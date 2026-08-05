@@ -23,7 +23,9 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BigRepoChangeOrigin {
     Local,
-    Remote { peer_id: PeerId },
+    Remote {
+        peer_id: PeerId,
+    },
     /// Materialization advanced because local keyhive state changed (a
     /// processed CGKA operation, delegation, revocation, or keyhive sync
     /// completion) — not attributable to a single peer and not a local edit.
@@ -250,7 +252,6 @@ struct DomainListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoDomainNotification>>,
 }
 
-
 /// Unified manager for all notification families.
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
@@ -430,7 +431,6 @@ impl ChangeListenerManager {
         }
         Ok(())
     }
-
 
     // ── Document change notify methods ────────────────────────────────────
 

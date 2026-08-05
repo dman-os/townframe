@@ -117,10 +117,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
         &self,
         peer_id: big_sync_core::PeerId,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> F::Future<
-        'static,
-        eyre::Result<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
-    >;
+    ) -> F::Future<'static, eyre::Result<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>>;
 }
 
 /// The result of the walk-derived heads query (`Runtime2Handle::doc_head_state`).

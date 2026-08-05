@@ -2,7 +2,7 @@
 //! imported by runtime2, its native backend, handler.rs, keyhive_conn.rs,
 //! and ephemeral.rs.
 //!
-//! NOTE: we use bincode for the initial Envelope but this is safe/canonicalized 
+//! NOTE: we use bincode for the initial Envelope but this is safe/canonicalized
 //! since it uses an ordered serializer internally
 
 use crate::interlude::*;

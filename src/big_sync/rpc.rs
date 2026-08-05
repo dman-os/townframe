@@ -324,9 +324,7 @@ impl BigSyncRpcWorker {
                     parts.map(|parts| PeerSummaryResult {
                         parts: parts
                             .into_iter()
-                            .map(|(part_id, summary)| {
-                                (part_id, summary.into_strat_summaries())
-                            })
+                            .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
                             .collect(),
                     })
                 };

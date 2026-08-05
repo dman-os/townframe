@@ -72,9 +72,8 @@ pub enum Runtime2Cmd {
     InspectDocHeadState {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Option<crate::runtime2::DocHeadState>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<Option<crate::runtime2::DocHeadState>>>,
     },
     OpenConn {
         peer: PeerId,
@@ -392,9 +391,8 @@ pub enum DocWorkerMsg {
     },
     InspectHeadState {
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Option<crate::runtime2::DocHeadState>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<Option<crate::runtime2::DocHeadState>>>,
     },
     /// Mailbox-ordered runtime quiescence barrier. The worker replies on
     /// `reply` once its in-flight work has drained (the mailbox is quiescent).

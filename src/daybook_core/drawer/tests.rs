@@ -2553,6 +2553,15 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     for ii in 0..total_docs {
         let mut content_doc = automerge::Automerge::new();
         content_doc.set_actor(automerge::ActorId::random());
+        // `create_doc` requires at least one head (the keyhive content
+        // frontier), mirroring the real drawer add flow which seeds a
+        // transaction before creating the doc.
+        {
+            let mut tx = content_doc.transaction();
+            tx.put(automerge::ROOT, "__seed", true)
+                .expect("seed write failed");
+            tx.commit();
+        }
         let content_handle = big_repo.create_doc(content_doc).await?;
         let content_doc_id = content_handle.document_id();
 

@@ -175,7 +175,8 @@ impl Node {
         let mut backends = HashMap::new();
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
         let shared_store: crate::SharedPartStore = Arc::clone(&store) as _;
-        let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(shared_store, backends, label)?;
+        let (worker, big_sync_stop) =
+            big_sync::spawn_big_sync_worker(shared_store, backends, label)?;
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
             repo,

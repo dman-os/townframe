@@ -276,8 +276,11 @@ async fn pull_required_partitions_via_big_sync_worker(
         super::BLOBS_BACKEND_ID.into(),
         Arc::clone(&blob_sync_backend) as _,
     );
-    let (big_sync_worker, big_sync_worker_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(partition_store), sync_backends, "daybook-clone-provision")?;
+    let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(partition_store),
+        sync_backends,
+        "daybook-clone-provision",
+    )?;
     let (big_sync_rpc, big_sync_rpc_stop) =
         big_sync::rpc::spawn_big_sync_rpc(Arc::clone(partition_store)).await?;
     let (repo_rpc, repo_rpc_stop_token) =

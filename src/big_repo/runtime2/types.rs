@@ -197,7 +197,8 @@ impl LiveDocBundle {
     }
 
     pub(crate) fn mark_broken(&self) {
-        self.broken.store(true, std::sync::atomic::Ordering::Release);
+        self.broken
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Whether some locally stored Sedimentree heads are not represented in

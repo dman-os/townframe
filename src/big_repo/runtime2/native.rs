@@ -481,8 +481,7 @@ where
             // well-known Public agent may be written by anyone (the writer
             // encrypts through Public's well-known keys).
             let public_ident = keyhive_core::principal::public::Public.id();
-            let public_access =
-                self.keyhive.agent_access_on(&public_ident, doc_ident).await;
+            let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
             Ok(public_access.is_some_and(|access| access.is_editor()))
         })
     }
@@ -810,7 +809,9 @@ where
                 doc.try_causal_decrypt_content(&encrypted, &ct_store)
                     .await
                     .map_err(|err| {
-                        ferr!("causal decrypt failed; BigRepo envelope is not causally closed: {err}")
+                        ferr!(
+                            "causal decrypt failed; BigRepo envelope is not causally closed: {err}"
+                        )
                     })?
             };
             tracing::debug!(%sed_id, "causal: released causal kh_doc lock");
@@ -1085,9 +1086,7 @@ struct KeyhiveNotifWiring {
     /// Cancel token per peer; a new connection supersedes the previous
     /// subscription for the same peer.
     cancels: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<PeerId, tokio_util::sync::CancellationToken>,
-        >,
+        tokio::sync::Mutex<std::collections::HashMap<PeerId, tokio_util::sync::CancellationToken>>,
     >,
 }
 
@@ -1365,7 +1364,9 @@ where
                 *incoming
                     .downcast::<(iroh::endpoint::Connection, Option<iroh::Endpoint>)>()
                     .map_err(|_| {
-                        ferr!("incoming must be (iroh::endpoint::Connection, Option<iroh::Endpoint>)")
+                        ferr!(
+                            "incoming must be (iroh::endpoint::Connection, Option<iroh::Endpoint>)"
+                        )
                     })?;
 
             // Capture before `accept_incoming` consumes the connection: the
@@ -1421,15 +1422,12 @@ where
             let sub_cancel = if let (Some(wiring), Some(endpoint)) = (&keyhive_notif, rpc_endpoint)
             {
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let remote_addr = endpoint
-                    .remote_info(remote_endpoint_id)
-                    .await
-                    .map(|info| {
-                        iroh::EndpointAddr::from_parts(
-                            info.id(),
-                            info.into_addrs().map(|info| info.into_addr()),
-                        )
-                    });
+                let remote_addr = endpoint.remote_info(remote_endpoint_id).await.map(|info| {
+                    iroh::EndpointAddr::from_parts(
+                        info.id(),
+                        info.into_addrs().map(|info| info.into_addr()),
+                    )
+                });
                 match remote_addr {
                     Some(remote_addr) => {
                         spawn_keyhive_change_subscription(
@@ -1780,9 +1778,7 @@ where
         )),
         keyhive_notif: Some(KeyhiveNotifWiring {
             evt_tx: evt_tx.clone(),
-            cancels: std::sync::Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            cancels: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }),
     });
 

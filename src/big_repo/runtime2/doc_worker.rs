@@ -42,6 +42,7 @@ where
         sed_id,
         state: DocState::Unloaded,
         partially_decrypted: false,
+        blocked_refs: HashSet::new(),
         io,
         change_manager,
         runtime_cmd_tx,
@@ -151,6 +152,13 @@ struct DocWorker2<F: FutureForm> {
 
     state: DocState,
     partially_decrypted: bool,
+    /// Content refs (fragment/loose-commit heads) whose plaintext we could not
+    /// decrypt or apply (missing key / missing Automerge dependency). The
+    /// source of truth for `partially_decrypted`; retried precisely on
+    /// session end and on keyhive-driven reattempts, so a live doc never
+    /// needs a coarse full-tree rewalk (A7).
+    blocked_refs: HashSet<(BigRepoCiphertextKind, CommitId)>,
+
     change_manager: Arc<crate::changes::ChangeListenerManager>,
 
     io: Arc<dyn DocIo<F>>,
@@ -165,7 +173,10 @@ struct DocWorker2<F: FutureForm> {
 
     /// Mailbox-ordered quiescence fences waiting for active finite work.
     /// Each fence replies directly on its oneshot once the worker is quiescent.
-    quiescence_waiters: Vec<(futures::channel::oneshot::Sender<()>, DocWorkerInternalLease)>,
+    quiescence_waiters: Vec<(
+        futures::channel::oneshot::Sender<()>,
+        DocWorkerInternalLease,
+    )>,
 }
 
 enum DocState {
@@ -186,10 +197,16 @@ enum DocState {
 
 enum LoadedDocSnapshot {
     Missing,
-    Unavailable(Vec<MaterializationBlocker>),
+    Unavailable {
+        blockers: Vec<MaterializationBlocker>,
+        blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
+    },
     Ready {
         doc: automerge::Automerge,
         partially_decrypted: bool,
+        /// Content refs that could not be decrypted or applied; the source
+        /// of truth for a live doc's blocked set when materialized cold.
+        blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
     },
 }
 
@@ -198,32 +215,40 @@ impl LoadedDocSnapshot {
         doc: automerge::Automerge,
         partially_decrypted: bool,
         blockers: Vec<MaterializationBlocker>,
+        blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
     ) -> Self {
         if doc.get_heads().is_empty() {
-            Self::Unavailable(blockers)
+            Self::Unavailable {
+                blockers,
+                blocked_refs,
+            }
         } else {
             Self::Ready {
                 doc,
                 partially_decrypted,
+                blocked_refs,
             }
         }
     }
 
     fn from_decrypted_plaintexts(
-        mut pending_plaintexts: Vec<Vec<u8>>,
+        mut pending: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
         mut partially_decrypted: bool,
         doc_id: DocumentId,
         mut blockers: Vec<MaterializationBlocker>,
+        mut blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
     ) -> eyre::Result<Self> {
         let mut doc = automerge::Automerge::new();
         loop {
             let mut deferred = Vec::new();
             let mut round_progress = false;
-            for plaintext in pending_plaintexts {
+            for (kind, ref_, plaintext) in pending {
                 match doc.load_incremental(&plaintext) {
-                    Ok(0) if doc.get_heads().is_empty() => deferred.push(plaintext),
+                    Ok(0) if doc.get_heads().is_empty() => deferred.push((kind, ref_, plaintext)),
                     Ok(applied) => round_progress |= applied > 0,
-                    Err(automerge::AutomergeError::MissingDeps) => deferred.push(plaintext),
+                    Err(automerge::AutomergeError::MissingDeps) => {
+                        deferred.push((kind, ref_, plaintext))
+                    }
                     Err(error) => {
                         return Err(ferr!("automerge load_incremental failed: {error}"));
                     }
@@ -234,6 +259,7 @@ impl LoadedDocSnapshot {
             }
             if !round_progress {
                 partially_decrypted = true;
+                blocked_refs.extend(deferred.iter().map(|(kind, ref_, _)| (*kind, *ref_)));
                 blockers.push(MaterializationBlocker::MissingAutomergeDependencies {
                     deferred_blobs: deferred.len(),
                 });
@@ -244,13 +270,15 @@ impl LoadedDocSnapshot {
                 );
                 break;
             }
-            pending_plaintexts = deferred;
+            pending = deferred;
         }
-        Ok(Self::from_materialized_doc(
-            doc,
-            partially_decrypted,
-            blockers,
-        ))
+        let mut snapshot =
+            Self::from_materialized_doc(doc, partially_decrypted, blockers, blocked_refs);
+        if let Self::Ready { blocked_refs, .. } = &mut snapshot {
+            blocked_refs.sort();
+            blocked_refs.dedup();
+        }
+        Ok(snapshot)
     }
 }
 
@@ -286,17 +314,17 @@ impl<F: FutureForm> DocWorker2<F> {
                 commit_ids,
                 fragment_ids,
                 reply,
-            } => self
-                .apply_sync_session(peer_id, commit_ids, fragment_ids, reply)
-                .await,
+            } => {
+                self.apply_sync_session(peer_id, commit_ids, fragment_ids, reply)
+                    .await
+            }
             DocWorkerMsg::ReattemptMaterialization { origin, resp } => {
                 debug!(
                     doc_id = %self.doc_id,
                     pending = matches!(self.state, DocState::PendingMaterialization(_)),
                     "retrying document materialization after dependency update"
                 );
-                match self.retry_materialization(origin).await
-                {
+                match self.retry_materialization(origin).await {
                     Ok(status) => {
                         debug!(%self.doc_id, ?status, "document materialization retry completed");
                         resp.send(Ok(status))
@@ -494,16 +522,28 @@ impl<F: FutureForm> DocWorker2<F> {
         }
 
         let mut partially_decrypted = false;
-        let mut pending_plaintexts = Vec::new();
+        let mut pending: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = Vec::new();
+        let mut blocked_refs = Vec::new();
         tracing::debug!(%self.doc_id, "passed point L1: load_doc_snapshot entry");
         for item in &order {
+            let (kind, head) = match item {
+                SedimentreeItem::Fragment(index) => {
+                    (BigRepoCiphertextKind::Fragment, fragments[*index].head())
+                }
+                SedimentreeItem::LooseCommit(index) => {
+                    (BigRepoCiphertextKind::LooseCommit, commits[*index].head())
+                }
+            };
             let content_ref = match item {
                 SedimentreeItem::Fragment(index) => fragments[*index].head().as_bytes().to_vec(),
                 SedimentreeItem::LooseCommit(index) => commits[*index].head().as_bytes().to_vec(),
             };
             match plaintexts.remove(&content_ref) {
-                Some(plaintext) => pending_plaintexts.push(plaintext),
-                None => partially_decrypted = true,
+                Some(plaintext) => pending.push((kind, head, plaintext)),
+                None => {
+                    partially_decrypted = true;
+                    blocked_refs.push((kind, head));
+                }
             }
         }
 
@@ -511,12 +551,21 @@ impl<F: FutureForm> DocWorker2<F> {
         // still returns. Include those dependencies in the same fixed-point
         // application pass. A topological sedimentree order does not guarantee
         // that every decrypted Automerge dependency precedes its child.
-        pending_plaintexts.extend(plaintexts.into_values());
+        pending.extend(plaintexts.into_iter().map(|(ref_bytes, plaintext)| {
+            let commit = CommitId::new(
+                ref_bytes
+                    .as_slice()
+                    .try_into()
+                    .expect("content ref must be 32 bytes"),
+            );
+            (BigRepoCiphertextKind::LooseCommit, commit, plaintext)
+        }));
         LoadedDocSnapshot::from_decrypted_plaintexts(
-            pending_plaintexts,
+            pending,
             partially_decrypted,
             self.doc_id,
             blockers,
+            blocked_refs,
         )
     }
 
@@ -540,11 +589,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     LoadedDocSnapshot::Ready {
                         doc,
                         partially_decrypted,
+                        blocked_refs,
                     } => {
                         let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
                         self.transition_to_ready(was_pending, Arc::clone(&heads))
                             .await?;
-                        self.set_partially_decrypted(partially_decrypted).await?;
+                        self.blocked_refs = blocked_refs.into_iter().collect();
+                        self.sync_partial_state().await?;
                         let bundle = Arc::new(LiveDocBundle::new(
                             self.doc_id,
                             doc,
@@ -558,7 +609,11 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.register_bundle_lease().await?;
                         DocLookup::Ready(bundle)
                     }
-                    LoadedDocSnapshot::Unavailable(blockers) => {
+                    LoadedDocSnapshot::Unavailable {
+                        blockers,
+                        blocked_refs,
+                    } => {
+                        self.blocked_refs = blocked_refs.into_iter().collect();
                         self.transition_to_pending(was_pending, blockers).await?;
                         DocLookup::PendingMaterialization
                     }
@@ -569,14 +624,20 @@ impl<F: FutureForm> DocWorker2<F> {
         Ok(out)
     }
 
-    async fn set_partially_decrypted(&mut self, partial: bool) -> eyre::Result<()> {
+    /// Recompute the partial-decryption flag from the held blocked-refs set
+    /// and propagate the change: the live bundle's flag (so handles handed
+    /// out before the state change observe it — tier9 regression) and the
+    /// materialization pending/ready event.
+    async fn sync_partial_state(&mut self) -> eyre::Result<()> {
+        let partial = !self.blocked_refs.is_empty();
         if self.partially_decrypted == partial {
             return Ok(());
         }
         self.partially_decrypted = partial;
-        tracing::debug!(%self.doc_id, "passed point S1: set_partially_decrypted before evt send");
+        tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point S1: sync_partial_state before evt send");
         if let DocState::Live(bundle) = &self.state {
             if let Some(bundle) = bundle.upgrade() {
+                bundle.set_partially_decrypted(partial);
             }
         }
         let event = if partial {
@@ -775,7 +836,10 @@ impl<F: FutureForm> DocWorker2<F> {
             self.change_manager
                 .notify_local_doc_materialization_pending(self.doc_id)?;
         }
-        self.set_partially_decrypted(true).await
+        // A pending doc is by definition partially decrypted: the blocked
+        // set is whatever `transition_to_pending`'s caller captured from the
+        // walk; the flag + pending event derive from it.
+        self.sync_partial_state().await
     }
 
     #[tracing::instrument(
@@ -944,91 +1008,169 @@ impl<F: FutureForm> DocWorker2<F> {
                 };
                 tracing::debug!(%self.doc_id, "passed point A2: hydrate_tree done");
                 tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
-                let (blobs, partially_decrypted) = self
+                let (resolved, unresolved) = self
                     .try_decrypt_received_blobs(&mut tree, &received_refs)
                     .await?;
                 tracing::debug!(%self.doc_id, "passed point A3: try_decrypt_received_blobs done");
-                self.set_partially_decrypted(partially_decrypted).await?;
-                tracing::debug!(%self.doc_id, "passed point A4: set_partially_decrypted done");
-                if blobs.is_empty() {
+                // Hold every ref we could not decrypt: the precise A7 record.
+                self.blocked_refs.extend(unresolved);
+                self.sync_partial_state().await?;
+                tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point A4: sync_partial_state done");
+                if resolved.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
                     tracing::debug!(%self.doc_id, "passed point A5: notif_pending_heads (empty) done");
-                    return self
-                        .report_sync_outcome(peer_id, has_live, true, reply)
-                        .await;
+                    return self.report_sync_outcome(peer_id, has_live, reply).await;
                 }
-                if partially_decrypted {
+                if !self.blocked_refs.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
                     tracing::debug!(%self.doc_id, "passed point A6: notif_pending_heads (partial) done");
                 }
 
-                let mut missing_deps = false;
-                let mut changed = false;
-                let ((after_heads, patches), apply_error) = surelock::key::lock_scope(|key| {
-                    let (mut doc, _key) = key.lock(&bundle.doc);
-                    let before = doc.get_heads();
-                    let mut apply_error = None;
-                    for blob in blobs {
-                        match doc.load_incremental(&blob) {
-                            Ok(_) => {}
-                            Err(automerge::AutomergeError::MissingDeps) => {
-                                missing_deps = true;
-                                break;
-                            }
-                            Err(error) => {
-                                apply_error = Some(ferr!("failed applying sync blob: {error}"));
-                                break;
-                            }
-                        }
-                    }
-                    let after = doc.get_heads();
-                    changed = before != after;
-                    let out = if !changed {
-                        (after, Vec::new())
-                    } else {
-                        let patches = if self
-                            .change_manager
-                            .has_change_listener_interest(
-                                self.doc_id,
-                                &BigRepoChangeOrigin::Remote { peer_id },
-                            )
-                        {
-                            doc.diff(&before, &after)
-                        } else {
-                            Vec::new()
-                        };
-                        (after, patches)
-                    };
-                    (out, apply_error)
-                });
-                if let Some(error) = apply_error {
-                    return Err(error);
+                let origin = BigRepoChangeOrigin::Remote { peer_id };
+                // Apply the session's decrypted content incrementally; refs
+                // whose Automerge dependencies are still missing stay blocked.
+                let (missing_deps, changed, after_heads, patches) =
+                    self.apply_blobs_to_live(&bundle, resolved, &origin).await?;
+                self.blocked_refs.extend(missing_deps);
+                self.sync_partial_state().await?;
+                if changed {
+                    self.notify_heads_advanced(after_heads, patches, &origin)?;
                 }
-                if missing_deps {
-                    self.set_partially_decrypted(true).await?;
-                    self.notif_pending_heads(&mut tree, peer_id).await?;
-                } else if changed {
-                    // Notify only when heads actually advanced.
-                    let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-                    self.change_manager.notify_doc_heads_changed(
-                        self.doc_id,
-                        Arc::clone(&heads),
-                        BigRepoChangeOrigin::Remote { peer_id },
-                    )?;
-                    for patch in patches {
-                        self.change_manager.notify_doc_changed(
-                            self.doc_id,
-                            Arc::new(patch),
-                            Arc::clone(&heads),
-                            BigRepoChangeOrigin::Remote { peer_id },
-                        )?;
-                    }
+
+                // A7: reconsider previously-held blocked refs — this session's
+                // keys/deps may unlock content from an earlier session. Precise
+                // retry of the held set; no coarse full-tree rewalk.
+                if self.retry_blocked_refs(&bundle, &origin).await? {
+                    tracing::debug!(%self.doc_id, "passed point A7b: blocked refs retried and heads advanced");
                 }
             }
         }
 
         tracing::debug!(%self.doc_id, "passed point A7: calling report_sync_outcome");
-        self.report_sync_outcome(peer_id, has_live, received, reply).await
+        self.report_sync_outcome(peer_id, has_live, reply).await
+    }
+
+    /// Apply decrypted plaintexts into the live bundle under the doc lock.
+    /// Returns the refs that hit `MissingDeps` (they stay blocked), whether
+    /// heads advanced, the resulting heads, and the patches to notify.
+    #[allow(clippy::type_complexity)]
+    async fn apply_blobs_to_live(
+        &self,
+        bundle: &Arc<LiveDocBundle>,
+        blobs: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
+        origin: &BigRepoChangeOrigin,
+    ) -> eyre::Result<(
+        Vec<(BigRepoCiphertextKind, CommitId)>,
+        bool,
+        Arc<[automerge::ChangeHash]>,
+        Vec<automerge::Patch>,
+    )> {
+        let (missing_deps, changed, after_heads, patches) = surelock::key::lock_scope(|key| {
+            let (mut doc, _key) = key.lock(&bundle.doc);
+            let before = doc.get_heads();
+            let mut missing_deps = Vec::new();
+            for (kind, ref_, plaintext) in blobs {
+                match doc.load_incremental(&plaintext) {
+                    Ok(_) => {}
+                    Err(automerge::AutomergeError::MissingDeps) => {
+                        missing_deps.push((kind, ref_));
+                    }
+                    Err(error) => {
+                        return Err(ferr!("failed applying sync blob: {error}"));
+                    }
+                }
+            }
+            let after = doc.get_heads();
+            let changed = before != after;
+            let patches = if changed
+                && self
+                    .change_manager
+                    .has_change_listener_interest(self.doc_id, origin)
+            {
+                doc.diff(&before, &after)
+            } else {
+                Vec::new()
+            };
+            Ok::<_, eyre::Error>((missing_deps, changed, Arc::from(after), patches))
+        })?;
+        Ok((missing_deps, changed, after_heads, patches))
+    }
+
+    /// Notify heads-changed + patches for a live-bundle advance.
+    fn notify_heads_advanced(
+        &self,
+        after_heads: Arc<[automerge::ChangeHash]>,
+        patches: Vec<automerge::Patch>,
+        origin: &BigRepoChangeOrigin,
+    ) -> eyre::Result<()> {
+        self.change_manager.notify_doc_heads_changed(
+            self.doc_id,
+            Arc::clone(&after_heads),
+            origin.clone(),
+        )?;
+        for patch in patches {
+            self.change_manager.notify_doc_changed(
+                self.doc_id,
+                Arc::new(patch),
+                Arc::clone(&after_heads),
+                origin.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Precisely retry the held blocked refs: decrypt whatever the current key
+    /// state unlocks and apply it into the live bundle. Iterative passes
+    /// resolve Automerge dependency chains among the blocked refs. Returns
+    /// true if heads advanced. This replaces the coarse full-tree rewalk for
+    /// live docs (A7: content blocked in an earlier session becomes
+    /// decryptable once its key/dependency arrives).
+    async fn retry_blocked_refs(
+        &mut self,
+        bundle: &Arc<LiveDocBundle>,
+        origin: &BigRepoChangeOrigin,
+    ) -> eyre::Result<bool> {
+        if self.blocked_refs.is_empty() {
+            return Ok(false);
+        }
+        let mut remaining: HashSet<(BigRepoCiphertextKind, CommitId)> =
+            std::mem::take(&mut self.blocked_refs);
+        let mut applied_any = false;
+        let mut made_progress = true;
+        while made_progress && !remaining.is_empty() {
+            made_progress = false;
+            let mut to_apply = Vec::new();
+            let mut still_blocked = HashSet::new();
+            for (kind, ref_) in remaining.iter().copied() {
+                let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, ref_);
+                match self
+                    .io
+                    .try_decrypt_content_keyed(self.sed_id, locator)
+                    .await?
+                {
+                    Some(plaintext) => to_apply.push((kind, ref_, plaintext)),
+                    None => {
+                        still_blocked.insert((kind, ref_));
+                    }
+                }
+            }
+            let attempted = to_apply.len();
+            let (missing_deps, changed, after_heads, patches) =
+                self.apply_blobs_to_live(bundle, to_apply, origin).await?;
+            let applied_count = attempted.saturating_sub(missing_deps.len());
+            if applied_count > 0 {
+                made_progress = true;
+            }
+            if changed {
+                applied_any = true;
+                self.notify_heads_advanced(after_heads, patches, origin)?;
+            }
+            still_blocked.extend(missing_deps);
+            remaining = still_blocked;
+        }
+        self.blocked_refs = remaining;
+        self.sync_partial_state().await?;
+        Ok(applied_any)
     }
 
     /// Determine and report the sync outcome after applying a session.
@@ -1042,7 +1184,6 @@ impl<F: FutureForm> DocWorker2<F> {
         &mut self,
         peer_id: PeerId,
         has_live: bool,
-        received: bool,
         reply: Option<
             futures::channel::oneshot::Sender<
                 Result<
@@ -1052,34 +1193,31 @@ impl<F: FutureForm> DocWorker2<F> {
             >,
         >,
     ) -> eyre::Result<()> {
-        let pending = matches!(
-            self.state,
-            DocState::PendingMaterialization(_)
-        );
+        let pending = matches!(self.state, DocState::PendingMaterialization(_));
         tracing::debug!(%self.doc_id, "passed point P1: report_sync_outcome entry");
-        // A live doc that received content is walked unconditionally: the
-        // session-scoped decrypt result can be stale relative to the full
-        // tree (a clean session must still reconsider previously-stored
-        // undecryptable content — A7).
-        let walk = pending || self.partially_decrypted || (received && has_live);
+        // Only a doc with no live bundle (cold: pending, or persisted-only)
+        // runs the full walk here. A live doc's session path already applied
+        // the received content incrementally and retried the held blocked
+        // refs precisely, so the receipt is honest without a coarse rewalk.
+        let walk = pending;
         let result = if walk {
             match self
                 .retry_materialization(BigRepoChangeOrigin::Remote { peer_id })
                 .await
             {
-                Ok(MaterializationStatus::Ready { .. }) => Ok(
-                    crate::runtime2::types::SyncDocReceipt {
+                Ok(MaterializationStatus::Ready { .. }) => {
+                    Ok(crate::runtime2::types::SyncDocReceipt {
                         outcome: crate::runtime2::types::SyncDocOutcome::Ready,
-                    },
-                ),
-                Ok(MaterializationStatus::Pending(blockers)) => Ok(
-                    crate::runtime2::types::SyncDocReceipt {
+                    })
+                }
+                Ok(MaterializationStatus::Pending(blockers)) => {
+                    Ok(crate::runtime2::types::SyncDocReceipt {
                         outcome: crate::runtime2::types::SyncDocOutcome::Pending(blockers),
-                    },
-                ),
-                Ok(MaterializationStatus::Missing) => Err(
-                    crate::runtime2::types::SyncDocError::NotFound,
-                ),
+                    })
+                }
+                Ok(MaterializationStatus::Missing) => {
+                    Err(crate::runtime2::types::SyncDocError::NotFound)
+                }
                 Err(error) => {
                     let report = Err(crate::runtime2::types::SyncDocError::Other(ferr!(
                         "{error:?}"
@@ -1100,7 +1238,10 @@ impl<F: FutureForm> DocWorker2<F> {
                     "invalidating inactive document after sync"
                 );
                 self.state = DocState::Unloaded;
-                self.set_partially_decrypted(false).await?;
+                // Unloaded means the next acquisition cold-walks and
+                // repopulates the blocked set; drop stale refs.
+                self.blocked_refs.clear();
+                self.sync_partial_state().await?;
             }
             Ok(crate::runtime2::types::SyncDocReceipt {
                 outcome: crate::runtime2::types::SyncDocOutcome::Stored,
@@ -1129,39 +1270,46 @@ impl<F: FutureForm> DocWorker2<F> {
         worker: eyre::Result<()>,
     ) -> eyre::Result<()> {
         if let Some(reply) = reply {
-            reply
-                .send(result)
-                .inspect_err(|_| warn!(ERROR_CALLER))
-                .ok();
+            reply.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
         worker
     }
 
     /// Decrypt only the content received by this Subduction exchange.
+    /// Returns the resolved (ref, plaintext) pairs in topological order plus
+    /// the refs that could not be decrypted — those are held as blocked refs
+    /// so a later session or key arrival can retry them precisely (A7).
     async fn try_decrypt_received_blobs(
         &self,
         tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
         received_refs: &HashSet<Vec<u8>>,
-    ) -> eyre::Result<(Vec<Vec<u8>>, bool)> {
+    ) -> eyre::Result<(
+        Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
+        Vec<(BigRepoCiphertextKind, CommitId)>,
+    )> {
         let fragments: Vec<_> = tree.fragments().collect();
         let commits: Vec<_> = tree.loose_commits().collect();
         let order = tree
             .topsorted_blob_order()
             .map_err(|error| ferr!("failed ordering sync session blobs: {error}"))?;
 
-        // Filter the order to only received items.
-        let received_order: Vec<(&SedimentreeItem, Vec<u8>)> = order
+        // Filter the order to only received items, carrying kind + head.
+        let received_order: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = order
             .iter()
             .filter_map(|item| {
-                let content_ref = match item {
+                let (kind, head) = match item {
                     SedimentreeItem::Fragment(idx) => {
-                        fragments.get(*idx).map(|f| f.head().as_bytes().to_vec())
+                        (BigRepoCiphertextKind::Fragment, fragments.get(*idx)?.head())
                     }
-                    SedimentreeItem::LooseCommit(idx) => {
-                        commits.get(*idx).map(|c| c.head().as_bytes().to_vec())
-                    }
+                    SedimentreeItem::LooseCommit(idx) => (
+                        BigRepoCiphertextKind::LooseCommit,
+                        commits.get(*idx)?.head(),
+                    ),
                 };
-                content_ref.and_then(|cr| received_refs.contains(&cr).then_some((item, cr)))
+                let content_ref = head.as_bytes().to_vec();
+                received_refs
+                    .contains(&content_ref)
+                    .then_some((kind, head, content_ref))
             })
             .collect();
 
@@ -1178,12 +1326,11 @@ impl<F: FutureForm> DocWorker2<F> {
             .take(received_order.len())
             .collect();
         let mut made_progress = true;
-        let mut materialization_pending = false;
         tracing::debug!(%self.doc_id, "passed point T1: try_decrypt_received_blobs entry, items={}", received_order.len());
 
         while made_progress && plaintext_by_index.iter().any(Option::is_none) {
             made_progress = false;
-            for (idx, (item, content_ref)) in received_order.iter().enumerate() {
+            for (idx, (kind, head, content_ref)) in received_order.iter().enumerate() {
                 if plaintext_by_index[idx].is_some() {
                     continue;
                 }
@@ -1193,28 +1340,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     continue;
                 }
 
-                let locator = match item {
-                    SedimentreeItem::Fragment(idx) => {
-                        let f = fragments
-                            .get(*idx)
-                            .ok_or_else(|| ferr!("missing fragment at index {idx}"))?;
-                        BigRepoCiphertextLocator::new(
-                            BigRepoCiphertextKind::Fragment,
-                            self.sed_id,
-                            f.head(),
-                        )
-                    }
-                    SedimentreeItem::LooseCommit(idx) => {
-                        let c = commits
-                            .get(*idx)
-                            .ok_or_else(|| ferr!("missing loose commit at index {idx}"))?;
-                        BigRepoCiphertextLocator::new(
-                            BigRepoCiphertextKind::LooseCommit,
-                            self.sed_id,
-                            c.head(),
-                        )
-                    }
-                };
+                let locator = BigRepoCiphertextLocator::new(*kind, self.sed_id, *head);
 
                 // Try entrypoint decrypt first.
                 tracing::debug!(%self.doc_id, "passed point T2: before try_decrypt_content_keyed");
@@ -1249,28 +1375,26 @@ impl<F: FutureForm> DocWorker2<F> {
             }
         }
         tracing::debug!(%self.doc_id, "passed point T5: try_decrypt_received_blobs loop end");
-        let unresolved_count = plaintext_by_index
-            .iter()
-            .filter(|value| value.is_none())
-            .count();
-        if unresolved_count != 0 {
+
+        let mut resolved = Vec::new();
+        let mut unresolved = Vec::new();
+        for (idx, (kind, head, _content_ref)) in received_order.into_iter().enumerate() {
+            match plaintext_by_index[idx].take() {
+                Some(plaintext) => resolved.push((kind, head, plaintext)),
+                None => unresolved.push((kind, head)),
+            }
+        }
+        if !unresolved.is_empty() {
             debug!(
                 doc_id = %self.doc_id,
                 sedimentree_id = %self.sed_id,
                 received_count = received_refs.len(),
-                resolved_count = plaintext_by_ref.len(),
-                unresolved_count,
+                resolved_count = resolved.len(),
+                unresolved_count = unresolved.len(),
                 "received content remains undecryptable during materialization"
             );
         }
-        if unresolved_count != 0 {
-            materialization_pending = true;
-        }
-        let blobs: Vec<Vec<u8>> = plaintext_by_index.into_iter().flatten().collect();
-        if materialization_pending {
-            return Ok((blobs, true));
-        }
-        Ok((blobs, false))
+        Ok((resolved, unresolved))
     }
 
     async fn notif_pending_heads(
@@ -1310,54 +1434,27 @@ impl<F: FutureForm> DocWorker2<F> {
             _ => None,
         };
         tracing::debug!(%self.doc_id, "passed point R1: retry_materialization entry");
+        // A live doc never needs a coarse rewalk: precisely retry the held
+        // blocked refs — a keyhive round or an earlier session may have
+        // unlocked some (A7). The doc stays live; partial is a valid state.
+        if let Some(bundle) = live_bundle {
+            tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point R1b: live precise retry");
+            let _ = self.retry_blocked_refs(&bundle, &origin).await?;
+            let partially_decrypted = !self.blocked_refs.is_empty();
+            return Ok(MaterializationStatus::Ready {
+                partially_decrypted,
+            });
+        }
+
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 mut doc,
                 partially_decrypted,
+                blocked_refs,
             } => {
                 tracing::debug!(%self.doc_id, "passed point R2: load_doc_snapshot Ready");
-                if let Some(bundle) = live_bundle {
-                    tracing::debug!(%self.doc_id, "passed point R3: before bundle.doc lock_scope");
-                    let (before, after_heads, patches) = surelock::key::lock_scope(|key| {
-                        let (mut live, _key) = key.lock(&bundle.doc);
-                        let before = live.get_heads();
-                        live.merge(&mut doc)
-                            .map_err(|e| ferr!("failed merging persisted snapshot into active document: {e:?}"))?;
-                        let after_heads = live.get_heads();
-                        let patches = live.diff(&before, &after_heads);
-                        Ok::<_, eyre::Error>((before, after_heads, patches))
-                    })?;
-                    tracing::debug!(%self.doc_id, "passed point R4: bundle.doc lock_scope done");
-                    let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-                    debug!(
-                        before_heads = before.len(),
-                        after_heads = heads.len(),
-                        changed = before.as_slice() != heads.as_ref(),
-                        partially_decrypted,
-                        "merged persisted snapshot into active document",
-                    );
-                    if before.as_slice() != heads.as_ref() {
-                        self.change_manager.notify_doc_heads_changed(
-                            self.doc_id,
-                            Arc::clone(&heads),
-                            origin.clone(),
-                        )?;
-                        for patch in patches {
-                            self.change_manager.notify_doc_changed(
-                                self.doc_id,
-                                Arc::new(patch),
-                                Arc::clone(&heads),
-                                origin.clone(),
-                            )?;
-                        }
-                    }
-                    self.state = DocState::Live(Arc::downgrade(&bundle));
-                    self.set_partially_decrypted(partially_decrypted).await?;
-                    return Ok(MaterializationStatus::Ready {
-                        partially_decrypted,
-                    });
-                }
-
+                self.blocked_refs = blocked_refs.into_iter().collect();
+                self.sync_partial_state().await?;
                 let after_heads = doc.get_heads();
                 tracing::debug!(%self.doc_id, "passed point R5: non-live path, before transition_to_ready");
                 self.transition_to_ready(was_pending, Arc::from(after_heads.clone()))
@@ -1381,22 +1478,22 @@ impl<F: FutureForm> DocWorker2<F> {
                     }
                 }
                 self.state = DocState::Transient(Box::new(doc));
-                self.set_partially_decrypted(partially_decrypted).await?;
                 Ok(MaterializationStatus::Ready {
                     partially_decrypted,
                 })
             }
-            LoadedDocSnapshot::Unavailable(blockers) => {
+            LoadedDocSnapshot::Unavailable {
+                blockers,
+                blocked_refs,
+            } => {
+                self.blocked_refs = blocked_refs.into_iter().collect();
                 let status = MaterializationStatus::Pending(blockers.clone());
-                if live_bundle.is_none() {
-                    self.transition_to_pending(was_pending, blockers).await?;
-                } else {
-                    self.set_partially_decrypted(true).await?;
-                }
+                self.transition_to_pending(was_pending, blockers).await?;
                 Ok(status)
             }
             LoadedDocSnapshot::Missing => {
-                self.set_partially_decrypted(false).await?;
+                self.blocked_refs.clear();
+                self.sync_partial_state().await?;
                 Ok(MaterializationStatus::Missing)
             }
         }
@@ -1414,7 +1511,10 @@ impl<F: FutureForm> DocWorker2<F> {
         for (reply, _lease) in waiters {
             // A dropped reply receiver means the hub-side fence awaiter was
             // aborted (shutdown) — benign.
-            reply.send(()).inspect_err(|_| debug!(%self.doc_id, "worker fence reply dropped")).ok();
+            reply
+                .send(())
+                .inspect_err(|_| debug!(%self.doc_id, "worker fence reply dropped"))
+                .ok();
         }
         Ok(())
     }
@@ -1436,7 +1536,7 @@ mod tests {
         assert_eq!(loaded.get_heads(), expected_heads);
 
         assert!(matches!(
-            LoadedDocSnapshot::from_materialized_doc(loaded, false, Vec::new()),
+            LoadedDocSnapshot::from_materialized_doc(loaded, false, Vec::new(), Vec::new()),
             LoadedDocSnapshot::Ready {
                 partially_decrypted: false,
                 ..
@@ -1457,9 +1557,21 @@ mod tests {
         let child = source.save_after(&parent_heads);
 
         let snapshot = LoadedDocSnapshot::from_decrypted_plaintexts(
-            vec![child, parent],
+            vec![
+                (
+                    BigRepoCiphertextKind::LooseCommit,
+                    CommitId::new([0; 32]),
+                    child,
+                ),
+                (
+                    BigRepoCiphertextKind::LooseCommit,
+                    CommitId::new([1; 32]),
+                    parent,
+                ),
+            ],
             false,
             DocumentId::new([1; 32]),
+            Vec::new(),
             Vec::new(),
         )
         .unwrap();

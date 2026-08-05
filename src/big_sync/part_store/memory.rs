@@ -1536,15 +1536,13 @@ mod tests {
             )
             .await??;
         tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match rx2.recv().await {
-                    Ok(SubEvent::ReplayComplete) => return Ok::<_, eyre::Report>(()),
-                    Ok(SubEvent::Added(event)) => {
-                        return Err(ferr!("denied replay leaked Added event: {event:?}"));
-                    }
-                    Ok(event) => return Err(ferr!("denied replay leaked event: {event:?}")),
-                    Err(_) => return Err(ferr!("denied subscriber closed during replay")),
+            match rx2.recv().await {
+                Ok(SubEvent::ReplayComplete) => return Ok::<_, eyre::Report>(()),
+                Ok(SubEvent::Added(event)) => {
+                    return Err(ferr!("denied replay leaked Added event: {event:?}"));
                 }
+                Ok(event) => return Err(ferr!("denied replay leaked event: {event:?}")),
+                Err(_) => return Err(ferr!("denied subscriber closed during replay")),
             }
         })
         .await??;

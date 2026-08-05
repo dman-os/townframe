@@ -933,7 +933,6 @@ impl BigDocHandle {
             ));
         }
 
-
         // All automerge work happens under a short sync lock; nothing is held
         // across an await (the commit goes out only after the lock scope ends).
         let (out, commit) = surelock::key::lock_scope(|key| {

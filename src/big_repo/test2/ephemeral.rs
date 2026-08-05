@@ -18,7 +18,11 @@ async fn publish_until_delivered(
 ) -> crate::Res<BigEphemeralEvent> {
     timeout(Duration::from_secs(5), async {
         loop {
-            publisher.repo.ephemeral().publish(topic, payload.clone()).await?;
+            publisher
+                .repo
+                .ephemeral()
+                .publish(topic, payload.clone())
+                .await?;
             match timeout(Duration::from_millis(200), subscription.recv()).await {
                 Ok(Some(event)) => return Ok(event),
                 Ok(None) => return Err(crate::ferr!("ephemeral subscription closed unexpectedly")),
@@ -85,13 +89,8 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    let event = publish_until_delivered(
-        pair.left(),
-        topic,
-        b"matching".to_vec(),
-        &mut matching,
-    )
-    .await?;
+    let event =
+        publish_until_delivered(pair.left(), topic, b"matching".to_vec(), &mut matching).await?;
     assert_eq!(event.payload, b"matching");
     assert!(timeout(Duration::from_millis(250), wrong_sender.recv())
         .await

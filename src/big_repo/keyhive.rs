@@ -287,7 +287,8 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let members = transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                let members =
+                    transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
                 if let Some((_, access)) = members.get(agent) {
                     caps.insert(DocumentId::new(kh_doc_id.to_bytes()), *access);
                 }
@@ -302,11 +303,14 @@ impl BigKeyhiveHandle {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
-            return transitive_members_short_locked(Membered::Document(KhDocumentId::from(id), doc))
-                .await
-                .into_iter()
-                .map(|(id, (_, access))| (id.to_bytes(), access))
-                .collect();
+            return transitive_members_short_locked(Membered::Document(
+                KhDocumentId::from(id),
+                doc,
+            ))
+            .await
+            .into_iter()
+            .map(|(id, (_, access))| (id.to_bytes(), access))
+            .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
             return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
@@ -326,16 +330,22 @@ impl BigKeyhiveHandle {
     ) -> Option<Access> {
         let keyhive = self.keyhive.as_ref();
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
-            return transitive_members_short_locked(Membered::Document(KhDocumentId::from(membered_id), doc))
-                .await
-                .get(agent)
-                .map(|(_, access)| *access);
+            return transitive_members_short_locked(Membered::Document(
+                KhDocumentId::from(membered_id),
+                doc,
+            ))
+            .await
+            .get(agent)
+            .map(|(_, access)| *access);
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(membered_id)).await {
-            return transitive_members_short_locked(Membered::Group(KhGroupId::from(membered_id), group))
-                .await
-                .get(agent)
-                .map(|(_, access)| *access);
+            return transitive_members_short_locked(Membered::Group(
+                KhGroupId::from(membered_id),
+                group,
+            ))
+            .await
+            .get(agent)
+            .map(|(_, access)| *access);
         }
         None
     }
@@ -351,7 +361,8 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let members = transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                let members =
+                    transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
                 if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_doc_id.to_bytes(), *access);
                 }
@@ -365,7 +376,8 @@ impl BigKeyhiveHandle {
         };
         for kh_group_id in group_ids {
             if let Some(group) = keyhive.get_group(kh_group_id).await {
-                let members = transitive_members_short_locked(Membered::Group(kh_group_id, group)).await;
+                let members =
+                    transitive_members_short_locked(Membered::Group(kh_group_id, group)).await;
                 if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_group_id.to_bytes(), *access);
                 }

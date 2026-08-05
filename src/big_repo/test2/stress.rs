@@ -554,8 +554,12 @@ impl StressFixture for BigRepoStressFixture {
                 .await
         }))
         .await?;
-        try_join_all(barrier_nodes.iter().map(|node| async { node.repo.unfreeze().await }))
-            .await?;
+        try_join_all(
+            barrier_nodes
+                .iter()
+                .map(|node| async { node.repo.unfreeze().await }),
+        )
+        .await?;
         try_join_all(barrier_nodes.iter().map(|node| async {
             node.repo
                 .wait_for_quiescence(Some(Duration::from_secs(20)))
@@ -601,21 +605,20 @@ impl StressFixture for BigRepoStressFixture {
                     .map(|(peer_id, observation)| {
                         let synced = tracked_docs
                             .iter()
-                            .filter(|doc_id| {
-                                observation.sedimentree_heads.contains_key(*doc_id)
-                            })
+                            .filter(|doc_id| observation.sedimentree_heads.contains_key(*doc_id))
                             .count();
-                        format!("{}:{synced}/{}", &peer_id.to_string()[..12], tracked_docs.len())
+                        format!(
+                            "{}:{synced}/{}",
+                            &peer_id.to_string()[..12],
+                            tracked_docs.len()
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
                 let mismatch_detail = tracked_docs
                     .iter()
                     .filter_map(|doc_id| {
-                        let expected = reference_heads
-                            .get(doc_id)
-                            .cloned()
-                            .unwrap_or_default();
+                        let expected = reference_heads.get(doc_id).cloned().unwrap_or_default();
                         let differing: Vec<String> = observations
                             .iter()
                             .filter(|(_, observation)| {
@@ -636,7 +639,12 @@ impl StressFixture for BigRepoStressFixture {
                             })
                             .collect();
                         (!differing.is_empty()).then(|| {
-                            format!("{}:ref={} [{}]", &doc_id.to_string()[..12], expected.len(), differing.join(","))
+                            format!(
+                                "{}:ref={} [{}]",
+                                &doc_id.to_string()[..12],
+                                expected.len(),
+                                differing.join(",")
+                            )
                         })
                     })
                     .collect::<Vec<_>>()
@@ -654,8 +662,6 @@ impl StressFixture for BigRepoStressFixture {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         };
-
-
 
         let format_heads = |heads: &BTreeSet<[u8; 32]>| {
             heads

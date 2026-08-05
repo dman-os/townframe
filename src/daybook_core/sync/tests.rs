@@ -557,7 +557,10 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     eprintln!("[ab] test: connect_url done, waiting convergence");
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30)).await?;
-    eprintln!("[ab] test: sync convergence done, waiting doc presence x{}", created_doc_ids.len());
+    eprintln!(
+        "[ab] test: sync convergence done, waiting doc presence x{}",
+        created_doc_ids.len()
+    );
 
     for doc_id in &created_doc_ids {
         wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;

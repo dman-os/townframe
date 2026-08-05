@@ -173,10 +173,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// Whether the local principal may write to this document (Edit access or
     /// better). The authoritative write gate: rejects revoked members and
     /// Read-only holders before a commit is persisted.
-    fn has_doc_write_access(
-        &self,
-        doc_id: crate::DocumentId,
-    ) -> F::Future<'_, eyre::Result<bool>>;
+    fn has_doc_write_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Store a raw fragment bundle at a boundary commit. The implementation
     /// encrypts the bundle and constructs the persisted fragment metadata from

@@ -19,7 +19,6 @@ use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
 use tokio::{sync::Notify, time::timeout};
 
-
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
     Arc<big_sync::Ctx>,
@@ -34,8 +33,11 @@ pub async fn boot_repo() -> Res<(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new(), "big-repo-boot-repo")?;
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(&shared_store),
+        HashMap::new(),
+        "big-repo-boot-repo",
+    )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
         store: shared_store,
         worker,
@@ -71,8 +73,11 @@ pub async fn _boot_disk_repo(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new(), "big-repo-boot-disk")?;
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(&shared_store),
+        HashMap::new(),
+        "big-repo-boot-disk",
+    )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
         store: shared_store,
         worker,
@@ -2782,11 +2787,13 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
         >,
     > {
         let summarized = self.target_part_store.summarize_parts(req.parts).await?;
-        Ok(Ok(summarized.map(|parts| big_sync_core::rpc::PeerSummaryResult {
-            parts: parts
-                .into_iter()
-                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                .collect(),
+        Ok(Ok(summarized.map(|parts| {
+            big_sync_core::rpc::PeerSummaryResult {
+                parts: parts
+                    .into_iter()
+                    .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
+                    .collect(),
+            }
         })))
     }
 
@@ -2876,8 +2883,11 @@ impl SyncRepoNode {
         })
         .await?;
         let shared_store = repo.shared_part_store();
-        let (initial_worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new(), "big-repo-sync-test")?;
+        let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&shared_store),
+            HashMap::new(),
+            "big-repo-sync-test",
+        )?;
         let big_sync_host = Arc::new(big_sync::Ctx {
             store: shared_store,
             worker: initial_worker,
@@ -2913,8 +2923,11 @@ impl SyncRepoNode {
         );
         let mut sync_backends = HashMap::new();
         sync_backends.insert(BigRepo::BACKEND_ID.into(), Arc::clone(&sync_backend) as _);
-        let (big_sync_worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends, "big-repo-sync-test-main")?;
+        let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&big_sync_host.store),
+            sync_backends,
+            "big-repo-sync-test-main",
+        )?;
 
         let accept_count = Arc::new(AtomicUsize::new(0));
         let accept_notify = Arc::new(Notify::new());

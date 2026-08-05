@@ -150,8 +150,6 @@ impl SqliteBigRepoStore {
         Arc::clone(&self.hidden_parts)
     }
 
-
-
     async fn next_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res<CursorIndex> {
         SqliteCore::next_cursor(tx).await
     }

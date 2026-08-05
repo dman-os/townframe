@@ -43,7 +43,11 @@ impl ProtocolHandler for SubductionProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let conn = self
             .big_repo
-            .accept_connection_iroh(conn, self.endpoint.clone(), Some(self.end_signal_tx.clone()))
+            .accept_connection_iroh(
+                conn,
+                self.endpoint.clone(),
+                Some(self.end_signal_tx.clone()),
+            )
             .await
             .map_err(|err| AcceptError::from_boxed(err.into()))?;
         tracing::debug!(peer_id = %conn.peer_id, "subduction conn accepted");
@@ -245,13 +249,19 @@ impl IrohSyncRepo {
             big_repo::BigRepo::BACKEND_ID.into(),
             Arc::clone(&repo_sync_backend) as _,
         );
-        let (big_sync_worker, big_sync_worker_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), doc_sync_backends, "daybook-docs")?;
+        let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&rcx.part_store),
+            doc_sync_backends,
+            "daybook-docs",
+        )?;
 
         let mut blob_sync_backends = std::collections::HashMap::new();
         blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
-        let (blob_sync_worker, blob_sync_worker_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.blob_part_store), blob_sync_backends, "daybook-blobs")?;
+        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&rcx.blob_part_store),
+            blob_sync_backends,
+            "daybook-blobs",
+        )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;

@@ -299,7 +299,8 @@ impl DrawerRepo {
         };
         let Some(heads) = self
             .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
-            .await? else {
+            .await?
+        else {
             debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "presence probe: branch doc heads unavailable");
             return Ok(None);
         };

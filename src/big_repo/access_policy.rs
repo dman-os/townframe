@@ -102,11 +102,7 @@ mod tests {
         policy.add_obj_member(object, relay, Access::Relay);
 
         assert!(policy.is_event_permitted(None, object, Some(relay)));
-        assert!(policy.is_event_permitted(
-            Some(PartId::new([3; 32])),
-            object,
-            Some(relay),
-        ));
+        assert!(policy.is_event_permitted(Some(PartId::new([3; 32])), object, Some(relay),));
     }
 
     #[test]
@@ -116,10 +112,6 @@ mod tests {
         let reader = PeerId::new([5; 32]);
         policy.add_obj_member(object, reader, Access::Read);
 
-        assert!(policy.is_event_permitted(
-            Some(PartId::new([6; 32])),
-            object,
-            Some(reader),
-        ));
+        assert!(policy.is_event_permitted(Some(PartId::new([6; 32])), object, Some(reader),));
     }
 }

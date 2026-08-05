@@ -171,8 +171,7 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         )
         .await;
     assert_eq!(
-        revoked_access,
-        None,
+        revoked_access, None,
         "revoked reader must lose effective document access"
     );
 
@@ -199,7 +198,9 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("write txn failed: {err:?}"))
         })
         .await;
-    let err2 = again.err().expect("write on invalidated handle must fail fast");
+    let err2 = again
+        .err()
+        .expect("write on invalidated handle must fail fast");
     assert!(
         format!("{err2:?}").contains("invalidated"),
         "invalidated-handle write must fail fast, got: {err2:?}"
@@ -237,18 +238,21 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         .await;
     assert_eq!(title.as_deref(), Some("before-revoke"));
     let ghost_gone = reader_doc2
-        .with_document_read(|doc| {
-            doc.get(automerge::ROOT, "ghost").ok().flatten().is_some()
-        })
+        .with_document_read(|doc| doc.get(automerge::ROOT, "ghost").ok().flatten().is_some())
         .await;
-    assert!(!ghost_gone, "reloaded document must not contain the rejected write");
+    assert!(
+        !ghost_gone,
+        "reloaded document must not contain the rejected write"
+    );
     let write3 = reader_doc2
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "ghost3", "again"))
                 .map_err(|err| crate::ferr!("write txn failed: {err:?}"))
         })
         .await;
-    write3.err().expect("re-acquired revoked write must still fail");
+    write3
+        .err()
+        .expect("re-acquired revoked write must still fail");
 
     drop(reader_doc);
     drop(reader_doc2);

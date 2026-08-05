@@ -89,7 +89,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .doc_payload_heads(doc_id)
             .await?
             .ok_or_eyre("local doc payload missing after successful sync")?;
-        debug!(head_count = heads.len(), "loaded persisted heads after document sync");
+        debug!(
+            head_count = heads.len(),
+            "loaded persisted heads after document sync"
+        );
         let deets = if remote_payload.is_none()
             && local_heads
                 .as_ref()

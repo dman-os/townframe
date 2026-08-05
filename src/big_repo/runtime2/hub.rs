@@ -301,7 +301,9 @@ where
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
         let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
-        let group_part_generation = self.keyhive_state_generation.load(std::sync::atomic::Ordering::Relaxed);
+        let group_part_generation = self
+            .keyhive_state_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
         debug!(
             barrier_id,
             local_peer_id = %self.local_peer_id,
@@ -328,12 +330,7 @@ where
                 .wrap_err(ERROR_CHANNEL)?;
             self.spawn_tracked(
                 crate::runtime2::TrackedWorkKind::WorkerFence,
-                F::await_worker_fence(
-                    barrier_id,
-                    doc_id,
-                    reply_rx,
-                    self.evt_tx.clone(),
-                ),
+                F::await_worker_fence(barrier_id, doc_id, reply_rx, self.evt_tx.clone()),
             )?;
         }
         Ok(())
@@ -426,7 +423,8 @@ where
                         parents,
                         content_heads,
                         resp,
-                ))?;
+                    ),
+                )?;
             }
             Runtime2Cmd::PutDoc {
                 doc_id,
@@ -546,7 +544,8 @@ where
                         closed,
                         self.evt_tx.clone(),
                         resp,
-                ))?;
+                    ),
+                )?;
             }
             Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
@@ -579,7 +578,8 @@ where
                         peer_id,
                         sed_id,
                         self.cmd_tx.clone(),
-                ))?;
+                    ),
+                )?;
             }
             Runtime2Cmd::DocSyncRoundDone { request_id } => {
                 // Transport round succeeded: resolve the waiter (if still
@@ -674,11 +674,8 @@ where
                 let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::ContainsSedimentree,
-                    F::contains_sedimentree(
-                        Arc::clone(&self.runtime_io),
-                        sedimentree_id,
-                        resp,
-                ))?;
+                    F::contains_sedimentree(Arc::clone(&self.runtime_io), sedimentree_id, resp),
+                )?;
             }
             Runtime2Cmd::HasLocalDocState { doc_id, resp } => {
                 let has_doc_worker = self.doc_workers.contains_key(&doc_id);
@@ -689,7 +686,8 @@ where
                         doc_id,
                         has_doc_worker,
                         resp,
-                ))?;
+                    ),
+                )?;
             }
             #[cfg(test)]
             Runtime2Cmd::HasDocWorker { doc_id, resp } => {
@@ -700,11 +698,8 @@ where
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::InspectStoredDocBlobs,
-                    F::inspect_stored_doc_blobs(
-                        Arc::clone(&self.runtime_io),
-                        sed_id,
-                        resp,
-                ))?;
+                    F::inspect_stored_doc_blobs(Arc::clone(&self.runtime_io), sed_id, resp),
+                )?;
             }
             Runtime2Cmd::WaitForQuiescence { freeze, resp } => {
                 self.request_quiescence(resp, freeze)?;
@@ -1452,9 +1447,7 @@ where
             Runtime2Evt::GroupPartWorkerAdvanced { generation } => {
                 self.group_part_generation = self.group_part_generation.max(generation);
                 let mut pending = Vec::new();
-                for (captured, waiter) in
-                    std::mem::take(&mut self.keyhive_reconciliation_waiters)
-                {
+                for (captured, waiter) in std::mem::take(&mut self.keyhive_reconciliation_waiters) {
                     if self.group_part_generation >= captured {
                         waiter
                             .send(Ok(()))
@@ -1595,7 +1588,8 @@ where
                         crate::changes::BigRepoAccess::from(data.payload().can()),
                         false,
                         member_is_document,
-                ))?;
+                    ),
+                )?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
                 self.bump_keyhive_state_generation("revocation received");
@@ -1614,7 +1608,8 @@ where
                         crate::changes::BigRepoAccess::Relay,
                         true,
                         member_is_document,
-                ))?;
+                    ),
+                )?;
             }
         }
         self.try_resolve_quiescence()
@@ -1729,14 +1724,12 @@ where
             }
             return Ok(());
         }
-        entry
-            .handle
-            .send(DocWorkerMsg::ApplySyncSession {
-                peer_id,
-                commit_ids,
-                fragment_ids,
-                reply,
-            })?;
+        entry.handle.send(DocWorkerMsg::ApplySyncSession {
+            peer_id,
+            commit_ids,
+            fragment_ids,
+            reply,
+        })?;
         Ok(())
     }
 
@@ -1829,7 +1822,8 @@ where
                 self.evt_tx.clone(),
                 peer_id,
                 request_id,
-        ))?;
+            ),
+        )?;
         Ok(())
     }
 
@@ -2032,23 +2026,17 @@ where
             "requesting targeted materialization retry from document worker"
         );
         let (resp, result) = futures::channel::oneshot::channel();
-        if let Err(error) = entry
-            .handle
-            .send(DocWorkerMsg::ReattemptMaterialization {
-                origin: crate::changes::BigRepoChangeOrigin::Keyhive,
-                resp,
-            })
-        {
+        if let Err(error) = entry.handle.send(DocWorkerMsg::ReattemptMaterialization {
+            origin: crate::changes::BigRepoChangeOrigin::Keyhive,
+            resp,
+        }) {
             self.materialization_retries_in_flight.remove(&doc_id);
             return Err(error).wrap_err(ERROR_CHANNEL);
         }
         self.spawn_tracked(
             crate::runtime2::TrackedWorkKind::MaterializationRetry,
-            F::forward_materialization_retry(
-                result,
-                self.evt_tx.clone(),
-                doc_id,
-        ))?;
+            F::forward_materialization_retry(result, self.evt_tx.clone(), doc_id),
+        )?;
         Ok(())
     }
 
@@ -2244,9 +2232,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             // only armed by `schedule_doc_worker_eviction_if_idle` in that
             // case); guard anyway so an in-flight operation is never cancelled
             // underneath itself.
-            let idle = self.doc_workers.get(&doc_id).is_some_and(|entry| {
-                entry.local_handles == 0 && entry.internal_leases == 0
-            });
+            let idle = self
+                .doc_workers
+                .get(&doc_id)
+                .is_some_and(|entry| entry.local_handles == 0 && entry.internal_leases == 0);
             if !idle {
                 if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                     entry.eviction_deadline = None;
@@ -2372,8 +2361,7 @@ impl<
                                 match cmd_rx.recv().await {
                                     Ok(Runtime2Cmd::Unfreeze) => {
                                         hub.frozen = false;
-                                        let buffered =
-                                            std::mem::take(&mut hub.frozen_cmd_buffer);
+                                        let buffered = std::mem::take(&mut hub.frozen_cmd_buffer);
                                         for cmd in buffered {
                                             hub.handle_cmd(cmd)?;
                                         }

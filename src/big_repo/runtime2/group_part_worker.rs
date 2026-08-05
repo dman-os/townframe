@@ -51,7 +51,9 @@ impl GroupPartWorker {
         let mut announced_idle = false;
         loop {
             let cursor = self.store.keyhive_group_part_cursor().await?;
-            let generation = self.state_generation.load(std::sync::atomic::Ordering::Relaxed);
+            let generation = self
+                .state_generation
+                .load(std::sync::atomic::Ordering::Relaxed);
             if generation > self.last_acked_generation {
                 if !self.rebuild_for_generation(generation, cursor).await? {
                     return Ok(());
@@ -106,7 +108,9 @@ impl GroupPartWorker {
             // reconciliation so member-before-group and group-before-member
             // orderings both settle.
             for group_id in self.keyhive.visible_group_ids().await {
-                self.store.ensure_part(group_part_id(group_id.to_bytes())).await?;
+                self.store
+                    .ensure_part(group_part_id(group_id.to_bytes()))
+                    .await?;
             }
             let local_principal = self.local_peer_id;
             let missed_history = events
@@ -202,7 +206,9 @@ impl GroupPartWorker {
         // groups referenced by known docs — an empty group must still
         // advertise its part.
         for group_id in self.keyhive.visible_group_ids().await {
-            self.store.ensure_part(group_part_id(group_id.to_bytes())).await?;
+            self.store
+                .ensure_part(group_part_id(group_id.to_bytes()))
+                .await?;
         }
         let local_principal = self.local_peer_id;
         let docs: Vec<_> = self.keyhive.document_ids().await;
