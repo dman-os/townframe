@@ -107,20 +107,6 @@ pub(crate) struct IrohConnectResult {
     pub(crate) sender_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
 }
 
-pub(crate) async fn connect_outgoing(
-    endpoint: iroh::Endpoint,
-    endpoint_addr: iroh::EndpointAddr,
-    signer: &subduction_crypto::signer::memory::MemorySigner,
-) -> Res<IrohConnectResult> {
-    connect_outgoing_to(
-        endpoint,
-        endpoint_addr,
-        signer,
-        subduction_core::handshake::audience::Audience::discover(b"townframe-subduction"),
-    )
-    .await
-}
-
 pub(crate) async fn connect_outgoing_to(
     endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
@@ -230,7 +216,7 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
-    let mut snapshot_doc = doc.clone();
+    let snapshot_doc = doc.clone();
     let snapshot = snapshot_doc.save();
 
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
@@ -324,7 +310,7 @@ pub(crate) async fn persist_cgka_update_op(
     let event = StaticEvent::CgkaOperation(Box::new(update_op));
     subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event)
         .await
-        .map_err(|e| ferr!("failed to save keyhive cgka update op: {e}"))?;
+        .map_err(|err| ferr!("failed to save keyhive cgka update op: {err}"))?;
     Ok(())
 }
 
@@ -409,12 +395,12 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         let pred_refs: Vec<Vec<u8>> = entry
             .boundary
             .iter()
-            .map(|c| c.as_bytes().to_vec())
+            .map(|id| id.as_bytes().to_vec())
             .collect();
         // Build ancestors map from all known predecessor keys
         let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = pred_refs
             .iter()
-            .filter_map(|pred| key_index.get(pred).map(|k| (pred.clone(), *k)))
+            .filter_map(|pred| key_index.get(pred).map(|key| (pred.clone(), *key)))
             .collect();
         let envelope = Envelope {
             plaintext: blob.as_slice().to_vec(),
@@ -430,7 +416,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
                 &envelope_bytes,
             )
             .await
-            .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
+            .map_err(|err| ferr!("encrypt fragment failed: {err}"))?;
         if let Some(secret) = encrypted.local_cgka_secret().copied() {
             local_secrets.push(secret);
         }
@@ -465,12 +451,12 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         let pred_refs: Vec<Vec<u8>> = entry
             .parents
             .iter()
-            .map(|c| c.as_bytes().to_vec())
+            .map(|id| id.as_bytes().to_vec())
             .collect();
 
         let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = pred_refs
             .iter()
-            .filter_map(|pred| key_index.get(pred).map(|k| (pred.clone(), *k)))
+            .filter_map(|pred| key_index.get(pred).map(|key| (pred.clone(), *key)))
             .collect();
         let envelope = Envelope {
             plaintext: blob.as_slice().to_vec(),
@@ -486,7 +472,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
                 &envelope_bytes,
             )
             .await
-            .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
+            .map_err(|err| ferr!("encrypt loose commit failed: {err}"))?;
         if let Some(secret) = encrypted.local_cgka_secret().copied() {
             local_secrets.push(secret);
         }
@@ -543,7 +529,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
         .await
         .ok_or_else(|| ferr!("keyhive doc not found for commit encryption"))?;
     let content_ref: Vec<u8> = head.as_bytes().to_vec();
-    let pred_refs: Vec<Vec<u8>> = parents.iter().map(|c| c.as_bytes().to_vec()).collect();
+    let pred_refs: Vec<Vec<u8>> = parents.iter().map(|id| id.as_bytes().to_vec()).collect();
     let (owner_secret_count, cgka_operation_count, has_pcs_key) = {
         let locked = kh_doc.lock().await;
         let cgka = locked
@@ -634,7 +620,7 @@ where
     S: BigRepoSubductionStorage,
 {
     use keyhive_core::crypto::envelope::Envelope;
-    use keyhive_crypto::{siv::Siv, symmetric_key::SymmetricKey};
+    use keyhive_crypto::siv::Siv;
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
         .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
@@ -655,7 +641,7 @@ where
         head,
     )
     .await
-    .map_err(|e| ferr!("failed loading loose commit for fragment encryption: {e}"))?
+    .map_err(|err| ferr!("failed loading loose commit for fragment encryption: {err}"))?
     .ok_or_else(|| {
         ferr!(
             "fragment head missing loose commit in storage: sedimentree_id={sedimentree_id:?} head={head:?}"

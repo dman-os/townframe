@@ -229,11 +229,6 @@ impl Node {
         Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
     }
 
-    pub(crate) async fn keyhive_group_part_cursor(&self) -> crate::Res<u64> {
-        self.store.keyhive_group_part_cursor().await
-    }
-
-    /// Update the subscribed parts for an already-connected peer.
 
     /// Update the subscribed parts for an already-connected peer.
     /// part replication between the two nodes.
@@ -296,14 +291,6 @@ impl Node {
             .await
             .insert(remote.peer_id(), connection.clone());
         Ok(connection)
-    }
-    pub(crate) async fn connection_to(&self, peer_id: PeerId) -> crate::Res<BigRepoConnection> {
-        self.connections
-            .lock()
-            .await
-            .get(&peer_id)
-            .cloned()
-            .ok_or_else(|| crate::ferr!("no connection from {} to {peer_id}", self.peer_id()))
     }
     pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerId> {
         self.connections.lock().await.keys().copied().collect()
@@ -584,10 +571,7 @@ impl Pair {
 /// keyhive and document sync operations, and indexing metadata.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Topo {
-    /// Direct A↔B — delegates to [`Pair`] for backward compatibility.
-    Direct(Pair),
     /// Relay A↔R↔B where R has Relay-only capability (stores encrypted parts
-    /// but has no decryption access). `a_conn` / `b_conn` are A↔R and R↔B.
     Relay(TopoData3),
     /// Line A↔B↔C.
     Line(TopoData3),
@@ -751,11 +735,6 @@ impl Topo {
     /// Return a reference to a node by index.
     pub(crate) fn topo_node(&self, idx: usize) -> &Node {
         match self {
-            Topo::Direct(p) => match idx {
-                0 => p.left(),
-                1 => p.right(),
-                _ => panic!("index out of range"),
-            },
             Topo::Relay(d) | Topo::Line(d) | Topo::Star(d) | Topo::Triangle(d) => d.guard.node(idx),
         }
     }
@@ -763,11 +742,6 @@ impl Topo {
     /// Return the connection for a directional edge.
     pub(crate) fn topo_conn(&self, from: usize, to: usize) -> &BigRepoConnection {
         match self {
-            Topo::Direct(p) => match (from, to) {
-                (0, 1) => p.left_conn(),
-                (1, 0) => p.right_conn(),
-                _ => panic!("no edge ({from}→{to}) in Direct"),
-            },
             Topo::Relay(d) | Topo::Line(d) | Topo::Star(d) | Topo::Triangle(d) => d.conn(from, to),
         }
     }

@@ -971,24 +971,6 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
-source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
-dependencies = [
- "blake3",
- "chacha20poly1305",
- "dupe",
- "ed25519-dalek 2.2.0",
- "future_form",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
- "nonempty 0.10.0",
- "rand 0.8.5",
- "serde",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "beekem"
-version = "0.3.0"
 source = "git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531#f95c9b934f20fda0ab6b96a2564f908abbb97531"
 dependencies = [
  "blake3",
@@ -996,7 +978,7 @@ dependencies = [
  "dupe",
  "ed25519-dalek 2.2.0",
  "future_form",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "keyhive_crypto",
  "nonempty 0.10.0",
  "rand 0.8.5",
  "serde",
@@ -1015,7 +997,7 @@ dependencies = [
  "atproto-dasl",
  "automerge",
  "autosurgeon",
- "beekem 0.3.0 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "beekem",
  "big_sync",
  "big_sync_core",
  "bincode",
@@ -1026,8 +1008,8 @@ dependencies = [
  "iroh",
  "irpc",
  "irpc-iroh",
- "keyhive_core 0.5.0 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "keyhive_core",
+ "keyhive_crypto",
  "nonempty 0.10.0",
  "nonempty 0.12.0",
  "pretty_assertions",
@@ -1065,7 +1047,7 @@ dependencies = [
  "iroh",
  "irpc",
  "irpc-iroh",
- "keyhive_core 0.5.0 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "keyhive_core",
  "rand 0.9.2",
  "serde",
  "sqlx",
@@ -5760,35 +5742,9 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
-source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
-dependencies = [
- "beekem 0.3.0 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
- "bincode",
- "blake3",
- "chacha20poly1305",
- "derivative",
- "derive-where",
- "derive_more 1.0.0",
- "dupe",
- "ed25519-dalek 2.2.0",
- "future_form",
- "futures",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
- "nonempty 0.10.0",
- "rand 0.8.5",
- "serde",
- "signature 2.2.0",
- "thiserror 1.0.69",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "keyhive_core"
-version = "0.5.0"
 source = "git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531#f95c9b934f20fda0ab6b96a2564f908abbb97531"
 dependencies = [
- "beekem 0.3.0 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "beekem",
  "bincode",
  "blake3",
  "chacha20poly1305",
@@ -5799,29 +5755,8 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "keyhive_crypto",
  "nonempty 0.10.0",
- "rand 0.8.5",
- "serde",
- "signature 2.2.0",
- "thiserror 1.0.69",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "keyhive_crypto"
-version = "0.2.1"
-source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
-dependencies = [
- "bincode",
- "blake3",
- "chacha20poly1305",
- "derive_more 1.0.0",
- "dupe",
- "ed25519-dalek 2.2.0",
- "future_form",
- "futures",
  "rand 0.8.5",
  "serde",
  "signature 2.2.0",
@@ -10474,8 +10409,8 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
- "keyhive_core 0.5.0 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=f95c9b934f20fda0ab6b96a2564f908abbb97531)",
+ "keyhive_core",
+ "keyhive_crypto",
  "rand 0.8.5",
  "sedimentree_core",
  "serde",
@@ -13899,7 +13834,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "atproto-dasl",
- "beekem 0.3.0 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
+ "beekem",
  "bon",
  "clap",
  "data-encoding",
@@ -13910,8 +13845,8 @@ dependencies = [
  "heck",
  "http",
  "indenter",
- "keyhive_core 0.5.0 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
- "keyhive_crypto 0.2.1 (git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086)",
+ "keyhive_core",
+ "keyhive_crypto",
  "nonempty 0.10.0",
  "oci-spec",
  "oci-wasm",

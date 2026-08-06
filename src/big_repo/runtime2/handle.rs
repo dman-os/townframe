@@ -33,9 +33,9 @@ impl<F: FutureForm> Clone for Runtime2Handle<F> {
         Self {
             cmd_tx: self.cmd_tx.clone(),
             sync_policy: self.sync_policy,
-            doc_sync_waiter_ids: self.doc_sync_waiter_ids.clone(),
-            keyhive_sync_waiter_ids: self.keyhive_sync_waiter_ids.clone(),
-            timer: self.timer.clone(),
+            doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
+            keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
+            timer: Arc::clone(&self.timer),
         }
     }
 }
@@ -58,10 +58,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
-    /// The sync policy (timeouts, TTLs).
-    pub fn sync_policy(&self) -> crate::runtime2::types::BigRepoSyncPolicy {
-        self.sync_policy
-    }
 
     // ── doc lifecycle ──────────────────────────────────────────────────────
 
@@ -81,7 +77,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     ) -> eyre::Result<std::sync::Arc<crate::runtime2::types::LiveDocBundle>> {
         use nonempty::NonEmpty;
         let heads = initial_content.get_heads();
-        let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
+        let content_heads = NonEmpty::from_vec(heads.iter().map(|head| head.0).collect())
             .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -185,18 +181,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
-    }
-
-    /// Query only the persisted Sedimentree payload heads.
-    pub async fn doc_payload_heads(
-        &self,
-        doc_id: DocumentId,
-    ) -> eyre::Result<Option<std::sync::Arc<[automerge::ChangeHash]>>> {
-        let state = self.doc_head_state(doc_id).await?;
-        match state.state {
-            crate::runtime2::MaterializationState::Missing => Ok(None),
-            _ => Ok(Some(state.sedimentree_heads)),
-        }
     }
 
     // ── connections (transport-agnostic) ──────────────────────────────────
@@ -335,7 +319,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                             peer_id,
                             waiter_id,
                         })
-                        .map_err(|e| match e {
+                        .map_err(|err| match err {
                             async_channel::TrySendError::Closed(_) => {
                                 crate::runtime2::types::SyncDocError::IoError(ferr!(
                                     "task was found dead"
@@ -408,7 +392,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             Err(()) => {
                 self.cmd_tx
                     .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
-                    .map_err(|e| match e {
+                    .map_err(|err| match err {
                         async_channel::TrySendError::Closed(_) => eyre::eyre!(ERROR_ACTOR),
                         async_channel::TrySendError::Full(_) => eyre::eyre!("mailbox full"),
                     })?;

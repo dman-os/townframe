@@ -151,7 +151,6 @@ type BigKeyhiveKeyhive = keyhive_core::keyhive::Keyhive<
 #[derive(Clone)]
 pub struct BigKeyhiveHandle {
     keyhive: Arc<BigKeyhiveKeyhive>,
-    signer: MemorySigner,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
@@ -165,7 +164,6 @@ impl BigKeyhiveHandle {
                 .map_err(|err| ferr!("error on keyhive init: {err:?}"))?;
         Ok(Self {
             keyhive: Arc::new(keyhive),
-            signer,
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
         })
@@ -204,7 +202,6 @@ impl BigKeyhiveHandle {
             subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
         Ok(Some(Self {
             keyhive: Arc::new(restored),
-            signer,
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
         }))
@@ -686,7 +683,6 @@ struct ExploreNode {
 }
 
 /// Transitive-membership walk with short per-node locks.
-
 /// Replicates `Group::transitive_members` semantics (explore/expanded/access-min
 /// with the root excluded) but never holds a doc/group lock across an await that
 /// acquires another lock: every node is locked only long enough to clone its

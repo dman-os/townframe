@@ -10,8 +10,7 @@ use big_sync_core::rpc::{
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
-use future_form::{FutureForm, Sendable};
+use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint};
 use futures::future::BoxFuture;
 use sedimentree_core::{
     blob::Blob,
@@ -143,13 +142,6 @@ impl SqliteBigRepoStore {
         Ok(store)
     }
 
-    /// Parts this node opts out of entirely: not served (hidden parts are
-    /// answered with `UnkownParts` on subscribe/summarize) and — per the
-    /// hidden-parts design — not advertised or pulled by `peer_sync_parts`.
-    pub(crate) fn hidden_parts(&self) -> Arc<HashSet<PartId>> {
-        Arc::clone(&self.hidden_parts)
-    }
-
     async fn next_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res<CursorIndex> {
         SqliteCore::next_cursor(tx).await
     }
@@ -184,10 +176,6 @@ impl SqliteBigRepoStore {
 
     fn obj_from_blob(blob: Vec<u8>) -> ObjId {
         SqliteCore::obj_from_blob(blob)
-    }
-
-    fn peer_from_blob(blob: Vec<u8>) -> PeerId {
-        SqliteCore::peer_from_blob(blob)
     }
     fn event_part_id(event: &SubEvent) -> Option<PartId> {
         match event {
@@ -1982,6 +1970,9 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(cursor))
     }
 
+
+
+    #[cfg_attr(not(test), expect(dead_code))] // used by sqlite store tests
     pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {
         let cursor: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(seq) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
@@ -2703,7 +2694,7 @@ mod tests {
         HostPartStore::ensure_part(&store, part).await?;
         HostPartStore::add_obj_to_parts(&store, obj, vec![part]).await?;
 
-        let mut rx = HostPartStore::subscribe_local(
+        let rx = HostPartStore::subscribe_local(
             &store,
             SubPartsRequest {
                 targets: HashSet::from([SubscriptionTarget::Part {
@@ -3466,7 +3457,7 @@ mod tests {
 
         // First delivery: reconcile once.
         store
-            .reconcile_group_part_batch(&[m.clone()], 700, true)
+            .reconcile_group_part_batch(std::slice::from_ref(&m), 700, true)
             .await?;
         let parts_after_first = HostPartStore::obj_parts(&store, doc).await?;
         assert!(

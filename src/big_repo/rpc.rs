@@ -282,8 +282,8 @@ impl IrohBigRepoRpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, SharedPartStore, StorageConfig};
-    use big_sync::MemoryPartStore;
+    use crate::{Config, StorageConfig};
+    
     use iroh::protocol::Router;
     use std::net::Ipv4Addr;
     use tokio::time::timeout;

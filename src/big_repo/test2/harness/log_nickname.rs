@@ -39,7 +39,7 @@ pub fn nickname(peer_id: &PeerId) -> String {
 }
 
 /// Clear all nicknames (used between independent test cases).
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn clear() {
     registry()
         .lock()

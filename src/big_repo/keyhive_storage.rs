@@ -112,12 +112,12 @@ impl FsKeyhiveStorage {
         tokio::fs::write(&tmp, data).await?;
         match tokio::fs::rename(&tmp, &dest).await {
             Ok(()) => Ok(()),
-            Err(e) => {
+            Err(err) => {
                 drop(tokio::fs::remove_file(&tmp).await);
                 if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
                     Ok(())
                 } else {
-                    Err(e)
+                    Err(err)
                 }
             }
         }
@@ -152,7 +152,7 @@ impl FsKeyhiveStorage {
         let mut rd = fs::read_dir(&dir).await?;
         while let Some(entry) = rd.next_entry().await? {
             let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
             let Some(hash) = StorageHash::from_hex(stem) else {
@@ -168,8 +168,8 @@ impl FsKeyhiveStorage {
         let path = parent_dir.join(format!("{}.bin", hash.to_hex()));
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 }
@@ -260,6 +260,7 @@ pub(crate) enum BigRepoKeyhiveStorage {
         archives: MemoryKeyhiveStorage,
     },
     /// Test-only in-memory backend for legacy runtime unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     MemoryLegacy(MemoryKeyhiveStorage),
     Fs {
         events: SqliteBigRepoStore,
@@ -279,6 +280,7 @@ pub(crate) enum BigRepoKeyhiveStorageError {
 }
 
 impl BigRepoKeyhiveStorage {
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn memory() -> Self {
         Self::MemoryLegacy(MemoryKeyhiveStorage::new())
     }

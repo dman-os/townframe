@@ -12,7 +12,7 @@ path = "main.rs"
 
 [dependencies]
 atproto-dasl.workspace = true
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
+beekem.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 
 dotenv-flow.workspace = true
@@ -26,8 +26,8 @@ serde_json.workspace = true
 http.workspace = true
 future_form.workspace = true
 ed25519-dalek = "2.2.0"
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
+keyhive_core.workspace = true
+keyhive_crypto.workspace = true
 nonempty = "0.10.0"
 rand08 = { package = "rand", version = "0.8.5" }
 sedimentree_core.workspace = true

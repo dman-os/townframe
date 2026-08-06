@@ -1,6 +1,3 @@
-//! FIXME: don't expose unregister_remote_repo_peer but handle the lifecycle
-//! internally by sharing the Arc<Mutex> of the registry to the runtime
-
 mod interlude {
     pub use big_sync_core::{ObjId, PartId, PeerId};
 
@@ -19,8 +16,6 @@ use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use sedimentree_core::loose_commit::id::CommitId;
 
-// FIXME: properly test the changes impl and investigate
-// why it no longer has users
 pub(crate) mod access_policy;
 mod backend;
 #[expect(unused)]
@@ -34,17 +29,15 @@ pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 pub mod rpc;
 
-/// runtime2 — the tractable, runtime-neutral rewrite.
-/// See `play.big_repo.runtime2.md`.
-pub(crate) mod runtime2;
-mod sqlite_big_repo_store;
-pub use sqlite_big_repo_store::SqliteBigRepoStore;
-pub(crate) mod wire;
+mod runtime2;
+pub use runtime2::{DocHeadState, MaterializationState};
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
     SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt,
 };
-pub use runtime2::{DocHeadState, MaterializationState};
+mod sqlite_big_repo_store;
+pub use sqlite_big_repo_store::SqliteBigRepoStore;
+mod wire;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentSyncStage {
@@ -128,6 +121,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
+    #[cfg_attr(not(test), expect(dead_code))]
     sqlite_store: SqliteBigRepoStore,
     #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
@@ -172,7 +166,7 @@ impl BigRepo {
         };
         let store = SqliteBigRepoStore::new_with_config(
             sql,
-            scope_key.clone(),
+            Arc::clone(&scope_key),
             big_sync_core::BuckId::MAX_LEVEL,
             big_sync::HostPartStoreConfig {
                 hidden_parts: hidden_parts.clone(),
@@ -364,18 +358,6 @@ impl BigRepo {
 
     pub(crate) fn sync_policy(&self) -> runtime2::types::BigRepoSyncPolicy {
         self.sync_policy
-    }
-
-    pub(crate) async fn subscribe_local(
-        &self,
-        reqs: big_sync_core::rpc::SubPartsRequest,
-    ) -> Res<
-        Result<
-            big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
-            big_sync_core::rpc::ListPartsError,
-        >,
-    > {
-        big_sync::HostPartStore::subscribe_local(&self.sqlite_store, reqs).await
     }
 
     pub fn ephemeral(&self) -> BigEphemeral {

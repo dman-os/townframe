@@ -37,7 +37,7 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         self.evt_tx
             .try_send(crate::runtime2::Runtime2Evt::PrekeyExpanded {
-                new_prekey: new_prekey.clone(),
+                new_prekey: Arc::clone(new_prekey),
             })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();
@@ -50,7 +50,7 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         self.evt_tx
             .try_send(crate::runtime2::Runtime2Evt::PrekeyRotated {
-                rotate_key: rotate_key.clone(),
+                rotate_key: Arc::clone(rotate_key),
             })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();
@@ -64,7 +64,7 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
         data: &'a Arc<Signed<CgkaOperation>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         self.evt_tx
-            .try_send(crate::runtime2::Runtime2Evt::CgkaOp { data: data.clone() })
+            .try_send(crate::runtime2::Runtime2Evt::CgkaOp { data: Arc::clone(data) })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();
         Sendable::ready(())
@@ -84,7 +84,7 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
         self.evt_tx
             .try_send(crate::runtime2::Runtime2Evt::DelegationReceived {
                 target,
-                data: data.clone(),
+                data: Arc::clone(data),
             })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();
@@ -99,7 +99,7 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
         self.evt_tx
             .try_send(crate::runtime2::Runtime2Evt::RevocationReceived {
                 target,
-                data: data.clone(),
+                data: Arc::clone(data),
             })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();

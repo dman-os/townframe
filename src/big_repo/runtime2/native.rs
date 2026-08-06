@@ -103,11 +103,6 @@ impl KeyhiveChangeNotifier {
         let _ = self.keyhive_change_tx.send(());
         Ok(())
     }
-
-    /// Best-effort peer wake-up without a cache bust (maintenance refresh).
-    pub(crate) fn notify_peers(&self) {
-        let _ = self.keyhive_change_tx.send(());
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -124,8 +119,6 @@ pub(crate) struct NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
-    /// Shared SQLite state for Keyhive-derived partition/event watermarks.
-    group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     /// Shared subduction handle — the core sync + storage engine.
     subduction: Arc<BigRepoSubduction<S>>,
     /// Clonable storage backend (for direct reads).
@@ -140,13 +133,9 @@ where
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
     local_peer_id: PeerId,
-    /// Sync policy (timeouts, TTLs).
-    sync_policy: BigRepoSyncPolicy,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
-    /// Ephemeral publisher for application-level transient messages.
-    ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     /// Single funnel for local Keyhive change notifications: cache-busts the
     /// protocol and broadcasts the RPC keyhive-changed hint to peers.
     keyhive_notifier: KeyhiveChangeNotifier,
@@ -156,8 +145,8 @@ impl<S> std::fmt::Debug for NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeBigRepoIo")
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("NativeBigRepoIo")
             .field("local_peer_id", &self.local_peer_id)
             .finish_non_exhaustive()
     }
@@ -173,6 +162,7 @@ struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
     storage: S,
     sed_id: SedimentreeId,
     /// In-memory cache of (content_ref -> encrypted content).
+    #[expect(clippy::type_complexity)]
     cache: std::sync::Mutex<
         HashMap<Vec<u8>, Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
     >,
@@ -191,7 +181,7 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
         // Check cache first.
         {
             let cache = self.cache.lock().expect(ERROR_MUTEX);
-            if let Some(encrypted) = cache.get(content_ref) {
+            if let Some(_encrypted) = cache.get(content_ref) {
                 return Ok(true);
             }
         }
@@ -200,7 +190,7 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
             .map_err(|_| ferr!("content_ref must be 32 bytes, got {}", content_ref.len()))?;
         let commit_id = CommitId::new(commit_id_bytes);
         // FIXME: use select! and race these two loads
-        if let Some(verified) =
+        if let Some(_verified) =
             <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                 &self.storage,
                 self.sed_id,
@@ -211,7 +201,7 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
         {
             return Ok(true);
         }
-        if let Some(verified) =
+        if let Some(_verified) =
             <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
                 &self.storage,
                 self.sed_id,
@@ -342,30 +332,7 @@ fn kh_doc_id_from_sed_id(sed_id: SedimentreeId) -> eyre::Result<KhDocumentId> {
     Ok(KhDocumentId::from(Identifier::from(vk)))
 }
 
-/// Get the keyhive document for a sedimentree ID, or return an error if
-/// the keyhive document is not found locally.
-async fn get_kh_doc(
-    keyhive: &BigKeyhiveHandle,
-    sed_id: SedimentreeId,
-) -> eyre::Result<
-    Arc<
-        futures::lock::Mutex<
-            keyhive_core::principal::document::Document<
-                Sendable,
-                keyhive_crypto::signer::memory::MemorySigner,
-                Vec<u8>,
-                crate::keyhive_listener::BigRepoKeyhiveListener,
-            >,
-        >,
-    >,
-> {
-    let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
-    keyhive
-        .clone_keyhive()
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_else(|| ferr!("keyhive doc not found for sedimentree_id={sed_id:?}"))
-}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DocIo<Sendable> impl
@@ -498,7 +465,7 @@ where
                 if let Some(tree) = self.sedimentrees.get_cloned(&sed_id).await {
                     let heads = sedimentree_heads_payload(&tree);
                     if !heads.is_empty() {
-                        return Ok(heads.iter().map(|h| CommitId::new(h.0)).collect());
+                        return Ok(heads.iter().map(|head| CommitId::new(head.0)).collect());
                     }
                     Some((tree.loose_commits().count(), tree.fragments().count()))
                 } else {
@@ -536,8 +503,8 @@ where
             }
 
             let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments.iter().map(|v| v.payload().clone()).collect(),
-                loose_commits.iter().map(|v| v.payload().clone()).collect(),
+                fragments.iter().map(|frag| frag.payload().clone()).collect(),
+                loose_commits.iter().map(|commit| commit.payload().clone()).collect(),
             ));
             let tree = self.sedimentrees.get_or_insert_with(sed_id, || tree).await;
             let heads = sedimentree_heads_payload(&tree);
@@ -551,9 +518,9 @@ where
                     durable_heads = heads.len(),
                     "cached Sedimentree reported empty heads; compared durable state"
                 );
-                return Ok(heads.iter().map(|h| CommitId::new(h.0)).collect());
+                return Ok(heads.iter().map(|head| CommitId::new(head.0)).collect());
             }
-            Ok(heads.iter().map(|h| CommitId::new(h.0)).collect())
+            Ok(heads.iter().map(|head| CommitId::new(head.0)).collect())
         })
     }
 
@@ -588,8 +555,8 @@ where
             }
 
             let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments.iter().map(|v| v.payload().clone()).collect(),
-                loose_commits.iter().map(|v| v.payload().clone()).collect(),
+                fragments.iter().map(|frag| frag.payload().clone()).collect(),
+                loose_commits.iter().map(|commit| commit.payload().clone()).collect(),
             ));
 
             // Keep the hydrated tree resident: materialization retries can be
@@ -658,8 +625,8 @@ where
                         locator.commit_id,
                     )
                     .await
-                    .map_err(|e| ferr!("failed loading loose commit: {e}"))?
-                    .map(|v| v.blob().clone().into_contents())
+                    .map_err(|err| ferr!("failed loading loose commit: {err}"))?
+                    .map(|frag| frag.blob().clone().into_contents())
                 }
                 crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
@@ -668,8 +635,8 @@ where
                         locator.commit_id,
                     )
                     .await
-                    .map_err(|e| ferr!("failed loading fragment: {e}"))?
-                    .map(|v| v.blob().clone().into_contents())
+                    .map_err(|err| ferr!("failed loading fragment: {err}"))?
+                    .map(|frag| frag.blob().clone().into_contents())
                 }
             };
             let Some(raw) = raw else {
@@ -678,7 +645,7 @@ where
 
             // Decode the encrypted blob.
             let encrypted = decode_encrypted_blob(&raw)
-                .map_err(|e| ferr!("failed decoding encrypted blob: {e}"))?;
+                .map_err(|err| ferr!("failed decoding encrypted blob: {err}"))?;
 
             // A missing local Keyhive document means the content keys have
             // not arrived yet. This is a normal pending-materialization
@@ -696,7 +663,7 @@ where
                     doc.remember_decryption_key(encrypted.content_ref.clone(), key);
                     // Deserialize the envelope to extract the actual payload.
                     let envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&plaintext)
-                        .map_err(|e| ferr!("bincode decrypt result: {e}"))?;
+                        .map_err(|err| ferr!("bincode decrypt result: {err}"))?;
                     Ok(Some(envelope.plaintext))
                 }
                 Err(DecryptError::KeyNotFound) => Ok(None),
@@ -732,8 +699,8 @@ where
                         locator.commit_id,
                     )
                     .await
-                    .map_err(|e| ferr!("failed loading loose commit: {e}"))?
-                    .map(|v| v.blob().clone().into_contents())
+                    .map_err(|err| ferr!("failed loading loose commit: {err}"))?
+                    .map(|frag| frag.blob().clone().into_contents())
                 }
                 crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
@@ -742,8 +709,8 @@ where
                         locator.commit_id,
                     )
                     .await
-                    .map_err(|e| ferr!("failed loading fragment: {e}"))?
-                    .map(|v| v.blob().clone().into_contents())
+                    .map_err(|err| ferr!("failed loading fragment: {err}"))?
+                    .map(|frag| frag.blob().clone().into_contents())
                 }
             };
             let Some(raw) = raw else {
@@ -932,7 +899,7 @@ where
             self.storage
                 .contains_sedimentree_id(sed_id)
                 .await
-                .map_err(|e| ferr!("failed checking sedimentree presence: {e}"))
+                .map_err(|err| ferr!("failed checking sedimentree presence: {err}"))
         })
     }
 
@@ -1001,17 +968,6 @@ where
                 }
                 Err(error) => Err(ferr!("keyhive initiate_sync_with_peer failed: {error}")),
             }
-        })
-    }
-
-    fn compact_keyhive(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            let archive_id =
-                subduction_keyhive::storage::StorageHash::new(*self.local_peer_id.as_bytes());
-            self.keyhive_protocol
-                .compact(archive_id)
-                .await
-                .wrap_err("keyhive archive compact failed")
         })
     }
 
@@ -1107,6 +1063,7 @@ where
     /// tracks multiple connections per peer, so closing one connection must
     /// disconnect exactly that connection — the flag's pointer identity is
     /// the connection id.
+    #[expect(clippy::type_complexity)]
     conns: std::sync::Arc<
         std::sync::Mutex<
             Vec<(
@@ -1131,8 +1088,8 @@ impl<S> std::fmt::Debug for IrohTransportConnect<S>
 where
     S: BigRepoSubductionStorage,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IrohTransportConnect")
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("IrohTransportConnect")
             .field("local_peer_id", &self.local_peer_id)
             .finish_non_exhaustive()
     }
@@ -1159,7 +1116,7 @@ async fn spawn_keyhive_change_subscription(
 
     // tokio::spawn cannot fail to spawn; a JoinHandle dropped here detaches
     // the task (it ends via `cancel` or stream close).
-    let _ = tokio::spawn(async move {
+    tokio::spawn(async move {
         let client = crate::rpc::IrohBigRepoRpcClient::new(endpoint, endpoint_addr);
         let mut changes = match client.subscribe_keyhive_changes(64).await {
             Ok(changes) => changes,
@@ -1309,8 +1266,8 @@ where
             let end_fut_inner = Sendable::from_future(async move {
                 use futures::future::{select, Either};
                 match select(
-                    Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
-                    Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
+                    Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
+                    Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
                 )
                 .await
                 {
@@ -1455,8 +1412,8 @@ where
             let end_fut_inner = Sendable::from_future(async move {
                 use futures::future::{select, Either};
                 match select(
-                    Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
-                    Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
+                    Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
+                    Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
                 )
                 .await
                 {
@@ -1600,6 +1557,7 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
 /// - [`BigEphemeral`] — the ephemeral pub/sub bus.
 /// - `async_channel::Sender<Runtime2Evt>` — sender for external event injection.
 /// - [`Runtime2StopToken<Sendable, TokioTaskRuntime>`] — stop token.
+#[expect(clippy::too_many_arguments)]
 pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
@@ -1751,7 +1709,6 @@ where
         keyhive_change_tx,
     );
     let native_io = Arc::new(NativeBigRepoIo {
-        group_part_store: group_part_store.clone(),
         subduction: Arc::clone(&subduction_handle),
         storage: storage.clone(),
         sedimentrees: Arc::clone(&sedimentrees),
@@ -1759,9 +1716,7 @@ where
         keyhive_storage: keyhive_storage.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
-        sync_policy,
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
-        ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_notifier: keyhive_notifier.clone(),
     });
 
@@ -1790,7 +1745,7 @@ where
     let keyhive_state_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let config = crate::runtime2::Runtime2Config {
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
-        runtime_io: native_io.clone() as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
+        runtime_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
         doc_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::DocIo<Sendable>>,
         sync_policy,
         change_manager: Arc::clone(&change_manager),
@@ -1898,10 +1853,6 @@ where
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl crate::runtime2::Clock for subduction_ephemeral::clock::std_clock::StdClock {
-    fn now(&self) -> subduction_core::timestamp::TimestampSeconds {
-        subduction_core::timestamp::TimestampSeconds::now()
-    }
-
     fn instant(&self) -> std::time::Instant {
         std::time::Instant::now()
     }

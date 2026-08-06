@@ -10,7 +10,6 @@
 //! access); Tier 0 here covers the head-parity invariants that the
 //! head-divergence flake violated.
 
-use super::log_nickname;
 use super::topo::Pair;
 use crate::{DocumentId, Res};
 
@@ -110,9 +109,4 @@ pub fn state_summary(label: &str, state: &crate::runtime2::DocHeadState) -> Stri
         mat,
         state.state,
     )
-}
-
-#[allow(dead_code)]
-fn _nickname_used(_p: &crate::PeerId) -> String {
-    log_nickname::nickname(_p)
 }

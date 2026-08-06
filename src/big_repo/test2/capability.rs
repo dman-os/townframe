@@ -461,7 +461,6 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
     // Boot a third node that will try the escalation.
     let escalator = crate::test2::harness::Node::boot(90, "Escalator").await?;
     let guard = crate::test2::harness::topo::ShutdownGuard::from(vec![escalator]);
-    let escalator_idx = 0; // guard.node(0)
 
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
@@ -1100,7 +1099,7 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let mut pair = Pair::boot(148, 149, "Owner", "RegrantEditor").await?;
+    let pair = Pair::boot(148, 149, "Owner", "RegrantEditor").await?;
     let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
 
     let mut initial = automerge::Automerge::new();

@@ -164,6 +164,7 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub mod contract {
     use super::*;
     use big_sync_core::rpc::{

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::Instrument;
 // Re-export the ephemeral so embedders can subscribe.
 
-struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
+pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── identity / config ──────────────────────────────────────────────────
     local_peer_id: PeerId,
     sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
@@ -106,8 +106,6 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// state generation at retry start. A `Pending` completion whose walk ran
     /// against a generation older than the current one is re-verified (B6).
     materialization_retries_in_flight: HashMap<DocumentId, u64>,
-    // ── waiter-id counters (shared with the handle) ────────────────────────
-    doc_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct ConnDeets {
@@ -133,7 +131,6 @@ struct KeyhiveWaiters {
 struct PendingDocSyncWaiter {
     doc_id: DocumentId,
     peer_id: PeerId,
-    request_id: subduction_core::connection::message::RequestId,
     resp: futures::channel::oneshot::Sender<
         Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
     >,
@@ -150,7 +147,7 @@ struct QuiescenceProbe {
 // COMMAND HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-trait HubCommandFuture<F: FutureForm> {
+pub(crate) trait HubCommandFuture<F: FutureForm> {
     fn create_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -565,7 +562,6 @@ where
                     PendingDocSyncWaiter {
                         doc_id,
                         peer_id,
-                        request_id: request_id.clone(),
                         resp,
                     },
                 );
@@ -712,7 +708,7 @@ where
     }
 }
 
-trait HubBackgroundFuture<F: FutureForm> {
+pub(crate) trait HubBackgroundFuture<F: FutureForm> {
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
@@ -762,7 +758,8 @@ trait HubBackgroundFuture<F: FutureForm> {
 /// Connection and doc-sync IO futures that need the concrete task set for
 /// spawning end-futures. Defined as a separate trait so `#[future_form]`
 /// can generate Sendable/Local implementations.
-trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
+pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
+    #[expect(clippy::type_complexity)]
     fn open_connection_and_watch(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
         peer: PeerId,
@@ -781,6 +778,7 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
         >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
+    #[expect(clippy::type_complexity)]
     fn accept_connection_and_watch(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
         incoming: Box<dyn std::any::Any + Send>,
@@ -1218,7 +1216,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         F::from_future(
             async move {
                 let result = match runtime_io
-                    .sync_doc_with_peer(sed_id, peer_id, Some(request_id.clone()))
+                    .sync_doc_with_peer(sed_id, peer_id, Some(request_id))
                     .await
                 {
                     Ok(crate::runtime2::SyncDocAttempt::Exchanged) => Ok(()),
@@ -1429,7 +1427,7 @@ where
                 request_id,
                 changed,
             } => {
-                self.finish_keyhive_sync(peer_id, request_id, changed)?;
+                self.finish_keyhive_sync(peer_id, request_id)?;
                 if changed {
                     self.bump_keyhive_state_generation("keyhive sync exchange");
                 }
@@ -1746,7 +1744,7 @@ where
         self.connected_peers.insert(
             peer_id,
             ConnDeets {
-                closed: closed.clone(),
+                closed: Arc::clone(&closed),
             },
         );
         self.start_keyhive_sync(peer_id)?;
@@ -1787,7 +1785,7 @@ where
         let admitted_ids = self
             .keyhive_waiters
             .get(&peer_id)
-            .map_or_else(std::collections::HashSet::new, |w| w.ids.clone());
+            .map_or_else(std::collections::HashSet::new, |waiters| waiters.ids.clone());
         self.keyhive_round_ids = self.keyhive_round_ids.wrapping_add(1);
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {
@@ -1812,7 +1810,7 @@ where
                 .active_keyhive_syncs
                 .get(&peer_id)
                 .map_or(0, |round| round.admitted_ids.len()),
-            pending_waiters = self.keyhive_waiters.get(&peer_id).map_or(0, |w| w.waiters.len()),
+            pending_waiters = self.keyhive_waiters.get(&peer_id).map_or(0, |waiters| waiters.waiters.len()),
             "starting Keyhive sync round"
         );
         self.spawn_tracked(
@@ -1904,7 +1902,6 @@ where
         &mut self,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
-        changed: bool,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
             debug!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
@@ -1965,7 +1962,7 @@ where
             remaining_waiters = self
                 .keyhive_waiters
                 .get(&peer_id)
-                .map_or(0, |w| w.waiters.len()),
+                .map_or(0, |waiters| waiters.waiters.len()),
             has_remaining,
             "completing Keyhive sync round"
         );
@@ -2126,7 +2123,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         let cmd_tx = self.cmd_tx.clone();
         self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
 
-        let lease = DocWorkerInternalLease::new(doc_id, lease_tx);
+        let lease = DocWorkerInternalLease::new(lease_tx);
         Ok((handle, lease))
     }
 
@@ -2270,11 +2267,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 /// concrete [`TaskRuntime`] backend `R`. Holds two independent task sets:
 /// - `child_tasks` — construction-time workers and dynamic background jobs.
 /// - `machine_tasks` — the hub's dispatcher loop, stopped last so it can
-///    drain in-flight tracked work before exiting.
+///   drain in-flight tracked work before exiting.
 pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) cancel: futures::future::AbortHandle,
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
-    pub(crate) timer: Arc<dyn crate::runtime2::Timer<F>>,
     pub(crate) child_tasks: R::Tasks,
     pub(crate) machine_tasks: R::Tasks,
 }
@@ -2314,7 +2310,7 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
     }
 }
 
-trait HubMachineFuture<F: FutureForm + FutureForm, R: TaskRuntime<F>> {
+pub(crate) trait HubMachineFuture<F: FutureForm + FutureForm, R: TaskRuntime<F>> {
     fn machine_loop(
         hub: Runtime2Hub<F, R>,
         cmd_rx: async_channel::Receiver<Runtime2Cmd>,
@@ -2337,7 +2333,7 @@ impl<
         timer: Arc<dyn crate::runtime2::Timer<F>>,
         registration: futures::future::AbortRegistration,
     ) -> F::Future<'static, eyre::Result<()>> {
-        let cancellation = registration.handle();
+        let _cancellation = registration.handle();
         let span = tracing::info_span!("runtime2_hub", local_peer_id = %hub.local_peer_id);
         F::from_future(
             async move {
@@ -2475,9 +2471,8 @@ where
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Runtime2Cmd>();
     let (evt_tx, evt_rx) = event_channel.unwrap_or_else(async_channel::unbounded::<Runtime2Evt>);
 
-    // The hub and its public handle must share waiter counters. The hub uses
-    // the current counter as a sync watermark; separate counters would leave
-    // every request below that watermark and make it wait forever.
+    // The handle generates waiter ids; the hub tracks waiters per peer/doc
+    // with its own round/request-id state (no hub-side watermark needed).
     let doc_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let keyhive_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
@@ -2490,8 +2485,8 @@ where
         doc_io,
         change_manager,
         child_tasks: child_tasks.clone(),
-        timer: timer.clone(),
-        clock: clock.clone(),
+        timer: Arc::clone(&timer),
+        clock: Arc::clone(&clock),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
         connected_peers: HashMap::new(),
@@ -2515,14 +2510,13 @@ where
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         materialization_retries_in_flight: HashMap::new(),
-        doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
     };
 
     // ── Construct handle ───────────────────────────────────────────────────
     let handle = Runtime2Handle::<F>::new(
         cmd_tx.clone(),
         hub.sync_policy,
-        hub.timer.clone(),
+        Arc::clone(&hub.timer),
         doc_sync_waiter_ids,
         keyhive_sync_waiter_ids,
     );
@@ -2534,7 +2528,7 @@ where
         hub,
         cmd_rx,
         evt_rx,
-        timer.clone(),
+        Arc::clone(&timer),
         runtime_registration,
     ))?;
 
@@ -2543,7 +2537,6 @@ where
         Runtime2StopToken {
             cancel: runtime_abort,
             cmd_tx,
-            timer,
             child_tasks,
             machine_tasks,
         },

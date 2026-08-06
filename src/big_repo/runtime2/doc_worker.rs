@@ -96,14 +96,9 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             async move {
                 let result = futures::future::Abortable::new(
                     async {
-                        loop {
-                            match msg_rx.recv().await {
-                                Ok(msg) => {
-                                    worker.handle_msg(msg).await?;
-                                    worker.resolve_quiescence_waiters().await?;
-                                }
-                                Err(async_channel::RecvError) => break,
-                            }
+                        while let Ok(msg) = msg_rx.recv().await {
+                            worker.handle_msg(msg).await?;
+                            worker.resolve_quiescence_waiters().await?;
                         }
                         eyre::Ok(())
                     },
@@ -192,9 +187,10 @@ enum DocState {
     Live(std::sync::Weak<LiveDocBundle>),
     /// Sedimentree content exists, but its keys, ciphertext closure, or
     /// Automerge dependency closure is not yet available.
-    PendingMaterialization(Vec<MaterializationBlocker>),
+    PendingMaterialization,
 }
 
+#[expect(clippy::large_enum_variant)]
 enum LoadedDocSnapshot {
     Missing,
     Unavailable {
@@ -321,7 +317,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocWorkerMsg::ReattemptMaterialization { origin, resp } => {
                 debug!(
                     doc_id = %self.doc_id,
-                    pending = matches!(self.state, DocState::PendingMaterialization(_)),
+                    pending = matches!(self.state, DocState::PendingMaterialization),
                     "retrying document materialization after dependency update"
                 );
                 match self.retry_materialization(origin).await {
@@ -458,7 +454,7 @@ impl<F: FutureForm> DocWorker2<F> {
             //   - Fully decryptable → `Ready` + `mark_materialization_ready`.
             //   - Partially decryptable → `PendingMaterialization` +
             //     `mark_materialization_pending`.
-            DocState::Unloaded | DocState::PendingMaterialization(_) => {
+            DocState::Unloaded | DocState::PendingMaterialization => {
                 self.take_or_load_transient_doc().await?
             }
         };
@@ -570,7 +566,7 @@ impl<F: FutureForm> DocWorker2<F> {
     }
 
     async fn take_or_load_transient_doc(&mut self) -> eyre::Result<DocLookup<Arc<LiveDocBundle>>> {
-        let was_pending = matches!(self.state, DocState::PendingMaterialization(_));
+        let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
             DocState::Transient(doc) => {
@@ -584,7 +580,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.register_bundle_lease().await?;
                 DocLookup::Ready(bundle)
             }
-            DocState::Unloaded | DocState::PendingMaterialization(_) => {
+            DocState::Unloaded | DocState::PendingMaterialization => {
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -664,6 +660,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// 2. the local principal no longer holds write access (revoked or
     ///    Read-only), or
     /// 3. the encrypted commit cannot be persisted (key unavailable).
+///
     /// A rejected commit never persists, so no partial history can form.
     async fn commit_delta(
         &mut self,
@@ -689,7 +686,7 @@ impl<F: FutureForm> DocWorker2<F> {
         if served_bundle_id != Some(bundle_id)
             || current.as_ref().is_some_and(|bundle| bundle.is_broken())
         {
-            let message = if current.as_ref().is_some_and(|b| b.is_broken()) {
+            let message = if current.as_ref().is_some_and(|bundle| bundle.is_broken()) {
                 "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
             } else {
                 "document write rejected: commit from a stale handle; re-acquire the document"
@@ -831,7 +828,8 @@ impl<F: FutureForm> DocWorker2<F> {
         blockers: Vec<MaterializationBlocker>,
     ) -> eyre::Result<()> {
         debug!(?blockers, "document materialization pending");
-        self.state = DocState::PendingMaterialization(blockers);
+        let _ = &blockers; // logged above; the state only carries the pending flag
+        self.state = DocState::PendingMaterialization;
         if !was_pending {
             self.change_manager
                 .notify_local_doc_materialization_pending(self.doc_id)?;
@@ -911,7 +909,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     },
                 )
             }
-            DocState::PendingMaterialization(_) => {
+            DocState::PendingMaterialization => {
                 (None, crate::runtime2::MaterializationState::Pending)
             }
             DocState::Unloaded => {
@@ -1193,7 +1191,7 @@ impl<F: FutureForm> DocWorker2<F> {
             >,
         >,
     ) -> eyre::Result<()> {
-        let pending = matches!(self.state, DocState::PendingMaterialization(_));
+        let pending = matches!(self.state, DocState::PendingMaterialization);
         tracing::debug!(%self.doc_id, "passed point P1: report_sync_outcome entry");
         // Only a doc with no live bundle (cold: pending, or persisted-only)
         // runs the full walk here. A live doc's session path already applied
@@ -1428,7 +1426,7 @@ impl<F: FutureForm> DocWorker2<F> {
         &mut self,
         origin: BigRepoChangeOrigin,
     ) -> eyre::Result<MaterializationStatus> {
-        let was_pending = matches!(self.state, DocState::PendingMaterialization(_));
+        let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let live_bundle = match &self.state {
             DocState::Live(weak) => weak.upgrade(),
             _ => None,
@@ -1448,7 +1446,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
-                mut doc,
+                doc,
                 partially_decrypted,
                 blocked_refs,
             } => {

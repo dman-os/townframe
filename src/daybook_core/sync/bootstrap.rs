@@ -605,7 +605,6 @@ pub async fn clone_repo_init_from_url(
                 iroh_secret_key: identity.iroh_secret_key,
                 secret_repo,
             },
-            staging.join("blobs"),
         )
         .await?;
         crate::repo::mark_repo_initialized(&staging).await?;

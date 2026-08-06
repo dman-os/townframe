@@ -2837,21 +2837,8 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
     }
 }
 
-async fn endpoint_addr_from_remote_info(
-    endpoint: &iroh::Endpoint,
-    endpoint_id: iroh::PublicKey,
-) -> Res<iroh::EndpointAddr> {
-    let remote_info = endpoint
-        .remote_info(endpoint_id)
-        .await
-        .ok_or_eyre("unable to get remote endpoint info")?;
-    Ok(iroh::EndpointAddr::from_parts(
-        remote_info.id(),
-        remote_info.into_addrs().map(|addr| addr.into_addr()),
-    ))
-}
-
 struct SyncRepoNode {
+    #[expect(dead_code)] // kept alive by boot(); used for teardown diagnostics
     path: PathBuf,
     repo: Arc<BigRepo>,
     big_sync_store: SharedPartStore,

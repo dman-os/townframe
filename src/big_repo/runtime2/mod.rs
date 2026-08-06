@@ -81,6 +81,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
     /// transitions to `true` when the transport drops the connection, and an
     /// end-future that resolves when the connection lifecycle ends (the hub
     /// spawns this to emit [`Runtime2Evt::ConnLost`]).
+    #[expect(clippy::type_complexity)]
     fn connect(
         &self,
         expected_peer: big_sync_core::PeerId,
@@ -96,6 +97,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
 
     /// Accept an inbound connection from `incoming` (transport-specific).
     /// Returns the same triple as [`connect`](Self::connect).
+    #[expect(clippy::type_complexity)]
     fn accept(
         &self,
         incoming: Box<dyn std::any::Any + Send>,

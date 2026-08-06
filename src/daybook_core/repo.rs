@@ -423,6 +423,7 @@ impl RepoCtx {
         Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
         partition_store: &SharedPartStore,
@@ -686,10 +687,8 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
 
 pub(crate) async fn finish_clone_init(
     parts: RepoCtxParts,
-    blobs_root: PathBuf,
 ) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
-    let local_user_path = &parts.local_user_path;
     let init_state = globals::get_init_state(sql).await?;
     let (doc_id_app, doc_id_drawer) = match init_state {
         globals::InitState::Created {

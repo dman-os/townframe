@@ -7,6 +7,44 @@ use big_sync_core::PeerId;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+/// Response payload for `OpenConn`/`AcceptConn`: the peer id, the shared
+/// connection-closed flag, and a receiver that completes when the connection
+/// fully closes.
+type ConnOpenResp = futures::channel::oneshot::Sender<
+    eyre::Result<(
+        PeerId,
+        Arc<std::sync::atomic::AtomicBool>,
+        futures::channel::oneshot::Receiver<(
+            Arc<std::sync::atomic::AtomicBool>,
+            eyre::Result<()>,
+        )>,
+    )>,
+>;
+
+/// A signed keyhive delegation forwarded to the hub as an event.
+type SignedDelegation = Arc<
+    keyhive_crypto::signed::Signed<
+        keyhive_core::principal::group::delegation::Delegation<
+            future_form::Sendable,
+            keyhive_crypto::signer::memory::MemorySigner,
+            Vec<u8>,
+            crate::keyhive_listener::BigRepoKeyhiveListener,
+        >,
+    >,
+>;
+
+/// A signed keyhive revocation forwarded to the hub as an event.
+type SignedRevocation = Arc<
+    keyhive_crypto::signed::Signed<
+        keyhive_core::principal::group::revocation::Revocation<
+            future_form::Sendable,
+            keyhive_crypto::signer::memory::MemorySigner,
+            Vec<u8>,
+            crate::keyhive_listener::BigRepoKeyhiveListener,
+        >,
+    >,
+>;
+
 /// Commands into the runtime hub (from `Runtime2Handle`).
 #[derive(educe::Educe)]
 #[educe(Debug)]
@@ -79,30 +117,12 @@ pub enum Runtime2Cmd {
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<(
-                PeerId,
-                Arc<std::sync::atomic::AtomicBool>,
-                futures::channel::oneshot::Receiver<(
-                    Arc<std::sync::atomic::AtomicBool>,
-                    eyre::Result<()>,
-                )>,
-            )>,
-        >,
+        resp: ConnOpenResp,
     },
     AcceptConn {
         incoming: Box<dyn std::any::Any + Send>,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<(
-                PeerId,
-                Arc<std::sync::atomic::AtomicBool>,
-                futures::channel::oneshot::Receiver<(
-                    Arc<std::sync::atomic::AtomicBool>,
-                    eyre::Result<()>,
-                )>,
-            )>,
-        >,
+        resp: ConnOpenResp,
     },
     CloseConn {
         peer_id: PeerId,
@@ -185,6 +205,7 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
+    #[cfg_attr(not(test), expect(dead_code))]
     InspectStoredDocBlobs {
         sed_id: sedimentree_core::id::SedimentreeId,
         #[educe(Debug(ignore))]
@@ -295,29 +316,11 @@ pub enum Runtime2Evt {
     },
     DelegationReceived {
         target: keyhive_core::principal::identifier::Identifier,
-        data: Arc<
-            keyhive_crypto::signed::Signed<
-                keyhive_core::principal::group::delegation::Delegation<
-                    future_form::Sendable,
-                    keyhive_crypto::signer::memory::MemorySigner,
-                    Vec<u8>,
-                    crate::keyhive_listener::BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
+        data: SignedDelegation,
     },
     RevocationReceived {
         target: keyhive_core::principal::identifier::Identifier,
-        data: Arc<
-            keyhive_crypto::signed::Signed<
-                keyhive_core::principal::group::revocation::Revocation<
-                    future_form::Sendable,
-                    keyhive_crypto::signer::memory::MemorySigner,
-                    Vec<u8>,
-                    crate::keyhive_listener::BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
+        data: SignedRevocation,
     },
 }
 

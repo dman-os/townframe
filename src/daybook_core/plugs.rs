@@ -2535,15 +2535,20 @@ mod tests {
     use super::*;
     use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
+    /// Boot a repo + plugs registry for tests.
+    ///
+    /// The first tuple element is the boot stop token: dropping it cancels
+    /// the runtime's machine loop, so tests must hold it for the duration
+    /// (they bind it as `_acx`/`_big_repo` — never used otherwise).
     async fn setup_repo() -> Res<(
-        SharedBigRepo,
+        Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
         SharedPartStore,
         Arc<PlugsRepo>,
         DocumentId,
         tempfile::TempDir,
     )> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, big_sync_host, acx_stop) = crate::test_support::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
         let handle = big_repo.create_doc(doc).await?;
@@ -2561,7 +2566,7 @@ mod tests {
 
         let (repo, _repo_stop) =
             PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
-        Ok((big_repo, big_sync_host.store, repo, doc_id, temp_dir))
+        Ok((acx_stop, big_sync_host.store, repo, doc_id, temp_dir))
     }
 
     #[tokio::test(flavor = "multi_thread")]

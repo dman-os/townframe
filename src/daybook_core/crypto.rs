@@ -91,9 +91,14 @@ impl AmStore for EncKeysStore {
     }
 }
 
+/// Encrypted key management for the repo (unfinished: `EncKeysStore::prop`
+/// is still `todo!()` and `KeysRepo` has no callers yet — the recovery-agent
+/// flow it was built for is not wired up).
 pub struct KeysRepo {
+    #[expect(dead_code)]
     secret_repo: crate::secrets::SecretRepo,
     store: AmStoreHandle<KeysRepoStore>,
+    #[expect(dead_code)]
     enckey_store: AmStoreHandle<EncKeysStore>,
 }
 
@@ -189,6 +194,7 @@ impl KeysRepo {
     }
 }
 
+#[expect(clippy::large_enum_variant)]
 pub enum GenesisResult {
     Success {
         repo_id: String,
@@ -202,7 +208,7 @@ pub enum GenesisResult {
 }
 
 fn repo_agent_genesis() -> Url {
-    format!("db+agent://genesis/")
+    "db+agent://genesis/".to_string()
         .parse()
         .expect(ERROR_IMPOSSIBLE)
 }
@@ -213,13 +219,8 @@ fn repo_agent_url(pubkey: &PubKey) -> Url {
         .expect(ERROR_IMPOSSIBLE)
 }
 
-fn recovery_agent_url(pubkey: &PubKey) -> Url {
-    format!("db+agent://recovery-{pubkey}/")
-        .parse()
-        .expect(ERROR_IMPOSSIBLE)
-}
 
-pub struct PriKey(ed25519_dalek::SigningKey);
+pub struct PriKey(#[expect(dead_code)] ed25519_dalek::SigningKey);
 
 #[derive(Clone)]
 pub struct PubKey(ed25519_dalek::VerifyingKey);
@@ -227,14 +228,13 @@ pub struct PubKey(ed25519_dalek::VerifyingKey);
 impl PubKey {
     const MULTIKEY_PREFIX: [u8; 2] = 0xED01_u16.to_be_bytes();
 
-    #[must_use]
     pub fn new(bytes: &[u8; 32]) -> Result<Self, ed25519_dalek::SignatureError> {
         Ok(Self(ed25519_dalek::VerifyingKey::from_bytes(bytes)?))
     }
 
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0.as_bytes()
+        self.0.as_bytes()
     }
 
     pub fn to_multikey(&self) -> [u8; 34] {
@@ -284,7 +284,7 @@ impl std::str::FromStr for PubKey {
         if buf[0] != b'z' {
             return Err(DecodeError::BadPrefix);
         }
-        if &buf[..2] != &Self::MULTIKEY_PREFIX[..] {
+        if buf[..2] != Self::MULTIKEY_PREFIX[..] {
             return Err(DecodeError::BadPrefix);
         }
         let mut real_buf = [0; 32];
@@ -333,7 +333,7 @@ impl<'de> serde::Deserialize<'de> for PubKey {
                             &"34 length byte array",
                         ));
                     }
-                    if &val[..2] != &PubKey::MULTIKEY_PREFIX[..] {
+                    if val[..2] != PubKey::MULTIKEY_PREFIX[..] {
                         return Err(serde::de::Error::custom("valid multikey prefix xED01_u16"));
                     }
                     let mut buf = [0u8; 32];
@@ -363,7 +363,7 @@ impl autosurgeon::Hydrate for PubKey {
                 format!("bytestring has byte length of {}", bytes.len()),
             ));
         }
-        if &bytes[..2] != &Self::MULTIKEY_PREFIX[..] {
+        if bytes[..2] != Self::MULTIKEY_PREFIX[..] {
             return Err(autosurgeon::HydrateError::unexpected(
                 "valid multikey prefix xED01_u16",
                 "not the right prefix".into(),

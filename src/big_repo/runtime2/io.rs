@@ -40,7 +40,6 @@ pub trait Timer<F: FutureForm>: Send + Sync {
 /// Replaces `TimestampSeconds::now()` / `Instant::now()`. Injected so tests
 /// control time.
 pub trait Clock: Send + Sync {
-    fn now(&self) -> subduction_core::timestamp::TimestampSeconds;
     fn instant(&self) -> std::time::Instant;
 }
 
@@ -248,7 +247,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     ) -> F::Future<'_, eyre::Result<Vec<Vec<u8>>>>;
 
     /// Read the immutable Keyhive event-log watermark for quiescence barriers.
-
     /// Classify a membership target without exposing Keyhive types to callers.
     fn is_document_membership_target(
         &self,
@@ -261,9 +259,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         peer_id: big_sync_core::PeerId,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'_, eyre::Result<KeyhiveSyncOutcome>>;
-
-    /// Compact the keyhive archive (periodic maintenance).
-    fn compact_keyhive(&self) -> F::Future<'_, eyre::Result<()>>;
 
     /// Run a doc sync round with `peer_id` for the given sedimentree.
     /// Returns `true` if the sync exchange had success (commits/fragments

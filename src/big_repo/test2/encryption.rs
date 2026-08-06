@@ -414,7 +414,9 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     let mut pre_revoke_decryptable = false;
     let mut post_revoke_undecryptable_by_revoked = true;
     for raw in &blobs {
-        let encrypted = decode_encrypted_blob(raw.as_slice())
+        // Assert the blob is a well-formed encrypted blob; the value itself is
+        // not needed here.
+        decode_encrypted_blob(raw.as_slice())
             .map_err(|e| crate::ferr!("blob decode failed: {e}"))?;
 
         // Try to decrypt with the revoked (right) node's keyhive.

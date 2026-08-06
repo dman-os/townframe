@@ -7,7 +7,6 @@
 use super::harness::topo::Node;
 use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
-use autosurgeon;
 use big_sync::{
     stress_support::{self, StressFixture},
     HostPartStore,
@@ -455,7 +454,7 @@ impl StressFixture for BigRepoStressFixture {
         // Per-doc grants cannot give a relay the group-part membership index —
         // group membership is the primitive that makes the relay subscribe to
         // and forward the group part.
-        for relay_peer_id in self.relay_peer_ids.lock().await.iter().copied() {
+        for relay_peer_id in self.relay_peer_ids.lock().await.iter() {
             let keyhive_peer = KeyhivePeerId::from_bytes(*relay_peer_id.as_bytes());
             let relay_agent = group_owner
                 .repo
@@ -547,7 +546,7 @@ impl StressFixture for BigRepoStressFixture {
         // it to replay before the second quiescence wait resolves, so the
         // alignment observation runs against a genuinely settled snapshot
         // instead of racing that drift.
-        let barrier_nodes: Vec<&Node> = nodes.iter().copied().collect();
+        let barrier_nodes: Vec<&Node> = nodes.to_vec();
         try_join_all(barrier_nodes.iter().map(|node| async {
             node.repo
                 .wait_for_quiescence_freeze(Some(Duration::from_secs(20)))

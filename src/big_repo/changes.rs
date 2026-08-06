@@ -115,8 +115,8 @@ impl GroupId {
 }
 
 impl std::fmt::Display for GroupId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GroupId({:02x?}..)", &self.0[..4])
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GroupId({:02x?}..)", &self.0[..4])
     }
 }
 
@@ -136,8 +136,8 @@ pub enum BigRepoAccess {
 }
 
 impl From<keyhive_core::access::Access> for BigRepoAccess {
-    fn from(a: keyhive_core::access::Access) -> Self {
-        match a {
+    fn from(access: keyhive_core::access::Access) -> Self {
+        match access {
             keyhive_core::access::Access::Relay => Self::Relay,
             keyhive_core::access::Access::Read => Self::Read,
             keyhive_core::access::Access::Edit => Self::Edit,

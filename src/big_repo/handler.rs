@@ -146,8 +146,8 @@ pub(crate) struct BigRepoComposedHandler<SH, EH, KH> {
 // ─── Debug ────────────────────────────────────────────────────────────────
 
 impl<SH, EH, KH> core::fmt::Debug for BigRepoComposedHandler<SH, EH, KH> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("BigRepoComposedHandler")
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_struct("BigRepoComposedHandler")
             .finish_non_exhaustive()
     }
 }

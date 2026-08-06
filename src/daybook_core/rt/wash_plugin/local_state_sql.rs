@@ -193,12 +193,17 @@ impl sqlite_connection::HostTransaction for SharedWashCtx {
         &mut self,
         handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
     ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
+        // `commit` is a WIT resource *method*, so `self` arrives as a `borrow`
+        // handle: the guest keeps ownership and drops the handle later via
+        // `[resource-drop]transaction`. Take the tx out of the token without
+        // deleting the table entry; the drop will clean up the (now empty) token.
         let token = self
             .table
-            .delete(handle)
+            .get_mut(&handle)
             .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
         let tx = token
             .transaction
+            .take()
             .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
         match tx.commit().await {
             Ok(_) => Ok(Ok(())),
@@ -210,12 +215,14 @@ impl sqlite_connection::HostTransaction for SharedWashCtx {
         &mut self,
         handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
     ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
+        // Same as `commit`: borrow method, so don't delete the table entry here.
         let token = self
             .table
-            .delete(handle)
+            .get_mut(&handle)
             .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
         let tx = token
             .transaction
+            .take()
             .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
         match tx.rollback().await {
             Ok(_) => Ok(Ok(())),

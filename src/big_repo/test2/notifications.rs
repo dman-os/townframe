@@ -1156,7 +1156,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
 
     // Capture sedimentree heads before the mutation.
     let pre_state = pair.left().repo.doc_head_state(doc_id).await?;
-    let pre_sedimentree = pre_state.sedimentree_heads.clone();
+    let pre_sedimentree = Arc::clone(&pre_state.sedimentree_heads);
 
     // Subscribe before the mutation so the notification channel is live.
     let (_reg, mut rx) = pair

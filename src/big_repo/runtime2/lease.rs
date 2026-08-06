@@ -47,15 +47,13 @@ impl Drop for DocLease {
 /// barriers. Remote Subduction sessions no longer acquire worker leases.
 #[derive(Debug)]
 pub struct DocWorkerInternalLease {
-    pub(crate) doc_id: DocumentId,
     pub(crate) release: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 impl DocWorkerInternalLease {
     /// Create a new internal lease. The `release` sender fires on drop.
-    pub(crate) fn new(doc_id: DocumentId, release: futures::channel::oneshot::Sender<()>) -> Self {
+    pub(crate) fn new(release: futures::channel::oneshot::Sender<()>) -> Self {
         Self {
-            doc_id,
             release: Some(release),
         }
     }
@@ -85,7 +83,7 @@ impl DocWorkerHandle {
     /// (worker backlogged). Callers may explicitly handle closure when it races
     /// an expected zero-handle eviction.
     pub fn send(&self, msg: DocWorkerMsg) -> eyre::Result<()> {
-        self.msg_tx.try_send(msg).map_err(|e| match e {
+        self.msg_tx.try_send(msg).map_err(|err| match err {
             async_channel::TrySendError::Closed(_) => ferr!("doc worker closed"),
             async_channel::TrySendError::Full(_) => ferr!("doc worker mailbox full"),
         })

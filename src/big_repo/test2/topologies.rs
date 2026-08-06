@@ -480,7 +480,7 @@ async fn tier3_partial_mesh_replication() -> crate::Res<()> {
     let c_d = c.connect(&d).await?;
     let d_c = d.accepted_connection().await;
     let d_a = d.connect(&a).await?;
-    let a_d = a.accepted_connection().await;
+    let _a_d = a.accepted_connection().await;
     let guard = ShutdownGuard::from(vec![a, b, c, d]);
 
     for conn in [&a_b, &b_c, &c_d, &d_a] {

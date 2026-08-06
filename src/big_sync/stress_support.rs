@@ -588,6 +588,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture>(
 /// After booting `node_count` nodes, calls [`prepare_cluster`] once, then runs
 /// three phases of topology churn + random mutations plus a final full-mesh
 /// converge-and-assert cycle.
+#[expect(clippy::too_many_arguments)]
 pub async fn run_randomized_stress<F: StressFixture>(
     fixture: F,
     world: Arc<F::World>,
