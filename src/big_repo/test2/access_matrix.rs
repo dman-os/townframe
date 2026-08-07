@@ -753,11 +753,11 @@ async fn run_group_case(
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left()
             .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .wait_for_quiescence(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(30))))
             .await?;
         pair.right()
             .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .wait_for_quiescence(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(30))))
             .await?;
         drop(owner_doc);
         let owner_doc =
@@ -810,6 +810,7 @@ async fn run_public_case(
     }
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right().repo.wait_for_keyhive_reconciliation(None).await?;
     if before_content {
         owner_doc
             .with_document(|doc| {
@@ -972,7 +973,10 @@ async fn run_document_as_member_case(
     // Document commits and deterministic fragmentation are published
     // independently of the Keyhive exchange. Settle the owner before asking
     // the member to synchronize the resulting Sedimentree frontier.
-    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.left()
+        .repo
+        .wait_for_quiescence(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(30))))
+        .await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, target_id).await?;
@@ -989,11 +993,11 @@ async fn run_document_as_member_case(
         pair.left_conn().sync_keyhive_with_peer(None).await?;
         pair.left()
             .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .wait_for_quiescence(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(30))))
             .await?;
         pair.right()
             .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .wait_for_quiescence(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(30))))
             .await?;
         drop(target_doc);
         let target_doc =

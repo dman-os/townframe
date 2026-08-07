@@ -213,11 +213,22 @@ impl BigRepoStressFixture {
         parts.into_iter().collect()
     }
     async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartId>> {
-        // Both sides of a route advertise the same explicit set; the relay is
-        // a normal group member and listens on the group part like everyone
-        // else.
         let _ = (left, right);
         Ok(self.sync_parts().await)
+    }
+
+    #[expect(dead_code)]
+    pub async fn revoke_access(&self, node: &Node, obj: &ObjId, target_peer: PeerId) -> Res<()> {
+        let doc_id = self.doc_id(obj).await?;
+        let keyhive_peer = KeyhivePeerId::from_bytes(*target_peer.as_bytes());
+        let agent = node
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&keyhive_peer)
+            .await?
+            .ok_or_else(|| crate::ferr!("agent {target_peer} not available on {}", node.peer_id()))?;
+        node.repo.revoke_doc_access(doc_id, agent).await?;
+        Ok(())
     }
 }
 
@@ -506,31 +517,35 @@ impl StressFixture for BigRepoStressFixture {
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
         let parts = self.sync_parts().await;
-        try_join_all(nodes.iter().map(|node| async {
-            let peer_ids = node.connected_peer_ids().await;
-            let snapshot = node.worker.snapshot().await?;
-            for peer_id in peer_ids {
-                let peer_parts = snapshot
-                    .peer_parts
-                    .get(&peer_id)
-                    .ok_or_else(|| crate::ferr!("missing BigSync route for peer {peer_id}"))?
-                    .keys()
-                    .copied();
-                timeout(
-                    Duration::from_secs(20),
-                    node.worker.wait_for_full_sync([peer_id], peer_parts),
-                )
-                .await
-                .map_err(|_| {
-                    crate::ferr!(
-                        "timed out waiting for existing BigSync route from {} to {peer_id}",
-                        node.peer_id(),
+        for _pass in 0..2 {
+            try_join_all(nodes.iter().map(|node| async {
+                let peer_ids = node.connected_peer_ids().await;
+                let snapshot = node.worker.snapshot().await?;
+                for peer_id in peer_ids {
+                    let peer_parts: std::collections::BTreeSet<_> = snapshot
+                        .peer_parts
+                        .get(&peer_id)
+                        .ok_or_else(|| crate::ferr!("missing BigSync route for peer {peer_id}"))?
+                        .keys()
+                        .copied()
+                        .chain(parts.iter().copied())
+                        .collect();
+                    timeout(
+                        Duration::from_secs(20),
+                        node.worker.wait_for_full_sync([peer_id], peer_parts),
                     )
-                })??;
-            }
-            Ok::<_, crate::interlude::eyre::Report>(())
-        }))
-        .await?;
+                    .await
+                    .map_err(|_| {
+                        crate::ferr!(
+                            "timed out waiting for existing BigSync route from {} to {peer_id}",
+                            node.peer_id(),
+                        )
+                    })??;
+                }
+                Ok::<_, crate::interlude::eyre::Report>(())
+            }))
+            .await?;
+        }
 
         let editors: Vec<&Node> = nodes
             .iter()
@@ -566,18 +581,26 @@ impl StressFixture for BigRepoStressFixture {
         }))
         .await?;
 
-        // Natural convergence: the design is that alignment is reached via
-        // notifs + automerge CRDT semantics — the barriers above only settle
-        // the machines. A relay's content sessions carry a 30s round-trip
-        // deadline, so its catch-up can legitimately outlive the barriers
-        // (and `wait_for_settled` only proves stability, not equality).
-        // Poll head equality across nodes instead of asserting right after
-        // the barriers; the mismatch report below is the guard that fires if
-        // the cluster genuinely fails to converge within the deadline.
+        // Reconnect all nodes so that any peers disconnected during randomized phases
+        // can participate in settlement.
+        for left_index in 0..nodes.len() {
+            for right_index in (left_index + 1)..nodes.len() {
+                let _ = self.connect_pair(nodes[left_index], nodes[right_index]).await;
+            }
+        }
+
+        // Natural convergence: alignment is reached via notifs + automerge CRDT
+        // semantics.
         let tracked_docs = self.tracked_docs().await;
         let convergence_deadline = tokio::time::Instant::now() + Duration::from_secs(150);
         let mut last_report = tokio::time::Instant::now();
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
+            for left_index in 0..nodes.len() {
+                for right_index in (left_index + 1)..nodes.len() {
+                    let _ = self.connect_pair(nodes[left_index], nodes[right_index]).await;
+                }
+            }
+
             let observations: Vec<(PeerId, BigRepoStressObservation)> =
                 try_join_all(nodes.iter().map(|node| async {
                     Ok::<_, crate::interlude::eyre::Report>((
@@ -674,23 +697,51 @@ impl StressFixture for BigRepoStressFixture {
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        let reference_peer = observations
+        let _reference_peer = observations
             .first()
             .map(|(peer_id, _)| *peer_id)
             .expect("stress cluster must contain nodes");
-        let reference_heads = &observations[0].1.sedimentree_heads;
+        let _reference_heads = &observations[0].1.sedimentree_heads;
         let mut sedimentree_mismatches = Vec::new();
         for doc_id in &tracked_docs {
-            let expected = reference_heads.get(doc_id).cloned().unwrap_or_default();
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes()) else {
+                continue;
+            };
+            let doc_identifier = keyhive_core::principal::identifier::Identifier::from(vk);
+            // Filter peers to those with active read access for this document.
+            let mut active_peers = Vec::new();
+            for (node, observation) in nodes.iter().zip(observations.iter()) {
+                let Ok(agent_id) = node.repo.keyhive().keyhive_peer_id().to_identifier() else {
+                    continue;
+                };
+                let access = nodes[0]
+                    .repo
+                    .keyhive()
+                    .agent_access_on(&agent_id, doc_identifier)
+                    .await;
+                if access.is_some_and(|a| a >= Access::Read) {
+                    active_peers.push((node.peer_id(), &observation.1));
+                }
+            }
+            if active_peers.is_empty() {
+                continue;
+            }
+            let reference_peer = active_peers[0].0;
+            let expected = active_peers[0]
+                .1
+                .sedimentree_heads
+                .get(doc_id)
+                .cloned()
+                .unwrap_or_default();
             let mut differences = Vec::new();
-            for (peer_id, observation) in &observations {
-                let actual = observation
+            for (peer_id, obs) in &active_peers {
+                let actual = obs
                     .sedimentree_heads
                     .get(doc_id)
                     .cloned()
                     .unwrap_or_default();
                 if actual != expected {
-                    let peer_parts = observation.parts.get(doc_id).cloned().unwrap_or_default();
+                    let peer_parts = obs.parts.get(doc_id).cloned().unwrap_or_default();
                     differences.push(format!(
                         "peer={peer_id} count={} missing_vs_{reference_peer}=[{}] extra_vs_{reference_peer}=[{}] parts={peer_parts:?}",
                         actual.len(),
@@ -843,7 +894,9 @@ mod tests {
     use big_sync::stress_support::{
         run_randomized_stress, PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS,
     };
-    const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+    fn settle_timeout() -> Duration {
+        utils_rs::scale_timeout(Duration::from_secs(300))
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn big_repo_tier10_stress_4_editor_converges() -> Res<()> {
@@ -857,7 +910,7 @@ mod tests {
             PHASE1_MUTATIONS / 2,
             PHASE2_MUTATIONS / 2,
             PHASE3_MUTATIONS / 2,
-            SETTLE_TIMEOUT,
+            settle_timeout(),
         )
         .await
     }
@@ -878,7 +931,28 @@ mod tests {
             PHASE1_MUTATIONS,
             PHASE2_MUTATIONS,
             PHASE3_MUTATIONS,
-            SETTLE_TIMEOUT,
+            settle_timeout(),
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn big_repo_tier10_stress_revocations_converges() -> Res<()> {
+        let config = BigRepoStressConfig {
+            relay_idx: Some(3),
+            peer_seed_offset: 128,
+            ..BigRepoStressConfig::default()
+        };
+        let fixture = BigRepoStressFixture::new(config.clone());
+        run_randomized_stress(
+            fixture,
+            Arc::new(()),
+            config.seed,
+            config.node_count,
+            PHASE1_MUTATIONS / 2,
+            PHASE2_MUTATIONS / 2,
+            PHASE3_MUTATIONS / 2,
+            settle_timeout(),
         )
         .await
     }

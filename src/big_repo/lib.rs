@@ -276,6 +276,8 @@ impl BigRepo {
             )
             .await?;
 
+        let _ = runtime.wait_for_keyhive_reconciliation(None).await;
+
         let out = Arc::new(Self {
             local_peer_id: peer_id,
             keyhive,
@@ -460,6 +462,14 @@ impl BigRepo {
         ))
     }
 
+    /// Wait until Keyhive event reconciliation currently queued on this repository finishes.
+    pub async fn wait_for_keyhive_reconciliation(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        self.runtime.wait_for_keyhive_reconciliation(timeout).await
+    }
+
     /// Wait until finite runtime work currently admitted to this repository
     /// has drained. Pending materialization due to unavailable keys is allowed.
     pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
@@ -577,8 +587,10 @@ impl BigRepo {
         principal: impl Into<BigKeyhiveAuthority>,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
-        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let heads = match self.doc_head_state(doc_id).await {
+            Ok(state) => state.sedimentree_heads,
+            Err(_) => Default::default(),
+        };
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
 
         self.keyhive
@@ -595,14 +607,17 @@ impl BigRepo {
             // Create the checkpoint after the grant so the checkpoint itself is
             // written under the newly granted epoch and can carry the prior
             // content history forward.
-            doc.with_document(|doc| {
-                let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
-            })
-            .await?;
+            if let Ok(doc_lookup) = self.get_doc(&doc_id).await {
+                if let Ok(doc) = doc_lookup.into_ready(doc_id) {
+                    doc.with_document(|doc| {
+                        let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
+                    })
+                    .await?;
+                }
+            }
         }
 
         self.keyhive_notifier.note_local_keyhive_changed().await?;
-
         Ok(())
     }
 

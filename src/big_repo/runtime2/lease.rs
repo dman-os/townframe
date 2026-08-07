@@ -124,3 +124,33 @@ pub struct DocWorkerEntry {
     /// `None` when at least one refcount is non-zero.
     pub eviction_deadline: Option<std::time::Instant>,
 }
+
+/// RAII guard for tracked background futures. Emits `TrackedWorkDone` on drop,
+/// guaranteeing `tracked_in_flight` is decremented even if the future panics
+/// or is cancelled early.
+pub struct TrackedWorkGuard {
+    evt_tx: Option<async_channel::Sender<crate::runtime2::Runtime2Evt>>,
+    kind: crate::runtime2::TrackedWorkKind,
+}
+
+impl TrackedWorkGuard {
+    pub(crate) fn new(
+        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        kind: crate::runtime2::TrackedWorkKind,
+    ) -> Self {
+        Self {
+            evt_tx: Some(evt_tx),
+            kind,
+        }
+    }
+}
+
+impl Drop for TrackedWorkGuard {
+    fn drop(&mut self) {
+        if let Some(evt_tx) = self.evt_tx.take() {
+            let _ = evt_tx.try_send(crate::runtime2::Runtime2Evt::TrackedWorkDone {
+                kind: self.kind,
+            });
+        }
+    }
+}

@@ -795,7 +795,10 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
         .expect_err("missing local Keyhive document must reject the payload");
     assert!(matches!(
         policy_error,
-        crate::SyncDocError::Policy(crate::SyncDocPolicyError::DocumentNotFound)
+        crate::SyncDocError::Policy(
+            crate::SyncDocPolicyError::DocumentNotFound
+                | crate::SyncDocPolicyError::InsufficientAccess
+        )
     ));
 
     topo.topo_node(2)

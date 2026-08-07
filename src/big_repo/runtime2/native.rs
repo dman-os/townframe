@@ -453,6 +453,29 @@ where
         })
     }
 
+    fn has_doc_fetch_access(
+        &self,
+        doc_id: crate::DocumentId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+        Sendable::from_future(async move {
+            let local_ident = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(self.local_peer_id.as_bytes())
+                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+            );
+            let doc_ident = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
+            );
+            let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
+            if access.is_some_and(|access| access.is_fetcher()) {
+                return Ok(true);
+            }
+            let public_ident = keyhive_core::principal::public::Public.id();
+            let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
+            Ok(public_access.is_some_and(|access| access.is_fetcher()))
+        })
+    }
+
     fn sedimentree_heads(
         &self,
         sed_id: SedimentreeId,
@@ -978,6 +1001,13 @@ where
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
+            let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
+            if !self.has_doc_fetch_access(doc_id).await.unwrap_or(false) {
+                debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: doc not present or authorized in local Keyhive");
+                return Ok(SyncDocAttempt::Policy(
+                    subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess,
+                ));
+            }
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
                 .subduction

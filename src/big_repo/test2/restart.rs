@@ -771,19 +771,26 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         Pair::boot_persistent(156, 157, "Owner", "Reader", left_path, right_path.clone()).await?;
     restart_right(&mut pair, right_path).await?;
     pair.connect().await?;
+    let (owner_doc, doc_id) = create_initial(&pair, "new-notification-doc").await?;
     pair.left()
-        .set_peer_parts(pair.right(), vec![crate::GLOBAL_PART_ID])
+        .set_peer_parts(
+            pair.right(),
+            vec![crate::GLOBAL_PART_ID, crate::PartId::new(doc_id.into_bytes())],
+        )
         .await?;
     pair.right()
-        .set_peer_parts(pair.left(), vec![crate::GLOBAL_PART_ID])
+        .set_peer_parts(
+            pair.left(),
+            vec![crate::GLOBAL_PART_ID, crate::PartId::new(doc_id.into_bytes())],
+        )
         .await?;
-    let (owner_doc, doc_id) = create_initial(&pair, "new-notification-doc").await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
     wait_for_reader_access(&pair.right().repo, doc_id).await?;
+    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     wait_for_title(&pair.right().repo, doc_id, "new-notification-doc").await?;
     drop(owner_doc);
     Ok(())

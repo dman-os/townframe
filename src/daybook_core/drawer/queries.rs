@@ -109,7 +109,22 @@ impl DrawerRepo {
             heads.clone()
         });
         debug!(%doc_id, "presence probe: entry cache miss, hydrating from drawer doc");
-        let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
+        let mut entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
+        if entry.is_none() {
+            let live_heads = self
+                .drawer_doc_handle
+                .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+                .await;
+            if live_heads != heads {
+                entry = self.hydrate_entry_at_heads(doc_id, &live_heads).await?;
+                if entry.is_some() {
+                    surelock::key::lock_scope(|key| {
+                        let (mut current_heads, _key) = key.lock(&self.current_heads);
+                        *current_heads = live_heads;
+                    });
+                }
+            }
+        }
         debug!(%doc_id, found = entry.is_some(), "presence probe: hydrated entry");
 
         if let Some(entry) = entry {

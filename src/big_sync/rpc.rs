@@ -342,66 +342,64 @@ impl BigSyncRpcWorker {
                     return;
                 };
                 let child_token = self.cancel_token.child_token();
-                self.subscription_tasks
-                    .spawn(async move {
-                        let fut = async move {
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    _ = child_token.cancelled() => break,
-                                    evt = sub.recv() => {
-                                        let evt = match evt {
-                                            Ok(evt) => evt,
-                                            Err(_err) => {
-                                                break;
-                                            }
-                                        };
-                                        match &evt {
-                                            big_sync_core::rpc::SubEvent::Added(inner) => tracing::trace!(
-                                                ?subscriber,
-                                                obj_id = %inner.obj_id,
-                                                part_id = %inner.part_id,
-                                                cursor = inner.cursor,
-                                                payload = !inner.payload.is_null(),
-                                                "rpc forwarding Added event",
-                                            ),
-                                            big_sync_core::rpc::SubEvent::Changed(inner) => tracing::trace!(
-                                                ?subscriber,
-                                                obj_id = %inner.obj_id,
-                                                cursor = inner.cursor,
-                                                part_count = inner.part_ids.len(),
-                                                payload = !inner.payload.is_null(),
-                                                "rpc forwarding Changed event",
-                                            ),
-                                            big_sync_core::rpc::SubEvent::Removed(inner) => tracing::trace!(
-                                                ?subscriber,
-                                                obj_id = %inner.obj_id,
-                                                part_id = %inner.part_id,
-                                                cursor = inner.cursor,
-                                                "rpc forwarding Removed event",
-                                            ),
-                                            big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::trace!(
-                                                ?subscriber,
-                                                obj_id = %inner.obj_id,
-                                                payload = !inner.payload.is_null(),
-                                                "rpc forwarding ObjectChanged event",
-                                            ),
-                                            big_sync_core::rpc::SubEvent::ReplayComplete => tracing::trace!(
-                                                ?subscriber,
-                                                "rpc forwarding ReplayComplete",
-                                            ),
-                                        }
-                                        if tx.send(evt).await.is_err() {
+                let _ = self.subscription_tasks.spawn(async move {
+                    let fut = async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = child_token.cancelled() => break,
+                                evt = sub.recv() => {
+                                    let evt = match evt {
+                                        Ok(evt) => evt,
+                                        Err(_err) => {
                                             break;
                                         }
+                                    };
+                                    match &evt {
+                                        big_sync_core::rpc::SubEvent::Added(inner) => tracing::trace!(
+                                            ?subscriber,
+                                            obj_id = %inner.obj_id,
+                                            part_id = %inner.part_id,
+                                            cursor = inner.cursor,
+                                            payload = !inner.payload.is_null(),
+                                            "rpc forwarding Added event",
+                                        ),
+                                        big_sync_core::rpc::SubEvent::Changed(inner) => tracing::trace!(
+                                            ?subscriber,
+                                            obj_id = %inner.obj_id,
+                                            cursor = inner.cursor,
+                                            part_count = inner.part_ids.len(),
+                                            payload = !inner.payload.is_null(),
+                                            "rpc forwarding Changed event",
+                                        ),
+                                        big_sync_core::rpc::SubEvent::Removed(inner) => tracing::trace!(
+                                            ?subscriber,
+                                            obj_id = %inner.obj_id,
+                                            part_id = %inner.part_id,
+                                            cursor = inner.cursor,
+                                            "rpc forwarding Removed event",
+                                        ),
+                                        big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::trace!(
+                                            ?subscriber,
+                                            obj_id = %inner.obj_id,
+                                            payload = !inner.payload.is_null(),
+                                            "rpc forwarding ObjectChanged event",
+                                        ),
+                                        big_sync_core::rpc::SubEvent::ReplayComplete => tracing::trace!(
+                                            ?subscriber,
+                                            "rpc forwarding ReplayComplete",
+                                        ),
+                                    }
+                                    if tx.send(evt).await.is_err() {
+                                        break;
                                     }
                                 }
                             }
-                            eyre::Ok(())
-                        };
-                        fut.await.unwrap();
-                    })
-                    .expect("failed spawning big sync rpc subscription forwarder");
+                        }
+                        eyre::Ok(())
+                    };
+                    let _ = fut.await;
+                });
             }
             BigSyncRpcMessage::GetChangedBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;

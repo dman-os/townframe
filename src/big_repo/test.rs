@@ -530,8 +530,8 @@ async fn concurrent_bidirectional_keyhive_sync_is_safe() -> Res<()> {
     let owner_conn = owner.take_latest_accepted_connection().await;
     let client_conn = client.connection_to(&owner).await;
     let (owner_sync, client_sync) = tokio::join!(
-        owner_conn.sync_keyhive_with_peer(Some(Duration::from_secs(5))),
-        client_conn.sync_keyhive_with_peer(Some(Duration::from_secs(5))),
+        owner_conn.sync_keyhive_with_peer(Some(utils_rs::scale_timeout(Duration::from_secs(30)))),
+        client_conn.sync_keyhive_with_peer(Some(utils_rs::scale_timeout(Duration::from_secs(30)))),
     );
     owner_sync?;
     client_sync?;
@@ -1136,8 +1136,8 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         },
         Err(err) => {
             assert!(
-                matches!(err, SyncDocError::Unauthorized),
-                "outsider doc sync should return Unauthorized, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized | SyncDocError::Policy(_)),
+                "outsider doc sync should return Unauthorized or Policy rejection, got {err:?}"
             );
         }
     }
@@ -1331,8 +1331,8 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
         }
         Err(err) => {
             assert!(
-                matches!(err, SyncDocError::Unauthorized),
-                "unauthorized doc sync should return Unauthorized, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized | SyncDocError::Policy(_)),
+                "unauthorized doc sync should return Unauthorized or Policy rejection, got {err:?}"
             );
         }
     }

@@ -106,14 +106,9 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                 )
                 .await;
 
-                if matches!(&result, Ok(Ok(())))
-                    && runtime_evt_tx
-                        .send(Runtime2Evt::DocWorkerStopped { doc_id })
-                        .await
-                        .is_err()
-                {
-                    debug!(%doc_id, "runtime stopped before doc worker stop event");
-                }
+                let _ = runtime_evt_tx
+                    .send(Runtime2Evt::DocWorkerStopped { doc_id })
+                    .await;
 
                 match result {
                     Ok(Err(_error)) if cancellation.is_aborted() => Ok(()),
@@ -122,14 +117,13 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                         Ok(())
                     }
                     Ok(Err(error)) => {
-                        runtime_evt_tx
+                        let _ = runtime_evt_tx
                             .send(Runtime2Evt::FatalWorkerError {
                                 doc_id: Some(doc_id),
                                 context: "document worker failed",
                                 error: format!("{error:?}"),
                             })
-                            .await
-                            .expect(ERROR_CHANNEL);
+                            .await;
                         Err(error)
                     }
                     Ok(Ok(())) => Ok(()),
@@ -291,8 +285,9 @@ impl<F: FutureForm> DocWorker2<F> {
             DocWorkerMsg::PutDoc {
                 initial_content,
                 resp,
+                _lease: _,
             } => self.put_doc(initial_content, resp).await,
-            DocWorkerMsg::AcquireHandle { resp } => self.acquire_handle(resp).await,
+            DocWorkerMsg::AcquireHandle { resp, _lease: _ } => self.acquire_handle(resp).await,
             DocWorkerMsg::CommitDelta {
                 bundle_id,
                 commits,
@@ -300,7 +295,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 patches,
                 origin,
                 resp,
-                _lease,
+                _lease: _,
             } => {
                 self.commit_delta(bundle_id, commits, heads, patches, origin, resp)
                     .await
@@ -310,11 +305,16 @@ impl<F: FutureForm> DocWorker2<F> {
                 commit_ids,
                 fragment_ids,
                 reply,
+                _lease: _,
             } => {
                 self.apply_sync_session(peer_id, commit_ids, fragment_ids, reply)
                     .await
             }
-            DocWorkerMsg::ReattemptMaterialization { origin, resp } => {
+            DocWorkerMsg::ReattemptMaterialization {
+                origin,
+                resp,
+                _lease: _,
+            } => {
                 debug!(
                     doc_id = %self.doc_id,
                     pending = matches!(self.state, DocState::PendingMaterialization),
@@ -336,15 +336,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     }
                 }
             }
-            DocWorkerMsg::QueryHeadState { resp } => {
+            DocWorkerMsg::QueryHeadState { resp, _lease: _ } => {
                 resp.send(self.head_state().await)
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
                 Ok(())
             }
-            // FIXME: we have a duplicate here just to support
-            // Option<> Senders
-            DocWorkerMsg::InspectHeadState { resp } => {
+            DocWorkerMsg::InspectHeadState { resp, _lease: _ } => {
                 resp.send(self.head_state().await.map(Some))
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();

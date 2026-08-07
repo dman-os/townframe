@@ -876,31 +876,35 @@ impl ChangeListenerManager {
                     },
                     val = change_rx.recv() => {
                         let Some(val) = val else {
-                            continue;
+                            // A closed notification channel can never reopen:
+                            // the repo is tearing down. Break rather than
+                            // `continue`, which would busy-spin on the
+                            // immediately-returning `None` at 100% CPU.
+                            break;
                         };
                         SwitchboardInput::Remote(val)
                     },
                     val = head_rx.recv() => {
                         let Some(val) = val else {
-                            continue;
+                            break;
                         };
                         SwitchboardInput::Heads(val)
                     },
                     val = local_rx.recv() => {
                         let Some(val) = val else {
-                            continue;
+                            break;
                         };
                         SwitchboardInput::Local(val)
                     },
                     val = pending_head_rx.recv() => {
                         let Some(val) = val else {
-                            continue;
+                            break;
                         };
                         SwitchboardInput::PendingHeads(val)
                     },
                     val = domain_rx.recv() => {
                         let Some(val) = val else {
-                            continue;
+                            break;
                         };
                         SwitchboardInput::Domain(val)
                     }

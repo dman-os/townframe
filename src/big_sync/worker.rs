@@ -752,10 +752,14 @@ impl BigSyncWorker {
     }
 
     async fn spawn_sync_task(&mut self, task: SyncTask) -> Res<()> {
-        let peer_state = self
-            .peers
-            .get(&task.deets.peer_id)
-            .expect(ERROR_UNRECONIZED);
+        let Some(peer_state) = self.peers.get(&task.deets.peer_id) else {
+            tracing::debug!(
+                peer_id = %task.deets.peer_id,
+                obj_id = %task.deets.obj_id,
+                "skipping sync task for removed peer"
+            );
+            return Ok(());
+        };
         let object_backend_id = if task.part_hints.is_empty() {
             peer_state.objects.get(&task.deets.obj_id).cloned()
         } else {

@@ -241,7 +241,7 @@ impl DrawerRepo {
                 )
                 .await?;
             self.big_repo
-                .wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
+                .wait_for_quiescence(Some(std::time::Duration::from_secs(30)))
                 .await?;
         }
         Ok(())
@@ -257,7 +257,7 @@ impl DrawerRepo {
                 .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
                 .await?;
             self.big_repo
-                .wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
+                .wait_for_quiescence(Some(std::time::Duration::from_secs(30)))
                 .await?;
         }
         Ok(())
@@ -397,11 +397,9 @@ impl DrawerRepo {
         snapshot: &BranchSnapshot,
     ) -> Res<HashSet<FacetKey>> {
         let branch_doc_id = snapshot.branch_doc_id;
-        let handle = self
-            .big_repo
-            .get_doc(&branch_doc_id)
-            .await?
-            .into_ready(branch_doc_id)?;
+        let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
+            return Ok(HashSet::new());
+        };
         let keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj = match automerge::ReadDoc::get_at(

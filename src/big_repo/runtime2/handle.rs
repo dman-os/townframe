@@ -307,6 +307,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .await
             .map_err(|_| crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(ERROR_ACTOR)))?;
         let result = if let Some(duration) = timeout {
+            let duration = utils_rs::scale_timeout(duration);
             match self.race_timeout(rx, duration).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
@@ -368,8 +369,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let timeout =
-            timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
+        let timeout = utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
         let deadline = std::time::Instant::now() + timeout;
         match self.race_timeout(rx, timeout).await {
             Ok(Ok(result)) => {
@@ -398,6 +398,23 @@ impl<F: FutureForm> Runtime2Handle<F> {
                     })?;
                 Err(eyre::eyre!("keyhive sync timed out"))
             }
+        }
+    }
+
+    pub async fn wait_for_keyhive_reconciliation(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        let timeout = utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
+        match self.race_timeout(rx, timeout).await {
+            Ok(Ok(result)) => result.wrap_err("keyhive reconciliation failed"),
+            Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
+            Err(()) => Err(eyre::eyre!("keyhive reconciliation timed out")),
         }
     }
 

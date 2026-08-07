@@ -433,13 +433,14 @@ where
                     .send(DocWorkerMsg::PutDoc {
                         initial_content,
                         resp,
+                        _lease,
                     })
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::GetDocHandle { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
-                    .send(DocWorkerMsg::AcquireHandle { resp })
+                    .send(DocWorkerMsg::AcquireHandle { resp, _lease })
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::CommitDelta {
@@ -469,20 +470,17 @@ where
             Runtime2Cmd::DocHeadState { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
-                    .send(DocWorkerMsg::QueryHeadState { resp })
+                    .send(DocWorkerMsg::QueryHeadState { resp, _lease })
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
-                let Some(entry) = self.doc_workers.get(&doc_id) else {
-                    resp.send(Ok(None))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                    return self.try_resolve_quiescence();
-                };
-                entry
-                    .handle
-                    .send(DocWorkerMsg::InspectHeadState { resp })
-                    .wrap_err(ERROR_CHANNEL)?;
+                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id) {
+                    if let Err(err) = worker.send(DocWorkerMsg::InspectHeadState { resp, _lease }) {
+                        debug!(%doc_id, ?err, "failed sending InspectHeadState to worker");
+                    }
+                } else {
+                    let _ = resp.send(Ok(None));
+                }
             }
             Runtime2Cmd::OpenConn { peer, addr, resp } => {
                 let child_tasks = self.child_tasks.clone();
@@ -975,12 +973,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let result = fut.await;
-            evt_tx
-                .send(Runtime2Evt::TrackedWorkDone { kind })
-                .await
-                .expect(ERROR_CHANNEL);
-            result
+            let _guard = crate::runtime2::TrackedWorkGuard::new(evt_tx, kind);
+            fut.await
         })
     }
 }
@@ -1690,44 +1684,33 @@ where
             >,
         >,
     ) -> eyre::Result<()> {
-        let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
-            // Subduction has persisted the session. A later acquisition will
-            // hydrate it directly when no worker currently exists.
-            if let Some(reply) = reply {
-                reply
-                    .send(Ok(crate::runtime2::types::SyncDocReceipt {
-                        outcome: crate::runtime2::types::SyncDocOutcome::Stored,
-                    }))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
+        let (worker, _lease) = match self.acquire_existing_doc_worker_handle(doc_id) {
+            Ok(Some(pair)) => pair,
+            _ => {
+                if let Some(reply) = reply {
+                    reply
+                        .send(Ok(crate::runtime2::types::SyncDocReceipt {
+                            outcome: crate::runtime2::types::SyncDocOutcome::Stored,
+                        }))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+                return Ok(());
             }
-            return Ok(());
         };
-        entry.eviction_deadline = None;
-        if entry.handle.is_closed() && entry.local_handles == 0 {
-            debug!(
-                doc_id = %doc_id,
-                "discarding stale evicted document worker during sync routing"
-            );
-            self.doc_workers.remove(&doc_id);
-            // The waiter was already removed from `pending_doc_syncs`;
-            // resolve its receipt here so the caller does not hang.
-            if let Some(reply) = reply {
-                reply
-                    .send(Ok(crate::runtime2::types::SyncDocReceipt {
-                        outcome: crate::runtime2::types::SyncDocOutcome::Stored,
-                    }))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
-            }
-            return Ok(());
-        }
-        entry.handle.send(DocWorkerMsg::ApplySyncSession {
+        if let Err(err) = worker.send(DocWorkerMsg::ApplySyncSession {
             peer_id,
             commit_ids,
             fragment_ids,
             reply,
-        })?;
+            _lease,
+        }) {
+            debug!(
+                doc_id = %doc_id,
+                ?err,
+                "failed to route sync session to doc worker (worker closed or full)"
+            );
+        }
         Ok(())
     }
 
@@ -2005,11 +1988,14 @@ where
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
             return Ok(());
         }
-        let Some(entry) = self.doc_workers.get(&doc_id) else {
-            debug!(%doc_id, "dropping pending materialization without document worker");
-            self.pending_materialization.remove(&doc_id);
-            self.schedule_doc_worker_eviction_if_idle(doc_id);
-            return Ok(());
+        let (worker, _lease) = match self.doc_worker_handle(doc_id) {
+            Ok(pair) => pair,
+            Err(_) => {
+                debug!(%doc_id, "dropping pending materialization without document worker");
+                self.pending_materialization.remove(&doc_id);
+                self.schedule_doc_worker_eviction_if_idle(doc_id);
+                return Ok(());
+            }
         };
         let generation = self
             .keyhive_state_generation
@@ -2018,14 +2004,14 @@ where
             .insert(doc_id, generation);
         debug!(
             %doc_id,
-            local_handles = entry.local_handles,
             generation,
             "requesting targeted materialization retry from document worker"
         );
         let (resp, result) = futures::channel::oneshot::channel();
-        if let Err(error) = entry.handle.send(DocWorkerMsg::ReattemptMaterialization {
+        if let Err(error) = worker.send(DocWorkerMsg::ReattemptMaterialization {
             origin: crate::changes::BigRepoChangeOrigin::Keyhive,
             resp,
+            _lease,
         }) {
             self.materialization_retries_in_flight.remove(&doc_id);
             return Err(error).wrap_err(ERROR_CHANNEL);
@@ -2125,6 +2111,29 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
         let lease = DocWorkerInternalLease::new(lease_tx);
         Ok((handle, lease))
+    }
+
+    /// Acquire handle + internal lease for an existing doc-worker without spawning a new one.
+    fn acquire_existing_doc_worker_handle(
+        &mut self,
+        doc_id: DocumentId,
+    ) -> eyre::Result<Option<(DocWorkerHandle, DocWorkerInternalLease)>> {
+        let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
+            return Ok(None);
+        };
+        if entry.handle.is_closed() {
+            return Ok(None);
+        }
+        entry.eviction_deadline = None;
+        entry.internal_leases += 1;
+        let handle = entry.handle.clone();
+
+        let (lease_tx, lease_rx) = futures::channel::oneshot::channel::<()>();
+        let cmd_tx = self.cmd_tx.clone();
+        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
+
+        let lease = DocWorkerInternalLease::new(lease_tx);
+        Ok(Some((handle, lease)))
     }
 
     /// Lazily spawn a doc-worker if none exists.
@@ -2292,12 +2301,15 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
         self.cmd_tx.close();
 
         // Wait for the machine loop to drain and exit. A timeout means the
-        // drain is wedged (e.g. a child stuck on transport IO), so abort the
-        // machine loop outright as a fallback (the second stop then joins
-        // the already-aborted set).
+        // drain is wedged (e.g. a child stuck on transport IO); `stop` has
+        // already aborted the remaining tasks and waited a grace period for
+        // them to terminate, so aborting the machine loop's registration
+        // here makes its next poll return immediately.
         if self.machine_tasks.stop(timeout).await.is_err() {
             tracing::warn!("runtime2 graceful shutdown timed out; aborting machine loop");
             self.cancel.abort();
+            // The join set was consumed by the first `stop`; this second
+            // call is a no-op (returns `Aborted`), kept for symmetry.
             let _ = self.machine_tasks.stop(timeout).await;
         }
 
@@ -2375,28 +2387,48 @@ impl<
                                 }
                                 continue;
                             }
-                            // FIXME: why do we need to allocate and box every loop?
+                            // Commands are polled before events: a command (e.g.
+                            // a lease release or an unfreeze) can cancel the
+                            // very work whose events would otherwise keep the
+                            // loop busy, so it must not be starved by an event
+                            // flood.
                             let mut sleep =
                                 Box::pin(timer.sleep(std::time::Duration::from_millis(500)).fuse());
-                            let mut cmd = Box::pin(cmd_rx.recv().fuse());
                             let mut evt = Box::pin(evt_rx.recv().fuse());
-                            futures::select_biased! {
-                                _ = sleep.as_mut() => hub.janitor_tick(),
-                                evt = evt.as_mut() => match evt {
-                                    Ok(evt) => hub.handle_evt(evt)?,
-                                    Err(_) => break,
-                                },
-                                cmd_res = cmd.as_mut() => match cmd_res {
-                                    Ok(cmd) => hub.handle_cmd(cmd)?,
-                                    Err(_) => {
-                                        // Channel closed: no more commands.
-                                        // The fused future is now terminated
-                                        // so `select_biased!` stops polling it;
-                                        // the loop keeps draining events until
-                                        // `tracked_in_flight` hits zero.
-                                        hub.cmd_closed = true;
-                                    }
-                                },
+                            if hub.cmd_closed {
+                                // Draining: only events (and the janitor) can
+                                // make progress. Polling a closed command
+                                // channel returns `Err` instantly, so a select
+                                // that still polls it would fire its branch on
+                                // every iteration and busy-spin the drain at
+                                // 100% CPU until `tracked_in_flight` hits zero.
+                                // Once the channel is closed it is never polled
+                                // again.
+                                futures::select_biased! {
+                                    _ = sleep.as_mut() => hub.janitor_tick(),
+                                    evt = evt.as_mut() => match evt {
+                                        Ok(evt) => hub.handle_evt(evt)?,
+                                        Err(_) => break,
+                                    },
+                                }
+                            } else {
+                                let mut cmd = Box::pin(cmd_rx.recv().fuse());
+                                futures::select_biased! {
+                                    _ = sleep.as_mut() => hub.janitor_tick(),
+                                    cmd_res = cmd.as_mut() => match cmd_res {
+                                        Ok(cmd) => hub.handle_cmd(cmd)?,
+                                        Err(_) => {
+                                            // Channel closed: no more commands.
+                                            // Fall into the drain path (events
+                                            // only) next iteration.
+                                            hub.cmd_closed = true;
+                                        }
+                                    },
+                                    evt = evt.as_mut() => match evt {
+                                        Ok(evt) => hub.handle_evt(evt)?,
+                                        Err(_) => break,
+                                    },
+                                }
                             }
                         }
                         eyre::Ok(())

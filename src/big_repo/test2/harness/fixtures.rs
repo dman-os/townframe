@@ -125,9 +125,17 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
         .expect("document id must be a verifying key");
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
-    let access = repo.keyhive().agent_access_on(&agent, document).await;
-    if access.is_some() {
-        return Ok(());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut access;
+    loop {
+        access = repo.keyhive().agent_access_on(&agent, document).await;
+        if access.is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     let effective_members = repo.keyhive().agents_for_membered(document).await;

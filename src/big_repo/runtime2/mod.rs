@@ -21,6 +21,7 @@ pub use io::{
 };
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
+    TrackedWorkGuard,
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub(crate) use native::KeyhiveChangeNotifier;

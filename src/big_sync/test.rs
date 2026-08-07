@@ -753,6 +753,16 @@ async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
 }
 
+async fn boot_policy_node(
+    world: Arc<TestWorld>,
+    peer_seed: u8,
+    policy: Arc<dyn crate::part_store::policy::ObjAccessPolicy>,
+) -> Res<NodeHarness> {
+    let peer_id = peer_id(peer_seed);
+    let store = Arc::new(MemoryPartStore::new(policy));
+    boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
+}
+
 async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarness> {
     let NodeHarness {
         world: node_world,

@@ -157,7 +157,6 @@ pub struct IrohSyncRepoStopToken {
 
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
-        eprintln!("[ab] sync_stop: start");
         self.cancel_token.cancel();
         let reconnect_handle = self.reconnect_task.lock().expect(ERROR_MUTEX).take();
         if let Some(handle) = reconnect_handle {
@@ -167,34 +166,26 @@ impl IrohSyncRepoStopToken {
             )
             .await?;
         }
-        eprintln!("[ab] sync_stop: reconnect joined");
         // pre light the stop signal to the full worker
+        self.big_sync_worker_stop.stop().await?;
+        self.big_sync_rpc_stop.stop().await?;
+        self.blob_sync_worker_stop.stop().await?;
+        self.blob_sync_rpc_stop.stop().await?;
+        self.big_repo_rpc_stop_token.stop().await?;
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
-            utils_rs::scale_timeout(Duration::from_secs(10)),
+            utils_rs::scale_timeout(Duration::from_secs(30)),
         )
         .await?;
-        eprintln!("[ab] sync_stop: worker joined");
-        self.big_sync_worker_stop.stop().await?;
-        eprintln!("[ab] sync_stop: big_sync_worker stopped");
-        self.big_sync_rpc_stop.stop().await?;
-        eprintln!("[ab] sync_stop: big_sync_rpc stopped");
-        self.blob_sync_worker_stop.stop().await?;
-        eprintln!("[ab] sync_stop: blob_sync_worker stopped");
-        self.blob_sync_rpc_stop.stop().await?;
-        eprintln!("[ab] sync_stop: blob_sync_rpc stopped");
-        self.big_repo_rpc_stop_token.stop().await?;
-        eprintln!("[ab] sync_stop: big_repo_rpc (runtime2) stopped");
-        // NOTE: we only add timeouts for stop tokens that don't have internal
-        // timeouts
+        let endpoint = self.router.endpoint().clone();
+        endpoint.close().await;
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
             self.router.shutdown(),
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting for router shutdown"))??;
-        eprintln!("[ab] sync_stop: router shutdown done");
         Ok(())
     }
 }
@@ -668,7 +659,10 @@ impl IrohSyncRepo {
                 // provision with keys that never arrived.
                 self.rcx
                     .big_repo
-                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .sync_keyhive_with_peer(
+                        peer_id,
+                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
+                    )
                     .await?;
                 let agent = self
                     .rcx
@@ -682,7 +676,10 @@ impl IrohSyncRepo {
                     .await?;
                 self.rcx
                     .big_repo
-                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .sync_keyhive_with_peer(
+                        peer_id,
+                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
+                    )
                     .await?;
                 // Group membership grants current authority but cannot decrypt
                 // blobs written before the clone joined. Publish self-contained
@@ -698,7 +695,10 @@ impl IrohSyncRepo {
                 // before BigSync can deliver its ciphertext.
                 self.rcx
                     .big_repo
-                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .sync_keyhive_with_peer(
+                        peer_id,
+                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
+                    )
                     .await?;
             }
             let partition_ids = self.peer_partition_ids(&peer_key, !clone_provision);
@@ -1043,6 +1043,7 @@ impl IrohSyncRepo {
         required_partitions: &[PartId],
         timeout: Duration,
     ) -> Res<()> {
+        let timeout = utils_rs::scale_timeout(timeout);
         self.ensure_repo_live()?;
         let Some(_progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
@@ -1050,13 +1051,11 @@ impl IrohSyncRepo {
         if peer_ids.is_empty() {
             return Ok(());
         }
-        let all_parts = self.peer_partition_ids("", true);
-        let blob_backend = BLOBS_BACKEND_ID.into();
+        let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) =
             required_partitions.iter().partition(|part| {
-                all_parts
-                    .get(part)
-                    .is_some_and(|backend| *backend == blob_backend)
+                **part == docs_blob || **part == plugs_blob
             });
         let timeout_outcome = tokio::time::timeout(timeout, async {
             let doc_wait = self

@@ -145,11 +145,17 @@ async fn ensure_group(
             return Ok((group, true));
         }
     };
-    let group = big_repo
-        .get_group_by_id(group_id)
-        .await
-        .ok_or_else(|| ferr!("persisted Keyhive group is unavailable: {key}"))?;
-    Ok((group, created))
+    if let Some(group) = big_repo.get_group_by_id(group_id).await {
+        return Ok((group, created));
+    }
+    let _ = big_repo.wait_for_keyhive_reconciliation(None).await;
+    if let Some(group) = big_repo.get_group_by_id(group_id).await {
+        return Ok((group, created));
+    }
+    let group = big_repo.create_group_with_parents(Vec::new()).await?;
+    let id = group.id().to_bytes();
+    persist_group_id(sql, key, id).await?;
+    Ok((group, true))
 }
 
 async fn load_group_id(sql: &SqlCtx, key: &str) -> Res<Option<[u8; 32]>> {

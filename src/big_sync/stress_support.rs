@@ -606,175 +606,182 @@ pub async fn run_randomized_stress<F: StressFixture>(
     let mut state: StressState<F::StressObj> = StressState::default();
     journal.record(format!("seed={seed}"));
     journal.record(format!("backend={}", fixture.label()));
-    journal.record(format!("node_count={node_count}"));
+    let res = async {
+        let boot_started_at = std::time::Instant::now();
+        let mut nodes = boot_cluster(&fixture, Arc::clone(&world), node_count).await?;
+        info!(elapsed = ?boot_started_at.elapsed(), "booted stress cluster");
 
-    let boot_started_at = std::time::Instant::now();
-    let mut nodes = boot_cluster(&fixture, Arc::clone(&world), node_count).await?;
-    info!(elapsed = ?boot_started_at.elapsed(), "booted stress cluster");
+        // One-time cluster preparation (e.g. shared edit groups, agent discovery).
+        let prepare_started_at = std::time::Instant::now();
+        fixture.prepare_cluster(&nodes).await?;
+        disconnect_all(&fixture, &nodes).await?;
+        info!(elapsed = ?prepare_started_at.elapsed(), "stress cluster prepare complete");
 
-    // One-time cluster preparation (e.g. shared edit groups, agent discovery).
-    let prepare_started_at = std::time::Instant::now();
-    fixture.prepare_cluster(&nodes).await?;
-    // Ensure phase 1 starts with a clean disconnected state;
-    // connect_active_topology does its own disconnect_all, but do it here too
-    // so prepare_cluster's temporary connections are guaranteed torn down.
-    disconnect_all(&fixture, &nodes).await?;
-    info!(elapsed = ?prepare_started_at.elapsed(), "stress cluster prepare complete");
-
-    journal.record("phase1:start");
-    info!("stress phase1 connect start");
-    let phase1_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase1:topology active={phase1_topology:?}"));
-    let phase1_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase1_topology).await?;
-    info!(
-        elapsed = ?phase1_connect_started_at.elapsed(),
-        "stress phase1 connect complete"
-    );
-    let phase1_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-connect")
-        .await?;
-    info!(
-        elapsed = ?phase1_settle_started_at.elapsed(),
-        "stress phase1 post-connect settled"
-    );
-    let phase1_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase1",
-        phase1_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase1_mutate_started_at.elapsed(), "stress phase1 mutations complete");
-    let phase1_post_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-mutations")
-        .await?;
-    info!(
-        elapsed = ?phase1_post_settle_started_at.elapsed(),
-        "stress phase1 post-mutations settled"
-    );
-
-    journal.record("phase2:start");
-    info!("stress phase2 connect start");
-    let phase2_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase2:topology active={phase2_topology:?}"));
-    let phase2_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase2_topology).await?;
-    info!(
-        elapsed = ?phase2_connect_started_at.elapsed(),
-        "stress phase2 connect complete"
-    );
-    let phase2_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-connect")
-        .await?;
-    info!(
-        elapsed = ?phase2_settle_started_at.elapsed(),
-        "stress phase2 post-connect settled"
-    );
-    let phase2_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase2",
-        phase2_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase2_mutate_started_at.elapsed(), "stress phase2 mutations complete");
-    let phase2_post_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-mutations")
-        .await?;
-    info!(
-        elapsed = ?phase2_post_settle_started_at.elapsed(),
-        "stress phase2 post-mutations settled"
-    );
-
-    journal.record("phase3:start");
-    info!("stress phase3 connect start");
-    let phase3_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase3:topology active={phase3_topology:?}"));
-    let phase3_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase3_topology).await?;
-    info!(
-        elapsed = ?phase3_connect_started_at.elapsed(),
-        "stress phase3 connect complete"
-    );
-    let phase3_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-connect")
-        .await?;
-    info!(
-        elapsed = ?phase3_settle_started_at.elapsed(),
-        "stress phase3 post-connect settled"
-    );
-    let phase3_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase3",
-        phase3_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase3_mutate_started_at.elapsed(), "stress phase3 mutations complete");
-    let phase3_post_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-mutations")
-        .await?;
-    info!(
-        elapsed = ?phase3_post_settle_started_at.elapsed(),
-        "stress phase3 post-mutations settled"
-    );
-
-    journal.record("final:reconnect_spanning_topology");
-    let final_connect_started_at = std::time::Instant::now();
-    connect_final_topology(&fixture, &mut rng, &nodes).await?;
-    info!(
-        elapsed = ?final_connect_started_at.elapsed(),
-        "stress final spanning-topology connect complete"
-    );
-    let final_settle_started_at = std::time::Instant::now();
-    fixture
-        .wait_for_settled(
-            &live_refs(&nodes),
-            Duration::from_secs(60),
-            "final:post-connect",
+        journal.record("phase1:start");
+        info!("stress phase1 connect start");
+        let phase1_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase1:topology active={phase1_topology:?}"));
+        let phase1_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase1_topology).await?;
+        info!(
+            elapsed = ?phase1_connect_started_at.elapsed(),
+            "stress phase1 connect complete"
+        );
+        let phase1_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase1_settle_started_at.elapsed(),
+            "stress phase1 post-connect settled"
+        );
+        let phase1_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase1",
+            phase1_mutations,
+            &journal,
         )
         .await?;
-    info!(
-        elapsed = ?final_settle_started_at.elapsed(),
-        "stress final cluster settle complete"
-    );
+        info!(elapsed = ?phase1_mutate_started_at.elapsed(), "stress phase1 mutations complete");
+        let phase1_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase1_post_settle_started_at.elapsed(),
+            "stress phase1 post-mutations settled"
+        );
 
-    let refs = live_refs(&nodes);
-    let align_started_at = std::time::Instant::now();
-    fixture.assert_cluster_alignment(&refs).await?;
-    info!(elapsed = ?align_started_at.elapsed(), "stress cluster alignment complete");
-    journal.record(format!(
-        "final_journal_entries={}",
-        journal.snapshot().len()
-    ));
+        journal.record("phase2:start");
+        info!("stress phase2 connect start");
+        let phase2_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase2:topology active={phase2_topology:?}"));
+        let phase2_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase2_topology).await?;
+        info!(
+            elapsed = ?phase2_connect_started_at.elapsed(),
+            "stress phase2 connect complete"
+        );
+        let phase2_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase2_settle_started_at.elapsed(),
+            "stress phase2 post-connect settled"
+        );
+        let phase2_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase2",
+            phase2_mutations,
+            &journal,
+        )
+        .await?;
+        info!(elapsed = ?phase2_mutate_started_at.elapsed(), "stress phase2 mutations complete");
+        let phase2_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase2_post_settle_started_at.elapsed(),
+            "stress phase2 post-mutations settled"
+        );
 
-    for node in nodes.into_iter().flatten() {
-        fixture.stop_node(node).await?;
+        journal.record("phase3:start");
+        info!("stress phase3 connect start");
+        let phase3_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase3:topology active={phase3_topology:?}"));
+        let phase3_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase3_topology).await?;
+        info!(
+            elapsed = ?phase3_connect_started_at.elapsed(),
+            "stress phase3 connect complete"
+        );
+        let phase3_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase3_settle_started_at.elapsed(),
+            "stress phase3 post-connect settled"
+        );
+        let phase3_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase3",
+            phase3_mutations,
+            &journal,
+        )
+        .await?;
+        info!(elapsed = ?phase3_mutate_started_at.elapsed(), "stress phase3 mutations complete");
+        let phase3_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase3_post_settle_started_at.elapsed(),
+            "stress phase3 post-mutations settled"
+        );
+
+        journal.record("final:reconnect_spanning_topology");
+        let final_connect_started_at = std::time::Instant::now();
+        connect_final_topology(&fixture, &mut rng, &nodes).await?;
+        info!(
+            elapsed = ?final_connect_started_at.elapsed(),
+            "stress final spanning-topology connect complete"
+        );
+        let final_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(
+                &live_refs(&nodes),
+                settle_timeout,
+                "final:post-connect",
+            )
+            .await?;
+        info!(
+            elapsed = ?final_settle_started_at.elapsed(),
+            "stress final cluster settle complete"
+        );
+
+        let refs = live_refs(&nodes);
+        let align_started_at = std::time::Instant::now();
+        fixture.assert_cluster_alignment(&refs).await?;
+        info!(elapsed = ?align_started_at.elapsed(), "stress cluster alignment complete");
+        journal.record(format!(
+            "final_journal_entries={}",
+            journal.snapshot().len()
+        ));
+
+        for node in nodes.into_iter().flatten() {
+            fixture.stop_node(node).await?;
+        }
+
+        Ok::<_, eyre::Report>(())
     }
+    .await;
 
-    Ok(())
+    if let Err(ref _err) = res {
+        eprintln!("\n=== STRESS TEST JOURNAL AT ABORT (seed={seed}) ===");
+        for entry in journal.snapshot() {
+            eprintln!("  {entry}");
+        }
+        eprintln!("=== END STRESS JOURNAL ===\n");
+    }
+    res
 }
 
 /// Backward-compatible wrapper using the old default seed and `STRESS_NODE_COUNT`.

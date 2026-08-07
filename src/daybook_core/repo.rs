@@ -789,6 +789,26 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }
 
+async fn get_ready_doc(
+    big_repo: &SharedBigRepo,
+    doc_id: big_repo::DocumentId,
+) -> Res<BigDocHandle> {
+    let timeout = utils_rs::scale_timeout(Duration::from_secs(45));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match big_repo.get_doc(&doc_id).await? {
+            big_repo::DocLookup::Ready(handle) => return Ok(handle),
+            big_repo::DocLookup::PendingMaterialization => {
+                if tokio::time::Instant::now() >= deadline {
+                    eyre::bail!("document {doc_id} is pending materialization");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            big_repo::DocLookup::Missing => eyre::bail!("document {doc_id} is missing"),
+        }
+    }
+}
+
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
@@ -802,13 +822,10 @@ async fn load_core_docs(
         eyre::bail!("repo init_state missing for existing repository");
     };
     let (handle_app, handle_drawer) = tokio::try_join!(
-        big_repo.get_doc(&doc_id_app),
-        big_repo.get_doc(&doc_id_drawer)
+        get_ready_doc(big_repo, doc_id_app),
+        get_ready_doc(big_repo, doc_id_drawer)
     )?;
-    Ok((
-        handle_app.into_ready(doc_id_app)?,
-        handle_drawer.into_ready(doc_id_drawer)?,
-    ))
+    Ok((handle_app, handle_drawer))
 }
 
 async fn init_core_docs(

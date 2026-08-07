@@ -305,3 +305,95 @@ async fn sqlite_sync_randomized_four_node_stress_converges() -> Res<()> {
     )
     .await
 }
+
+#[derive(Clone, Default)]
+struct PolicyMembershipFixture;
+
+#[async_trait]
+impl StressFixture for PolicyMembershipFixture {
+    type World = TestWorld;
+    type Node = NodeHarness;
+    type StressObj = ObjId;
+    type Observation = (WorkerSnapshot, ObservedStoreSnapshot);
+
+    fn label(&self) -> &'static str {
+        "policy_membership"
+    }
+
+    fn make_stress_obj(&self, rng: &mut StdRng) -> Self::StressObj {
+        stress_support::stress_obj(rng)
+    }
+
+    async fn boot_node(&self, world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node> {
+        let policy = Arc::new(crate::part_store::policy::MembershipPolicy::default());
+        boot_policy_node(world, peer_seed, policy).await
+    }
+
+    async fn stop_node(&self, node: Self::Node) -> Res<()> {
+        node.stop().await
+    }
+
+    async fn restart_node(
+        &self,
+        world: Arc<Self::World>,
+        _peer_seed: u8,
+        node: Self::Node,
+    ) -> Res<Self::Node> {
+        super::restart_node(world, node).await
+    }
+
+    async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
+        tokio::try_join!(left.connect_to(right), right.connect_to(left))?;
+        Ok(())
+    }
+
+    async fn disconnect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
+        tokio::try_join!(
+            left.host.worker.remove_peer(right.peer_id),
+            right.host.worker.remove_peer(left.peer_id),
+        )?;
+        Ok(())
+    }
+
+    async fn seed_new_obj(
+        &self,
+        node: &Self::Node,
+        obj: &Self::StressObj,
+        payload: serde_json::Value,
+    ) -> Res<()> {
+        node.seed_obj(*obj, payload).await
+    }
+
+    async fn seed_obj(
+        &self,
+        node: &Self::Node,
+        obj: &Self::StressObj,
+        payload: serde_json::Value,
+    ) -> Res<()> {
+        node.seed_obj(*obj, payload).await
+    }
+
+    async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
+        tokio::try_join!(node.handle.snapshot(), node.snapshot())
+    }
+
+    fn peer_id(&self, node: &Self::Node) -> PeerId {
+        node.peer_id
+    }
+
+    async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
+        assert_cluster_alignment_lww(nodes).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_sync_randomized_four_node_stress_converges() -> Res<()> {
+    stress_support::run_randomized_four_node_stress(
+        PolicyMembershipFixture,
+        Arc::new(TestWorld::default()),
+        stress_support::PHASE1_MUTATIONS,
+        stress_support::PHASE2_MUTATIONS,
+        stress_support::PHASE3_MUTATIONS,
+    )
+    .await
+}

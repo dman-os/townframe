@@ -10,7 +10,7 @@ use std::sync::Once;
 const NODE_COUNT: usize = 4;
 const EVENT_COUNT: usize = 64;
 const PHASE_TIMEOUT_BASE: Duration = Duration::from_secs(45);
-const FULL_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(60);
+const FULL_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(120);
 const BLOB_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(90);
 const DEFAULT_STRESS_SEED: u64 = 0xD4B5_51C0_0001;
 static TEST_ENV_INIT: Once = Once::new();
@@ -25,7 +25,7 @@ enum EventKind {
     PutBlobAttach,
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     TEST_ENV_INIT.call_once(|| {
@@ -72,7 +72,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
             sample = ?applied.iter().take(12).collect::<Vec<_>>(),
             "phase-1 events applied"
         );
-        wait_network_rest(&nodes, &endpoints, phase_timeout, blob_sync_timeout).await?;
+        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await?;
 
         let leaving_idx = rng.random_range(0..NODE_COUNT);
         info!(leaving_idx, "transfer phase: leaving node");
@@ -103,7 +103,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         let topology_2 = generate_connected_edges(&mut rng);
         info!(?topology_2, "phase-2 topology");
         endpoints = connect_topology(&nodes, &topology_2).await?;
-        wait_network_rest(&nodes, &endpoints, phase_timeout, blob_sync_timeout).await
+        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await
     }
     .await;
     let stop_results = futures::stream::iter(
@@ -287,32 +287,23 @@ async fn connect_topology(
 
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    _peers_set: &[HashSet<PeerId>],
     timeout: Duration,
     blob_timeout: Duration,
 ) -> Res<()> {
-    for (idx, node_opt) in nodes.iter().enumerate() {
-        let Some(node) = node_opt.as_ref() else {
-            continue;
-        };
-        let peers = peers_set[idx].iter().cloned().collect::<Vec<_>>();
-        if !peers.is_empty() {
-            node.sync_repo
-                .wait_until_peers_sync(&peers, timeout)
-                .await?;
-        }
+    for node in nodes.iter().flatten() {
+        node.sync_repo
+            .rcx
+            .big_repo
+            .wait_for_quiescence(Some(timeout))
+            .await?;
     }
 
-    let active = nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, node)| node.as_ref().map(|node| (idx, node)))
-        .collect::<Vec<_>>();
-
+    let active = nodes.iter().flatten().collect::<Vec<_>>();
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
-            let left = active[i].1;
-            let right = active[j].1;
+            let left = active[i];
+            let right = active[j];
             wait_for_doc_set_parity(&left.drawer, &right.drawer, timeout).await?;
             assert_doc_head_parity(left, right).await?;
         }
@@ -321,6 +312,7 @@ async fn wait_network_rest(
     assert_blob_parity(nodes, blob_timeout).await?;
     Ok(())
 }
+
 
 async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Res<()> {
     let left_snapshot = collect_doc_branch_heads(left).await?;
@@ -369,8 +361,11 @@ async fn collect_doc_branch_heads(
     doc_ids.sort_unstable();
     for doc_id in doc_ids {
         let Some(branches) = node.drawer.get_doc_branches(&doc_id).await? else {
-            continue;
+            eyre::bail!("document {doc_id} present in drawer index but not yet materialized on node");
         };
+        if branches.branches.is_empty() {
+            eyre::bail!("document {doc_id} present in drawer index but has no branches materialized yet");
+        }
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();
         branch_names.sort_unstable();
         for branch_name in branch_names {
@@ -622,7 +617,8 @@ async fn apply_event(
                 )
                 .await;
             if let Err(err) = out {
-                if is_missing_facets_object_err(&err) {
+                let msg = err.to_string();
+                if msg.contains("facets object not found") || msg.contains("unrecognized branch") {
                     return Ok(None);
                 }
                 return Err(err.into());

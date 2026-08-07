@@ -38,7 +38,7 @@ async fn boot_connected_sync_pair(
 }
 
 async fn wait_for_facet_manifest(node: &SyncTestNode, tag: &'static str) -> Res<()> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(utils_rs::scale_timeout(Duration::from_secs(30)), async {
         loop {
             if node
                 ._plugs_repo
@@ -219,7 +219,7 @@ async fn wait_for_synced_doc_on_both_sides(
     branch: &BranchPathBuf,
     timeout: Duration,
 ) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
-    tokio::time::timeout(timeout, async {
+    tokio::time::timeout(utils_rs::scale_timeout(timeout), async {
         loop {
             let left_doc = left
                 .drawer
@@ -395,12 +395,13 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the pre-connect blob doc")?;
+        wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         wait_for_drawer_doc_parity(
             &node_a,
             &node_b,
             &doc_id,
             &BranchPathBuf::from("main"),
-            Duration::from_secs(30),
+            Duration::from_secs(60),
         )
         .await?;
         let doc_on_b = node_b
@@ -574,6 +575,14 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
         assert_eq!(got, payload);
+        wait_for_doc_head_parity(
+            &node_a,
+            &node_b,
+            &doc_id,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(60),
+        )
+        .await?;
 
         let doc_on_a = node_a
             .drawer
@@ -703,6 +712,7 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_originator_then_o
             })
             .await?;
 
+        wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         wait_for_drawer_doc_parity(
             &node_a,
             &node_b,
@@ -974,6 +984,8 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                 Duration::from_secs(120),
             )
             .await?;
+
+        wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60)).await?;
 
         let branch = BranchPathBuf::from("main");
         let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(

@@ -335,6 +335,8 @@ pub enum DocWorkerMsg {
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
         >,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     AcquireHandle {
         #[educe(Debug(ignore))]
@@ -343,6 +345,8 @@ pub enum DocWorkerMsg {
                 crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
             >,
         >,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     CommitDelta {
         /// Bundle id of the committing handle; the worker rejects commits from
@@ -377,6 +381,8 @@ pub enum DocWorkerMsg {
                 >,
             >,
         >,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     ReattemptMaterialization {
         /// Why the retry was triggered; reported to change listeners as the
@@ -387,15 +393,21 @@ pub enum DocWorkerMsg {
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::MaterializationStatus, String>,
         >,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     QueryHeadState {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     InspectHeadState {
         #[educe(Debug(ignore))]
         resp:
             futures::channel::oneshot::Sender<eyre::Result<Option<crate::runtime2::DocHeadState>>>,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
     /// Mailbox-ordered runtime quiescence barrier. The worker replies on
     /// `reply` once its in-flight work has drained (the mailbox is quiescent).

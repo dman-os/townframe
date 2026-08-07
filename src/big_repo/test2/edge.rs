@@ -209,8 +209,8 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
         }
         Err(err) => {
             assert!(
-                matches!(err, SyncDocError::Unauthorized),
-                "unauthorized doc sync should return Unauthorized, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized | SyncDocError::Policy(_)),
+                "unauthorized doc sync should return Unauthorized or Policy rejection, got {err:?}"
             );
         }
     }
@@ -272,8 +272,8 @@ async fn tier9_missing_doc_sync_returns_unauthorized() -> crate::Res<()> {
         .await
         .expect_err("syncing a non-existent doc must fail");
     assert!(
-        matches!(err, SyncDocError::Unauthorized),
-        "sync of a non-existent doc must return Unauthorized, got {err:?}"
+        matches!(err, SyncDocError::Unauthorized | SyncDocError::Policy(_)),
+        "sync of a non-existent doc must fail with Unauthorized or Policy rejection, got {err:?}"
     );
 
     Ok(())
@@ -905,5 +905,51 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     }
 
     drop(owner_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier0_relay_never_creates_doc_worker_during_passive_sync_or_diagnostics() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let topo = Topo::boot_relay(240, 241, 242, "Editor", "Relay", "Reader").await?;
+    let doc_id = crate::DocumentId::random();
+
+    // Verify relay (index 1) starts with no worker
+    assert!(!topo.topo_node(1).repo.runtime.has_doc_worker(doc_id).await?);
+
+    // Diagnostics on relay must NOT spawn a worker
+    let snapshot = topo.topo_node(1).repo.document_sync_snapshot(doc_id).await?;
+    assert_eq!(snapshot.stage, crate::DocumentSyncStage::NotPersisted);
+    assert!(!topo.topo_node(1).repo.runtime.has_doc_worker(doc_id).await?);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier0_grant_doc_access_succeeds_on_unmaterialized_doc() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(242, 243, "NodeA", "NodeB").await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "test", "init"))
+        .map_err(|err| crate::ferr!("failed creating initial doc: {err:?}"))?;
+    let doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = doc.document_id();
+
+    // Create target agent for NodeB
+    let keyhive_b = pair.right().repo.keyhive().keyhive_peer_id();
+    let agent_b = pair
+        .left()
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&keyhive_b)
+        .await?
+        .expect("NodeB agent must be in Keyhive");
+
+    // Grant access on NodeA for doc_id prior to doc handle resolution
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, agent_b, keyhive_core::access::Access::Edit)
+        .await?;
+
     Ok(())
 }

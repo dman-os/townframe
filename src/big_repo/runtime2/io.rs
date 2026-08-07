@@ -174,6 +174,10 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// Read-only holders before a commit is persisted.
     fn has_doc_write_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
+    /// Whether the local principal may fetch or sync this document (Fetch/Relay access
+    /// or better). Used for early fail-fast validation prior to network sync.
+    fn has_doc_fetch_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
+
     /// Store a raw fragment bundle at a boundary commit. The implementation
     /// encrypts the bundle and constructs the persisted fragment metadata from
     /// the encrypted blob.

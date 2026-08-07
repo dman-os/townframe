@@ -223,6 +223,7 @@ pub async fn connect_and_pull_required_partitions_once(
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
+    let timeout = utils_rs::scale_timeout(timeout);
     let endpoint_builder =
         iroh::Endpoint::builder(iroh::endpoint::presets::Minimal).secret_key(iroh_secret_key);
     #[cfg(test)]
@@ -326,7 +327,10 @@ async fn pull_required_partitions_via_big_sync_worker(
     tokio::time::timeout(timeout, async {
         loop {
             big_repo
-                .sync_keyhive_with_peer(peer_id, Some(timeout))
+                .sync_keyhive_with_peer(
+                    peer_id,
+                    Some(utils_rs::scale_timeout(Duration::from_secs(30))),
+                )
                 .await?;
             let docs = [bootstrap.app_doc_id, bootstrap.drawer_doc_id];
             let mut ready = true;
@@ -336,9 +340,11 @@ async fn pull_required_partitions_via_big_sync_worker(
                     .await
                 {
                     Ok(_receipt) => {}
-                    Err(big_repo::SyncDocError::Policy(
-                        big_repo::SyncDocPolicyError::DocumentNotFound,
-                    )) => {
+                    Err(
+                        big_repo::SyncDocError::NotFound
+                        | big_repo::SyncDocError::Unauthorized
+                        | big_repo::SyncDocError::Policy(_),
+                    ) => {
                         ready = false;
                         break;
                     }
@@ -406,24 +412,6 @@ async fn pull_required_partitions_via_big_sync_worker(
         }
     }
 
-    tokio::time::timeout(timeout, async {
-        loop {
-            let app_present = matches!(
-                big_repo.get_doc(&bootstrap.app_doc_id).await?,
-                big_repo::DocLookup::Ready(_)
-            );
-            let drawer_present = matches!(
-                big_repo.get_doc(&bootstrap.drawer_doc_id).await?,
-                big_repo::DocLookup::Ready(_)
-            );
-            if app_present && drawer_present {
-                return eyre::Ok(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .wrap_err("timed out waiting for required core docs during clone")??;
     big_sync_rpc_stop.stop().await?;
     repo_rpc_stop_token.stop().await?;
     big_sync_worker_stop.stop().await?;

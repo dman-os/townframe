@@ -206,7 +206,7 @@ macro_rules! table_tests {
                                         $crate::testing::setup_tracing_once();
                                     }
                                     let multi_thread: Option<bool> = $crate::optional_expr!($($multi_thread)?);
-                                    let multi_thread = multi_thread.unwrap_or(false);
+                                    let multi_thread = multi_thread.unwrap_or(true);
                                     let mut builder = if multi_thread{
                                         tokio::runtime::Builder::new_multi_thread()
                                     }else{
