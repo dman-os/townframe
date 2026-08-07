@@ -40,7 +40,7 @@
     - [ ] Redo IR
     - [ ] https://json-render.dev/ based display
 - [ ] Sync
-  - [ ] Keyhive
+  - [x] Keyhive
   - [ ] Figure out key mgmt
   - [ ] P2P
     - [x] iroh

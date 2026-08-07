@@ -40,10 +40,6 @@ serde_json.workspace = true
 # automerge
 autosurgeon = { workspace = true, features = ["uuid"] }
 
-# parking_lot = "0.12"
-# libc = "0.2"
-# struct-patch = "0.10"
-
 #
 # fs
 directories.workspace = true

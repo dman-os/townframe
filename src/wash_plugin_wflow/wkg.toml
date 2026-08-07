@@ -1,0 +1,6 @@
+[overrides]
+"townframe:daybook" = { path = "../daybook_core/wit" }
+"townframe:daybook-types" = { path = "../daybook_types/wit" }
+"townframe:sql" = { path = "../daybook_sql/wit" }
+"townframe:mltools" = { path = "../mltools/wit" }
+"townframe:api-utils" = { path = "../api_utils_rs/wit" }
