@@ -3,4 +3,15 @@ new:
 
 build:
   command: pnpm run build
-  component_path: dist/http_logging_handler_hono.wasm
+  component_path: dist/btress_auth.wasm
+
+dev:
+  address: 127.0.0.1:8071
+
+workload:
+  environment:
+    config:
+      BTRESS_URL: http://localhost:8071
+      ROOT_WEB_DOMAIN: http://localhost:3000
+      BETTER_AUTH_URL: http://localhost:8071
+      BETTER_AUTH_SECRET: big_little_secret

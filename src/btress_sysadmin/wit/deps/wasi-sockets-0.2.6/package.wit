@@ -180,3 +180,4 @@ interface ip-name-lookup {
 
   resolve-addresses: func(network: borrow<network>, name: string) -> result<resolve-address-stream, error-code>;
 }
+

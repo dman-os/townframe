@@ -262,7 +262,7 @@ lto = "thin"
 opt-level = "s"
 # opt-level = 'z'
 # Strip all debugging information from the binary to slightly reduce file size.
-# strip = "debuginfo"
+strip = "none"
 # panic = "abort"
 debug = true
 

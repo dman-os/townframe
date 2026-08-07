@@ -1,19 +1,19 @@
-import { log as wasiLog } from "wasi:logging/logging@0.1.0-draft";
-import { fire } from "@bytecodealliance/jco-std/wasi/0.2.x/http/adapters/hono/server";
+import {
+  fire,
+  incomingHandler as adapter,
+} from "@bytecodealliance/jco-std/wasi/0.2.x/http/adapters/hono/server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 
 import { appCx } from "./context.js";
 
-export { incomingHandler } from "@bytecodealliance/jco-std/wasi/0.2.x/http/adapters/hono/server";
-
 type Variables = {
   requestId: string;
   startTime: number;
 };
 
-async function main() {
+async function setup() {
   const cx = await appCx();
   const app = new Hono<{ Variables: Variables }>();
 
@@ -27,16 +27,6 @@ async function main() {
       honoLogger.info(rest[0] as string, {
         items: rest.splice(1),
       });
-    }),
-  );
-
-  app.get("/", (c) =>
-    c.json({
-      name: "HTTP Logging Handler",
-      version: "1.0.0",
-      description:
-        "A Hono handler on wasmCloud demonstrating WASI structured logging",
-      endpoints: { "/": "API info", "/health": "Health check" },
     }),
   );
 
@@ -73,4 +63,9 @@ async function main() {
   fire(app);
 }
 
-main().catch((err) => wasiLog("error", "main", err.toString()));
+export const incomingHandler = {
+  async handle(req: any, resp: any) {
+    await setup();
+    await adapter.handle(req, resp);
+  },
+};

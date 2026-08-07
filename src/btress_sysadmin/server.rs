@@ -24,8 +24,8 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
     //     .await
     //     .unwrap();
     //
-    let conf = leptos::config::get_config_from_env()?;
-    let leptos_options = conf.leptos_options;
+    let mut leptos_options = leptos::config::get_config_from_env()?.leptos_options;
+    leptos_options.site_root = "/public".into();
     info!("generating route list");
     // Generate the list of routes in your Leptos App
     let routes = generate_route_list(App);
@@ -59,6 +59,7 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
                 move || shell(leptos_options.clone())
             },
         )
+        // HydrationScripts are served by a separate server
         // .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options)
         .with_state(cx.clone())
@@ -88,7 +89,9 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
         );
 
     info!("converting request");
-    let axum_req = interop::try_from_incoming(wasi_req).wrap_err("error converting to axum req")?;
+
+    let axum_req = interop::try_from_incoming(wasi_req)
+            .wrap_err("error converting to axum req")?;
 
     info!("processing request");
     use tower::ServiceExt;

@@ -3,6 +3,7 @@ name = "btress_sysadmin"
 version.workspace = true
 edition.workspace = true
 
+# needed to fool cargo-leptos
 [[bin]]
 name = "fake"
 path = "main.rs"
@@ -33,7 +34,12 @@ wasm-bindgen-futures = { version = "0.4.76", optional = true }
 # http
 axum = { workspace = true, optional = true }
 axum-extra = { workspace = true, optional = true, features = ["cookie", "cookie-signed"] }
-leptos_axum = { version = "0.8.10", optional = true, default-features = false, features = [] }
+leptos_axum = { version = "0.8.10", optional = true, default-features = false, 
+    # FIXME: this is a dud, "wasm" assumes running in a js wasm environment
+    # enabled since pre setting any_spawner::tokio makes it harmless 
+    # and to stop eprintln warnings they've added 
+    # but might break in the future if they do more gating around "wasm"
+    features = ["wasm"] }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, features = ["util", "sensitive-headers", "trace"], optional = true }
 http.workspace = true
@@ -77,7 +83,7 @@ ssr = [
 
 [package.metadata.leptos]
 tailwind-input-file = "./styles/tailwind.css"
-site-root = "../../target/site"
+site-root = "target/site"
 
 lib-profile-release = "wasm-release"
 lib-features = ["hydrate"]

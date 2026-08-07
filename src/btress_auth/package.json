@@ -7,22 +7,22 @@
     "hono": "^4.12.25"
   },
   "devDependencies": {
-    "@bytecodealliance/jco": "^1.17.9",
+    "@bytecodealliance/jco": "^1.27.0",
     "nodemon": "^3.1.9",
     "rimraf": "^6.1.2",
-    "rolldown": "^1.0.0-beta.47",
+    "rolldown": "1.2.3",
     "typescript": "~5.9.3"
   },
   "main": "dist/component.js",
   "private": true,
   "scripts": {
-    "build": "pnpm run setup:wit && pnpm run build:ts && pnpm run build:component",
-    "build:component": "jco componentize -w wit -o dist/http_logging_handler_hono.wasm dist/component.js",
+    "build": "pnpm run build:ts && pnpm run build:component",
+    "build:component": "jco componentize -w wit -o dist/btress_auth.wasm dist/component.js",
     "build:ts": "rolldown -c rolldown.config.mjs",
     "dev": "nodemon",
-    "fetch:wit": "wash wit fetch",
     "generate:types": "rimraf generated/types && jco guest-types wit/ -o generated/types",
     "serve": "jco serve dist/http_logging_handler_hono.wasm",
+    "fetch:wit": "wash wit fetch",
     "setup:wit": "pnpm run fetch:wit && pnpm run generate:types"
   },
   "type": "module"

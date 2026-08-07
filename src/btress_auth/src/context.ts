@@ -1,9 +1,13 @@
-import { log as wasiLog } from "wasi:logging/logging@0.1.0-draft";
+// import { log as wasiLog } from "wasi:logging/logging@0.1.0-draft";
 import { configure, getLogger } from "@logtape/logtape";
-import { betterAuth } from "better-auth";
+import { betterAuth } from "better-auth/minimal";
 
 import { getConfig } from "./config.js";
 import { switchMap } from "./utils.js";
+
+function wasiLog(...args: any[]) {
+  console.log(...args);
+}
 
 export async function appCx() {
   await configure({

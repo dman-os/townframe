@@ -13,11 +13,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <script>{theme::init_script()}</script>
                 <AutoReload options=options.clone() />
-                <HydrationScripts options/>
+                <HydrationScripts options root="http://localhost:3001" />
                 <MetaTags/>
             </head>
             <body>
-                <App/>
+            <App/>
             </body>
         </html>
     }
@@ -28,7 +28,7 @@ pub fn App() -> impl IntoView {
     view! {
         // injects a stylesheet into the document <head>
         // id=leptos means cargo-leptos will hot-reload this stylesheet
-        <Stylesheet id="leptos" href="/pkg/web.css"/>
+        <Stylesheet id="leptos" href="http://localhost:3001/pkg/btress_sysadmin.css"/>
 
         // sets the document title
         <Title text="Welcome to Leptos"/>
