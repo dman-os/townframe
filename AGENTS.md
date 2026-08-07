@@ -79,6 +79,17 @@
   - In most machine's you're working on, `jj` is being used and the safest looking git commands could mess up the `jj` state destroying work.
   - Even if on other machines, git mutation commands are too destructive and unsafe.
 
+### Resolving conflicts
+
+- `jj st` shows unresolved conflicts in the working copy; `jj log` marks conflicted commits with `(conflict)`.
+- For each conflicted commit on the branch:
+  1. `jj edit <commit>` — move the working copy onto the conflicted commit.
+  2. `jj new` — create a fresh empty commit on top. The conflict is inherited into it.
+  3. Fix the conflicts in the new commit (edit the conflict markers directly, or `jj resolve`).
+  4. `jj squash -m "<message>"` — fold the resolution back into the conflicted commit.
+- The intermediate `jj new` commit gives clear visibility onto exactly what changed to resolve the conflict, and keeps the resolution out of the conflicted commit's own diff until squashed.
+- `jj squash` opens an editor by default; pass `-m "<message>"` to skip it (e.g. keep the parent's message).
+- After squashing, verify with `jj st` that no conflicts remain, and check `jj log` for rebased descendants that may have picked up new conflicts.
 ## Performance
 
 Flag code that is doing:

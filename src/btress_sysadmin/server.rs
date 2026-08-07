@@ -90,8 +90,7 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
 
     info!("converting request");
 
-    let axum_req = interop::try_from_incoming(wasi_req)
-            .wrap_err("error converting to axum req")?;
+    let axum_req = interop::try_from_incoming(wasi_req).wrap_err("error converting to axum req")?;
 
     info!("processing request");
     use tower::ServiceExt;
@@ -138,7 +137,7 @@ impl std::ops::Deref for SharedServerCtx {
     type Target = ServerCtx;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &self.0
     }
 }
 
