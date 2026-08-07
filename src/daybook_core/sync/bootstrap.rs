@@ -460,7 +460,7 @@ pub async fn clone_repo_init_from_url(
         marker_path: destination.join("db.repo.txt"),
         lock_path: destination.join("repo.lock"),
     };
-    let lock_guard = crate::repo::RepoLockGuard::acquire(&staging.join("repo.lock"))?;
+    let lock_guard = crate::repo::RepoLockGuard::acquire(staging.join("repo.lock")).await?;
 
     let cloned = async {
         let secret_repo = crate::secrets::SecretRepo::boot().await?;

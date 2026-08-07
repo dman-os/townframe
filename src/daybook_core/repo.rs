@@ -37,50 +37,56 @@ pub struct RepoLockGuard {
 }
 
 impl RepoLockGuard {
-    pub fn acquire(lock_path: &std::path::Path) -> Res<Self> {
+    pub async fn acquire(lock_path: PathBuf) -> Res<Self> {
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        let mut _file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)
-            .wrap_err_with(|| format!("error opening repo lock file {}", lock_path.display()))?;
+        tokio::task::spawn_blocking(move || {
+            let mut _file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .wrap_err_with(|| {
+                    format!("error opening repo lock file {}", lock_path.display())
+                })?;
 
-        // NOTE: lock is released when file is dropped
-        _file.try_lock_exclusive().map_err(|err| {
-            let holder = std::fs::read_to_string(lock_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<RepoLockInfo>(&content).ok());
-            if let Some(holder) = holder {
-                eyre::eyre!(
-                    "repo is already in use by pid={} (lock file: {})",
-                    holder.pid,
-                    lock_path.display()
-                )
-            } else {
-                eyre::eyre!(
-                    "repo is already in use (lock file: {}, cause: {})",
-                    lock_path.display(),
-                    err
-                )
-            }
-        })?;
+            // NOTE: lock is released when file is dropped
+            _file.try_lock_exclusive().map_err(|err| {
+                let holder = std::fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<RepoLockInfo>(&content).ok());
+                if let Some(holder) = holder {
+                    eyre::eyre!(
+                        "repo is already in use by pid={} (lock file: {})",
+                        holder.pid,
+                        lock_path.display()
+                    )
+                } else {
+                    eyre::eyre!(
+                        "repo is already in use (lock file: {}, cause: {})",
+                        lock_path.display(),
+                        err
+                    )
+                }
+            })?;
 
-        let lock_info = RepoLockInfo {
-            pid: std::process::id(),
-            created_at_unix_secs: jiff::Timestamp::now().as_second(),
-        };
-        _file.set_len(0)?;
-        let json = serde_json::to_string(&lock_info)?;
-        std::io::Write::write_all(&mut _file, json.as_bytes())?;
-        std::io::Write::flush(&mut _file)?;
-        Ok(Self {
-            _file,
-            _path: lock_path.to_path_buf(),
+            let lock_info = RepoLockInfo {
+                pid: std::process::id(),
+                created_at_unix_secs: jiff::Timestamp::now().as_second(),
+            };
+            _file.set_len(0)?;
+            let json = serde_json::to_string(&lock_info)?;
+            std::io::Write::write_all(&mut _file, json.as_bytes())?;
+            std::io::Write::flush(&mut _file)?;
+            Ok(Self {
+                _file,
+                _path: lock_path.to_path_buf(),
+            })
         })
+        .await
+        .expect(ERROR_TOKIO)
     }
 }
 
@@ -221,7 +227,7 @@ impl RepoCtx {
     ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
         info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo open: acquiring lock");
-        let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
+        let lock_guard = RepoLockGuard::acquire(layout.lock_path.clone()).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open: lock acquired");
         if !is_repo_initialized(&layout.repo_root).await? {
             eyre::bail!(
@@ -242,7 +248,7 @@ impl RepoCtx {
     ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
         info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo init: acquiring lock");
-        let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
+        let lock_guard = RepoLockGuard::acquire(layout.lock_path.clone()).await?;
         info!(repo_root = %layout.repo_root.display(), "repo init: lock acquired");
         if is_repo_initialized(&layout.repo_root).await? {
             eyre::bail!(

@@ -53,7 +53,8 @@ impl wit::exports::wasi::http::incoming_handler::Guest for Component {
             .build()
             .expect(ERROR_TOKIO);
         let local = tokio::task::LocalSet::new();
-        local.block_on(&rt, server::server_main(request, response_out))
+        local
+            .block_on(&rt, server::server_main(request, response_out))
             .expect("error handling request");
     }
 }

@@ -2542,7 +2542,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
 
     let temp_dir = tempfile::tempdir()?;
     let storage_path = temp_dir.path().join("samod-amctx-disk");
-    std::fs::create_dir_all(&storage_path)?;
+    tokio::fs::create_dir_all(&storage_path).await?;
 
     let (big_repo, _big_sync_host, acx_stop) = boot_disk_repo(storage_path.clone()).await?;
 
@@ -2654,7 +2654,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     let storage_path = std::env::temp_dir()
         .join("drawer-perf")
         .join(Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&storage_path)?;
+    tokio::fs::create_dir_all(&storage_path).await?;
 
     let (big_repo, big_sync_host, acx_stop) = boot_disk_repo(storage_path.clone()).await?;
 
@@ -2721,7 +2721,8 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     assert!(docs_per_sec > 0.0);
     stop_token.stop().await?;
     acx_stop().await?;
-    std::fs::remove_dir_all(&storage_path)
+    tokio::fs::remove_dir_all(&storage_path)
+        .await
         .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
         .ok();
     Ok(())
