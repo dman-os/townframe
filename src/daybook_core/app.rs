@@ -139,7 +139,7 @@ impl AppCtx {
 pub mod version_updates {
     use crate::interlude::*;
 
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
+    use automerge::{transaction::Transactable, ROOT};
     use autosurgeon::reconcile_prop;
 
     use crate::config::ConfigStore;
@@ -149,34 +149,41 @@ pub mod version_updates {
 
     pub fn version_latest() -> Res<Vec<u8>> {
         use crate::stores::AmStore;
-        let mut doc = AutoCommit::new().with_actor(ActorId::random());
-        doc.put(ROOT, "version", "0")?;
-        // annotate schema for app document
-        doc.put(ROOT, "$schema", "daybook.app")?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            TablesStore::prop().as_ref(),
-            TablesStore::default(),
-        )?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            ConfigStore::prop().as_ref(),
-            ConfigStore::default(),
-        )?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            PlugsStore::prop().as_ref(),
-            PlugsStore::default(),
-        )?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            InitStore::prop().as_ref(),
-            InitStore::default(),
-        )?;
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.app")?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                TablesStore::prop().as_ref(),
+                TablesStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                ConfigStore::prop().as_ref(),
+                ConfigStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                PlugsStore::prop().as_ref(),
+                PlugsStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                InitStore::prop().as_ref(),
+                InitStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
         Ok(doc.save_nocompress())
     }
 }

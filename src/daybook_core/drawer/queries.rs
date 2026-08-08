@@ -120,7 +120,9 @@ impl DrawerRepo {
                 if entry.is_some() {
                     surelock::key::lock_scope(|key| {
                         let (mut current_heads, _key) = key.lock(&self.current_heads);
-                        *current_heads = live_heads;
+                        if *current_heads == heads {
+                            *current_heads = live_heads;
+                        }
                     });
                 }
             }

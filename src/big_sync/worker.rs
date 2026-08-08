@@ -248,11 +248,23 @@ pub fn spawn_big_sync_worker(
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
     label: &'static str,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
+    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None)
+}
+
+pub fn spawn_big_sync_worker_with_options(
+    part_store: SharedPartitionStore,
+    sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
+    label: &'static str,
+    max_task_backoff: Option<Duration>,
+) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
     let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
 
-    let machine = big_sync_core::BigSyncMachine::default();
+    let mut machine = big_sync_core::BigSyncMachine::default();
+    if let Some(backoff) = max_task_backoff {
+        machine.set_max_task_backoff(backoff);
+    }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());

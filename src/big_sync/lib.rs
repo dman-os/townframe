@@ -34,8 +34,8 @@ pub use part_store::{HostPartStore, HostPartStoreConfig};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{
-    spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,
-    SyncTaskRunOutcome,
+    spawn_big_sync_worker, spawn_big_sync_worker_with_options, BackendId, BigSyncWorkerError,
+    BigSyncWorkerHandle, StopToken, SyncTaskRunOutcome,
 };
 
 #[derive(Clone)]

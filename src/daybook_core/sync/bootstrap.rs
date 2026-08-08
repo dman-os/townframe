@@ -324,6 +324,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     // Clone provisioning is an explicit protocol. Notifications are advisory;
     // after subscription readiness, poll the authoritative grant by exchanging
     // Keyhive state and attempting the two required document syncs.
+    let attempt_timeout = std::cmp::max(timeout / 4, Duration::from_secs(2));
     tokio::time::timeout(timeout, async {
         loop {
             big_repo
@@ -336,7 +337,7 @@ async fn pull_required_partitions_via_big_sync_worker(
             let mut ready = true;
             for doc_id in docs {
                 match big_repo
-                    .sync_doc_with_peer(doc_id, peer_id, Some(timeout))
+                    .sync_doc_with_peer(doc_id, peer_id, Some(attempt_timeout))
                     .await
                 {
                     Ok(_receipt) => {}
@@ -573,27 +574,25 @@ pub async fn clone_repo_init_from_url(
         )
         .await?;
 
-        let rcx = crate::repo::finish_clone_init(
-            crate::repo::RepoCtxParts {
-                layout,
-                lock_guard,
-                sql: sql.clone(),
-                part_store: Arc::clone(&part_store),
-                blob_part_store: Arc::clone(&blob_part_store),
-                big_repo: Arc::clone(&big_repo),
-                big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
-                local_peer_key,
-                local_actor_id,
-                local_user_path,
-                local_device_name,
-                repo_id: bootstrap.repo_id.clone(),
-                checkout_id,
-                repo_name: bootstrap.repo_name.clone(),
-                iroh_public_key: identity.iroh_public_key.to_string(),
-                iroh_secret_key: identity.iroh_secret_key,
-                secret_repo,
-            },
-        )
+        let rcx = crate::repo::finish_clone_init(crate::repo::RepoCtxParts {
+            layout,
+            lock_guard,
+            sql: sql.clone(),
+            part_store: Arc::clone(&part_store),
+            blob_part_store: Arc::clone(&blob_part_store),
+            big_repo: Arc::clone(&big_repo),
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
+            local_peer_key,
+            local_actor_id,
+            local_user_path,
+            local_device_name,
+            repo_id: bootstrap.repo_id.clone(),
+            checkout_id,
+            repo_name: bootstrap.repo_name.clone(),
+            iroh_public_key: identity.iroh_public_key.to_string(),
+            iroh_secret_key: identity.iroh_secret_key,
+            secret_repo,
+        })
         .await?;
         crate::repo::mark_repo_initialized(&staging).await?;
 

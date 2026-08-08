@@ -746,11 +746,7 @@ pub async fn run_randomized_stress<F: StressFixture>(
         );
         let final_settle_started_at = std::time::Instant::now();
         fixture
-            .wait_for_settled(
-                &live_refs(&nodes),
-                settle_timeout,
-                "final:post-connect",
-            )
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "final:post-connect")
             .await?;
         info!(
             elapsed = ?final_settle_started_at.elapsed(),

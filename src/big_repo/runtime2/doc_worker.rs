@@ -106,28 +106,24 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                 )
                 .await;
 
+                let error = match result {
+                    Ok(Err(error)) if !cancellation.is_aborted() && !runtime_evt_tx.is_closed() => {
+                        Some(format!("document worker failed: {error:?}"))
+                    }
+                    _ => None,
+                };
+
                 let _ = runtime_evt_tx
-                    .send(Runtime2Evt::DocWorkerStopped { doc_id })
+                    .send(Runtime2Evt::DocWorkerStopped {
+                        doc_id,
+                        error: error.clone(),
+                    })
                     .await;
 
-                match result {
-                    Ok(Err(_error)) if cancellation.is_aborted() => Ok(()),
-                    Ok(Err(error)) if runtime_evt_tx.is_closed() => {
-                        debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
-                        Ok(())
-                    }
-                    Ok(Err(error)) => {
-                        let _ = runtime_evt_tx
-                            .send(Runtime2Evt::FatalWorkerError {
-                                doc_id: Some(doc_id),
-                                context: "document worker failed",
-                                error: format!("{error:?}"),
-                            })
-                            .await;
-                        Err(error)
-                    }
-                    Ok(Ok(())) => Ok(()),
-                    Err(_) => Ok(()),
+                if let Some(err) = error {
+                    Err(eyre::eyre!("{err}"))
+                } else {
+                    Ok(())
                 }
             }
             .instrument(tracing::info_span!("doc_worker mailbox loop", %doc_id)),
@@ -658,7 +654,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// 2. the local principal no longer holds write access (revoked or
     ///    Read-only), or
     /// 3. the encrypted commit cannot be persisted (key unavailable).
-///
+    ///
     /// A rejected commit never persists, so no partial history can form.
     async fn commit_delta(
         &mut self,

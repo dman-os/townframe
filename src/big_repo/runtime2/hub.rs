@@ -474,7 +474,8 @@ where
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
-                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id) {
+                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
+                {
                     if let Err(err) = worker.send(DocWorkerMsg::InspectHeadState { resp, _lease }) {
                         debug!(%doc_id, ?err, "failed sending InspectHeadState to worker");
                     }
@@ -1451,37 +1452,16 @@ where
                 }
                 self.keyhive_reconciliation_waiters = pending;
             }
-            Runtime2Evt::DocWorkerStopped { doc_id } => {
+            Runtime2Evt::DocWorkerStopped { doc_id, error } => {
                 self.doc_workers.remove(&doc_id);
                 self.pending_materialization.remove(&doc_id);
                 self.materialization_retries_in_flight.remove(&doc_id);
                 if let Some(probe) = self.quiescence_probe.as_mut() {
                     probe.pending_docs.remove(&doc_id);
                 }
-            }
-            Runtime2Evt::DocWorkerFenced { doc_id, barrier_id } => {
-                self.handle_doc_worker_fenced(doc_id, barrier_id)?;
-            }
-            Runtime2Evt::TrackedWorkDone { kind } => {
-                assert!(
-                    self.tracked_in_flight > 0,
-                    "TrackedWorkDone without a matching spawn_tracked increment"
-                );
-                self.tracked_in_flight -= 1;
-                debug!(
-                    local_peer_id = %self.local_peer_id,
-                    kind = ?kind,
-                    tracked_in_flight = self.tracked_in_flight,
-                    "tracked background work completed",
-                );
-            }
-            Runtime2Evt::FatalWorkerError {
-                doc_id: _,
-                context,
-                error,
-            } => {
-                // Per AGENTS.md: programming errors crash the program.
-                panic!("fatal runtime worker error context={context}: {error}");
+                if let Some(err) = error {
+                    tracing::error!(%doc_id, error = %err, "doc worker stopped with error");
+                }
             }
             Runtime2Evt::DocWorkerMaterializationPending { doc_id } => {
                 self.pending_materialization.insert(doc_id);
@@ -1527,8 +1507,19 @@ where
                             self.retry_doc_materialization(doc_id)?;
                         }
                     }
+                    crate::runtime2::MaterializationStatus::Ready {
+                        partially_decrypted: true,
+                    } => {
+                        self.pending_materialization.insert(doc_id);
+                        debug!(
+                            %doc_id,
+                            "materialization retry remains partially decrypted"
+                        );
+                    }
                     crate::runtime2::MaterializationStatus::Missing
-                    | crate::runtime2::MaterializationStatus::Ready { .. } => {
+                    | crate::runtime2::MaterializationStatus::Ready {
+                        partially_decrypted: false,
+                    } => {
                         self.pending_materialization.remove(&doc_id);
                         debug!(%doc_id, ?status, "materialization retry reached a terminal state");
                     }
@@ -1582,6 +1573,10 @@ where
                         member_is_document,
                     ),
                 )?;
+                let pending: Vec<_> = self.pending_materialization.iter().copied().collect();
+                for doc_id in pending {
+                    self.retry_doc_materialization(doc_id)?;
+                }
             }
             Runtime2Evt::RevocationReceived { target, data } => {
                 self.bump_keyhive_state_generation("revocation received");
@@ -1602,6 +1597,22 @@ where
                         member_is_document,
                     ),
                 )?;
+            }
+            Runtime2Evt::DocWorkerFenced { doc_id, barrier_id } => {
+                self.handle_doc_worker_fenced(doc_id, barrier_id)?;
+            }
+            Runtime2Evt::TrackedWorkDone { kind } => {
+                assert!(
+                    self.tracked_in_flight > 0,
+                    "TrackedWorkDone without a matching spawn_tracked increment"
+                );
+                self.tracked_in_flight -= 1;
+                debug!(
+                    local_peer_id = %self.local_peer_id,
+                    kind = ?kind,
+                    tracked_in_flight = self.tracked_in_flight,
+                    "tracked background work completed",
+                );
             }
         }
         self.try_resolve_quiescence()
@@ -1768,7 +1779,9 @@ where
         let admitted_ids = self
             .keyhive_waiters
             .get(&peer_id)
-            .map_or_else(std::collections::HashSet::new, |waiters| waiters.ids.clone());
+            .map_or_else(std::collections::HashSet::new, |waiters| {
+                waiters.ids.clone()
+            });
         self.keyhive_round_ids = self.keyhive_round_ids.wrapping_add(1);
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {

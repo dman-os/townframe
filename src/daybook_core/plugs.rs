@@ -594,19 +594,24 @@ impl crate::stores::AmStore for PlugsStore {
 
 pub mod version_updates {
     use super::*;
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
+    use automerge::{transaction::Transactable, ROOT};
     use autosurgeon::reconcile_prop;
 
     pub fn version_latest() -> Res<Vec<u8>> {
-        let mut doc = AutoCommit::new().with_actor(ActorId::random());
-        doc.put(ROOT, "version", "0")?;
-        doc.put(ROOT, "$schema", "daybook.plugs")?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            super::PlugsStore::prop().as_ref(),
-            super::PlugsStore::default(),
-        )?;
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.plugs")?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                super::PlugsStore::prop().as_ref(),
+                super::PlugsStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
         Ok(doc.save_nocompress())
     }
 }

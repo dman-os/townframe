@@ -64,7 +64,9 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
         data: &'a Arc<Signed<CgkaOperation>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         self.evt_tx
-            .try_send(crate::runtime2::Runtime2Evt::CgkaOp { data: Arc::clone(data) })
+            .try_send(crate::runtime2::Runtime2Evt::CgkaOp {
+                data: Arc::clone(data),
+            })
             .inspect_err(|_| warn!(ERROR_CHANNEL))
             .ok();
         Sendable::ready(())

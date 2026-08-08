@@ -126,7 +126,7 @@ impl KeysRepo {
                 let store_val = EncKeysStore::load(&key_doc_handle).await?;
                 crate::stores::AmStoreHandle::new(
                     store_val,
-                    app_doc_handle.clone(),
+                    key_doc_handle.clone(),
                     local_actor_id.clone(),
                 )
             },
@@ -239,7 +239,7 @@ impl PubKey {
 
     pub fn to_multikey(&self) -> [u8; 34] {
         let mut buf = [0; 34];
-        buf.copy_from_slice(&Self::MULTIKEY_PREFIX);
+        buf[..2].copy_from_slice(&Self::MULTIKEY_PREFIX);
         buf[2..].copy_from_slice(self.0.as_bytes());
         buf
     }
@@ -278,12 +278,12 @@ impl std::str::FromStr for PubKey {
     type Err = DecodeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let buf: [u8; 35] = bs58::decode(value.as_bytes())
-            .into_array_const()
-            .map_err(|_| DecodeError::BadBs58)?;
-        if buf[0] != b'z' {
+        if buf.as_bytes()[0] != b'z' {
             return Err(DecodeError::BadPrefix);
         }
+        let buf: [u8; 35] = bs58::decode(&value.as_bytes()[1..])
+            .into_array_const()
+            .map_err(|_| DecodeError::BadBs58)?;
         if buf[..2] != Self::MULTIKEY_PREFIX[..] {
             return Err(DecodeError::BadPrefix);
         }
@@ -337,7 +337,7 @@ impl<'de> serde::Deserialize<'de> for PubKey {
                         return Err(serde::de::Error::custom("valid multikey prefix xED01_u16"));
                     }
                     let mut buf = [0u8; 32];
-                    buf.copy_from_slice(val);
+                    buf.copy_from_slice(&val[2..]);
                     Ok(buf)
                 }
             }

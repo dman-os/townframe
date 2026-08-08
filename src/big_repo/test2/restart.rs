@@ -775,13 +775,19 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
     pair.left()
         .set_peer_parts(
             pair.right(),
-            vec![crate::GLOBAL_PART_ID, crate::PartId::new(doc_id.into_bytes())],
+            vec![
+                crate::GLOBAL_PART_ID,
+                crate::PartId::new(doc_id.into_bytes()),
+            ],
         )
         .await?;
     pair.right()
         .set_peer_parts(
             pair.left(),
-            vec![crate::GLOBAL_PART_ID, crate::PartId::new(doc_id.into_bytes())],
+            vec![
+                crate::GLOBAL_PART_ID,
+                crate::PartId::new(doc_id.into_bytes()),
+            ],
         )
         .await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;

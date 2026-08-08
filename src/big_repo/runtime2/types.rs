@@ -69,7 +69,7 @@ pub enum SyncDocError {
     Policy(SyncDocPolicyError),
     /// TransportError
     TransportError,
-    /// IoError
+    /// IO error: {0}
     IoError(eyre::Report),
     /// Unexpected {0}
     Other(#[from] eyre::Report),

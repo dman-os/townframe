@@ -240,18 +240,26 @@ impl IrohSyncRepo {
             big_repo::BigRepo::BACKEND_ID.into(),
             Arc::clone(&repo_sync_backend) as _,
         );
-        let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+        let max_task_backoff = std::env::var("DAYB_SYNC_MAX_BACKOFF_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .or(Some(Duration::from_mins(1)));
+
+        let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&rcx.part_store),
             doc_sync_backends,
             "daybook-docs",
+            max_task_backoff,
         )?;
 
         let mut blob_sync_backends = std::collections::HashMap::new();
         blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
-        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&rcx.blob_part_store),
             blob_sync_backends,
             "daybook-blobs",
+            max_task_backoff,
         )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
@@ -761,9 +769,9 @@ impl IrohSyncRepo {
                 Some(ActivePeerState::Connecting {
                     closed: Some(closed),
                 }) => std::sync::Arc::ptr_eq(closed, &signal.closed),
-                // A dial reservation with no connection yet cannot have an
-                // end signal; treat any as current.
-                Some(ActivePeerState::Connecting { closed: None }) => true,
+                // A dial reservation with no connection yet cannot own this
+                // end signal. The dialing task still owns the slot.
+                Some(ActivePeerState::Connecting { closed: None }) => false,
                 None => false,
             }
         };
@@ -783,21 +791,26 @@ impl IrohSyncRepo {
             "current connection ended; tearing down peer registration"
         );
         self.teardown_peer_registration(signal.peer_id).await;
-        let Some(ActivePeerState::Connected { peer_key, .. }) =
-            self.active_peers.write().await.remove(&signal.peer_id)
-        else {
-            debug!(peer_id = %signal.peer_id, "connection end for unknown peer");
-            return Ok(());
+        let removed = self.active_peers.write().await.remove(&signal.peer_id);
+        let peer_key = match removed {
+            Some(ActivePeerState::Connected { peer_key, .. }) => Some(peer_key),
+            Some(ActivePeerState::Connecting { .. }) => None,
+            None => {
+                debug!(peer_id = %signal.peer_id, "connection end for unknown peer");
+                return Ok(());
+            }
         };
-        let events = [IrohSyncEvent::ConnectionClosed {
-            peer_key,
-            reason: signal
-                .err
-                .map(|err| format!("conn error: {err}"))
-                .unwrap_or_else(|| "natural disconnect".into()),
-        }];
+        if let Some(peer_key) = peer_key {
+            let events = [IrohSyncEvent::ConnectionClosed {
+                peer_key,
+                reason: signal
+                    .err
+                    .map(|err| format!("conn error: {err}"))
+                    .unwrap_or_else(|| "natural disconnect".into()),
+            }];
 
-        self.registry.notify(events);
+            self.registry.notify(events);
+        }
         if self.cancel_token.is_cancelled() {
             return Ok(());
         }
@@ -1053,10 +1066,9 @@ impl IrohSyncRepo {
         }
         let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
         let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
-        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) =
-            required_partitions.iter().partition(|part| {
-                **part == docs_blob || **part == plugs_blob
-            });
+        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
+            .iter()
+            .partition(|part| **part == docs_blob || **part == plugs_blob);
         let timeout_outcome = tokio::time::timeout(timeout, async {
             let doc_wait = self
                 .big_sync_worker

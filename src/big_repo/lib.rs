@@ -30,11 +30,11 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 
 mod runtime2;
-pub use runtime2::{DocHeadState, MaterializationState};
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
     SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt,
 };
+pub use runtime2::{DocHeadState, MaterializationState};
 mod sqlite_big_repo_store;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 mod wire;
@@ -66,6 +66,7 @@ pub use ephemeral::{
     BigEphemeralTopic,
 };
 pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
+pub use keyhive_core;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -128,7 +129,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
     #[educe(Debug(ignore))]
-    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+    keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
     #[educe(Debug(ignore))]
     keyhive_notifier: runtime2::KeyhiveChangeNotifier,
     #[educe(Debug(ignore))]
@@ -366,7 +367,9 @@ impl BigRepo {
         self.ephemeral.clone()
     }
 
-    pub(crate) fn subscribe_keyhive_changes(&self) -> tokio::sync::broadcast::Receiver<()> {
+    pub(crate) fn subscribe_keyhive_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Option<PeerId>> {
         self.keyhive_change_tx.subscribe()
     }
 
@@ -472,6 +475,7 @@ impl BigRepo {
 
     /// Wait until finite runtime work currently admitted to this repository
     /// has drained. Pending materialization due to unavailable keys is allowed.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
         self.runtime.wait_for_quiescence(timeout).await
     }
@@ -479,6 +483,7 @@ impl BigRepo {
     /// Like [`BigRepo::wait_for_quiescence`], but freezes the hub once
     /// quiescence is reached: no events are processed and all non-unfreeze
     /// commands are held until [`BigRepo::unfreeze`].
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence_freeze(
         &self,
         timeout: Option<std::time::Duration>,
@@ -589,7 +594,10 @@ impl BigRepo {
     ) -> Res<()> {
         let heads = match self.doc_head_state(doc_id).await {
             Ok(state) => state.sedimentree_heads,
-            Err(_) => Default::default(),
+            Err(err) => {
+                tracing::debug!(%doc_id, %err, "doc_head_state unavailable for grant_doc_access boundary; using empty heads");
+                Default::default()
+            }
         };
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
 

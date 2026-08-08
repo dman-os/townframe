@@ -176,7 +176,7 @@ impl Node {
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
         let shared_store: crate::SharedPartStore = Arc::clone(&store) as _;
         let (worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(shared_store, backends, label)?;
+            big_sync::spawn_big_sync_worker_with_options(shared_store, backends, label, Some(Duration::from_secs(5)))?;
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
             repo,
@@ -228,7 +228,6 @@ impl Node {
     ) -> crate::Res<bool> {
         Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
     }
-
 
     /// Update the subscribed parts for an already-connected peer.
     /// part replication between the two nodes.

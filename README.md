@@ -25,7 +25,7 @@ It currently consists of:
 ## Why?
 
 I think tools like these tend to be highly personal to each person and I recommend everyone try to build one for themselves.
-Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and soforth.
+Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and so forth.
 
 Specifically, daybook design is informed by tech I find shiny, gaps I see in the current landscape and my personal politics.
 
@@ -36,7 +36,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
   - Leverage WASM for plugins. 
 - Gaps
   - Emacs/Vim
-    - State of the art editing experience
+    - State-of-the-art editing experience
     - Pre-mobile tech
   - Notion 
     - Excellent design 

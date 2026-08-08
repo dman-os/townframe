@@ -74,13 +74,13 @@ pub(crate) struct KeyhiveChangeNotifier {
     /// Keyhive protocol handle — cache busting + syncpoint invalidation.
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Broadcast backing the `SubscribeKeyhiveChanges` RPC stream.
-    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+    keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
 }
 
 impl KeyhiveChangeNotifier {
     pub(crate) fn new(
         keyhive_protocol: BigRepoKeyhiveProtocol,
-        keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+        keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
     ) -> Self {
         Self {
             keyhive_protocol,
@@ -100,8 +100,18 @@ impl KeyhiveChangeNotifier {
             .wrap_err("keyhive local-change refresh failed")?;
         // Broadcast delivery is intentionally best effort; the event is only
         // a wake-up hint and is not the source of Keyhive state.
-        let _ = self.keyhive_change_tx.send(());
+        let _ = self.keyhive_change_tx.send(None);
         Ok(())
+    }
+
+    /// Forward a remotely applied change to our other connected peers.
+    ///
+    /// The protocol has already incorporated the remote events and updated
+    /// its sync state before invoking the sync-done observer, so invalidating
+    /// that state here would turn a finite gossip round into an echo loop.
+    /// Only the payload-free wake-up hint needs forwarding.
+    pub(crate) fn note_remote_keyhive_changed(&self, source_peer_id: PeerId) {
+        let _ = self.keyhive_change_tx.send(Some(source_peer_id));
     }
 }
 
@@ -146,7 +156,8 @@ where
     S: BigRepoSubductionStorage,
 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("NativeBigRepoIo")
+        formatter
+            .debug_struct("NativeBigRepoIo")
             .field("local_peer_id", &self.local_peer_id)
             .finish_non_exhaustive()
     }
@@ -331,8 +342,6 @@ fn kh_doc_id_from_sed_id(sed_id: SedimentreeId) -> eyre::Result<KhDocumentId> {
         .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
     Ok(KhDocumentId::from(Identifier::from(vk)))
 }
-
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DocIo<Sendable> impl
@@ -526,8 +535,14 @@ where
             }
 
             let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments.iter().map(|frag| frag.payload().clone()).collect(),
-                loose_commits.iter().map(|commit| commit.payload().clone()).collect(),
+                fragments
+                    .iter()
+                    .map(|frag| frag.payload().clone())
+                    .collect(),
+                loose_commits
+                    .iter()
+                    .map(|commit| commit.payload().clone())
+                    .collect(),
             ));
             let tree = self.sedimentrees.get_or_insert_with(sed_id, || tree).await;
             let heads = sedimentree_heads_payload(&tree);
@@ -578,8 +593,14 @@ where
             }
 
             let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments.iter().map(|frag| frag.payload().clone()).collect(),
-                loose_commits.iter().map(|commit| commit.payload().clone()).collect(),
+                fragments
+                    .iter()
+                    .map(|frag| frag.payload().clone())
+                    .collect(),
+                loose_commits
+                    .iter()
+                    .map(|commit| commit.payload().clone())
+                    .collect(),
             ));
 
             // Keep the hydrated tree resident: materialization retries can be
@@ -599,14 +620,13 @@ where
         raw_blob: Vec<u8>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            let raw_blob = Blob::new(raw_blob);
+            let _raw_blob = Blob::new(raw_blob);
             let encrypted_blob = encrypt_fragment_blob(
                 &self.keyhive,
                 &self.storage,
                 sed_id,
                 head,
                 &boundary,
-                raw_blob.as_slice(),
             )
             .await
             .wrap_err("failed encrypting fragment blob")?;
@@ -751,6 +771,7 @@ where
             let key_tag = |key: &keyhive_crypto::symmetric_key::SymmetricKey| {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                hasher.write(b"townframe_key_tag_domain_spec_v1");
                 key.as_slice().hash(&mut hasher);
                 format!("{:016x}", hasher.finish())
             };
@@ -1002,11 +1023,17 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
             let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
-            if !self.has_doc_fetch_access(doc_id).await.unwrap_or(false) {
-                debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: doc not present or authorized in local Keyhive");
-                return Ok(SyncDocAttempt::Policy(
-                    subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess,
-                ));
+            match self.has_doc_fetch_access(doc_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: doc not present or authorized in local Keyhive");
+                    return Ok(SyncDocAttempt::Policy(
+                        subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess,
+                    ));
+                }
+                Err(err) => {
+                    return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
+                }
             }
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
@@ -1119,7 +1146,8 @@ where
     S: BigRepoSubductionStorage,
 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("IrohTransportConnect")
+        formatter
+            .debug_struct("IrohTransportConnect")
             .field("local_peer_id", &self.local_peer_id)
             .finish_non_exhaustive()
     }
@@ -1495,16 +1523,18 @@ where
             // Disconnect exactly the transport represented by this handle.
             // Subduction removes the connection's paired multiplexer without
             // disturbing other live connections to the same peer.
-            let auth = conns
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|(flag, _)| std::sync::Arc::ptr_eq(flag, &closed))
-                .map(|(_, auth)| auth.clone());
-            conns
-                .lock()
-                .unwrap()
-                .retain(|(flag, _)| !std::sync::Arc::ptr_eq(flag, &closed));
+            let mut auth = None;
+            {
+                let mut guard = conns.lock().unwrap();
+                guard.retain(|(flag, auth_conn)| {
+                    if std::sync::Arc::ptr_eq(flag, &closed) {
+                        auth = Some(auth_conn.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
             if let Some(auth) = auth {
                 subduction
                     .disconnect(&auth)
@@ -1599,7 +1629,7 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+    keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -1670,6 +1700,15 @@ where
         )
         .with_storage_recovery(),
     );
+    // A pulled Keyhive change must be advertised to our other peers as well:
+    // connected topologies are not necessarily full meshes. The sync-done
+    // observer below forwards a broadcast after the protocol has applied
+    // remote events. Unlike a local mutation, that must not invalidate the
+    // protocol's freshly updated sync state.
+    let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
+        Arc::clone(&keyhive_protocol),
+        keyhive_change_tx,
+    );
 
     let mut keyhive_handler = BigRepoKeyhiveHandler::new(
         Arc::clone(&keyhive_protocol),
@@ -1685,6 +1724,7 @@ where
         // keeps `KeyhiveSyncDone` from overtaking a preceding delegation event
         // (single FIFO channel).
         let evt_tx = evt_tx.clone();
+        let keyhive_notifier = keyhive_notifier.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
@@ -1700,6 +1740,9 @@ where
                         %peer_id,
                         "runtime2 stopped before keyhive sync-done event"
                     );
+                }
+                if changed {
+                    keyhive_notifier.note_remote_keyhive_changed(peer_id);
                 }
             },
         ));
@@ -1734,10 +1777,6 @@ where
     // ── IO facades ─────────────────────────────────────────────────────────
     // Single funnel for local Keyhive change notifications (cache bust + RPC
     // broadcast). Mutations inside the IO and the public API both call it.
-    let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
-        Arc::clone(&keyhive_protocol),
-        keyhive_change_tx,
-    );
     let native_io = Arc::new(NativeBigRepoIo {
         subduction: Arc::clone(&subduction_handle),
         storage: storage.clone(),
@@ -2098,7 +2137,6 @@ mod tests {
             sed_id,
             h2,
             &h2_parents,
-            b"fragment-payload",
         )
         .await?;
         let fragment_verified = VerifiedMeta::<Fragment>::seal::<Sendable, _>(

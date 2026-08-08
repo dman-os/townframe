@@ -45,7 +45,6 @@ pub async fn cli() -> Res<()> {
     let post_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>>;
     let sealed_pred_key: Option<Vec<u8>>;
 
-
     let doc_id = {
         let kh = alice_kh;
         let doc = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;

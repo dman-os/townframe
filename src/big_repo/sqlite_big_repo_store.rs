@@ -1331,6 +1331,9 @@ impl SqliteBigRepoStore {
 
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
+        if std::env::var("SUBSCRIBE_TRACE").is_ok() {
+            eprintln!("SUBSCRIBE parts={:?} cursors={:?} objects={}", parts, part_cursors, objects.len());
+        }
         let sub = Arc::new(BigRepoSubscription {
             sender: tx.clone(),
             principal: subscriber,
@@ -1434,6 +1437,9 @@ impl SqliteBigRepoStore {
                         }
                     }
                     object_replay_pending = false;
+                }
+                if std::env::var("SUBSCRIBE_TRACE").is_ok() {
+                    eprintln!("REPLAY delivered={} cursor={}->{} raw={}", output.len(), cursor, max_cursor, raw_event_count);
                 }
                 for event in output {
                     if tx.send(event).await.is_err() {
@@ -1969,8 +1975,6 @@ impl SqliteBigRepoStore {
                 .await?;
         Ok(Self::u64_from_db(cursor))
     }
-
-
 
     #[cfg_attr(not(test), expect(dead_code))] // used by sqlite store tests
     pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {

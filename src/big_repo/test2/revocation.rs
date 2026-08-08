@@ -198,8 +198,7 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("write txn failed: {err:?}"))
         })
         .await;
-    let err2 = again
-        .expect_err("write on invalidated handle must fail fast");
+    let err2 = again.expect_err("write on invalidated handle must fail fast");
     assert!(
         format!("{err2:?}").contains("invalidated"),
         "invalidated-handle write must fail fast, got: {err2:?}"
@@ -249,8 +248,7 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("write txn failed: {err:?}"))
         })
         .await;
-    let err3 = write3
-        .expect_err("re-acquired revoked write must still fail");
+    let err3 = write3.expect_err("re-acquired revoked write must still fail");
     assert!(
         format!("{err3:?}").contains("invalidated") || format!("{err3:?}").contains("access"),
         "re-acquired revoked write must fail fast, got: {err3:?}"

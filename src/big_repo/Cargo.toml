@@ -78,5 +78,8 @@ beekem.workspace = true
 tracing.workspace = true
 pretty_assertions = "1.4.1"
 
+[features]
+test-support = []
+
 [dev-dependencies]
 big_sync = { workspace = true, features = ["test-support"] }

@@ -249,7 +249,7 @@ impl DocBlobsIndexRepo {
         if selected_blob_keys.is_empty() {
             return self.delete_doc_branch(doc_id, branch_path).await;
         }
-        let facets = self
+        let Some((facets, _)) = self
             .drawer_repo
             .get_at_branch_heads_with_facets_arc(
                 doc_id,
@@ -258,8 +258,10 @@ impl DocBlobsIndexRepo {
                 Some(selected_blob_keys),
             )
             .await?
-            .map(|(facets, _)| facets)
-            .ok_or_eyre("doc didn't match expectation")?;
+        else {
+            tracing::debug!(%doc_id, %branch_path, "doc heads changed during index update");
+            return self.doc_presence_outcome(doc_id).await;
+        };
 
         let mut blobs = HashMap::<Arc<str>, u64>::new();
         for (_facet_key, facet_raw) in facets {

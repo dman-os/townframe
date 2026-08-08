@@ -685,9 +685,7 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
     Ok(())
 }
 
-pub(crate) async fn finish_clone_init(
-    parts: RepoCtxParts,
-) -> Res<Arc<RepoCtx>> {
+pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
     let init_state = globals::get_init_state(sql).await?;
     let (doc_id_app, doc_id_drawer) = match init_state {
@@ -833,7 +831,6 @@ async fn init_core_docs(
     repo_sql: &SqlCtx,
     authority: &crate::authority::RepoAuthority,
 ) -> Res<(BigDocHandle, BigDocHandle)> {
-    use automerge::transaction::Transactable;
     let app_doc = {
         let bytes = version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
@@ -841,18 +838,16 @@ async fn init_core_docs(
         big_repo
             .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
-            .map_err(|err| eyre::eyre!("{err}"))?
+            .map_err(|err| ferr!("{err}"))?
     };
     let drawer_doc = {
-        let mut doc = automerge::AutoCommit::new();
-        doc.put(automerge::ROOT, "version", "0")?;
-        let bytes = doc.save_nocompress();
+        let bytes = crate::drawer::version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for drawer doc")?;
         big_repo
             .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
-            .map_err(|err| eyre::eyre!("{err}"))?
+            .map_err(|err| ferr!("{err}"))?
     };
     globals::set_init_state(
         repo_sql,

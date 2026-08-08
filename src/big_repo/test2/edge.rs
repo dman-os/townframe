@@ -909,18 +909,37 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tier0_relay_never_creates_doc_worker_during_passive_sync_or_diagnostics() -> crate::Res<()> {
+async fn tier0_relay_never_creates_doc_worker_during_passive_sync_or_diagnostics() -> crate::Res<()>
+{
     utils_rs::testing::setup_tracing_once();
     let topo = Topo::boot_relay(240, 241, 242, "Editor", "Relay", "Reader").await?;
     let doc_id = crate::DocumentId::random();
 
     // Verify relay (index 1) starts with no worker
-    assert!(!topo.topo_node(1).repo.runtime.has_doc_worker(doc_id).await?);
+    assert!(
+        !topo
+            .topo_node(1)
+            .repo
+            .runtime
+            .has_doc_worker(doc_id)
+            .await?
+    );
 
     // Diagnostics on relay must NOT spawn a worker
-    let snapshot = topo.topo_node(1).repo.document_sync_snapshot(doc_id).await?;
+    let snapshot = topo
+        .topo_node(1)
+        .repo
+        .document_sync_snapshot(doc_id)
+        .await?;
     assert_eq!(snapshot.stage, crate::DocumentSyncStage::NotPersisted);
-    assert!(!topo.topo_node(1).repo.runtime.has_doc_worker(doc_id).await?);
+    assert!(
+        !topo
+            .topo_node(1)
+            .repo
+            .runtime
+            .has_doc_worker(doc_id)
+            .await?
+    );
     Ok(())
 }
 

@@ -168,6 +168,7 @@ zstd.workspace = true
 # wasmtime.workspace = true
 
 [dev-dependencies]
+big_repo = { workspace = true, features = ["test-support"] }
 big_sync = { workspace = true, features = ["test-support"] }
 tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }

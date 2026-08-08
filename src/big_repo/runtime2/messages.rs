@@ -14,10 +14,7 @@ type ConnOpenResp = futures::channel::oneshot::Sender<
     eyre::Result<(
         PeerId,
         Arc<std::sync::atomic::AtomicBool>,
-        futures::channel::oneshot::Receiver<(
-            Arc<std::sync::atomic::AtomicBool>,
-            eyre::Result<()>,
-        )>,
+        futures::channel::oneshot::Receiver<(Arc<std::sync::atomic::AtomicBool>, eyre::Result<()>)>,
     )>,
 >;
 
@@ -219,6 +216,7 @@ pub enum Runtime2Cmd {
     /// non-`Unfreeze` commands) once quiescence is reached, until a matching
     /// `Unfreeze`. Tests use this to run assertions against a quiescent
     /// snapshot with nothing able to slip past the barrier.
+    #[cfg_attr(not(test), allow(dead_code))]
     WaitForQuiescence {
         freeze: bool,
         #[educe(Debug(ignore))]
@@ -277,11 +275,7 @@ pub enum Runtime2Evt {
     },
     DocWorkerStopped {
         doc_id: DocumentId,
-    },
-    FatalWorkerError {
-        doc_id: Option<DocumentId>,
-        context: &'static str,
-        error: String,
+        error: Option<String>,
     },
     DocWorkerMaterializationPending {
         doc_id: DocumentId,

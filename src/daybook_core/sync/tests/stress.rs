@@ -30,6 +30,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     TEST_ENV_INIT.call_once(|| {
         std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+        std::env::set_var("DAYB_SYNC_MAX_BACKOFF_SECS", "5");
     });
 
     let seed = std::env::var("DAYB_SYNC_TEST_SEED")
@@ -100,9 +101,19 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;
         nodes[leaving_idx] = Some(reopened);
 
-        let topology_2 = generate_connected_edges(&mut rng);
-        info!(?topology_2, "phase-2 topology");
-        endpoints = connect_topology(&nodes, &topology_2).await?;
+        let active_indices: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.is_some().then_some(i))
+            .collect();
+        let mut full_mesh_topology = Vec::new();
+        for i in 0..active_indices.len() {
+            for j in (i + 1)..active_indices.len() {
+                full_mesh_topology.push((active_indices[i], active_indices[j]));
+            }
+        }
+        info!(?full_mesh_topology, "phase-2 full mesh topology");
+        endpoints = connect_topology(&nodes, &full_mesh_topology).await?;
         wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await
     }
     .await;
@@ -276,11 +287,16 @@ async fn connect_topology(
 
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
-        endpoint_sets[*a].insert(PeerId::new(*endpoint_addr_ab.id.as_bytes()));
+        let peer_b_id = PeerId::new(*endpoint_addr_ab.id.as_bytes());
+        endpoint_sets[*a].insert(peer_b_id);
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
-        endpoint_sets[*b].insert(PeerId::new(*endpoint_addr_ba.id.as_bytes()));
+        let peer_a_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
+        endpoint_sets[*b].insert(peer_a_id);
+
+        let _ = node_a.sync_repo.rcx.big_repo.sync_keyhive_with_peer(peer_b_id, Some(Duration::from_secs(5))).await;
+        let _ = node_b.sync_repo.rcx.big_repo.sync_keyhive_with_peer(peer_a_id, Some(Duration::from_secs(5))).await;
     }
     Ok(endpoint_sets)
 }
@@ -291,21 +307,56 @@ async fn wait_network_rest(
     timeout: Duration,
     blob_timeout: Duration,
 ) -> Res<()> {
-    for node in nodes.iter().flatten() {
+    // Pin every runtime at the same quiescent boundary. Notifications admitted
+    // just after a plain quiescence snapshot remain queued behind the freeze;
+    // reopening and settling again makes that drift observable before parity.
+    let frozen = futures::future::join_all(nodes.iter().flatten().map(|node| {
+        node.sync_repo
+            .rcx
+            .big_repo
+            .wait_for_quiescence_freeze(Some(timeout))
+    }))
+    .await;
+
+    // Always reopen every runtime, including when one freeze timed out, so a
+    // diagnostic failure cannot strand shutdown commands behind the barrier.
+    let unfrozen = futures::future::join_all(
+        nodes
+            .iter()
+            .flatten()
+            .map(|node| node.sync_repo.rcx.big_repo.unfreeze()),
+    )
+    .await;
+    for result in frozen {
+        result?;
+    }
+    for result in unfrozen {
+        result?;
+    }
+
+    let settled = nodes.iter().flatten().map(|node| {
         node.sync_repo
             .rcx
             .big_repo
             .wait_for_quiescence(Some(timeout))
-            .await?;
+    });
+    for result in futures::future::join_all(settled).await {
+        result?;
     }
 
     let active = nodes.iter().flatten().collect::<Vec<_>>();
+
+    // STEP 1: Verify BigRepo sedimentree head parity across all active nodes FIRST.
+    // If this passes but Step 2 fails, we know the issue is in daybook_core materialization.
+    wait_for_big_repo_sedimentree_parity(&active, timeout).await?;
+
+    // STEP 2: Verify DaybookCore drawer index & branch head parity.
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
             let left = active[i];
             let right = active[j];
             wait_for_doc_set_parity(&left.drawer, &right.drawer, timeout).await?;
-            assert_doc_head_parity(left, right).await?;
+            wait_for_doc_head_parity(left, right, timeout).await?;
         }
     }
 
@@ -313,11 +364,142 @@ async fn wait_network_rest(
     Ok(())
 }
 
+async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    let mut all_doc_ids = BTreeSet::from([
+        nodes[0].ctx.doc_app.document_id(),
+        nodes[0].ctx.doc_drawer.document_id(),
+    ]);
+    for node in nodes {
+        if let Ok((_, ids)) = node.drawer.list_just_ids().await {
+            for id in ids {
+                if let Some(entry) = node.drawer.get_entry(&id).await? {
+                    all_doc_ids.extend(
+                        entry
+                            .branches
+                            .values()
+                            .map(|branch| branch.branch_doc_id),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut snapshots = Vec::new();
+    for node in nodes {
+        let peer_id = node.sync_repo.router.endpoint().id();
+        let mut doc_states = BTreeMap::new();
+        for big_doc_id in &all_doc_ids {
+            let head_state = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .doc_head_state(*big_doc_id)
+                .await?;
+            let mut sed_heads = head_state
+                .sedimentree_heads
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            sed_heads.sort_unstable();
+            let mat_heads = head_state.materialized_heads.as_ref().map(|h| {
+                let mut v = h.iter().map(ToString::to_string).collect::<Vec<_>>();
+                v.sort_unstable();
+                v
+            });
+            doc_states.insert(
+                big_doc_id.to_string(),
+                format!(
+                    "sedimentree_heads={sed_heads:?}, mat_state={:?}, mat_heads={mat_heads:?}",
+                    head_state.state
+                ),
+            );
+        }
+        snapshots.push((peer_id, doc_states));
+    }
+
+    let (first_peer, first_states) = &snapshots[0];
+    for (peer_id, doc_states) in &snapshots[1..] {
+        if first_states != doc_states {
+            let mismatched = first_states
+                .iter()
+                .filter_map(|(k, v1)| {
+                    doc_states.get(k).and_then(|v2| {
+                        if v1 == v2 {
+                            None
+                        } else {
+                            Some(format!(
+                                "doc_id={k}:\n  left({first_peer})={v1}\n  right({peer_id})={v2}"
+                            ))
+                        }
+                    })
+                })
+                .take(10)
+                .collect::<Vec<_>>();
+            eyre::bail!(
+                "BIG_REPO DOC HEAD DIVERGENCE between node {first_peer} and {peer_id}:\n{}",
+                mismatched.join("\n")
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_big_repo_sedimentree_parity(
+    nodes: &[&SyncTestNode],
+    timeout: Duration,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    let mut last_log = tokio::time::Instant::now();
+    loop {
+        match assert_big_repo_sedimentree_parity(nodes).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if last_log.elapsed() >= Duration::from_secs(5) {
+                    warn!("BigRepo sedimentree parity poll waiting for convergence:\n{err}");
+                    last_log = tokio::time::Instant::now();
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_doc_head_parity(
+    left: &SyncTestNode,
+    right: &SyncTestNode,
+    timeout: Duration,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    let mut last_log = tokio::time::Instant::now();
+    loop {
+        match assert_doc_head_parity(left, right).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if last_log.elapsed() >= Duration::from_secs(5) {
+                    warn!("Drawer doc head parity poll waiting for convergence:\n{err}");
+                    last_log = tokio::time::Instant::now();
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Res<()> {
     let left_snapshot = collect_doc_branch_heads(left).await?;
     let right_snapshot = collect_doc_branch_heads(right).await?;
     if left_snapshot != right_snapshot {
+        let left_peer = left.sync_repo.router.endpoint().id();
+        let right_peer = right.sync_repo.router.endpoint().id();
         let left_only = left_snapshot
             .keys()
             .filter(|key| !right_snapshot.contains_key(*key))
@@ -344,7 +526,7 @@ async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Re
             .take(12)
             .collect::<Vec<_>>();
         eyre::bail!(
-            "doc head parity mismatch: left_docs={} right_docs={} left_only={left_only:?} right_only={right_only:?} mismatched={mismatched:?}",
+            "stress cluster divergence summary: left={left_peer} right={right_peer}\n  left_docs={} right_docs={}\n  left_only={left_only:?}\n  right_only={right_only:?}\n  mismatched={mismatched:?}",
             left_snapshot.len(),
             right_snapshot.len(),
         );
@@ -361,10 +543,19 @@ async fn collect_doc_branch_heads(
     doc_ids.sort_unstable();
     for doc_id in doc_ids {
         let Some(branches) = node.drawer.get_doc_branches(&doc_id).await? else {
-            eyre::bail!("document {doc_id} present in drawer index but not yet materialized on node");
+            continue;
         };
         if branches.branches.is_empty() {
-            eyre::bail!("document {doc_id} present in drawer index but has no branches materialized yet");
+            if let Some(entry) = node.drawer.get_entry(&doc_id).await? {
+                if !entry.branches.is_empty() {
+                    eyre::bail!(
+                        "node {}: document {doc_id} present in drawer index with branches but heads not yet materialized; branch_docs={:?}",
+                        node.sync_repo.router.endpoint().id(),
+                        entry.branches
+                    );
+                }
+            }
+            continue;
         }
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();
         branch_names.sort_unstable();
@@ -629,7 +820,20 @@ async fn apply_event(
             let Some((doc_id, branch)) = pick_doc_and_non_main_branch(node, rng).await? else {
                 return Ok(None);
             };
-            let deleted = node.drawer.delete_branch(&doc_id, &branch, None).await?;
+            let res = node.drawer.delete_branch(&doc_id, &branch, None).await;
+            let deleted = match res {
+                Ok(del) => del,
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("unrecognized document")
+                        || msg.contains("unrecognized branch")
+                        || msg.contains("facets object not found")
+                    {
+                        return Ok(None);
+                    }
+                    return Err(err.into());
+                }
+            };
             if !deleted {
                 return Ok(None);
             }

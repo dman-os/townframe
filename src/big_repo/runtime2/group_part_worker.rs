@@ -9,6 +9,8 @@ use std::sync::Arc;
 const EVENT_BATCH_SIZE: u32 = 64;
 const DOC_BATCH_SIZE: usize = 64;
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+const GENERATION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(10);
+const GENERATION_DEBOUNCE_MAX_EXTENSIONS: usize = 4;
 
 /// Crash-recoverable maintenance for Keyhive-derived policy and partitions.
 ///
@@ -55,6 +57,7 @@ impl GroupPartWorker {
                 .state_generation
                 .load(std::sync::atomic::Ordering::Relaxed);
             if generation > self.last_acked_generation {
+                let generation = self.debounce_generation(generation).await;
                 if !self.rebuild_for_generation(generation, cursor).await? {
                     return Ok(());
                 }
@@ -185,6 +188,26 @@ impl GroupPartWorker {
                 }
             }
         }
+    }
+
+    /// Collapse a burst of Keyhive state-generation bumps into one rebuild.
+    ///
+    /// A quiet interval ends the debounce early. The extension cap guarantees
+    /// that a continuous stream cannot postpone policy/partition projection
+    /// indefinitely; changes arriving during the rebuild are picked up by the
+    /// next loop.
+    async fn debounce_generation(&self, mut generation: u64) -> u64 {
+        for _ in 0..GENERATION_DEBOUNCE_MAX_EXTENSIONS {
+            self.timer.sleep(GENERATION_DEBOUNCE).await;
+            let latest = self
+                .state_generation
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if latest == generation {
+                break;
+            }
+            generation = latest;
+        }
+        generation
     }
 
     /// Full rebuild driven by a Keyhive state-generation advance. The event

@@ -177,7 +177,21 @@ pub(crate) async fn grant_docs_admin(
     group: &BigKeyhiveGroup,
     doc_ids: impl IntoIterator<Item = DocumentId>,
 ) -> Res<()> {
+    use big_repo::keyhive_core::{access::Access, principal::identifier::Identifier};
+    let group_ident = Identifier::from(group.id());
     for doc_id in doc_ids {
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+            .map_err(|err| eyre::eyre!("invalid doc_id verifying key: {err}"))?;
+        let doc_ident = Identifier::from(vk);
+        if matches!(
+            big_repo
+                .keyhive()
+                .agent_access_on(&group_ident, doc_ident)
+                .await,
+            Some(Access::Admin)
+        ) {
+            continue;
+        }
         big_repo
             .add_admin_member_to_doc(doc_id, group.clone())
             .await?;

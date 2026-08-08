@@ -1,5 +1,22 @@
 use crate::interlude::*;
 
+pub mod version_updates {
+    use crate::interlude::*;
+    use automerge::transaction::Transactable;
+    use automerge::ROOT;
+
+    pub fn version_latest() -> Res<Vec<u8>> {
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.drawer")?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
+        Ok(doc.save_nocompress())
+    }
+}
+
 #[cfg(test)]
 use super::BranchStateRow;
 use super::{BranchKind, BranchRefRow, DrawerRepo};
@@ -253,8 +270,9 @@ impl DrawerRepo {
                 tracing::warn!(
                     branch_name = %branch_name,
                     branch_doc_id = %branch_ref.branch_doc_id,
-                    "missing branch heads for drawer branch ref"
+                    "missing branch heads for drawer branch ref; requesting doc handle from big_repo"
                 );
+                let _ = self.big_repo.get_doc(&branch_ref.branch_doc_id).await;
                 continue;
             };
             branches.insert(branch_name, latest_heads);

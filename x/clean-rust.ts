@@ -3,24 +3,30 @@
 import { $ } from "./utils.ts";
 
 type CargoMetadata = {
-	packages: CargoPackage[];
-	workspace_members: string[];
+  packages: CargoPackage[];
+  workspace_members: string[];
 };
 
 type CargoPackage = {
-	id: string;
-	name: string;
+  id: string;
+  name: string;
 };
 
-const metadata = await $`cargo metadata --format-version 1 --no-deps`.json();
+const metadata =
+  (await $`cargo metadata --format-version 1 --no-deps`.json()) as {
+    workspace_members: string[];
+    packages: { id: string; name: string }[];
+  };
 
 const workspaceMemberIds = new Set(metadata.workspace_members);
 const workspacePackages = metadata.packages
-	.filter((pkg) => workspaceMemberIds.has(pkg.id))
-	.map((pkg) => pkg.name);
+  .filter((pkg) => workspaceMemberIds.has(pkg.id))
+  .map((pkg) => pkg.name);
 
 if (workspacePackages.length === 0) {
-	throw new Error("cargo metadata returned no workspace packages");
+  throw new Error("cargo metadata returned no workspace packages");
 }
 
-await $.raw`cargo clean ${workspacePackages.map((name) => `-p ${name}`).join(" ")}`;
+await $.raw`cargo clean ${
+  workspacePackages.map((name) => `-p ${name}`).join(" ")
+}`;

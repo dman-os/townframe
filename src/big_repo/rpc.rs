@@ -221,21 +221,37 @@ async fn handle_rpc_message(
                             _ = cancel.cancelled() => break,
                             event = changes.recv() => {
                                 match event {
-                                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    Ok(source_peer_id) => {
+                                        let mut should_notify = source_peer_id != Some(peer_id);
                                         // Collapse bursts: drain everything immediately
                                         // available (lag counts as "more happened") into
                                         // one notification, so a burst of local mutations
                                         // costs peers a single pull.
                                         loop {
                                             match changes.try_recv() {
-                                                Ok(()) => {}
-                                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                                                Ok(source_peer_id) => {
+                                                    should_notify |= source_peer_id != Some(peer_id);
+                                                }
+                                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                                                    should_notify = true;
+                                                }
                                                 Err(
                                                     tokio::sync::broadcast::error::TryRecvError::Empty
                                                     | tokio::sync::broadcast::error::TryRecvError::Closed,
                                                 ) => break,
                                             }
                                         }
+                                        if should_notify && tx
+                                            .send(KeyhiveChangedRpcEvent { initial: false })
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        // We no longer know which source(s) were skipped, so
+                                        // conservatively wake this subscriber once.
                                         if tx
                                             .send(KeyhiveChangedRpcEvent { initial: false })
                                             .await
@@ -283,7 +299,7 @@ impl IrohBigRepoRpcClient {
 mod tests {
     use super::*;
     use crate::{Config, StorageConfig};
-    
+
     use iroh::protocol::Router;
     use std::net::Ipv4Addr;
     use tokio::time::timeout;

@@ -204,10 +204,6 @@ pub(crate) struct StagedAutomergeIngest {
     pub(crate) blobs: Vec<Blob>,
     pub(crate) fragment_entries: Vec<FragmentEntry>,
     pub(crate) loose_entries: Vec<LooseEntry>,
-    _change_count: usize,
-    _covered_count: usize,
-    _loose_count: usize,
-    _fragment_count: usize,
 }
 
 /// Stage transient plaintext Automerge bundle bytes and provisional
@@ -257,18 +253,10 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
         loose_entries.push(LooseEntry { head, parents });
     }
 
-    let covered_count = covered.len();
-    let fragment_count = fragment_entries.len();
-    let loose_count = loose_entries.len();
-
     StagedAutomergeIngest {
         blobs,
         fragment_entries,
         loose_entries,
-        _change_count: doc.get_changes_meta(&[]).len(),
-        _covered_count: covered_count,
-        _loose_count: loose_count,
-        _fragment_count: fragment_count,
     }
 }
 
@@ -540,6 +528,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     let key_tag = |key: &SymmetricKey| {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(b"townframe_key_tag_domain_spec_v1");
         key.as_slice().hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     };
@@ -614,7 +603,6 @@ pub(crate) async fn encrypt_fragment_blob<S>(
     sedimentree_id: SedimentreeId,
     head: CommitId,
     boundary: &BTreeSet<CommitId>,
-    _fragment_bytes: &[u8],
 ) -> Res<Blob>
 where
     S: BigRepoSubductionStorage,

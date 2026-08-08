@@ -582,6 +582,10 @@ structstruck::strike! {
 
 // public surface
 impl BigSyncMachine {
+    pub fn set_max_task_backoff(&mut self, max_backoff: Duration) {
+        self.tasks.max_backoff = max_backoff;
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn task_counts(&self) -> TaskCounts {
         self.tasks.task_counts()
@@ -764,12 +768,19 @@ impl BigSyncMachine {
         let mut pending_parts = Set::new();
         let mut pending_tasks = Set::new();
         for &part_id in old_part_ids.intersection(&parts) {
-            if let Some(PeerPartState {
-                strat: PeerPartStrategy::Pending(task_id),
-            }) = peer_state.parts.remove(&part_id)
-            {
-                pending_parts.insert(part_id);
-                pending_tasks.insert(task_id);
+            if matches!(
+                peer_state.parts.get(&part_id),
+                Some(PeerPartState {
+                    strat: PeerPartStrategy::Pending(_)
+                })
+            ) {
+                if let Some(PeerPartState {
+                    strat: PeerPartStrategy::Pending(task_id),
+                }) = peer_state.parts.remove(&part_id)
+                {
+                    pending_parts.insert(part_id);
+                    pending_tasks.insert(task_id);
+                }
             }
         }
         for task_id in pending_tasks {
@@ -831,7 +842,6 @@ impl BigSyncMachine {
                 .expect(ERROR_UNRECONIZED);
         }
         peer_state.objects = objects;
-        self.stat_machine.remove_peer(peer_id);
         self.stat_machine.set_peer(peer_id, parts.iter().copied());
         for &part_id in &decision_parts {
             self.stat_machine
@@ -1121,20 +1131,18 @@ impl BigSyncMachine {
 impl BigSyncMachine {
     fn refresh_peer_replay_worker(&mut self, peer_id: PeerId, force: bool) {
         if force {
-            if let Some(old_state) = self
-                .peers
-                .get_mut(&peer_id)
-                .expect(ERROR_UNRECONIZED)
-                .replay_worker
-                .take()
-            {
-                let _state = self
-                    .tasks
-                    .stop_task(old_state.task_id)
-                    .expect(ERROR_UNRECONIZED);
+            if let Some(peer_state) = self.peers.get_mut(&peer_id) {
+                if let Some(old_state) = peer_state.replay_worker.take() {
+                    let _state = self
+                        .tasks
+                        .stop_task(old_state.task_id)
+                        .expect(ERROR_UNRECONIZED);
+                }
             }
         }
-        let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
         let replay_req_parts: Set<_> = peer_state
             .parts
             .iter()
@@ -1896,11 +1904,8 @@ mod tests {
     use super::*;
 
     /// A waiter registered for a peer+part must NOT remain stranded after that
-    /// peer is removed.  Currently the cleanup in `SyncStatMachine::remove_peer`
-    /// is commented out (see FIXME on line 380), so this test is **red**.
-    ///
-    /// Expected post-fix behavior: the waiter is satisfied / removed when its
-    /// last remaining peer is removed.
+    /// peer is removed. `SyncStatMachine::remove_peer` cleans up the peer and
+    /// satisfies waiters when their last remaining peer is removed.
     #[test]
     fn full_sync_waiter_does_not_strand_on_peer_removal() {
         let mut stat = SyncStatMachine::default();

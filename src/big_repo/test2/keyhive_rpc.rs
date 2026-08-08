@@ -14,7 +14,7 @@
 //! the suite gates every Keyhive assertion behind an explicit sync call, so a
 //! missing notification is invisible there; this module is the exception.
 
-use super::harness::{fixtures, Pair};
+use super::harness::{fixtures, Pair, Topo};
 use crate::Res;
 use automerge::transaction::Transactable;
 use std::time::Duration;
@@ -106,6 +106,64 @@ async fn create_doc_notification_drives_peer_keyhive_convergence() -> Res<()> {
              syncs — cluster Keyhive convergence is broken"
         )
     })?;
+
+    drop(owner_doc);
+    Ok(())
+}
+
+/// A peer that pulls a remote Keyhive change must advertise that change to its
+/// other peers. Otherwise notification-driven convergence only works across a
+/// single edge and connected non-mesh topologies remain permanently stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn pulled_keyhive_change_is_forwarded_across_line_topology() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let topo = Topo::boot_line(246, 247, 248, "Creator", "Bridge", "Coparent").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "multi-hop-converge"))
+        .map_err(|err| crate::ferr!("failed creating multi-hop doc: {err:?}"))?;
+    let owner_doc = topo
+        .topo_node(0)
+        .repo
+        .create_doc_with_parents(initial, vec![fixtures::public_agent().into()])
+        .await?;
+    let doc_id = owner_doc.document_id();
+
+    // No explicit sync after document creation. A's notification makes B pull;
+    // B must then forward the change hint so C pulls from B.
+    timeout(Duration::from_secs(15), async {
+        loop {
+            if super::harness::keyhive::assert_document_snapshot_equal(
+                topo.topo_node(0),
+                topo.topo_node(2),
+                doc_id,
+            )
+            .await
+            .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        crate::ferr!(
+            "far coparent Keyhive never converged across the notification-driven line topology"
+        )
+    })?;
+
+    // Forwarding is deliberately coarse, but it must still terminate. In
+    // particular, a remotely applied change must not invalidate the
+    // receiver's freshly advanced Keyhive syncpoint and echo forever around
+    // the connected component.
+    for node_index in 0..3 {
+        topo.topo_node(node_index)
+            .repo
+            .wait_for_quiescence(Some(Duration::from_secs(5)))
+            .await?;
+    }
 
     drop(owner_doc);
     Ok(())

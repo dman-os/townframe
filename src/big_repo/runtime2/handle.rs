@@ -58,7 +58,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
-
     // ── doc lifecycle ──────────────────────────────────────────────────────
 
     /// Create a new document with `initial_content` and the given keyhive
@@ -369,7 +368,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let timeout = utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
+        let timeout =
+            utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
         let deadline = std::time::Instant::now() + timeout;
         match self.race_timeout(rx, timeout).await {
             Ok(Ok(result)) => {
@@ -410,7 +410,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let timeout = utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
+        let timeout =
+            utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
         match self.race_timeout(rx, timeout).await {
             Ok(Ok(result)) => result.wrap_err("keyhive reconciliation failed"),
             Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
@@ -418,6 +419,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence(
         &self,
         timeout: Option<std::time::Duration>,
@@ -428,6 +430,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Like [`Runtime2Handle::wait_for_quiescence`], but freezes the hub once
     /// quiescence is reached: no further events are processed and all
     /// non-`Unfreeze` commands are held until [`Runtime2Handle::unfreeze`].
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence_freeze(
         &self,
         timeout: Option<std::time::Duration>,

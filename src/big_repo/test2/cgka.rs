@@ -23,10 +23,128 @@
 //! | `group_add_checkpoint`                        | BigRepo emits CGKA membership plus a history checkpoint |
 //! |                                               | for a group member added after document creation.       |
 
-use super::harness::{fixtures, keyhive as kh_snap, Pair};
+use super::harness::{fixtures, keyhive as kh_snap, Pair, Topo};
 use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
+
+/// A membership rotation and a write from a disconnected old-epoch member are
+/// concurrent siblings. Once the writer reconnects, current readers must gain
+/// a decryptable causal entrypoint covering that offline head; converging the
+/// Keyhive event graph and sedimentree alone is insufficient.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let topo = Topo::boot_triangle(238, 239, 240, "OfflineWriter", "Admin", "NewReader").await?;
+    let writer = topo.topo_node(0);
+    let admin = topo.topo_node(1);
+    let reader = topo.topo_node(2);
+
+    let admin_agent = fixtures::agent_of(&writer.repo, admin).await?;
+    let reader_agent = fixtures::agent_of(&admin.repo, reader).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "base"))
+        .map_err(|err| crate::ferr!("failed creating base document: {err:?}"))?;
+    let writer_doc = writer.repo.create_doc(initial).await?;
+    let doc_id = writer_doc.document_id();
+
+    // Admin belongs to the epoch the writer will retain while offline.
+    writer
+        .repo
+        .grant_doc_access(doc_id, admin_agent, Access::Admin)
+        .await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+    let (_writer_doc, admin_doc) = fixtures::sync_doc_bidirectional(
+        topo.topo_conn(0, 1),
+        topo.topo_conn(1, 0),
+        &writer.repo,
+        &admin.repo,
+        doc_id,
+    )
+    .await?;
+
+    // Isolate the writer completely. Admin then adds Reader and emits the
+    // normal history checkpoint under the new epoch.
+    writer.disconnect_peer(admin.peer_id()).await?;
+    admin.disconnect_peer(writer.peer_id()).await?;
+    writer.disconnect_peer(reader.peer_id()).await?;
+    reader.disconnect_peer(writer.peer_id()).await?;
+
+    admin
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    topo.topo_conn(2, 1).sync_keyhive_with_peer(None).await?;
+    let (_admin_doc, reader_doc_before_offline_write) = fixtures::sync_doc_bidirectional(
+        topo.topo_conn(1, 2),
+        topo.topo_conn(2, 1),
+        &admin.repo,
+        &reader.repo,
+        doc_id,
+    )
+    .await?;
+
+    // This commit uses the writer's old epoch. It is concurrent with Admin's
+    // reader-add checkpoint rather than an ancestor of that checkpoint.
+    writer_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "offline", "old-epoch-write"))
+                .map_err(|err| crate::ferr!("failed offline write: {err:?}"))
+        })
+        .await??;
+
+    // Reconnect Writer↔Admin, converge Keyhive first, then propagate the
+    // offline payload through Admin to Reader.
+    let writer_to_admin = writer.connect(admin).await?;
+    let admin_to_writer = admin.accepted_connection().await;
+    writer_to_admin.sync_keyhive_with_peer(None).await?;
+    admin_to_writer.sync_keyhive_with_peer(None).await?;
+    let (_writer_doc, admin_doc_after_reconnect) = fixtures::sync_doc_bidirectional(
+        &writer_to_admin,
+        &admin_to_writer,
+        &writer.repo,
+        &admin.repo,
+        doc_id,
+    )
+    .await?;
+
+    // Once an existing member has both concurrent heads, a current-epoch
+    // successor can carry both application keys across the membership boundary.
+    admin_doc_after_reconnect
+        .with_document(|doc| {
+            doc.empty_commit(automerge::transaction::CommitOptions::default());
+        })
+        .await?;
+
+    let (_admin_doc, reader_doc) = fixtures::sync_doc_bidirectional(
+        topo.topo_conn(1, 2),
+        topo.topo_conn(2, 1),
+        &admin.repo,
+        &reader.repo,
+        doc_id,
+    )
+    .await?;
+    let offline = reader_doc
+        .with_document_read(|doc| {
+            let Ok(Some((automerge::Value::Scalar(value), _))) =
+                doc.get(automerge::ROOT, "offline")
+            else {
+                return None;
+            };
+            match value.as_ref() {
+                ScalarValue::Str(value) => Some(value.to_string()),
+                _ => None,
+            }
+        })
+        .await;
+    assert_eq!(offline.as_deref(), Some("old-epoch-write"));
+
+    drop(admin_doc);
+    drop(reader_doc_before_offline_write);
+    Ok(())
+}
 
 // ─── Immediate write after parented document creation ──────────────────────
 
@@ -245,7 +363,10 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         .await
         .ok_or_else(|| crate::ferr!("clone is missing core Keyhive document"))?;
     remote_keyhive.force_pcs_update(remote_doc).await?;
-    pair.right().repo.wait_for_keyhive_reconciliation(None).await?;
+    pair.right()
+        .repo
+        .wait_for_keyhive_reconciliation(None)
+        .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
     core_handle

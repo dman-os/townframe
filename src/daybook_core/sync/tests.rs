@@ -1187,4 +1187,3 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
     blobs_repo.shutdown().await?;
     Ok(())
 }
-

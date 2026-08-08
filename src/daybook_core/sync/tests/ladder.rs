@@ -985,7 +985,8 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             )
             .await?;
 
-        wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60)).await?;
+        wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60))
+            .await?;
 
         let branch = BranchPathBuf::from("main");
         let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(

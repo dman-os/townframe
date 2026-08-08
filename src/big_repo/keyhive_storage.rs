@@ -74,7 +74,11 @@ impl FsKeyhiveStorage {
             std::process::id()
         ));
         let dest = self.root.join(PREKEY_SECRETS_FILE);
-        tokio::fs::write(&tmp, bytes).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&bytes).await?;
+        file.sync_all().await?;
+        drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -109,7 +113,11 @@ impl FsKeyhiveStorage {
             std::process::id()
         ));
 
-        tokio::fs::write(&tmp, data).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
             Ok(()) => Ok(()),
             Err(err) => {

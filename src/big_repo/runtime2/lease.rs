@@ -148,9 +148,8 @@ impl TrackedWorkGuard {
 impl Drop for TrackedWorkGuard {
     fn drop(&mut self) {
         if let Some(evt_tx) = self.evt_tx.take() {
-            let _ = evt_tx.try_send(crate::runtime2::Runtime2Evt::TrackedWorkDone {
-                kind: self.kind,
-            });
+            let _ =
+                evt_tx.try_send(crate::runtime2::Runtime2Evt::TrackedWorkDone { kind: self.kind });
         }
     }
 }

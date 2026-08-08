@@ -1413,9 +1413,10 @@ impl HostPartStore for SqlitePartStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .unwrap();
-        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
+        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.core.scope_id)
             .bind(&obj_blob)
+            .bind(Self::peer_blob(member))
             .execute(&mut *tx)
             .await
             .unwrap();

@@ -19,6 +19,7 @@ mod tests;
 pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use meta::version_updates;
 
 use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
 use cache::FacetCacheKey;
@@ -240,9 +241,6 @@ impl DrawerRepo {
                     }),
                 )
                 .await?;
-            self.big_repo
-                .wait_for_quiescence(Some(std::time::Duration::from_secs(30)))
-                .await?;
         }
         Ok(())
     }
@@ -253,11 +251,13 @@ impl DrawerRepo {
         branch_doc_id: DocumentId,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
-            self.big_repo
-                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
+            let part_id = self.replicated_partition_id();
+            let obj_id = big_sync_core::ObjId::new(*branch_doc_id.as_bytes());
+            self.partition_store
+                .remove_obj_from_part(obj_id, part_id)
                 .await?;
             self.big_repo
-                .wait_for_quiescence(Some(std::time::Duration::from_secs(30)))
+                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
                 .await?;
         }
         Ok(())

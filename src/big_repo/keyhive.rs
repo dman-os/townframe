@@ -701,10 +701,14 @@ async fn transitive_members_short_locked(
     // Capture the root's direct members under a short lock, then walk.
     let root_members = root.members().await;
     for member_id in root_members.keys() {
-        let dlg = root
-            .get_capability(member_id)
-            .await
-            .expect("members have capabilities by definition");
+        let Some(dlg) = root.get_capability(member_id).await else {
+            // Revoked concurrently between the members() snapshot and this
+            // capability lookup: the member is no longer part of the group.
+            // Skip rather than panic — keyhive's own walk never sees this
+            // because it holds the group lock for the whole traversal, but
+            // our short-locked walk deliberately drops it between awaits.
+            continue;
+        };
         enqueue_member(
             dlg.payload.delegate().clone(),
             dlg.payload.can(),
@@ -720,14 +724,15 @@ async fn transitive_members_short_locked(
         let access = explored.access;
         let members = membered.members().await;
         for (mem_id, dlgs) in members.iter() {
-            let dlg = membered
-                .get_capability(mem_id)
-                .await
-                .expect("members have capabilities by definition");
+            let Some(dlg) = membered.get_capability(mem_id).await else {
+                // Same concurrent-revocation race as the root loop above.
+                continue;
+            };
             let member_access = access.min(dlg.payload.can());
-            if caps
-                .get(mem_id)
-                .is_none_or(|(_, existing_access)| *existing_access < member_access)
+            if mem_id != &root_id
+                && caps
+                    .get(mem_id)
+                    .is_none_or(|(_, existing_access)| *existing_access < member_access)
             {
                 caps.insert(*mem_id, (dlg.payload.delegate().clone(), member_access));
             }

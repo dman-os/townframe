@@ -226,7 +226,9 @@ impl BigRepoStressFixture {
             .keyhive()
             .get_agent_by_peer_id(&keyhive_peer)
             .await?
-            .ok_or_else(|| crate::ferr!("agent {target_peer} not available on {}", node.peer_id()))?;
+            .ok_or_else(|| {
+                crate::ferr!("agent {target_peer} not available on {}", node.peer_id())
+            })?;
         node.repo.revoke_doc_access(doc_id, agent).await?;
         Ok(())
     }
@@ -585,7 +587,9 @@ impl StressFixture for BigRepoStressFixture {
         // can participate in settlement.
         for left_index in 0..nodes.len() {
             for right_index in (left_index + 1)..nodes.len() {
-                let _ = self.connect_pair(nodes[left_index], nodes[right_index]).await;
+                let _ = self
+                    .connect_pair(nodes[left_index], nodes[right_index])
+                    .await;
             }
         }
 
@@ -597,7 +601,9 @@ impl StressFixture for BigRepoStressFixture {
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
             for left_index in 0..nodes.len() {
                 for right_index in (left_index + 1)..nodes.len() {
-                    let _ = self.connect_pair(nodes[left_index], nodes[right_index]).await;
+                    let _ = self
+                        .connect_pair(nodes[left_index], nodes[right_index])
+                        .await;
                 }
             }
 

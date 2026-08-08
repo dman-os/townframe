@@ -110,8 +110,8 @@ impl TaskCounts {
 }
 
 structstruck::strike! {
-    #[derive(Default)]
     pub struct Tasks {
+        pub max_backoff: Duration,
         next_id: TaskId,
         all: Map<TaskId, pub struct TaskState {
             pub retry: Retry,
@@ -120,6 +120,20 @@ structstruck::strike! {
         sync_spawn_queue: Vec<SyncTask>,
         machine_spawn_queue: Vec<MachineTask>,
         stop_queue: Set<TaskId>,
+    }
+}
+
+impl Default for Tasks {
+    fn default() -> Self {
+        Self {
+            max_backoff: Duration::from_mins(1),
+            next_id: Default::default(),
+            all: Default::default(),
+            pending: Default::default(),
+            sync_spawn_queue: Default::default(),
+            machine_spawn_queue: Default::default(),
+            stop_queue: Default::default(),
+        }
     }
 }
 
@@ -178,15 +192,19 @@ impl Tasks {
         prev_retry: Retry,
         min_delay: Duration,
     ) -> TaskId {
-        const MAX_BACKOFF: Duration = Duration::from_mins(10);
+        let max_backoff = if self.max_backoff.is_zero() {
+            Duration::from_mins(1)
+        } else {
+            self.max_backoff
+        };
         let backoff = if prev_retry.backoff.is_zero() {
-            min_delay.min(MAX_BACKOFF)
+            min_delay.min(max_backoff)
         } else {
             prev_retry
                 .backoff
                 .saturating_mul(2)
                 .max(min_delay)
-                .min(MAX_BACKOFF)
+                .min(max_backoff)
         };
         let now = std::time::Instant::now();
         let retry = Retry {
