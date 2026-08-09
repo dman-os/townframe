@@ -268,6 +268,63 @@ pub(crate) enum BigRepoCiphertextKind {
     LooseCommit,
 }
 
+const CAUSAL_CHECKPOINT_MAGIC: &[u8] = b"townframe/causal-checkpoint/v1\0";
+const CAUSAL_CHECKPOINT_ID_PREFIX: &[u8; 8] = b"TFCASL01";
+
+/// Key-only node in the Sedimentree encryption DAG. Its plaintext is consumed
+/// by BigRepo and never passed to Automerge.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CausalCheckpoint {
+    pub(crate) logical_id: [u8; 32],
+    pub(crate) epoch: [u8; 32],
+    pub(crate) covered_frontier: BTreeSet<CommitId>,
+}
+
+impl CausalCheckpoint {
+    pub(crate) fn new(epoch: [u8; 32], covered_frontier: BTreeSet<CommitId>) -> Self {
+        let mut bytes = b"townframe/causal-checkpoint/logical/v2".to_vec();
+        bytes.extend_from_slice(&epoch);
+        for head in &covered_frontier {
+            bytes.extend_from_slice(head.as_bytes());
+        }
+        Self {
+            logical_id: *blake3::hash(&bytes).as_bytes(),
+            epoch,
+            covered_frontier,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Res<Vec<u8>> {
+        let mut encoded = CAUSAL_CHECKPOINT_MAGIC.to_vec();
+        encoded.extend(bincode::serialize(self).wrap_err("encode causal checkpoint")?);
+        Ok(encoded)
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Res<Option<Self>> {
+        let Some(payload) = bytes.strip_prefix(CAUSAL_CHECKPOINT_MAGIC) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            bincode::deserialize(payload).wrap_err("decode causal checkpoint")?,
+        ))
+    }
+}
+
+/// Derive a stable physical content reference for one logical checkpoint and
+/// PCS epoch. Rejection sampling keeps checkpoints at Sedimentree depth zero,
+/// so storing one can never request an Automerge fragment.
+pub(crate) fn causal_checkpoint_id(checkpoint: &CausalCheckpoint) -> CommitId {
+    let mut bytes = b"townframe/causal-checkpoint/physical/v1".to_vec();
+    bytes.extend_from_slice(&checkpoint.logical_id);
+    let mut candidate = *blake3::hash(&bytes).as_bytes();
+    candidate[..CAUSAL_CHECKPOINT_ID_PREFIX.len()].copy_from_slice(CAUSAL_CHECKPOINT_ID_PREFIX);
+    CommitId::new(candidate)
+}
+
+pub(crate) fn is_causal_checkpoint_id(id: CommitId) -> bool {
+    id.as_bytes().starts_with(CAUSAL_CHECKPOINT_ID_PREFIX)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct BigRepoCiphertextLocator {
     pub(crate) kind: BigRepoCiphertextKind,
@@ -712,4 +769,54 @@ pub(crate) fn fragment_nonce_context(
         context.extend_from_slice(boundary_head.as_bytes());
     }
     context
+}
+
+#[cfg(test)]
+mod causal_checkpoint_tests {
+    use super::*;
+
+    fn frontier(bytes: &[[u8; 32]]) -> BTreeSet<CommitId> {
+        bytes.iter().copied().map(CommitId::new).collect()
+    }
+
+    #[test]
+    fn checkpoint_wire_format_is_typed_and_round_trips() -> Res<()> {
+        let checkpoint = CausalCheckpoint::new([9; 32], frontier(&[[1; 32], [2; 32]]));
+        let encoded = checkpoint.encode()?;
+
+        assert_eq!(CausalCheckpoint::decode(&encoded)?, Some(checkpoint));
+        assert_eq!(CausalCheckpoint::decode(b"an automerge payload")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn physical_checkpoint_identity_is_epoch_specific_and_never_fragments() {
+        let checkpoint = CausalCheckpoint::new([5; 32], frontier(&[[3; 32], [4; 32]]));
+        let first = causal_checkpoint_id(&checkpoint);
+        let repeated = causal_checkpoint_id(&checkpoint);
+        let next_epoch = causal_checkpoint_id(&CausalCheckpoint::new(
+            [6; 32],
+            checkpoint.covered_frontier.clone(),
+        ));
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, next_epoch);
+        assert!(is_causal_checkpoint_id(first));
+        assert!(is_causal_checkpoint_id(next_epoch));
+        assert!(!is_causal_checkpoint_id(CommitId::new([0; 32])));
+    }
+
+    #[test]
+    fn logical_checkpoint_identity_only_depends_on_covered_frontier() {
+        let first = CausalCheckpoint::new([5; 32], frontier(&[[7; 32], [8; 32]]));
+        let same = CausalCheckpoint::new([5; 32], frontier(&[[8; 32], [7; 32]]));
+        let different = CausalCheckpoint::new([5; 32], frontier(&[[7; 32], [9; 32]]));
+
+        assert_eq!(first.logical_id, same.logical_id);
+        assert_ne!(first.logical_id, different.logical_id);
+        assert_ne!(
+            first.logical_id,
+            CausalCheckpoint::new([6; 32], first.covered_frontier.clone()).logical_id
+        );
+    }
 }

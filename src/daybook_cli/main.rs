@@ -501,6 +501,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                         daybook_core::sync::RequestCloneProvisionReq {
                             requested_device_name: None,
                             requester_endpoint_id: ctx.iroh_public_key.clone(),
+                            requester_contact_card: ctx.big_repo.local_keyhive_contact_card(),
                         },
                     )
                     .await?;

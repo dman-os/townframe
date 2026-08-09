@@ -473,6 +473,35 @@ where
                     .send(DocWorkerMsg::QueryHeadState { resp, _lease })
                     .wrap_err(ERROR_CHANNEL)?;
             }
+            Runtime2Cmd::EnsureCausalCoverage { doc_id, resp } => {
+                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+                match worker
+                    .msg_tx
+                    .try_send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
+                {
+                    Ok(()) => {}
+                    Err(async_channel::TrySendError::Closed(
+                        DocWorkerMsg::ReconcileCausalCoverage { resp, .. },
+                    )) => {
+                        // The worker can finish between the alive check in
+                        // `doc_worker_handle` and this send. Its stopped event
+                        // will remove the stale entry; a later durable causal
+                        // coverage wakeup will spawn a replacement.
+                        debug!(%doc_id, "causal coverage raced a stopped document worker");
+                        if let Some(resp) = resp {
+                            resp.send(Err(ferr!("document worker stopped before causal coverage")))
+                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .ok();
+                        }
+                    }
+                    Err(async_channel::TrySendError::Full(_)) => {
+                        unreachable!("document worker mailbox is unbounded")
+                    }
+                    Err(async_channel::TrySendError::Closed(_)) => {
+                        unreachable!("closed send must return the sent causal coverage message")
+                    }
+                }
+            }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
                 if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
                 {
@@ -1634,6 +1663,10 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> eyre::Result<()> {
+        if self.cmd_closed {
+            debug!("discarding observed sync session while shutting down");
+            return Ok(());
+        }
         let doc_id = DocumentId::new(*session.sedimentree_id.as_bytes());
         debug!(
             peer_id = %session.peer_id,
@@ -1695,20 +1728,10 @@ where
             >,
         >,
     ) -> eyre::Result<()> {
-        let (worker, _lease) = match self.acquire_existing_doc_worker_handle(doc_id) {
-            Ok(Some(pair)) => pair,
-            _ => {
-                if let Some(reply) = reply {
-                    reply
-                        .send(Ok(crate::runtime2::types::SyncDocReceipt {
-                            outcome: crate::runtime2::types::SyncDocOutcome::Stored,
-                        }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                }
-                return Ok(());
-            }
-        };
+        // Received content must pass through the document worker even without
+        // an application handle: writable overlap nodes use cold/transient
+        // materialization to publish causal-key healing checkpoints.
+        let (worker, _lease) = self.doc_worker_handle(doc_id)?;
         if let Err(err) = worker.send(DocWorkerMsg::ApplySyncSession {
             peer_id,
             commit_ids,

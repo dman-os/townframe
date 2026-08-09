@@ -169,6 +169,37 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         >,
     >;
 
+    /// Fingerprint of the currently usable BeeKEM epoch, or `None` when the
+    /// settled operation history requires a causally subsequent Update.
+    fn current_causal_epoch(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'_, eyre::Result<Option<[u8; 32]>>>;
+
+    /// Epoch fingerprint recorded in a persisted frontier ciphertext.
+    fn ciphertext_epoch(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        head: sedimentree_core::loose_commit::id::CommitId,
+    ) -> F::Future<'_, eyre::Result<Option<[u8; 32]>>>;
+
+    /// Publish a key-only causal checkpoint covering the supplied encryption
+    /// frontier. The implementation establishes and durably records a PCS
+    /// root first when the healed Keyhive graph has none.
+    fn persist_causal_checkpoint(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        covered_frontier: std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+    ) -> F::Future<
+        '_,
+        eyre::Result<
+            Option<(
+                sedimentree_core::loose_commit::id::CommitId,
+                crate::runtime2::support::CausalCheckpoint,
+            )>,
+        >,
+    >;
+
     /// Whether the local principal may write to this document (Edit access or
     /// better). The authoritative write gate: rejects revoked members and
     /// Read-only holders before a commit is persisted.

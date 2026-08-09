@@ -37,15 +37,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             remote_payload = remote_payload.is_some(),
             "big repo sync_obj",
         );
-        if !has_local_doc_state && remote_payload.is_none() {
-            return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                big_sync_core::SyncTaskCompletion {
-                    obj_id,
-                    deets: big_sync_core::SyncCompletionDeets::Noop,
-                },
-            ));
-        }
-
         // short circuit if the payloads are equal
         let local_heads = repo.doc_payload_heads(doc_id).await?;
         if let Some(remote_payload) = &remote_payload {

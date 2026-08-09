@@ -36,7 +36,7 @@ use crate::{
     runtime2::types::BigRepoSyncPolicy,
     BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
-use keyhive_core::principal::document::DecryptError;
+use keyhive_core::principal::document::{DecryptError, EncryptError};
 use keyhive_core::{
     crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
     principal::identifier::Identifier, store::ciphertext::CiphertextStore,
@@ -133,6 +133,9 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     /// Clonable storage backend (for direct reads).
     storage: S,
+    /// Durable metadata index used by Keyhive causal decryption to discover
+    /// every ciphertext encrypted under a particular CGKA Update.
+    causal_ciphertext_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     /// Shared sedimentree cache (minimized trees).
     sedimentrees: SubductionSedimentrees,
     /// Keyhive handle — document operations, content encryption.
@@ -171,6 +174,7 @@ where
 /// subduction storage. Used by [`NativeBigRepoIo::try_causal_decrypt`].
 struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
     storage: S,
+    causal_index: Option<crate::sqlite_big_repo_store::SqliteBigRepoStore>,
     sed_id: SedimentreeId,
     /// In-memory cache of (content_ref -> encrypted content).
     #[expect(clippy::type_complexity)]
@@ -180,9 +184,14 @@ struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
 }
 
 impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
-    fn new(storage: S, sed_id: SedimentreeId) -> Self {
+    fn new(
+        storage: S,
+        causal_index: Option<crate::sqlite_big_repo_store::SqliteBigRepoStore>,
+        sed_id: SedimentreeId,
+    ) -> Self {
         Self {
             storage,
+            causal_index,
             sed_id,
             cache: std::sync::Mutex::new(HashMap::new()),
         }
@@ -308,7 +317,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
 
     fn get_ciphertext_by_pcs_update<'a>(
         &'a self,
-        _pcs_update: &'a keyhive_crypto::digest::Digest<
+        pcs_update: &'a keyhive_crypto::digest::Digest<
             keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
         >,
     ) -> <Sendable as FutureForm>::Future<
@@ -318,8 +327,22 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
             Self::GetCiphertextError,
         >,
     > {
-        // Not used in the decrypt paths we support; return empty.
-        Sendable::from_future(async move { Ok(Vec::new()) })
+        Sendable::from_future(async move {
+            let Some(causal_index) = &self.causal_index else {
+                return Ok(Vec::new());
+            };
+            let blobs = causal_index
+                .causal_ciphertexts_by_pcs_update(self.sed_id, pcs_update.raw.as_bytes())
+                .await?;
+            blobs
+                .into_iter()
+                .map(|blob| {
+                    decode_encrypted_blob(&blob)
+                        .map(Arc::new)
+                        .map_err(|error| ferr!("failed decoding indexed ciphertext: {error}"))
+                })
+                .collect()
+        })
     }
 
     fn mark_decrypted<'a>(
@@ -433,6 +456,156 @@ where
                 self.keyhive_notifier.note_local_keyhive_changed().await?;
             }
             Ok(fragment_requests)
+        })
+    }
+
+    fn persist_causal_checkpoint(
+        &self,
+        sed_id: SedimentreeId,
+        covered_frontier: BTreeSet<CommitId>,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<Option<(CommitId, crate::runtime2::support::CausalCheckpoint)>>,
+    > {
+        Sendable::from_future(async move {
+            use crate::runtime2::support::{causal_checkpoint_id, CausalCheckpoint};
+
+            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
+            let keyhive = self.keyhive.clone_keyhive();
+            let kh_doc = keyhive
+                .get_document(kh_doc_id)
+                .await
+                .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
+
+            if keyhive
+                .try_pcs_key_hash(Arc::clone(&kh_doc))
+                .await
+                .is_none()
+            {
+                let (update, local_secret) = match keyhive
+                    .force_pcs_update(Arc::clone(&kh_doc))
+                    .await
+                {
+                    Ok(update) => update,
+                    Err(EncryptError::UnableToPcsUpdate(
+                        beekem::error::CgkaError::IdentifierNotFound,
+                    )) => {
+                        debug!(?sed_id, "causal checkpoint deferred: local principal is absent from the current CGKA tree");
+                        return Ok(None);
+                    }
+                    Err(error) => {
+                        return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
+                    }
+                };
+                persist_cgka_updates_durably(
+                    &self.keyhive_storage,
+                    vec![update],
+                    vec![local_secret],
+                )
+                .await?;
+                self.keyhive_notifier.note_local_keyhive_changed().await?;
+            }
+
+            let pcs_key_hash = keyhive
+                .try_pcs_key_hash(Arc::clone(&kh_doc))
+                .await
+                .ok_or_else(|| ferr!("causal checkpoint PCS root remained unavailable"))?;
+            let checkpoint =
+                CausalCheckpoint::new(*pcs_key_hash.raw.as_bytes(), covered_frontier.clone());
+            let head = causal_checkpoint_id(&checkpoint);
+            let plaintext = checkpoint.encode()?;
+            let encrypted = encrypt_loose_commit_with_update_op(
+                &self.keyhive,
+                sed_id,
+                head,
+                &covered_frontier,
+                &plaintext,
+                &HashMap::new(),
+            )
+            .await;
+            let (encrypted_blob, _app_key, update_op, local_secret) = match encrypted {
+                Ok(encrypted) => encrypted,
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::runtime2::io::DocumentKeyUnavailable>()
+                        .is_some() =>
+                {
+                    debug!(
+                        ?sed_id,
+                        ?covered_frontier,
+                        "causal checkpoint deferred: frontier application key is unavailable"
+                    );
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            assert!(
+                update_op.is_none() && local_secret.is_none(),
+                "checkpoint encryption unexpectedly rotated the prepared PCS root"
+            );
+            let fragment_request = self
+                .subduction
+                .store_commit(sed_id, head, covered_frontier, encrypted_blob)
+                .await
+                .wrap_err("failed storing causal checkpoint")?;
+            assert!(
+                fragment_request.is_none(),
+                "depth-zero causal checkpoint requested Automerge fragmentation"
+            );
+            Ok(Some((head, checkpoint)))
+        })
+    }
+
+    fn current_causal_epoch(
+        &self,
+        sed_id: SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+        Sendable::from_future(async move {
+            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
+            let keyhive = self.keyhive.clone_keyhive();
+            let Some(kh_doc) = keyhive.get_document(kh_doc_id).await else {
+                return Ok(None);
+            };
+            Ok(keyhive
+                .try_pcs_key_hash(kh_doc)
+                .await
+                .map(|hash| *hash.raw.as_bytes()))
+        })
+    }
+
+    fn ciphertext_epoch(
+        &self,
+        sed_id: SedimentreeId,
+        head: CommitId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+        Sendable::from_future(async move {
+            let loose =
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
+                    &self.storage,
+                    sed_id,
+                    head,
+                )
+                .await
+                .map_err(|error| ferr!("failed loading frontier commit: {error}"))?;
+            let raw = if let Some(commit) = loose {
+                commit.blob().clone().into_contents()
+            } else {
+                let fragment =
+                    <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
+                        &self.storage,
+                        sed_id,
+                        head,
+                    )
+                    .await
+                    .map_err(|error| ferr!("failed loading frontier fragment: {error}"))?;
+                let Some(fragment) = fragment else {
+                    return Ok(None);
+                };
+                fragment.blob().clone().into_contents()
+            };
+            let encrypted = decode_encrypted_blob(&raw)
+                .map_err(|error| ferr!("failed decoding frontier ciphertext: {error}"))?;
+            Ok(Some(*encrypted.pcs_key_hash.raw.as_bytes()))
         })
     }
 
@@ -621,15 +794,10 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let _raw_blob = Blob::new(raw_blob);
-            let encrypted_blob = encrypt_fragment_blob(
-                &self.keyhive,
-                &self.storage,
-                sed_id,
-                head,
-                &boundary,
-            )
-            .await
-            .wrap_err("failed encrypting fragment blob")?;
+            let encrypted_blob =
+                encrypt_fragment_blob(&self.keyhive, &self.storage, sed_id, head, &boundary)
+                    .await
+                    .wrap_err("failed encrypting fragment blob")?;
             let fragment = sedimentree_core::fragment::Fragment::new(
                 sed_id,
                 head,
@@ -777,7 +945,11 @@ where
             };
 
             // Set up a ciphertext store backed by our storage.
-            let ct_store = NativeCiphertextStore::new(self.storage.clone(), sed_id);
+            let ct_store = NativeCiphertextStore::new(
+                self.storage.clone(),
+                Some(self.causal_ciphertext_store.clone()),
+                sed_id,
+            );
             tracing::debug!(%sed_id, "causal: before entrypoint kh_doc lock");
             let (entrypoint_raw, entrypoint_key) = {
                 let mut doc = kh_doc.lock().await;
@@ -1780,6 +1952,7 @@ where
     let native_io = Arc::new(NativeBigRepoIo {
         subduction: Arc::clone(&subduction_handle),
         storage: storage.clone(),
+        causal_ciphertext_store: group_part_store.clone(),
         sedimentrees: Arc::clone(&sedimentrees),
         keyhive: keyhive.clone(),
         keyhive_storage: keyhive_storage.clone(),
@@ -1833,7 +2006,7 @@ where
 
     // Subduction listener.
     let group_part_worker = crate::runtime2::group_part_worker::GroupPartWorker::new(
-        group_part_store,
+        group_part_store.clone(),
         keyhive.clone(),
         PeerId::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
@@ -1844,6 +2017,20 @@ where
         .child_tasks
         .spawn(Sendable::from_future(async move {
             group_part_worker.run().await.unwrap();
+            Ok(())
+        }))?;
+
+    let causal_checkpoint_worker =
+        crate::runtime2::causal_checkpoint_worker::CausalCheckpointWorker::new(
+            group_part_store,
+            keyhive.clone(),
+            handle.clone(),
+            Arc::clone(&timer),
+        );
+    stop_token
+        .child_tasks
+        .spawn(Sendable::from_future(async move {
+            causal_checkpoint_worker.run().await.unwrap();
             Ok(())
         }))?;
 
@@ -1945,14 +2132,24 @@ mod tests {
     use subduction_crypto::signer::memory::MemorySigner;
     use subduction_crypto::verified_meta::VerifiedMeta;
 
-    fn kh_listener() -> BigRepoKeyhiveListener {
-        let (tx, _rx) = async_channel::unbounded();
-        BigRepoKeyhiveListener { evt_tx: tx }
+    fn kh_listener() -> (
+        BigRepoKeyhiveListener,
+        async_channel::Receiver<crate::runtime2::Runtime2Evt>,
+    ) {
+        let (evt_tx, evt_rx) = async_channel::unbounded();
+        (
+            BigRepoKeyhiveListener {
+                evt_tx,
+                storage: BigRepoKeyhiveStorage::memory(),
+            },
+            evt_rx,
+        )
     }
 
     #[tokio::test]
     async fn ciphertext_store_durable_after_mark_decrypted() -> eyre::Result<()> {
-        let keyhive = BigKeyhiveHandle::new([9; 32], kh_listener()).await?;
+        let (listener, _evt_rx) = kh_listener();
+        let keyhive = BigKeyhiveHandle::new([9; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(
@@ -1991,7 +2188,7 @@ mod tests {
             .await
             .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
 
-        let ct_store = NativeCiphertextStore::new(storage.clone(), sed_id);
+        let ct_store = NativeCiphertextStore::new(storage.clone(), None, sed_id);
         let content_ref = head.as_bytes().to_vec();
 
         let indexed = ct_store
@@ -2017,7 +2214,8 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_cache_identity() -> eyre::Result<()> {
-        let keyhive = BigKeyhiveHandle::new([14; 32], kh_listener()).await?;
+        let (listener, _evt_rx) = kh_listener();
+        let keyhive = BigKeyhiveHandle::new([14; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(
@@ -2056,7 +2254,7 @@ mod tests {
             .await
             .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
 
-        let ct_store = NativeCiphertextStore::new(storage.clone(), sed_id);
+        let ct_store = NativeCiphertextStore::new(storage.clone(), None, sed_id);
         let content_ref = head.as_bytes().to_vec();
 
         let first = ct_store
@@ -2078,7 +2276,8 @@ mod tests {
     }
     #[tokio::test]
     async fn ciphertext_store_prefers_fragment_over_loose_commit() -> eyre::Result<()> {
-        let keyhive = BigKeyhiveHandle::new([11; 32], kh_listener()).await?;
+        let (listener, _evt_rx) = kh_listener();
+        let keyhive = BigKeyhiveHandle::new([11; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(
@@ -2146,7 +2345,7 @@ mod tests {
         )
         .await;
         Storage::<Sendable>::save_fragment(&storage, sed_id, fragment_verified).await?;
-        let ct_store = NativeCiphertextStore::new(storage, sed_id);
+        let ct_store = NativeCiphertextStore::new(storage, None, sed_id);
         let encrypted = ct_store
             .get_ciphertext(&h2.as_bytes().to_vec())
             .await?
@@ -2179,7 +2378,7 @@ mod tests {
         Storage::<Sendable>::save_loose_commit(&storage, sed_id, verified)
             .await
             .wrap_err("save_loose_commit failed")?;
-        let ct_store = NativeCiphertextStore::new(storage, sed_id);
+        let ct_store = NativeCiphertextStore::new(storage, None, sed_id);
         let error = ct_store
             .get_ciphertext(&head.as_bytes().to_vec())
             .await

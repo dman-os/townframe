@@ -41,6 +41,10 @@ impl<F: FutureForm> Clone for Runtime2Handle<F> {
 }
 
 impl<F: FutureForm> Runtime2Handle<F> {
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.cmd_tx.is_closed()
+    }
+
     /// Construct a new handle. Called by `spawn_runtime2` in the hub.
     pub(crate) fn new(
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -166,6 +170,18 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
+    }
+
+    pub(crate) async fn ensure_causal_coverage(&self, doc_id: DocumentId) -> eyre::Result<bool> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::EnsureCausalCoverage {
+                doc_id,
+                resp: Some(resp),
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| eyre::eyre!(ERROR_ACTOR))?
     }
 
     /// Inspect head state without creating a document worker.

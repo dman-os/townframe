@@ -295,18 +295,49 @@ async fn connect_topology(
         let peer_a_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
         endpoint_sets[*b].insert(peer_a_id);
 
-        let _ = node_a.sync_repo.rcx.big_repo.sync_keyhive_with_peer(peer_b_id, Some(Duration::from_secs(5))).await;
-        let _ = node_b.sync_repo.rcx.big_repo.sync_keyhive_with_peer(peer_a_id, Some(Duration::from_secs(5))).await;
+        let _ = node_a
+            .sync_repo
+            .rcx
+            .big_repo
+            .sync_keyhive_with_peer(peer_b_id, Some(Duration::from_secs(5)))
+            .await;
+        let _ = node_b
+            .sync_repo
+            .rcx
+            .big_repo
+            .sync_keyhive_with_peer(peer_a_id, Some(Duration::from_secs(5)))
+            .await;
     }
     Ok(endpoint_sets)
 }
 
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
-    _peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerId>],
     timeout: Duration,
     blob_timeout: Duration,
 ) -> Res<()> {
+    let network_timeout = timeout.max(blob_timeout);
+    let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
+        node.as_ref().map(|node| async move {
+            let parts = node
+                .sync_repo
+                .peer_partition_ids("", true)
+                .into_keys()
+                .collect::<Vec<_>>();
+            node.sync_repo
+                .wait_for_network_rest(
+                    &peers_set[index].iter().copied().collect::<Vec<_>>(),
+                    &parts,
+                    network_timeout,
+                )
+                .await
+        })
+    });
+    for result in futures::future::join_all(fixed_points).await {
+        result?;
+    }
+
     // Pin every runtime at the same quiescent boundary. Notifications admitted
     // just after a plain quiescence snapshot remain queued behind the freeze;
     // reopening and settling again makes that drift observable before parity.
@@ -376,12 +407,7 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Some(entry) = node.drawer.get_entry(&id).await? {
-                    all_doc_ids.extend(
-                        entry
-                            .branches
-                            .values()
-                            .map(|branch| branch.branch_doc_id),
-                    );
+                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
                 }
             }
         }
@@ -417,11 +443,19 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
                 ),
             );
         }
-        snapshots.push((peer_id, doc_states));
+        snapshots.push((
+            peer_id,
+            doc_states,
+            node.sync_repo
+                .rcx
+                .big_repo
+                .big_sync_store_snapshot()
+                .await?,
+        ));
     }
 
-    let (first_peer, first_states) = &snapshots[0];
-    for (peer_id, doc_states) in &snapshots[1..] {
+    let (first_peer, first_states, first_store) = &snapshots[0];
+    for (peer_id, doc_states, store) in &snapshots[1..] {
         if first_states != doc_states {
             let mismatched = first_states
                 .iter()
@@ -439,12 +473,93 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
                 .take(10)
                 .collect::<Vec<_>>();
             eyre::bail!(
-                "BIG_REPO DOC HEAD DIVERGENCE between node {first_peer} and {peer_id}:\n{}",
-                mismatched.join("\n")
+                "BIG_REPO DOC HEAD DIVERGENCE between node {first_peer} and {peer_id}:\n{}\n{}",
+                mismatched.join("\n"),
+                big_sync_store_diff(
+                    &first_peer.to_string(),
+                    first_store,
+                    &peer_id.to_string(),
+                    store,
+                )
             );
         }
     }
     Ok(())
+}
+
+fn big_sync_store_diff(
+    left_peer: &str,
+    left: &big_repo::BigSyncStoreSnapshot,
+    right_peer: &str,
+    right: &big_repo::BigSyncStoreSnapshot,
+) -> String {
+    let left_objects: BTreeMap<_, _> = left.objects.iter().cloned().collect();
+    let right_objects: BTreeMap<_, _> = right.objects.iter().cloned().collect();
+    let object_diffs = left_objects
+        .keys()
+        .chain(right_objects.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(
+            |obj_id| match (left_objects.get(obj_id), right_objects.get(obj_id)) {
+                (left_value, right_value) if left_value == right_value => None,
+                (left_value, right_value) => Some(format!(
+                    "obj={obj_id}: left={left_value:?}, right={right_value:?}"
+                )),
+            },
+        )
+        .take(12)
+        .collect::<Vec<_>>();
+    let semantic_memberships = |snapshot: &big_repo::BigSyncStoreSnapshot| {
+        snapshot
+            .memberships
+            .iter()
+            .map(|(part, obj, _, _, removed_at, _)| ((*part, *obj), removed_at.is_none()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let left_memberships = semantic_memberships(left);
+    let right_memberships = semantic_memberships(right);
+    let membership_diffs = left_memberships
+        .keys()
+        .chain(right_memberships.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(
+            |key| match (left_memberships.get(key), right_memberships.get(key)) {
+                (left_value, right_value) if left_value == right_value => None,
+                (left_value, right_value) => Some(format!(
+                    "part={} obj={}: left_live={left_value:?}, right_live={right_value:?}",
+                    key.0, key.1
+                )),
+            },
+        )
+        .take(12)
+        .collect::<Vec<_>>();
+    format!(
+        "BIG_SYNC STORE DIFF:\n  left({left_peer}) objects={} memberships={} pending={} parts={} kh_events={} kh_bytes={} cgka_secrets={} prekey_secrets={} sediment_items={} sediment_bytes={}\n  right({right_peer}) objects={} memberships={} pending={} parts={} kh_events={} kh_bytes={} cgka_secrets={} prekey_secrets={} sediment_items={} sediment_bytes={}\n  object_diffs={object_diffs:#?}\n  membership_diffs={membership_diffs:#?}\n  left_pending={:#?}\n  right_pending={:#?}",
+        left.objects.len(),
+        left.memberships.len(),
+        left.pending_memberships.len(),
+        left.part_cursors.len(),
+        left.keyhive_event_count,
+        left.keyhive_event_bytes,
+        left.local_cgka_secret_count,
+        left.local_prekey_secret_count,
+        left.sedimentree_item_count,
+        left.sedimentree_blob_bytes,
+        right.objects.len(),
+        right.memberships.len(),
+        right.pending_memberships.len(),
+        right.part_cursors.len(),
+        right.keyhive_event_count,
+        right.keyhive_event_bytes,
+        right.local_cgka_secret_count,
+        right.local_prekey_secret_count,
+        right.sedimentree_item_count,
+        right.sedimentree_blob_bytes,
+        left.pending_memberships,
+        right.pending_memberships,
+    )
 }
 
 async fn wait_for_big_repo_sedimentree_parity(

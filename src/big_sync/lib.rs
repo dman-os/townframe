@@ -13,8 +13,8 @@ pub mod rpc;
 pub mod stress_support;
 #[cfg(test)]
 mod test;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod trap;
 mod worker;
 

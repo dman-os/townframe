@@ -104,6 +104,11 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
     },
+    EnsureCausalCoverage {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        resp: Option<futures::channel::oneshot::Sender<eyre::Result<bool>>>,
+    },
     InspectDocHeadState {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -375,6 +380,12 @@ pub enum DocWorkerMsg {
                 >,
             >,
         >,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
+    },
+    ReconcileCausalCoverage {
+        #[educe(Debug(ignore))]
+        resp: Option<futures::channel::oneshot::Sender<eyre::Result<bool>>>,
         #[educe(Debug(ignore))]
         _lease: crate::runtime2::DocWorkerInternalLease,
     },

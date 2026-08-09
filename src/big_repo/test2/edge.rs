@@ -545,7 +545,7 @@ async fn with_document_roundtrip_rehydrates_from_storage() -> crate::Res<()> {
 // `has_doc_worker` BEFORE any handle acquisition proves that the sync
 // session handler skipped worker creation.
 #[tokio::test(flavor = "multi_thread")]
-async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
+async fn tier9_r2_relay_sync_materializes_in_transient_worker() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(240, 241, "Owner", "Reader").await?;
 
@@ -567,8 +567,8 @@ async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     // Sync document content WITHOUT acquiring a live handle on the reader.
-    // The subduction layer persists the content; the hub sees SyncSessionObserved
-    // but must skip worker creation because no live handle exists.
+    // The runtime creates a transient worker to materialize and reconcile the
+    // persisted session even though no public handle exists.
     pair.right_conn()
         .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
         .await?;
@@ -577,10 +577,11 @@ async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
         .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
         .await?;
 
-    // Before any handle acquisition: no doc-worker should exist.
+    // Before any handle acquisition: the transient worker performed the cold
+    // materialization path.
     assert!(
-        !pair.right().repo.runtime.has_doc_worker(doc_id).await?,
-        "doc-worker must NOT be created by sync session when no live handle exists"
+        pair.right().repo.runtime.has_doc_worker(doc_id).await?,
+        "sync session must create a transient doc-worker without a live handle"
     );
 
     // Content was persisted by subduction even without a worker.
@@ -661,15 +662,15 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
         .await?;
 
-    // No doc-worker exists after sync (no live handle).
+    // A transient worker exists after sync even without a live handle so key
+    // changes can drive materialization and causal healing.
     assert!(
-        !topo
-            .topo_node(1)
+        topo.topo_node(1)
             .repo
             .runtime
             .has_doc_worker(doc_id)
             .await?,
-        "relay must NOT have a doc-worker after relay-only sync"
+        "relay sync must create a transient doc-worker"
     );
     assert!(
         topo.topo_node(1)

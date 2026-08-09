@@ -77,11 +77,160 @@ pub struct SqliteBigRepoStore {
     policy: Arc<dyn big_sync::ObjAccessPolicy>,
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BigSyncStoreSnapshot {
+    pub objects: Vec<(ObjId, Option<serde_json::Value>)>,
+    pub memberships: Vec<(PartId, ObjId, i64, i64, Option<i64>, i64)>,
+    pub pending_memberships: Vec<(PartId, ObjId)>,
+    pub part_cursors: Vec<(PartId, i64)>,
+    pub peer_part_cursors: Vec<(PeerId, PartId, i64)>,
+    pub keyhive_event_count: i64,
+    pub keyhive_event_bytes: i64,
+    pub local_cgka_secret_count: usize,
+    pub local_prekey_secret_count: usize,
+    pub sedimentree_item_count: i64,
+    pub sedimentree_blob_bytes: i64,
+}
+
 impl std::ops::Deref for SqliteBigRepoStore {
     type Target = SqliteCore;
 
     fn deref(&self) -> &Self::Target {
         &self.core
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl SqliteBigRepoStore {
+    /// Capture every convergence-relevant BigSync row plus protocol-volume
+    /// counters. Intended for deterministic cross-node test diagnostics.
+    pub async fn big_sync_store_snapshot(&self) -> Res<BigSyncStoreSnapshot> {
+        let object_rows = sqlx::query(
+            "SELECT obj_id, payload_json FROM big_sync_objs
+             WHERE scope_id = ?1 ORDER BY obj_id",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let objects = object_rows
+            .into_iter()
+            .map(|row| {
+                let payload: Option<String> = row.try_get("payload_json")?;
+                let mut payload = payload
+                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                    .transpose()?;
+                if let Some(heads) = payload
+                    .as_mut()
+                    .and_then(|value| value.get_mut("heads"))
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    heads.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+                }
+                Ok((Self::obj_from_blob(row.try_get("obj_id")?), payload))
+            })
+            .collect::<Res<Vec<_>>>()?;
+
+        let membership_rows = sqlx::query(
+            "SELECT part_id, obj_id, added_at, changed_at, removed_at, latest_cursor
+             FROM big_sync_members WHERE scope_id = ?1
+             ORDER BY part_id, obj_id",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let memberships = membership_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    Self::part_from_blob(row.try_get("part_id")?),
+                    Self::obj_from_blob(row.try_get("obj_id")?),
+                    row.try_get("added_at")?,
+                    row.try_get("changed_at")?,
+                    row.try_get("removed_at")?,
+                    row.try_get("latest_cursor")?,
+                ))
+            })
+            .collect::<Res<Vec<_>>>()?;
+
+        let pending_rows = sqlx::query(
+            "SELECT part_id, obj_id FROM big_sync_pending_members
+             WHERE scope_id = ?1 ORDER BY part_id, obj_id",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let pending_memberships = pending_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    Self::part_from_blob(row.try_get("part_id")?),
+                    Self::obj_from_blob(row.try_get("obj_id")?),
+                ))
+            })
+            .collect::<Res<Vec<_>>>()?;
+
+        let part_rows = sqlx::query(
+            "SELECT part_id, latest_cursor FROM big_sync_parts
+             WHERE scope_id = ?1 ORDER BY part_id",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let part_cursors = part_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    Self::part_from_blob(row.try_get("part_id")?),
+                    row.try_get("latest_cursor")?,
+                ))
+            })
+            .collect::<Res<Vec<_>>>()?;
+
+        let peer_rows = sqlx::query(
+            "SELECT peer_id, part_id, cursor FROM big_sync_peer_cursors
+             WHERE scope_id = ?1 ORDER BY peer_id, part_id",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let peer_part_cursors = peer_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    SqliteCore::peer_from_blob(row.try_get("peer_id")?),
+                    Self::part_from_blob(row.try_get("part_id")?),
+                    row.try_get("cursor")?,
+                ))
+            })
+            .collect::<Res<Vec<_>>>()?;
+
+        let volume = sqlx::query(
+            "SELECT
+               (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_count,
+               (SELECT COALESCE(SUM(length(event_bytes)), 0) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_bytes,
+               ((SELECT COUNT(*) FROM big_repo_subduction_commits WHERE scope_id = ?1) +
+                (SELECT COUNT(*) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_count,
+               ((SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_commits WHERE scope_id = ?1) +
+                (SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_bytes",
+        )
+        .bind(self.scope_id)
+        .fetch_one(&self.sql.read_pool)
+        .await?;
+
+        Ok(BigSyncStoreSnapshot {
+            objects,
+            memberships,
+            pending_memberships,
+            part_cursors,
+            peer_part_cursors,
+            keyhive_event_count: volume.try_get("kh_count")?,
+            keyhive_event_bytes: volume.try_get("kh_bytes")?,
+            local_cgka_secret_count: 0,
+            local_prekey_secret_count: 0,
+            sedimentree_item_count: volume.try_get("sediment_count")?,
+            sedimentree_blob_bytes: volume.try_get("sediment_bytes")?,
+        })
     }
 }
 
@@ -1332,7 +1481,12 @@ impl SqliteBigRepoStore {
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
         if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-            eprintln!("SUBSCRIBE parts={:?} cursors={:?} objects={}", parts, part_cursors, objects.len());
+            eprintln!(
+                "SUBSCRIBE parts={:?} cursors={:?} objects={}",
+                parts,
+                part_cursors,
+                objects.len()
+            );
         }
         let sub = Arc::new(BigRepoSubscription {
             sender: tx.clone(),
@@ -1439,7 +1593,13 @@ impl SqliteBigRepoStore {
                     object_replay_pending = false;
                 }
                 if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-                    eprintln!("REPLAY delivered={} cursor={}->{} raw={}", output.len(), cursor, max_cursor, raw_event_count);
+                    eprintln!(
+                        "REPLAY delivered={} cursor={}->{} raw={}",
+                        output.len(),
+                        cursor,
+                        max_cursor,
+                        raw_event_count
+                    );
                 }
                 for event in output {
                     if tx.send(event).await.is_err() {
@@ -1537,6 +1697,11 @@ impl SqliteBigRepoStore {
         if !pending_part_ids.is_empty() {
             let mut events = Vec::with_capacity(pending_part_ids.len());
             for part_id in pending_part_ids {
+                let old_state = self.load_member_state(tx, part_id, obj_id).await?;
+                assert!(
+                    !matches!(old_state, MemberState::Live(_)),
+                    "latent membership cannot already be live"
+                );
                 sqlx::query(
                     "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
                      VALUES (?1, ?2, 0)
@@ -1548,7 +1713,13 @@ impl SqliteBigRepoStore {
                 .await?;
                 sqlx::query(
                     "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
+                     ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
+                        added_at = excluded.added_at,
+                        added_payload_json = excluded.added_payload_json,
+                        changed_at = excluded.changed_at,
+                        removed_at = NULL,
+                        latest_cursor = excluded.latest_cursor",
                 )
                 .bind(self.scope_id)
                 .bind(Self::part_blob(part_id))
@@ -1562,7 +1733,7 @@ impl SqliteBigRepoStore {
                     part_id,
                     obj_id,
                     cursor,
-                    &MemberState::Absent,
+                    &old_state,
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
@@ -1691,10 +1862,26 @@ impl SqliteBigRepoStore {
                 cursor INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
             ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_causal_checkpoint_cursor (
+                scope_id INTEGER PRIMARY KEY,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
+            ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_causal_ciphertext_index (
+                scope_id INTEGER NOT NULL,
+                sedimentree_id BLOB NOT NULL,
+                content_ref BLOB NOT NULL,
+                digest BLOB NOT NULL,
+                kind INTEGER NOT NULL,
+                pcs_update_hash BLOB NOT NULL,
+                PRIMARY KEY(scope_id, sedimentree_id, content_ref, digest, kind)
+            ) STRICT",
             "CREATE INDEX IF NOT EXISTS big_repo_keyhive_event_log_hash_idx
              ON big_repo_keyhive_event_log(scope_id, event_hash)",
             "CREATE INDEX IF NOT EXISTS big_repo_keyhive_replay_tail_seq_idx
              ON big_repo_keyhive_replay_tail(scope_id, event_hash)",
+            "CREATE INDEX IF NOT EXISTS big_repo_causal_ciphertext_update_idx
+             ON big_repo_causal_ciphertext_index(scope_id, sedimentree_id, pcs_update_hash)",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
@@ -1705,7 +1892,15 @@ impl SqliteBigRepoStore {
         .bind(self.scope_id)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO big_repo_causal_checkpoint_cursor(scope_id, cursor)
+             VALUES (?1, 0)",
+        )
+        .bind(self.scope_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
+        self.backfill_causal_ciphertext_index().await?;
         Ok(())
     }
     /// Reconcile one bounded document batch transactionally.
@@ -1849,27 +2044,26 @@ impl SqliteBigRepoStore {
             }
         }
 
-        let cursor = if transitions.is_empty() {
-            None
-        } else {
-            Some(Self::next_cursor(&mut tx).await?)
-        };
         let mut events = Vec::with_capacity(transitions.len());
-        if let Some(cursor) = cursor {
-            for (part_id, doc, old, new) in transitions {
-                sqlx::query(
-                    "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
+        for (part_id, doc, old, new) in transitions {
+            // Part cursors are scalar high-water marks and pagination
+            // resumes with `latest_cursor > cursor`. Sharing one cursor
+            // between sibling transitions would let acknowledging either
+            // sibling permanently skip the others.
+            let cursor = Self::next_cursor(&mut tx).await?;
+            sqlx::query(
+                "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
                      VALUES (?1, ?2, 0)
                      ON CONFLICT(scope_id, part_id) DO NOTHING",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .execute(&mut *tx)
-                .await?;
-                match &new {
-                    MemberState::Live(_) => {
-                        sqlx::query(
-                            "INSERT INTO big_sync_members(
+            )
+            .bind(self.scope_id)
+            .bind(Self::part_blob(part_id))
+            .execute(&mut *tx)
+            .await?;
+            match &new {
+                MemberState::Live(_) => {
+                    sqlx::query(
+                        "INSERT INTO big_sync_members(
                              scope_id, part_id, obj_id, added_at, added_payload_json,
                              changed_at, removed_at, latest_cursor
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
@@ -1878,76 +2072,75 @@ impl SqliteBigRepoStore {
                              added_payload_json = excluded.added_payload_json,
                              changed_at = excluded.changed_at, removed_at = NULL,
                              latest_cursor = excluded.latest_cursor",
-                        )
-                        .bind(self.scope_id)
-                        .bind(Self::part_blob(part_id))
-                        .bind(Self::obj_blob(doc))
-                        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                        .bind(
-                            serde_json::to_string(
-                                transition_event_payloads
-                                    .get(&(part_id, doc))
-                                    .expect("live transition requires payload"),
-                            )
-                            .expect(ERROR_JSON),
-                        )
-                        .execute(&mut *tx)
-                        .await?;
-                        self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
-                            .await?;
-                        sqlx::query(
-                            "DELETE FROM big_sync_pending_members
-                             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-                        )
-                        .bind(self.scope_id)
-                        .bind(Self::part_blob(part_id))
-                        .bind(Self::obj_blob(doc))
-                        .execute(&mut *tx)
-                        .await?;
-                        events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                            cursor,
-                            part_id,
-                            obj_id: doc,
-                            payload: transition_event_payloads
+                    )
+                    .bind(self.scope_id)
+                    .bind(Self::part_blob(part_id))
+                    .bind(Self::obj_blob(doc))
+                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                    .bind(
+                        serde_json::to_string(
+                            transition_event_payloads
                                 .get(&(part_id, doc))
-                                .expect("live transition requires payload")
-                                .clone(),
-                        }));
-                    }
-                    MemberState::Dead => {
-                        sqlx::query(
-                            "UPDATE big_sync_members
+                                .expect("live transition requires payload"),
+                        )
+                        .expect(ERROR_JSON),
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
+                        .await?;
+                    sqlx::query(
+                        "DELETE FROM big_sync_pending_members
+                             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                    )
+                    .bind(self.scope_id)
+                    .bind(Self::part_blob(part_id))
+                    .bind(Self::obj_blob(doc))
+                    .execute(&mut *tx)
+                    .await?;
+                    events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        cursor,
+                        part_id,
+                        obj_id: doc,
+                        payload: transition_event_payloads
+                            .get(&(part_id, doc))
+                            .expect("live transition requires payload")
+                            .clone(),
+                    }));
+                }
+                MemberState::Dead => {
+                    sqlx::query(
+                        "UPDATE big_sync_members
                              SET removed_at = ?1, changed_at = ?1, latest_cursor = ?1
                              WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-                        )
-                        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                        .bind(self.scope_id)
-                        .bind(Self::part_blob(part_id))
-                        .bind(Self::obj_blob(doc))
-                        .execute(&mut *tx)
+                    )
+                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                    .bind(self.scope_id)
+                    .bind(Self::part_blob(part_id))
+                    .bind(Self::obj_blob(doc))
+                    .execute(&mut *tx)
+                    .await?;
+                    self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
                         .await?;
-                        self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
-                            .await?;
-                        events.push(SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                            cursor,
-                            part_id,
-                            obj_id: doc,
-                        }));
-                    }
-                    MemberState::Absent => {
-                        unreachable!("reconciliation cannot target absent state")
-                    }
+                    events.push(SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                        cursor,
+                        part_id,
+                        obj_id: doc,
+                    }));
                 }
-                sqlx::query(
-                    "UPDATE big_sync_parts SET latest_cursor = ?1
-                     WHERE scope_id = ?2 AND part_id = ?3",
-                )
-                .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .execute(&mut *tx)
-                .await?;
+                MemberState::Absent => {
+                    unreachable!("reconciliation cannot target absent state")
+                }
             }
+            sqlx::query(
+                "UPDATE big_sync_parts SET latest_cursor = ?1
+                     WHERE scope_id = ?2 AND part_id = ?3",
+            )
+            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+            .bind(self.scope_id)
+            .bind(Self::part_blob(part_id))
+            .execute(&mut *tx)
+            .await?;
         }
         if advance_cursor {
             sqlx::query("UPDATE big_repo_group_part_cursor SET cursor = ?1 WHERE scope_id = ?2")
@@ -1974,6 +2167,29 @@ impl SqliteBigRepoStore {
                 .fetch_one(&self.sql.read_pool)
                 .await?;
         Ok(Self::u64_from_db(cursor))
+    }
+
+    pub(crate) async fn causal_checkpoint_cursor(&self) -> Res<u64> {
+        let cursor: i64 = sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_causal_checkpoint_cursor WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_one(&self.sql.read_pool)
+        .await?;
+        Ok(Self::u64_from_db(cursor))
+    }
+
+    pub(crate) async fn advance_causal_checkpoint_cursor(&self, cursor: u64) -> Res<()> {
+        sqlx::query(
+            "UPDATE big_repo_causal_checkpoint_cursor
+             SET cursor = MAX(cursor, ?1)
+             WHERE scope_id = ?2",
+        )
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+        .bind(self.scope_id)
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
     }
 
     #[cfg_attr(not(test), expect(dead_code))] // used by sqlite store tests
@@ -2178,6 +2394,105 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
+    async fn backfill_causal_ciphertext_index(&self) -> Result<(), SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
+            "SELECT sedimentree_id, commit_id AS content_ref, digest, 0 AS kind, blob
+             FROM big_repo_subduction_commits WHERE scope_id = ?1
+             UNION ALL
+             SELECT sedimentree_id, head_id AS content_ref, digest, 1 AS kind, blob
+             FROM big_repo_subduction_fragments WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        for row in rows {
+            let blob: Vec<u8> = row.try_get("blob")?;
+            let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(&blob) else {
+                continue;
+            };
+            sqlx::query(
+                "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
+                    scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(self.scope_id)
+            .bind(row.try_get::<Vec<u8>, _>("sedimentree_id")?)
+            .bind(row.try_get::<Vec<u8>, _>("content_ref")?)
+            .bind(row.try_get::<Vec<u8>, _>("digest")?)
+            .bind(row.try_get::<i64, _>("kind")?)
+            .bind(encrypted.pcs_update_op_hash.raw.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn causal_ciphertexts_by_pcs_update(
+        &self,
+        sedimentree_id: SedimentreeId,
+        pcs_update_hash: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
+            "SELECT commits.blob
+             FROM big_repo_causal_ciphertext_index AS causal
+             JOIN big_repo_subduction_commits AS commits
+               ON commits.scope_id = causal.scope_id
+              AND commits.sedimentree_id = causal.sedimentree_id
+              AND commits.commit_id = causal.content_ref
+              AND commits.digest = causal.digest
+             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
+               AND causal.pcs_update_hash = ?3 AND causal.kind = 0
+             UNION ALL
+             SELECT fragments.blob
+             FROM big_repo_causal_ciphertext_index AS causal
+             JOIN big_repo_subduction_fragments AS fragments
+               ON fragments.scope_id = causal.scope_id
+              AND fragments.sedimentree_id = causal.sedimentree_id
+              AND fragments.head_id = causal.content_ref
+              AND fragments.digest = causal.digest
+             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
+               AND causal.pcs_update_hash = ?3 AND causal.kind = 1",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(sedimentree_id))
+        .bind(pcs_update_hash.as_slice())
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| row.try_get("blob").map_err(Into::into))
+            .collect()
+    }
+
+    async fn index_causal_ciphertext(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        sedimentree_id: SedimentreeId,
+        content_ref: CommitId,
+        digest: Vec<u8>,
+        kind: i64,
+        blob: &[u8],
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(blob) else {
+            return Ok(());
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
+                scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(sedimentree_id))
+        .bind(Self::commit_blob(content_ref))
+        .bind(digest)
+        .bind(kind)
+        .bind(encrypted.pcs_update_op_hash.raw.as_bytes().as_slice())
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     async fn commit_rows(
         &self,
         id: SedimentreeId,
@@ -2243,6 +2558,8 @@ impl SqliteBigRepoStore {
         verified: VerifiedMeta<LooseCommit>,
     ) -> Result<(), SqliteBigRepoStoreError> {
         let (signed, payload, blob) = verified.into_full_parts();
+        let digest = Self::digest_blob(&payload);
+        let blob = blob.into_contents();
         sqlx::query(
             "INSERT OR IGNORE INTO big_repo_subduction_commits
              (scope_id, sedimentree_id, commit_id, digest, signed, blob)
@@ -2251,11 +2568,13 @@ impl SqliteBigRepoStore {
         .bind(self.scope_id)
         .bind(Self::tree_blob(id))
         .bind(Self::commit_blob(payload.head()))
-        .bind(Self::digest_blob(&payload))
+        .bind(&digest)
         .bind(signed.as_bytes())
-        .bind(blob.into_contents())
+        .bind(&blob)
         .execute(&mut **tx)
         .await?;
+        self.index_causal_ciphertext(tx, id, payload.head(), digest, 0, &blob)
+            .await?;
         Ok(())
     }
 
@@ -2266,6 +2585,8 @@ impl SqliteBigRepoStore {
         verified: VerifiedMeta<Fragment>,
     ) -> Result<(), SqliteBigRepoStoreError> {
         let (signed, payload, blob) = verified.into_full_parts();
+        let digest = Self::digest_blob(&payload);
+        let blob = blob.into_contents();
         sqlx::query(
             "INSERT OR IGNORE INTO big_repo_subduction_fragments
              (scope_id, sedimentree_id, head_id, digest, signed, blob)
@@ -2274,11 +2595,13 @@ impl SqliteBigRepoStore {
         .bind(self.scope_id)
         .bind(Self::tree_blob(id))
         .bind(Self::commit_blob(payload.head()))
-        .bind(Self::digest_blob(&payload))
+        .bind(&digest)
         .bind(signed.as_bytes())
-        .bind(blob.into_contents())
+        .bind(&blob)
         .execute(&mut **tx)
         .await?;
+        self.index_causal_ciphertext(tx, id, payload.head(), digest, 1, &blob)
+            .await?;
         Ok(())
     }
 }
@@ -2501,6 +2824,9 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0")
+                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
+                .execute(&mut *tx).await?;
             sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3")
                 .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
                 .execute(&mut *tx).await?;
@@ -2512,6 +2838,8 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     fn delete_loose_commits(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0")
+                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
             sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2")
                 .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -2599,6 +2927,9 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 1")
+                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
+                .execute(&mut *tx).await?;
             sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3")
                 .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
                 .execute(&mut *tx).await?;
@@ -2610,6 +2941,8 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     fn delete_fragments(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 1")
+                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
             sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2")
                 .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -2791,6 +3124,34 @@ mod tests {
         assert_eq!(
             HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?,
             1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latent_membership_resurrects_removed_member_when_payload_returns() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-latent-regrant",
+            BuckId::MAX_LEVEL,
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
+        )
+        .await?;
+        let part = PartId(Byte32Id::new([224; 32]));
+        let obj = ObjId(Byte32Id::new([225; 32]));
+        HostPartStore::ensure_part(&store, part).await?;
+
+        HostPartStore::add_obj_to_parts(&store, obj, vec![part]).await?;
+        HostPartStore::set_obj_payload(&store, obj, serde_json::json!("first")).await?;
+        HostPartStore::remove_obj_from_part(&store, obj, part).await?;
+
+        HostPartStore::add_obj_to_parts(&store, obj, vec![part]).await?;
+        HostPartStore::set_obj_payload(&store, obj, serde_json::json!("second")).await?;
+
+        assert_eq!(HostPartStore::obj_parts(&store, obj).await?, vec![part]);
+        assert_eq!(
+            HostPartStore::obj_payload(&store, obj).await?,
+            Some(serde_json::json!("second"))
         );
         Ok(())
     }
@@ -3067,6 +3428,37 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn causal_checkpoint_cursor_is_monotonic_and_survives_restart() -> Res<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("causal-checkpoint-cursor.sqlite");
+        let url = format!("sqlite://{}", db_path.display());
+        let scope = "causal-checkpoint-cursor";
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::url(&url).await?,
+            scope,
+            BuckId::MAX_LEVEL,
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
+        )
+        .await?;
+
+        assert_eq!(store.causal_checkpoint_cursor().await?, 0);
+        store.advance_causal_checkpoint_cursor(7).await?;
+        store.advance_causal_checkpoint_cursor(3).await?;
+        assert_eq!(store.causal_checkpoint_cursor().await?, 7);
+        drop(store);
+
+        let reopened = SqliteBigRepoStore::new(
+            SqlCtx::url(&url).await?,
+            scope,
+            BuckId::MAX_LEVEL,
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
+        )
+        .await?;
+        assert_eq!(reopened.causal_checkpoint_cursor().await?, 7);
+        Ok(())
+    }
     #[tokio::test]
     async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<()> {
         let sql = SqlCtx::memory().await?;
@@ -3176,6 +3568,58 @@ mod tests {
             "doc should be in the global part when desired_global=true"
         );
         assert_eq!(store.keyhive_group_part_cursor().await?, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_batch_assigns_unique_paginateable_part_cursors() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store = SqliteBigRepoStore::new(
+            sql,
+            "reconcile-cursor-siblings",
+            BuckId::MAX_LEVEL,
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
+        )
+        .await?;
+        let part = PartId(Byte32Id::new([3; 32]));
+        let docs = [ObjId(Byte32Id::new([4; 32])), ObjId(Byte32Id::new([5; 32]))];
+        store.ensure_part(part).await?;
+        for doc in docs {
+            HostPartStore::set_obj_payload(&store, doc, serde_json::json!(doc.to_string())).await?;
+        }
+        let mutations = docs.map(|doc| GroupPartReconciliation {
+            doc,
+            agents: HashMap::new(),
+            managed_group_parts: HashSet::from([part]),
+            desired_group_parts: HashSet::from([part]),
+            desired_global: false,
+        });
+        store
+            .reconcile_group_part_batch(&mutations, 7, true)
+            .await?;
+
+        let first = HostPartStore::list_events(&store, HashSet::from([part]), 0, 1)
+            .await??
+            .remove(&part)
+            .expect("requested part page");
+        assert_eq!(first.events.len(), 1);
+        let cursor = match &first.events[0] {
+            PartEvent::Added(event) => event.cursor,
+            other => panic!("expected first sibling addition, got {other:?}"),
+        };
+        let second = HostPartStore::list_events(&store, HashSet::from([part]), cursor, 1)
+            .await??
+            .remove(&part)
+            .expect("requested continuation page");
+        assert_eq!(second.events.len(), 1, "continuation must retain sibling");
+        let second_cursor = match &second.events[0] {
+            PartEvent::Added(event) => event.cursor,
+            other => panic!("expected second sibling addition, got {other:?}"),
+        };
+        assert!(
+            second_cursor > cursor,
+            "sibling events need distinct cursors"
+        );
         Ok(())
     }
 

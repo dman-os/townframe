@@ -101,7 +101,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     let admin_to_writer = admin.accepted_connection().await;
     writer_to_admin.sync_keyhive_with_peer(None).await?;
     admin_to_writer.sync_keyhive_with_peer(None).await?;
-    let (_writer_doc, admin_doc_after_reconnect) = fixtures::sync_doc_bidirectional(
+    let (_writer_doc, _admin_doc_after_reconnect) = fixtures::sync_doc_bidirectional(
         &writer_to_admin,
         &admin_to_writer,
         &writer.repo,
@@ -110,15 +110,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     )
     .await?;
 
-    // Once an existing member has both concurrent heads, a current-epoch
-    // successor can carry both application keys across the membership boundary.
-    admin_doc_after_reconnect
-        .with_document(|doc| {
-            doc.empty_commit(automerge::transaction::CommitOptions::default());
-        })
-        .await?;
-
-    let (_admin_doc, reader_doc) = fixtures::sync_doc_bidirectional(
+    let (admin_doc_after_heal, reader_doc) = fixtures::sync_doc_bidirectional(
         topo.topo_conn(1, 2),
         topo.topo_conn(2, 1),
         &admin.repo,
@@ -126,20 +118,66 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         doc_id,
     )
     .await?;
-    let offline = reader_doc
-        .with_document_read(|doc| {
-            let Ok(Some((automerge::Value::Scalar(value), _))) =
-                doc.get(automerge::ROOT, "offline")
-            else {
-                return None;
-            };
-            match value.as_ref() {
-                ScalarValue::Str(value) => Some(value.to_string()),
-                _ => None,
-            }
-        })
-        .await;
-    assert_eq!(offline.as_deref(), Some("old-epoch-write"));
+    fixtures::wait_for_network_rest(
+        [writer, admin, reader].as_slice(),
+        std::time::Duration::from_secs(20),
+    )
+    .await?;
+    let settled_blob_counts = futures::future::try_join_all(
+        [writer, admin, reader]
+            .into_iter()
+            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id)),
+    )
+    .await?
+    .into_iter()
+    .map(|blobs| blobs.len())
+    .collect::<Vec<_>>();
+    fixtures::wait_for_network_rest(
+        [writer, admin, reader].as_slice(),
+        std::time::Duration::from_secs(20),
+    )
+    .await?;
+    let replayed_blob_counts = futures::future::try_join_all(
+        [writer, admin, reader]
+            .into_iter()
+            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id)),
+    )
+    .await?
+    .into_iter()
+    .map(|blobs| blobs.len())
+    .collect::<Vec<_>>();
+    assert_eq!(
+        replayed_blob_counts, settled_blob_counts,
+        "replayed healing attempts must not create a checkpoint storm"
+    );
+    let read_offline = |doc: &automerge::Automerge| {
+        let Ok(Some((automerge::Value::Scalar(value), _))) = doc.get(automerge::ROOT, "offline")
+        else {
+            return None;
+        };
+        match value.as_ref() {
+            ScalarValue::Str(value) => Some(value.to_string()),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        writer_doc.with_document_read(read_offline).await.as_deref(),
+        Some("old-epoch-write"),
+        "offline writer lost its own persisted write"
+    );
+    assert_eq!(
+        admin_doc_after_heal
+            .with_document_read(read_offline)
+            .await
+            .as_deref(),
+        Some("old-epoch-write"),
+        "healing admin did not materialize the offline write"
+    );
+    assert_eq!(
+        reader_doc.with_document_read(read_offline).await.as_deref(),
+        Some("old-epoch-write"),
+        "new reader did not materialize the healed offline write"
+    );
 
     drop(admin_doc);
     drop(reader_doc_before_offline_write);
@@ -483,6 +521,18 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
 
     let before_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id).await?;
     let before_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id).await?;
+    let blobs_before_a = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_a_id)
+        .await?
+        .len();
+    let blobs_before_b = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_b_id)
+        .await?
+        .len();
 
     // Add the new member to the group — BOTH documents' CGKA must change.
     pair.left()
@@ -496,6 +546,24 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     assert_ne!(
         before_a.cgka_operation_hashes, after_a.cgka_operation_hashes,
         "doc A's CGKA must change when a member is added to a governing group"
+    );
+    assert_eq!(
+        pair.left()
+            .repo
+            .inspect_stored_doc_blobs(doc_a_id)
+            .await?
+            .len(),
+        blobs_before_a + 1,
+        "the group rotation must checkpoint doc A exactly once"
+    );
+    assert_eq!(
+        pair.left()
+            .repo
+            .inspect_stored_doc_blobs(doc_b_id)
+            .await?
+            .len(),
+        blobs_before_b + 1,
+        "the group rotation must checkpoint doc B exactly once"
     );
     assert_ne!(
         before_b.cgka_operation_hashes, after_b.cgka_operation_hashes,

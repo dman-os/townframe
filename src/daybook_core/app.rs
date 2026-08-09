@@ -167,20 +167,10 @@ pub mod version_updates {
                 ConfigStore::default(),
             )
             .map_err(|_| automerge::AutomergeError::Fail)?;
-            reconcile_prop(
-                tx,
-                ROOT,
-                PlugsStore::prop().as_ref(),
-                PlugsStore::default(),
-            )
-            .map_err(|_| automerge::AutomergeError::Fail)?;
-            reconcile_prop(
-                tx,
-                ROOT,
-                InitStore::prop().as_ref(),
-                InitStore::default(),
-            )
-            .map_err(|_| automerge::AutomergeError::Fail)?;
+            reconcile_prop(tx, ROOT, PlugsStore::prop().as_ref(), PlugsStore::default())
+                .map_err(|_| automerge::AutomergeError::Fail)?;
+            reconcile_prop(tx, ROOT, InitStore::prop().as_ref(), InitStore::default())
+                .map_err(|_| automerge::AutomergeError::Fail)?;
             Ok::<_, automerge::AutomergeError>(())
         })
         .map_err(|err| ferr!("{err:?}"))?;

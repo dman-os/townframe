@@ -233,14 +233,13 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let owner = Node::boot(114, "Owner").await?;
-    let guard = ShutdownGuard::from(vec![owner]);
+    let pair = Pair::boot(114, 214, "Owner", "Reader").await?;
 
     let mut initial = automerge::Automerge::new();
     initial
         .transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
         .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
-    let doc = guard.node(0).repo.create_doc(initial).await?;
+    let doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = doc.document_id();
 
     // Capture the pre-grant head (the automerge head before grant).
@@ -249,66 +248,62 @@ async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
         .await
         .expect("doc must have at least one pre-grant head");
 
-    // Grant Read access to a group (triggers checkpoint).
-    let group = guard.node(0).repo.create_group_with_parents(vec![]).await?;
-    guard
-        .node(0)
+    // Grant an empty group first. That does not introduce a reader and may
+    // therefore leave the current epoch unchanged. Adding the first actual
+    // reader is the operation that must rotate and checkpoint the history.
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .add_member_to_group(reader_agent, &group, Access::Read)
+        .await?;
 
-    // Find the checkpoint blob: it's the blob whose content_ref matches the
-    // new head that was just created by the checkpoint commit.
-    let checkpoint_head: Vec<u8> = doc
-        .with_document_read(|d| {
-            let all_heads = d.get_heads();
-            // The checkpoint adds one new head; find the one not in pregrant.
-            all_heads
-                .iter()
-                .find(|h| h.0.as_slice() != pregrant_head.as_slice())
-                .map(|h| h.0.to_vec())
-        })
-        .await
-        .expect("checkpoint commit must create a new head");
-
-    let blobs = guard.node(0).repo.inspect_stored_doc_blobs(doc_id).await?;
-    let checkpoint_blob = blobs
-        .iter()
-        .find_map(|raw| {
-            let encrypted = decode_encrypted_blob(raw).ok()?;
-            (encrypted.content_ref == checkpoint_head).then_some(raw.clone())
-        })
-        .expect("checkpoint blob must exist for the new head");
-
-    // Decrypt the checkpoint blob to get the Envelope.
-    let plaintext = try_decrypt(&guard.node(0).repo, doc_id, &checkpoint_blob)
-        .await
-        .map_err(|e| crate::ferr!("checkpoint blob decrypt failed: {e}"))?;
-
-    // Deserialize as Envelope whose plaintext is Vec<u8> (the bincode blob
-    // whose ancestors map contains the pregrant head key).
-    let envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
-        bincode::deserialize(&plaintext)
-            .map_err(|e| crate::ferr!("bincode deserialize checkpoint envelope: {e}"))?;
+    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let mut found = None;
+    for raw in blobs {
+        let encrypted = decode_encrypted_blob(&raw)?;
+        let plaintext = try_decrypt(&pair.left().repo, doc_id, &raw)
+            .await
+            .map_err(|e| crate::ferr!("stored blob decrypt failed: {e}"))?;
+        let envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
+            bincode::deserialize(&plaintext)
+                .map_err(|e| crate::ferr!("bincode deserialize stored envelope: {e}"))?;
+        if let Some(checkpoint) =
+            crate::runtime2::support::CausalCheckpoint::decode(&envelope.plaintext)?
+        {
+            found = Some((encrypted.content_ref, envelope, checkpoint));
+            break;
+        }
+    }
+    let (_checkpoint_head, envelope, checkpoint) =
+        found.expect("typed causal checkpoint blob must exist after reader grant");
 
     assert!(
         envelope.ancestors.contains_key(&pregrant_head),
         "checkpoint envelope must carry the pregrant head in its ancestors map"
     );
 
-    let snapshot = automerge::Automerge::load(&envelope.plaintext).map_err(|error| {
-        crate::ferr!("checkpoint payload is not a standalone snapshot: {error}")
-    })?;
     assert!(
-        snapshot
-            .get_heads()
+        checkpoint
+            .covered_frontier
             .iter()
-            .any(|head| head.0.as_slice() == checkpoint_head.as_slice()),
-        "checkpoint snapshot must materialize its advertised head without predecessor blobs"
+            .any(|head| head.as_bytes().as_slice() == pregrant_head.as_slice()),
+        "checkpoint must logically cover the pregrant Automerge frontier"
+    );
+    assert_eq!(
+        doc.with_document_read(|d| d.get_heads()).await,
+        vec![automerge::ChangeHash(
+            pregrant_head.clone().try_into().unwrap()
+        )],
+        "key-only checkpoint must not mutate Automerge heads"
     );
 
     drop(doc);
-    drop(guard);
+    drop(pair);
     Ok(())
 }
 

@@ -175,8 +175,12 @@ impl Node {
         let mut backends = HashMap::new();
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
         let shared_store: crate::SharedPartStore = Arc::clone(&store) as _;
-        let (worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker_with_options(shared_store, backends, label, Some(Duration::from_secs(5)))?;
+        let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
+            shared_store,
+            backends,
+            label,
+            Some(Duration::from_secs(5)),
+        )?;
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
             repo,
@@ -274,7 +278,7 @@ impl Node {
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_parts(remote, stress_support::test_parts())
+        self.connect_with_parts(remote, vec![crate::GLOBAL_PART_ID])
             .await
     }
     pub(crate) async fn connect_with_parts(

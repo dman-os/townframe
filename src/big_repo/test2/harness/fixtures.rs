@@ -237,6 +237,78 @@ pub async fn sync_doc_bidirectional(
     Ok((handle_a, handle_b))
 }
 
+/// Reach the fixed point of every currently configured BigSync route and all
+/// local BigRepo work on `nodes`. A sync round may itself publish new physical
+/// document heads (for example a causal healing checkpoint), so one frontier
+/// fence is not sufficient.
+pub async fn wait_for_network_rest(
+    nodes: &[&super::topo::Node],
+    timeout: std::time::Duration,
+) -> Res<()> {
+    let prepared = tokio::time::timeout(timeout, async {
+        for node in nodes {
+            loop {
+                let event_tail = node.store.keyhive_event_log_cursor().await?;
+                if node.store.keyhive_group_part_cursor().await? >= event_tail {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            node.repo.wait_for_quiescence(None).await?;
+        }
+        Ok::<_, crate::eyre::Error>(())
+    })
+    .await;
+    match prepared {
+        Ok(prepared) => prepared?,
+        Err(_) => {
+            let mut cursors = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                cursors.push((
+                    node.label,
+                    node.store.keyhive_event_log_cursor().await,
+                    node.store.keyhive_group_part_cursor().await,
+                ));
+            }
+            return Err(crate::ferr!(
+                "timed out preparing BigRepo network-rest routes: {cursors:?}"
+            ));
+        }
+    }
+
+    let mut targets = Vec::new();
+    for node in nodes {
+        let snapshot = node.worker.snapshot().await?;
+        tracing::debug!(
+            node = %node.repo.local_peer_id(),
+            peer_parts = ?snapshot.peer_parts,
+            "network-rest BigSync routes"
+        );
+        for (peer_id, parts) in snapshot.peer_parts {
+            targets.push(big_sync::test_support::NetworkRestTarget {
+                worker: node.worker.clone(),
+                store: Arc::clone(&node.store) as Arc<dyn big_sync::HostPartStore>,
+                peer_ids: vec![peer_id],
+                part_ids: parts.into_keys().collect(),
+            });
+        }
+    }
+    big_sync::test_support::wait_for_network_rest(&targets, timeout, || async {
+        for node in nodes {
+            while {
+                let event_tail = node.store.keyhive_event_log_cursor().await?;
+                node.store.keyhive_group_part_cursor().await? < event_tail
+                    || node.store.causal_checkpoint_cursor().await? < event_tail
+            } {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            node.repo.wait_for_quiescence(None).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Convenience wrapper around [`sync_doc_bidirectional`] for a [`Pair`].
 /// Returns (left_handle, right_handle).
 pub async fn sync_doc_pair(

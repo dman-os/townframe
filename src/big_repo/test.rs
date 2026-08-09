@@ -239,6 +239,136 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
 }
 
 #[tokio::test]
+async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontier() -> Res<()> {
+    let (repo, _part_store, _stop_token) = boot_repo().await?;
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "stable-frontier"))
+        .expect("failed seeding doc");
+    let handle = repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    let initial_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+
+    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+    assert_eq!(
+        repo.inspect_stored_doc_blobs(doc_id).await?.len(),
+        initial_count,
+        "the initial ordinary write already covers its current epoch"
+    );
+
+    let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
+    let keyhive = repo.keyhive().clone_keyhive();
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .expect("created document must be present in Keyhive");
+    let (update, local_secret) = keyhive.force_pcs_update(kh_doc).await?;
+    crate::runtime2::support::persist_cgka_updates_durably(
+        &repo.keyhive_storage,
+        vec![update],
+        vec![local_secret],
+    )
+    .await?;
+
+    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+    let rotated_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+    assert_eq!(
+        rotated_count,
+        initial_count + 1,
+        "a new epoch at the same Automerge frontier needs one checkpoint"
+    );
+    for _ in 0..3 {
+        assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+    }
+    assert_eq!(
+        repo.inspect_stored_doc_blobs(doc_id).await?.len(),
+        rotated_count,
+        "replayed attempts in one epoch must not mint duplicate checkpoints"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> {
+    use subduction_core::storage::traits::Storage;
+
+    let temp_root = tempdir()?;
+    let repo_path = temp_root.path().join("checkpoint-crash-window");
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "crash-window"))
+        .expect("failed seeding doc");
+    let handle = repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    let kh_doc = repo
+        .keyhive()
+        .clone_keyhive()
+        .get_document(keyhive_document_id_for_big_repo_doc(doc_id))
+        .await
+        .expect("created document must be present in Keyhive");
+    let (update, local_secret) = repo
+        .keyhive()
+        .clone_keyhive()
+        .force_pcs_update(kh_doc)
+        .await?;
+    crate::runtime2::support::persist_cgka_updates_durably(
+        &repo.keyhive_storage,
+        vec![update],
+        vec![local_secret],
+    )
+    .await?;
+    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+
+    let checkpoint_ids: Vec<_> = repo
+        .inspect_stored_doc_blobs(doc_id)
+        .await?
+        .into_iter()
+        .filter_map(|raw| decode_encrypted_blob(&raw).ok())
+        .filter_map(|encrypted| {
+            let bytes: [u8; 32] = encrypted.content_ref.try_into().ok()?;
+            let id = sedimentree_core::loose_commit::id::CommitId::new(bytes);
+            crate::runtime2::support::is_causal_checkpoint_id(id).then_some(id)
+        })
+        .collect();
+    assert!(
+        !checkpoint_ids.is_empty(),
+        "rotation must create a checkpoint"
+    );
+    for checkpoint_id in checkpoint_ids {
+        Storage::<future_form::Sendable>::delete_loose_commit(
+            &repo.sqlite_store(),
+            sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes()),
+            checkpoint_id,
+        )
+        .await?;
+    }
+    drop(handle);
+    stop().await?;
+    drop(repo);
+
+    let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let repaired = reopened
+                .inspect_stored_doc_blobs(doc_id)
+                .await?
+                .into_iter()
+                .filter_map(|raw| decode_encrypted_blob(&raw).ok())
+                .filter_map(|encrypted| encrypted.content_ref.try_into().ok())
+                .map(sedimentree_core::loose_commit::id::CommitId::new)
+                .any(crate::runtime2::support::is_causal_checkpoint_id);
+            if repaired {
+                return Ok::<_, crate::eyre::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("startup audit did not repair missing checkpoint")?;
+    reopened_stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_boundary_commit_stores_requested_encrypted_fragment() -> Res<()> {
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
@@ -653,12 +783,12 @@ async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<
         .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    let checkpoint_head = handle
+    let postgrant_automerge_head = handle
         .with_document_read(|doc| initial_content_heads(doc).map(|heads| heads.head.to_vec()))
         .await?;
-    assert_ne!(
-        checkpoint_head, pregrant_head,
-        "reader grant should write a checkpoint commit after the pregrant head"
+    assert_eq!(
+        postgrant_automerge_head, pregrant_head,
+        "a key-only checkpoint must not alter the Automerge frontier"
     );
 
     let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
@@ -671,9 +801,9 @@ async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<
         .iter()
         .find_map(|raw| {
             let encrypted = decode_encrypted_blob(raw).ok()?;
-            (encrypted.content_ref == checkpoint_head).then_some(encrypted)
+            (encrypted.content_ref != pregrant_head).then_some(encrypted)
         })
-        .expect("post-grant checkpoint blob should be stored under the new head");
+        .expect("reader grant should add a key-only checkpoint after the pregrant head");
 
     let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
     let keyhive = owner.repo.keyhive().clone_keyhive();
@@ -814,24 +944,35 @@ async fn client_keyhive_decrypts_postgrant_checkpoint_after_explicit_keyhive_syn
         .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    let checkpoint_head = handle
-        .with_document_read(|doc| initial_content_heads(doc).map(|heads| heads.head.to_vec()))
-        .await?;
-    assert_ne!(
-        checkpoint_head, pregrant_head,
-        "reader grant should advance the owner head with a checkpoint commit"
-    );
-
     owner_conn.sync_keyhive_with_peer(None).await?;
 
     let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
-    let checkpoint_blob = postgrant_blobs
-        .iter()
-        .find_map(|raw| {
-            let encrypted = decode_encrypted_blob(raw).ok()?;
-            (encrypted.content_ref == checkpoint_head).then_some(encrypted)
-        })
-        .expect("post-grant checkpoint blob should be stored under the new head");
+    let mut checkpoint_blob = None;
+    for raw in postgrant_blobs {
+        let encrypted = decode_encrypted_blob(&raw)?;
+        let owner_kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
+        let owner_kh_doc = owner
+            .repo
+            .keyhive()
+            .clone_keyhive()
+            .get_document(owner_kh_doc_id)
+            .await
+            .expect("owner keyhive doc should exist");
+        let plaintext = owner_kh_doc
+            .lock()
+            .await
+            .try_decrypt_content_keyed(&encrypted)
+            .ok()
+            .map(|(plaintext, _)| plaintext);
+        let Some(plaintext) = plaintext else { continue };
+        let envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
+            bincode::deserialize(&plaintext)?;
+        if crate::runtime2::support::CausalCheckpoint::decode(&envelope.plaintext)?.is_some() {
+            checkpoint_blob = Some(encrypted);
+            break;
+        }
+    }
+    let checkpoint_blob = checkpoint_blob.expect("post-grant causal checkpoint must be stored");
 
     let client_kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
     let client_keyhive = client.repo.keyhive().clone_keyhive();
@@ -877,10 +1018,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
         .into_ready(doc_id)?
         .export()
         .await;
-    let heads_before = repo
-        .doc_payload_heads(doc_id)
-        .await?
-        .expect("heads should exist before reboot");
+    let heads_before = handle.with_document_read(|doc| doc.get_heads()).await;
     let title_before = handle
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
@@ -901,10 +1039,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
         .into_ready(doc_id)?
         .export()
         .await;
-    let heads_after = repo
-        .doc_payload_heads(doc_id)
-        .await?
-        .expect("heads should exist after reboot");
+    let heads_after = fetched.with_document_read(|doc| doc.get_heads()).await;
 
     assert_eq!(export_after, export_before);
     assert_eq!(heads_after, heads_before);
@@ -3812,6 +3947,18 @@ async fn run_sync_backend_remote_payload_missing_noop_case() -> Res<()> {
     .await
 }
 
+async fn run_sync_backend_missing_local_and_remote_payload_case() -> Res<()> {
+    run_sync_backend_case(
+        None,
+        None,
+        SyncCompletionDeets::ChangedObject,
+        false,
+        sync_test_parts(),
+        true,
+    )
+    .await
+}
+
 async fn run_sync_backend_remote_payload_missing_changed_case(
     sync_part_hints: Vec<PartId>,
 ) -> Res<()> {
@@ -4047,6 +4194,17 @@ async fn big_repo_sync_backend_returns_noop_when_remote_payload_is_missing() -> 
     )
     .await
     .expect("sync backend test timed out")?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn big_repo_sync_backend_fetches_missing_doc_when_remote_payload_is_missing() -> Res<()> {
+    timeout(
+        SYNC_CASE_TIMEOUT,
+        run_sync_backend_missing_local_and_remote_payload_case(),
+    )
+    .await
+    .expect("sync backend missing-document test timed out")?;
     Ok(())
 }
 

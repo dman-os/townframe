@@ -36,6 +36,8 @@ pub use runtime2::types::{
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 mod sqlite_big_repo_store;
+#[cfg(feature = "test-support")]
+pub use sqlite_big_repo_store::BigSyncStoreSnapshot;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 mod wire;
 
@@ -122,7 +124,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     sqlite_store: SqliteBigRepoStore,
     #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
@@ -200,6 +202,23 @@ impl BigRepo {
     pub fn shared_part_store(&self) -> SharedPartStore {
         Arc::clone(&self.big_sync_store)
     }
+    #[cfg(feature = "test-support")]
+    pub async fn big_sync_store_snapshot(&self) -> Res<BigSyncStoreSnapshot> {
+        let mut snapshot = self.sqlite_store.big_sync_store_snapshot().await?;
+        snapshot.local_cgka_secret_count = subduction_keyhive::load_local_cgka_secrets::<
+            _,
+            future_form::Sendable,
+        >(&self.keyhive_storage)
+        .await?
+        .len();
+        snapshot.local_prekey_secret_count = subduction_keyhive::load_local_prekey_secrets::<
+            _,
+            future_form::Sendable,
+        >(&self.keyhive_storage)
+        .await?
+        .len();
+        Ok(snapshot)
+    }
     #[cfg(test)]
     pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
         self.sqlite_store.clone()
@@ -236,6 +255,7 @@ impl BigRepo {
         let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
         let listener = crate::keyhive_listener::BigRepoKeyhiveListener {
             evt_tx: evt_tx.clone(),
+            storage: keyhive_storage.clone(),
         };
         let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(
             node_identity_seed,
@@ -334,6 +354,20 @@ impl BigRepo {
             .get_agent_by_peer_id(&peer_id)
             .await?
             .ok_or_eyre("local Keyhive agent is unavailable")
+    }
+    /// Return the contact card that identifies this repository's local
+    /// Keyhive agent. Clone provisioning sends this before any repo-sync
+    /// connection exists.
+    pub fn local_keyhive_contact_card(&self) -> keyhive_core::contact_card::ContactCard {
+        self.keyhive.contact_card().clone()
+    }
+    /// Learn and durably persist a peer's contact card before granting it
+    /// access. The returned agent can be used directly in the grant.
+    pub async fn receive_keyhive_contact_card(
+        &self,
+        contact_card: &keyhive_core::contact_card::ContactCard,
+    ) -> Res<BigKeyhiveAgent> {
+        self.keyhive.receive_contact_card(contact_card).await
     }
     /// Resolve a connected peer's Keyhive agent.
     pub async fn keyhive_agent_for_peer(&self, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
@@ -562,19 +596,16 @@ impl BigRepo {
             .add_member_to_group(member, group, access, after_content, &self.keyhive_storage)
             .await?;
 
-        // BigRepo's contract is history-inclusive for reader grants. Keyhive
-        // updates each affected document's CGKA tree, while this layer creates
-        // one real content checkpoint per affected document so the new member
-        // receives a decryptable entry point to the existing history.
+        // BigRepo's contract is history-inclusive for reader grants. Publish a
+        // key-only post-grant entrypoint without mutating the Automerge doc.
         if access.is_reader() {
             for doc_id in &affected_docs {
-                let doc = docs
+                let _doc = docs
                     .get(doc_id)
                     .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
-                doc.with_document(|doc| {
-                    let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
-                })
-                .await?;
+                if !self.runtime.ensure_causal_coverage(*doc_id).await? {
+                    tracing::debug!(%doc_id, "group grant causal checkpoint deferred to durable event reconciliation");
+                }
             }
         }
 
@@ -584,8 +615,9 @@ impl BigRepo {
 
     /// Grant document access.
     ///
-    /// Reader grants also write a real Automerge checkpoint so the readable
-    /// history survives reopen and sync.
+    /// Reader grants also attempt a key-only causal checkpoint so the readable
+    /// history survives reopen and sync without mutating document content. A
+    /// durable Keyhive-event consumer retries when causal keys are still in flight.
     pub async fn grant_doc_access(
         self: &Arc<Self>,
         doc_id: DocumentId,
@@ -611,18 +643,8 @@ impl BigRepo {
             )
             .await?;
 
-        if access.is_reader() {
-            // Create the checkpoint after the grant so the checkpoint itself is
-            // written under the newly granted epoch and can carry the prior
-            // content history forward.
-            if let Ok(doc_lookup) = self.get_doc(&doc_id).await {
-                if let Ok(doc) = doc_lookup.into_ready(doc_id) {
-                    doc.with_document(|doc| {
-                        let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
-                    })
-                    .await?;
-                }
-            }
+        if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id).await? {
+            tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
 
         self.keyhive_notifier.note_local_keyhive_changed().await?;
@@ -647,6 +669,9 @@ impl BigRepo {
                 &self.keyhive_storage,
             )
             .await?;
+        if !self.runtime.ensure_causal_coverage(doc_id).await? {
+            tracing::debug!(%doc_id, "document revocation causal checkpoint deferred to durable event reconciliation");
+        }
         self.keyhive_notifier.note_local_keyhive_changed().await?;
         Ok(())
     }

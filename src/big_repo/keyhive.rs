@@ -414,6 +414,23 @@ impl BigKeyhiveHandle {
         &self.contact_card
     }
 
+    pub(crate) async fn receive_contact_card(
+        &self,
+        contact_card: &keyhive_core::contact_card::ContactCard,
+    ) -> Res<BigKeyhiveAgent> {
+        self.keyhive
+            .receive_contact_card(contact_card)
+            .await
+            .map_err(|error| ferr!("failed receiving Keyhive contact card: {error}"))?;
+        // `receive_contact_card` invokes our Keyhive listener, which persists
+        // the prekey event before this await completes.
+        self.get_agent_by_peer_id(&subduction_keyhive::KeyhivePeerId::from_bytes(
+            contact_card.id().to_bytes(),
+        ))
+        .await?
+        .ok_or_eyre("received contact card did not create a Keyhive agent")
+    }
+
     pub(crate) fn keyhive_peer_id(&self) -> subduction_keyhive::KeyhivePeerId {
         self.keyhive_peer_id.clone()
     }

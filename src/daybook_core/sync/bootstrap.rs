@@ -70,6 +70,7 @@ pub struct ResolveCloneInfoRpcReq {
 pub struct RequestCloneProvisionReq {
     pub requested_device_name: Option<String>,
     pub requester_endpoint_id: String,
+    pub requester_contact_card: big_repo::keyhive_core::contact_card::ContactCard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -459,11 +460,31 @@ pub async fn clone_repo_init_from_url(
         // Generate identity locally — secret keys never leave the device.
         let local_secret = iroh::SecretKey::generate();
         let local_public = local_secret.public();
+        let sqlite_path = staging.join("sqlite.db");
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
+        let checkout_id = {
+            let id = Uuid::new_v4();
+            let id = utils_rs::hash::encode_base58_multibase(id);
+            format!("dcheckout_{id}")
+        };
+        let identity = secret_repo
+            .set_identity(&checkout_id, local_secret.clone())
+            .await?;
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: identity.iroh_secret_key.to_bytes(),
+            storage: big_repo::StorageConfig::Disk {
+                path: staging.join("samod"),
+            },
+            scope_key: Arc::from("daybook-core"),
+            hidden_parts: Default::default(),
+        })
+        .await?;
         let provision = request_clone_provision_from_url(
             source_url,
             RequestCloneProvisionReq {
                 requested_device_name: Some(format!("clone-{}", std::env::consts::ARCH)),
                 requester_endpoint_id: local_public.to_string(),
+                requester_contact_card: big_repo.local_keyhive_contact_card(),
             },
         )
         .await?;
@@ -471,17 +492,10 @@ pub async fn clone_repo_init_from_url(
 
         let local_peer_key = daybook_types::doc::format_peer_key(local_public.as_bytes());
 
-        let sqlite_path = staging.join("sqlite.db");
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
         crate::repo::globals::set_string_global(&sql, "global.repo_id", &bootstrap.repo_id).await?;
         crate::authority::persist_ids(&sql, bootstrap.authority_ids).await?;
         crate::repo::globals::set_string_global(&sql, "global.repo_name", &bootstrap.repo_name)
             .await?;
-        let checkout_id = {
-            let id = Uuid::new_v4();
-            let id = utils_rs::hash::encode_base58_multibase(id);
-            format!("dcheckout_{id}")
-        };
         crate::repo::globals::set_string_global(&sql, "global.checkout_id", &checkout_id).await?;
         let user_id = format!(
             "{}{}",
@@ -489,10 +503,6 @@ pub async fn clone_repo_init_from_url(
             Uuid::new_v4().bs58()
         );
         crate::repo::globals::set_string_global(&sql, "global.user_id", &user_id).await?;
-
-        let identity = secret_repo
-            .set_identity(&checkout_id, local_secret.clone())
-            .await?;
 
         let pkey_bs58 = utils_rs::hash::encode_base58_multibase(local_public.as_bytes());
         let device_id = format!(
@@ -531,15 +541,6 @@ pub async fn clone_repo_init_from_url(
             crate::repo::globals::set_sync_config(&sql, &sync_config).await?;
         }
 
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
-            node_identity_seed: identity.iroh_secret_key.to_bytes(),
-            storage: big_repo::StorageConfig::Disk {
-                path: staging.join("samod"),
-            },
-            scope_key: Arc::from("daybook-core"),
-            hidden_parts: Default::default(),
-        })
-        .await?;
         let part_store = big_repo.shared_part_store();
         let blob_part_store = crate::repo::open_blob_part_store(&staging).await?;
         let blobs_repo = crate::blobs::BlobsRepo::new(

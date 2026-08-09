@@ -4,7 +4,8 @@ use crate::interlude::*;
 
 use crate::changes::BigRepoChangeOrigin;
 use crate::runtime2::support::{
-    stage_automerge_ingest, BigRepoCiphertextKind, BigRepoCiphertextLocator,
+    is_causal_checkpoint_id, stage_automerge_ingest, BigRepoCiphertextKind,
+    BigRepoCiphertextLocator, CausalCheckpoint,
 };
 use crate::runtime2::types::{DocLookup, LiveDocBundle};
 use crate::runtime2::Runtime2Evt;
@@ -43,6 +44,7 @@ where
         state: DocState::Unloaded,
         partially_decrypted: false,
         blocked_refs: HashSet::new(),
+        causal_checkpoints: HashMap::new(),
         io,
         change_manager,
         runtime_cmd_tx,
@@ -143,6 +145,8 @@ struct DocWorker2<F: FutureForm> {
     /// session end and on keyhive-driven reattempts, so a live doc never
     /// needs a coarse full-tree rewalk (A7).
     blocked_refs: HashSet<(BigRepoCiphertextKind, CommitId)>,
+    /// Decrypted key-only nodes, indexed by their physical Sedimentree head.
+    causal_checkpoints: HashMap<CommitId, CausalCheckpoint>,
 
     change_manager: Arc<crate::changes::ChangeListenerManager>,
 
@@ -193,6 +197,7 @@ enum LoadedDocSnapshot {
         /// Content refs that could not be decrypted or applied; the source
         /// of truth for a live doc's blocked set when materialized cold.
         blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
+        causal_checkpoints: Vec<(CommitId, CausalCheckpoint)>,
     },
 }
 
@@ -202,6 +207,7 @@ impl LoadedDocSnapshot {
         partially_decrypted: bool,
         blockers: Vec<MaterializationBlocker>,
         blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
+        causal_checkpoints: Vec<(CommitId, CausalCheckpoint)>,
     ) -> Self {
         if doc.get_heads().is_empty() {
             Self::Unavailable {
@@ -213,6 +219,7 @@ impl LoadedDocSnapshot {
                 doc,
                 partially_decrypted,
                 blocked_refs,
+                causal_checkpoints,
             }
         }
     }
@@ -225,10 +232,16 @@ impl LoadedDocSnapshot {
         mut blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
     ) -> eyre::Result<Self> {
         let mut doc = automerge::Automerge::new();
+        let mut causal_checkpoints = Vec::new();
         loop {
             let mut deferred = Vec::new();
             let mut round_progress = false;
             for (kind, ref_, plaintext) in pending {
+                if let Some(checkpoint) = CausalCheckpoint::decode(&plaintext)? {
+                    causal_checkpoints.push((ref_, checkpoint));
+                    round_progress = true;
+                    continue;
+                }
                 match doc.load_incremental(&plaintext) {
                     Ok(0) if doc.get_heads().is_empty() => deferred.push((kind, ref_, plaintext)),
                     Ok(applied) => round_progress |= applied > 0,
@@ -258,8 +271,13 @@ impl LoadedDocSnapshot {
             }
             pending = deferred;
         }
-        let mut snapshot =
-            Self::from_materialized_doc(doc, partially_decrypted, blockers, blocked_refs);
+        let mut snapshot = Self::from_materialized_doc(
+            doc,
+            partially_decrypted,
+            blockers,
+            blocked_refs,
+            causal_checkpoints,
+        );
         if let Self::Ready { blocked_refs, .. } = &mut snapshot {
             blocked_refs.sort();
             blocked_refs.dedup();
@@ -305,6 +323,15 @@ impl<F: FutureForm> DocWorker2<F> {
             } => {
                 self.apply_sync_session(peer_id, commit_ids, fragment_ids, reply)
                     .await
+            }
+            DocWorkerMsg::ReconcileCausalCoverage { resp, _lease: _ } => {
+                let result = self.reconcile_causal_coverage().await;
+                if let Some(resp) = resp {
+                    resp.send(result.as_ref().copied().map_err(|error| ferr!("{error:?}")))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+                result.map(|_| ())
             }
             DocWorkerMsg::ReattemptMaterialization {
                 origin,
@@ -531,6 +558,9 @@ impl<F: FutureForm> DocWorker2<F> {
             match plaintexts.remove(&content_ref) {
                 Some(plaintext) => pending.push((kind, head, plaintext)),
                 None => {
+                    if kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head) {
+                        continue;
+                    }
                     partially_decrypted = true;
                     blocked_refs.push((kind, head));
                 }
@@ -580,11 +610,13 @@ impl<F: FutureForm> DocWorker2<F> {
                         doc,
                         partially_decrypted,
                         blocked_refs,
+                        causal_checkpoints,
                     } => {
                         let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
                         self.transition_to_ready(was_pending, Arc::clone(&heads))
                             .await?;
                         self.blocked_refs = blocked_refs.into_iter().collect();
+                        self.causal_checkpoints.extend(causal_checkpoints);
                         self.sync_partial_state().await?;
                         let bundle = Arc::new(LiveDocBundle::new(
                             self.doc_id,
@@ -659,7 +691,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn commit_delta(
         &mut self,
         bundle_id: u64,
-        commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
+        mut commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
         heads: Vec<automerge::ChangeHash>,
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
@@ -712,6 +744,36 @@ impl<F: FutureForm> DocWorker2<F> {
                 return Ok(());
             }
         }
+        // Automerge payload dependencies and the encryption/Sedimentree DAG
+        // intentionally differ when key-only checkpoints are present. A
+        // checkpoint can replace exactly the Automerge frontier it covers,
+        // but must not make a write depend on arbitrary physical Sedimentree
+        // heads: another partition may have produced a checkpoint whose key
+        // this writer cannot decrypt.
+        let batch_ids: HashSet<_> = commits.iter().map(|(head, _, _)| *head).collect();
+        for (_head, parents, _blob) in &mut commits {
+            let external: BTreeSet<_> = parents
+                .iter()
+                .filter(|parent| !batch_ids.contains(parent))
+                .copied()
+                .collect();
+            if let Some(checkpoint_head) = self
+                .causal_checkpoints
+                .iter()
+                .filter(|(_, checkpoint)| checkpoint.covered_frontier == external)
+                .map(|(head, _)| *head)
+                .min()
+            {
+                parents.retain(|parent| batch_ids.contains(parent));
+                parents.insert(checkpoint_head);
+            }
+        }
+        debug!(
+            %self.doc_id,
+            commits = ?commits.iter().map(|(head, parents, _)| (*head, parents)).collect::<Vec<_>>(),
+            "persisting local Automerge commits"
+        );
+
         let pending_fragment_requests =
             match self.io.persist_local_commits(self.sed_id, commits).await {
                 Ok(requests) => requests,
@@ -1036,10 +1098,108 @@ impl<F: FutureForm> DocWorker2<F> {
                     tracing::debug!(%self.doc_id, "passed point A7b: blocked refs retried and heads advanced");
                 }
             }
+
+            if !has_live {
+                let origin = BigRepoChangeOrigin::Remote { peer_id };
+                let _ = self.retry_materialization(origin).await?;
+            }
+            self.reconcile_causal_coverage().await?;
         }
 
         tracing::debug!(%self.doc_id, "passed point A7: calling report_sync_outcome");
         self.report_sync_outcome(peer_id, has_live, reply).await
+    }
+
+    /// Attempt to reconcile the current BeeKEM epoch with the materialized
+    /// Automerge frontier. The operation is idempotent: settled linear
+    /// histories need no shadow node, while a missing epoch or uncovered fork
+    /// publishes exactly one epoch-specific checkpoint.
+    async fn reconcile_causal_coverage(&mut self) -> eyre::Result<bool> {
+        if !self.io.has_doc_write_access(self.doc_id).await? {
+            debug!(%self.doc_id, "causal coverage skipped: no write access");
+            return Ok(true);
+        }
+        let needs_reload = matches!(
+            self.state,
+            DocState::Unloaded | DocState::PendingMaterialization
+        ) || matches!(&self.state, DocState::Live(bundle) if bundle.upgrade().is_none());
+        if needs_reload {
+            self.state = DocState::Unloaded;
+            let _ = self
+                .retry_materialization(BigRepoChangeOrigin::Local)
+                .await?;
+        }
+        if !self.blocked_refs.is_empty() {
+            debug!(%self.doc_id, blocked = self.blocked_refs.len(), "causal coverage skipped: blocked content");
+            return Ok(false);
+        }
+        let materialized_heads: Vec<automerge::ChangeHash> = match &self.state {
+            DocState::Transient(doc) => doc.get_heads(),
+            DocState::Live(bundle) => {
+                let Some(bundle) = bundle.upgrade() else {
+                    debug!(%self.doc_id, "causal coverage deferred: live bundle expired");
+                    return Ok(false);
+                };
+                surelock::key::lock_scope(|key| {
+                    let (doc, _key) = key.lock(&bundle.doc);
+                    doc.get_heads()
+                })
+            }
+            DocState::Unloaded | DocState::PendingMaterialization => {
+                debug!(%self.doc_id, "causal coverage deferred: document did not materialize");
+                return Ok(false);
+            }
+        };
+        if materialized_heads.is_empty() {
+            // An empty Automerge document has no historical application key
+            // to carry across this epoch. The Keyhive event is therefore
+            // fully classified as requiring no causal checkpoint.
+            return Ok(true);
+        }
+
+        let sedimentree_frontier: BTreeSet<CommitId> = self
+            .io
+            .sedimentree_heads(self.sed_id)
+            .await?
+            .into_iter()
+            .collect();
+        if sedimentree_frontier.is_empty() {
+            debug!(%self.doc_id, "causal coverage deferred: sedimentree frontier is empty");
+            return Ok(false);
+        }
+        let covered_frontier: BTreeSet<CommitId> = materialized_heads
+            .into_iter()
+            .map(|head| CommitId::new(head.0))
+            .collect();
+        let current_epoch = self.io.current_causal_epoch(self.sed_id).await?;
+        if let Some(epoch) = current_epoch {
+            if self.causal_checkpoints.values().any(|checkpoint| {
+                checkpoint.epoch == epoch && checkpoint.covered_frontier == covered_frontier
+            }) {
+                debug!(%self.doc_id, covered = covered_frontier.len(), "causal coverage already present for current epoch");
+                return Ok(true);
+            }
+            if sedimentree_frontier.len() == 1 {
+                let head = *sedimentree_frontier
+                    .first()
+                    .expect("single frontier must contain one head");
+                if self.io.ciphertext_epoch(self.sed_id, head).await? == Some(epoch) {
+                    debug!(%self.doc_id, "causal coverage satisfied by current-epoch linear frontier");
+                    return Ok(true);
+                }
+            }
+        }
+
+        debug!(%self.doc_id, ?current_epoch, ?covered_frontier, ?sedimentree_frontier, "persisting causal coverage checkpoint");
+        let Some((head, checkpoint)) = self
+            .io
+            .persist_causal_checkpoint(self.sed_id, covered_frontier)
+            .await?
+        else {
+            return Ok(false);
+        };
+        self.causal_checkpoints.insert(head, checkpoint);
+        Ok(true)
     }
 
     /// Apply decrypted plaintexts into the live bundle under the doc lock.
@@ -1047,7 +1207,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// heads advanced, the resulting heads, and the patches to notify.
     #[allow(clippy::type_complexity)]
     async fn apply_blobs_to_live(
-        &self,
+        &mut self,
         bundle: &Arc<LiveDocBundle>,
         blobs: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
         origin: &BigRepoChangeOrigin,
@@ -1057,11 +1217,21 @@ impl<F: FutureForm> DocWorker2<F> {
         Arc<[automerge::ChangeHash]>,
         Vec<automerge::Patch>,
     )> {
+        let mut automerge_blobs = Vec::new();
+        for (kind, ref_, plaintext) in blobs {
+            if let Some(checkpoint) = CausalCheckpoint::decode(&plaintext)? {
+                debug!(%self.doc_id, ?ref_, ?checkpoint.covered_frontier, "filtered causal checkpoint from Automerge");
+                self.causal_checkpoints.insert(ref_, checkpoint);
+            } else {
+                debug!(%self.doc_id, ?ref_, ?kind, "applying decrypted Automerge blob");
+                automerge_blobs.push((kind, ref_, plaintext));
+            }
+        }
         let (missing_deps, changed, after_heads, patches) = surelock::key::lock_scope(|key| {
             let (mut doc, _key) = key.lock(&bundle.doc);
             let before = doc.get_heads();
             let mut missing_deps = Vec::new();
-            for (kind, ref_, plaintext) in blobs {
+            for (kind, ref_, plaintext) in automerge_blobs {
                 match doc.load_incremental(&plaintext) {
                     Ok(_) => {}
                     Err(automerge::AutomergeError::MissingDeps) => {
@@ -1073,6 +1243,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
             let after = doc.get_heads();
+            debug!(%self.doc_id, ?before, ?after, ?missing_deps, "finished incremental Automerge application");
             let changed = before != after;
             let patches = if changed
                 && self
@@ -1127,6 +1298,9 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         let mut remaining: HashSet<(BigRepoCiphertextKind, CommitId)> =
             std::mem::take(&mut self.blocked_refs);
+        remaining.retain(|(kind, id)| {
+            *kind != BigRepoCiphertextKind::LooseCommit || !is_causal_checkpoint_id(*id)
+        });
         let mut applied_any = false;
         let mut made_progress = true;
         while made_progress && !remaining.is_empty() {
@@ -1285,8 +1459,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .topsorted_blob_order()
             .map_err(|error| ferr!("failed ordering sync session blobs: {error}"))?;
 
-        // Filter the order to only received items, carrying kind + head.
-        let received_order: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = order
+        let ordered_items: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = order
             .iter()
             .filter_map(|item| {
                 let (kind, head) = match item {
@@ -1299,10 +1472,17 @@ impl<F: FutureForm> DocWorker2<F> {
                     ),
                 };
                 let content_ref = head.as_bytes().to_vec();
-                received_refs
-                    .contains(&content_ref)
-                    .then_some((kind, head, content_ref))
+                Some((kind, head, content_ref))
             })
+            .collect();
+        // Received items are the available causal entrypoints. Successful
+        // entrypoint decryption may unlock older stored ancestors that were
+        // not named by this particular Subduction receipt; those ancestors
+        // must still be returned to the materializer below.
+        let received_order: Vec<_> = ordered_items
+            .iter()
+            .filter(|(_, _, content_ref)| received_refs.contains(content_ref))
+            .cloned()
             .collect();
 
         let expected = received_refs.len();
@@ -1368,14 +1548,23 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         tracing::debug!(%self.doc_id, "passed point T5: try_decrypt_received_blobs loop end");
 
-        let mut resolved = Vec::new();
-        let mut unresolved = Vec::new();
-        for (idx, (kind, head, _content_ref)) in received_order.into_iter().enumerate() {
-            match plaintext_by_index[idx].take() {
-                Some(plaintext) => resolved.push((kind, head, plaintext)),
-                None => unresolved.push((kind, head)),
-            }
-        }
+        let decrypted_refs: HashSet<_> = plaintext_by_ref.keys().cloned().collect();
+        let resolved: Vec<_> = ordered_items
+            .into_iter()
+            .filter_map(|(kind, head, content_ref)| {
+                plaintext_by_ref
+                    .remove(&content_ref)
+                    .map(|plaintext| (kind, head, plaintext))
+            })
+            .collect();
+        let unresolved = received_order
+            .into_iter()
+            .filter(|(_, _, content_ref)| !decrypted_refs.contains(content_ref))
+            .map(|(kind, head, _)| (kind, head))
+            .filter(|(kind, head)| {
+                *kind != BigRepoCiphertextKind::LooseCommit || !is_causal_checkpoint_id(*head)
+            })
+            .collect::<Vec<_>>();
         if !unresolved.is_empty() {
             debug!(
                 doc_id = %self.doc_id,
@@ -1443,9 +1632,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 doc,
                 partially_decrypted,
                 blocked_refs,
+                causal_checkpoints,
             } => {
                 tracing::debug!(%self.doc_id, "passed point R2: load_doc_snapshot Ready");
                 self.blocked_refs = blocked_refs.into_iter().collect();
+                self.causal_checkpoints.extend(causal_checkpoints);
                 self.sync_partial_state().await?;
                 let after_heads = doc.get_heads();
                 tracing::debug!(%self.doc_id, "passed point R5: non-live path, before transition_to_ready");
@@ -1528,7 +1719,13 @@ mod tests {
         assert_eq!(loaded.get_heads(), expected_heads);
 
         assert!(matches!(
-            LoadedDocSnapshot::from_materialized_doc(loaded, false, Vec::new(), Vec::new()),
+            LoadedDocSnapshot::from_materialized_doc(
+                loaded,
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             LoadedDocSnapshot::Ready {
                 partially_decrypted: false,
                 ..
@@ -1571,5 +1768,145 @@ mod tests {
             panic!("parent and child plaintexts should materialize");
         };
         assert_eq!(doc.get_heads(), expected_heads);
+    }
+
+    #[test]
+    fn non_automerge_shadow_node_contracts_out_of_materialized_history() {
+        use automerge::{transaction::Transactable, ReadDoc};
+        use sedimentree_core::{
+            blob::{Blob, BlobMeta},
+            depth::CountLeadingZeroBytes,
+            id::SedimentreeId,
+            loose_commit::LooseCommit,
+            sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+        };
+
+        let mut base = automerge::Automerge::new();
+        base.transact(|tx| tx.put(automerge::ROOT, "base", 1))
+            .unwrap();
+        let base_heads = base.get_heads();
+        assert_eq!(base_heads.len(), 1);
+        let base_head = base_heads[0];
+        let base_bytes = base.save();
+
+        let mut left = base
+            .fork()
+            .with_actor(automerge::ActorId::from(b"shadow-left".as_slice()));
+        left.transact(|tx| tx.put(automerge::ROOT, "left", 1))
+            .unwrap();
+        let left_heads = left.get_heads();
+        assert_eq!(left_heads.len(), 1);
+        let left_head = left_heads[0];
+        let left_bytes = left.save_after(&[base_head]);
+
+        let mut right = base
+            .fork()
+            .with_actor(automerge::ActorId::from(b"shadow-right".as_slice()));
+        right
+            .transact(|tx| tx.put(automerge::ROOT, "right", 1))
+            .unwrap();
+        let right_heads = right.get_heads();
+        assert_eq!(right_heads.len(), 1);
+        let right_head = right_heads[0];
+        let right_bytes = right.save_after(&[base_head]);
+
+        let sed_id = SedimentreeId::new([9; 32]);
+        let base_id = CommitId::new(base_head.0);
+        // Keep the synthetic ID away from CountLeadingZeroBytes boundaries so
+        // it cannot accidentally become a fragment boundary.
+        let shadow_id = CommitId::new([0x7f; 32]);
+        let left_id = CommitId::new(left_head.0);
+        let right_id = CommitId::new(right_head.0);
+        let meta = |tag| BlobMeta::new(&Blob::new(vec![tag]));
+        let commits = vec![
+            LooseCommit::new(sed_id, base_id, BTreeSet::new(), meta(1)),
+            LooseCommit::new(sed_id, shadow_id, BTreeSet::from([base_id]), meta(2)),
+            // Sedimentree says these depend on the shadow node, while their
+            // Automerge payloads still directly depend on `base_head`.
+            LooseCommit::new(sed_id, left_id, BTreeSet::from([shadow_id]), meta(3)),
+            LooseCommit::new(sed_id, right_id, BTreeSet::from([shadow_id]), meta(4)),
+        ];
+        let mut tree = MinimizedSedimentree::new(Sedimentree::new(Vec::new(), commits));
+        tree.ensure_minimized(&CountLeadingZeroBytes);
+        assert_eq!(
+            tree.heads(&CountLeadingZeroBytes)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([left_id, right_id])
+        );
+
+        let loose: Vec<_> = tree.loose_commits().collect();
+        let order = tree.topsorted_blob_order().unwrap();
+        let ordered_ids: Vec<_> = order
+            .iter()
+            .map(|item| match item {
+                SedimentreeItem::LooseCommit(index) => loose[*index].head(),
+                SedimentreeItem::Fragment(_) => unreachable!(),
+            })
+            .collect();
+        let position = |id| {
+            ordered_ids
+                .iter()
+                .position(|candidate| *candidate == id)
+                .unwrap()
+        };
+        assert!(position(base_id) < position(shadow_id));
+        assert!(position(shadow_id) < position(left_id));
+        assert!(position(shadow_id) < position(right_id));
+
+        let snapshot = LoadedDocSnapshot::from_decrypted_plaintexts(
+            ordered_ids
+                .into_iter()
+                .filter_map(|id| match id {
+                    id if id == base_id => {
+                        Some((BigRepoCiphertextKind::LooseCommit, id, base_bytes.clone()))
+                    }
+                    id if id == left_id => {
+                        Some((BigRepoCiphertextKind::LooseCommit, id, left_bytes.clone()))
+                    }
+                    id if id == right_id => {
+                        Some((BigRepoCiphertextKind::LooseCommit, id, right_bytes.clone()))
+                    }
+                    id if id == shadow_id => None,
+                    _ => unreachable!(),
+                })
+                .collect(),
+            false,
+            DocumentId::new(*sed_id.as_bytes()),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let LoadedDocSnapshot::Ready { doc, .. } = snapshot else {
+            panic!("filtering the shadow node must leave a materializable Automerge DAG");
+        };
+        assert_eq!(
+            doc.get_heads().into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([left_head, right_head])
+        );
+        assert_eq!(
+            doc.get(automerge::ROOT, "base")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_i64(),
+            Some(1)
+        );
+        assert_eq!(
+            doc.get(automerge::ROOT, "left")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_i64(),
+            Some(1)
+        );
+        assert_eq!(
+            doc.get(automerge::ROOT, "right")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_i64(),
+            Some(1)
+        );
     }
 }

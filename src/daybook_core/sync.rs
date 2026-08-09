@@ -89,7 +89,6 @@ pub struct IrohSyncRepo {
     active_peers: tokio::sync::RwLock<HashMap<PeerId, ActivePeerState>>,
     // sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
-    clone_provision_peers: Arc<tokio::sync::Mutex<std::collections::HashSet<PeerId>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
     blob_sync_worker: big_sync::BigSyncWorkerHandle,
     big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
@@ -255,12 +254,13 @@ impl IrohSyncRepo {
 
         let mut blob_sync_backends = std::collections::HashMap::new();
         blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
-        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
-            Arc::clone(&rcx.blob_part_store),
-            blob_sync_backends,
-            "daybook-blobs",
-            max_task_backoff,
-        )?;
+        let (blob_sync_worker, blob_sync_worker_stop) =
+            big_sync::spawn_big_sync_worker_with_options(
+                Arc::clone(&rcx.blob_part_store),
+                blob_sync_backends,
+                "daybook-blobs",
+                max_task_backoff,
+            )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;
@@ -309,9 +309,6 @@ impl IrohSyncRepo {
             .await?;
 
         let big_sync_rx = big_sync_worker.subscribe_stats();
-        let clone_provision_peers =
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
-
         let reconnect_task = default();
         let repo = Arc::new(Self {
             rcx,
@@ -326,7 +323,6 @@ impl IrohSyncRepo {
             active_peers: default(),
             conn_end_signal_tx: conn_end_tx,
             reconnect_task: Arc::clone(&reconnect_task),
-            clone_provision_peers: Arc::clone(&clone_provision_peers),
             big_sync_worker,
             blob_sync_worker,
             big_repo_rpc: big_repo_rpc.clone(),
@@ -626,7 +622,6 @@ impl IrohSyncRepo {
             );
         }
         let peer_id = conn.peer_id;
-        let clone_provision = self.clone_provision_peers.lock().await.remove(&peer_id);
         let res = async {
             let peer_key = daybook_types::doc::format_peer_key(conn.peer_id.as_bytes());
             let events = [IrohSyncEvent::IncomingConnection {
@@ -657,59 +652,7 @@ impl IrohSyncRepo {
 
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
-            if clone_provision {
-                // A keyhive round cancelled by connection lifecycle (peer
-                // restart/shutdown mid-round) propagates as an error: the
-                // provision is not complete without the round, so the whole
-                // incoming connection setup fails and the reconnect path
-                // re-runs it (the peer is re-registered for re-provision
-                // below). Absorbing the cancellation here would continue the
-                // provision with keys that never arrived.
-                self.rcx
-                    .big_repo
-                    .sync_keyhive_with_peer(
-                        peer_id,
-                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
-                    )
-                    .await?;
-                let agent = self
-                    .rcx
-                    .big_repo
-                    .keyhive_agent_for_peer(peer_id)
-                    .await?
-                    .ok_or_else(|| ferr!("clone peer is not present in Keyhive"))?;
-                self.rcx
-                    .big_repo
-                    .add_admin_member_to_group(agent, &self.authority.repo_agents)
-                    .await?;
-                self.rcx
-                    .big_repo
-                    .sync_keyhive_with_peer(
-                        peer_id,
-                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
-                    )
-                    .await?;
-                // Group membership grants current authority but cannot decrypt
-                // blobs written before the clone joined. Publish self-contained
-                // checkpoints under the new epoch before BigSync exposes the
-                // authoritative documents.
-                for doc in [&self.rcx.doc_app, &self.rcx.doc_drawer] {
-                    doc.with_document(|doc| {
-                        let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
-                    })
-                    .await?;
-                }
-                // Exchange again so the clone observes the checkpoint's epoch
-                // before BigSync can deliver its ciphertext.
-                self.rcx
-                    .big_repo
-                    .sync_keyhive_with_peer(
-                        peer_id,
-                        Some(utils_rs::scale_timeout(Duration::from_secs(30))),
-                    )
-                    .await?;
-            }
-            let partition_ids = self.peer_partition_ids(&peer_key, !clone_provision);
+            let partition_ids = self.peer_partition_ids(&peer_key, true);
             let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             self.big_sync_worker
                 .set_peer(conn.peer_id, doc_rpc_client, doc_parts, HashMap::new())
@@ -737,16 +680,13 @@ impl IrohSyncRepo {
         }
         .await;
         if let Err(error) = &res {
-            error!(%peer_id, ?error, clone_provision, "incoming BigRepo connection setup failed");
+            error!(%peer_id, ?error, "incoming BigRepo connection setup failed");
             self.big_repo_rpc.unregister_peer(peer_id);
             let old = self.active_peers.write().await.remove(&peer_id);
             assert!(
                 matches!(old, Some(ActivePeerState::Connecting { .. })),
                 "fishy"
             );
-            if clone_provision {
-                self.clone_provision_peers.lock().await.insert(peer_id);
-            }
         }
 
         res
@@ -844,11 +784,19 @@ impl IrohSyncRepo {
     ) -> Res<bootstrap::CloneProvisionResponse> {
         let endpoint_id = iroh::PublicKey::from_str(&req.requester_endpoint_id)
             .wrap_err("invalid requester_endpoint_id in clone provision request")?;
-        let requester_peer_id = PeerId::new(*endpoint_id.as_bytes());
-        self.clone_provision_peers
-            .lock()
-            .await
-            .insert(requester_peer_id);
+        eyre::ensure!(
+            req.requester_contact_card.id().to_bytes() == *endpoint_id.as_bytes(),
+            "clone endpoint identity does not match its Keyhive contact card"
+        );
+        let requester = self
+            .rcx
+            .big_repo
+            .receive_keyhive_contact_card(&req.requester_contact_card)
+            .await?;
+        self.rcx
+            .big_repo
+            .add_admin_member_to_group(requester, &self.authority.repo_agents)
+            .await?;
         // self.sync_store.allow_peer(requester_peer_key).await?;
         let endpoint_addr = self.router.endpoint().addr();
         let device_name = req
@@ -1087,6 +1035,45 @@ impl IrohSyncRepo {
             }
         }
         Ok(())
+    }
+
+    /// Test-support fence for the fixed point of BigSync and BigRepo local
+    /// work. Unlike one `wait_for_full_sync`, this includes new part events
+    /// generated while applying the preceding sync round.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_for_network_rest(
+        &self,
+        peer_ids: &[PeerId],
+        required_partitions: &[PartId],
+        timeout: Duration,
+    ) -> Res<()> {
+        self.ensure_repo_live()?;
+        let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
+        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
+            .iter()
+            .copied()
+            .partition(|part| *part == docs_blob || *part == plugs_blob);
+        let targets = [
+            big_sync::test_support::NetworkRestTarget {
+                worker: self.big_sync_worker.clone(),
+                store: Arc::clone(&self.rcx.part_store) as Arc<dyn big_sync::HostPartStore>,
+                peer_ids: peer_ids.to_vec(),
+                part_ids: doc_parts,
+            },
+            big_sync::test_support::NetworkRestTarget {
+                worker: self.blob_sync_worker.clone(),
+                store: Arc::clone(&self.rcx.blob_part_store) as Arc<dyn big_sync::HostPartStore>,
+                peer_ids: peer_ids.to_vec(),
+                part_ids: blob_parts,
+            },
+        ];
+        big_sync::test_support::wait_for_network_rest(
+            &targets,
+            utils_rs::scale_timeout(timeout),
+            || self.rcx.big_repo.wait_for_quiescence(None),
+        )
+        .await
     }
 
     pub async fn wait_until_peers_sync(&self, peer_ids: &[PeerId], timeout: Duration) -> Res<()> {

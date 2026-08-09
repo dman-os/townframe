@@ -1,8 +1,9 @@
 //! Composite keyhive listener that forwards every event into the runtime's
 //! event channel as a typed [`Runtime2Evt`] message.
 //!
-//! Constructed with **only** a sender — no keyhive/storage handle
-//! (avoids the reference cycle the playbook warns about). Pure forwarder.
+//! Local private prekey material is persisted before the corresponding public
+//! event is forwarded, so a crash cannot leave a durable rotation without its
+//! decryption key.
 use crate::interlude::*;
 use beekem::operation::CgkaOperation;
 use future_form::{FutureForm, Sendable};
@@ -22,39 +23,54 @@ use std::sync::Arc;
 ///
 /// Implements every keyhive listener trait. Each `on_*` packs the event into
 /// the matching [`Runtime2Evt`] variant and sends it over the unbounded event
-/// channel. No async work beyond the send.
+/// channel.
 ///
 /// Cloning is cheap (the sender is `Clone`).
 #[derive(Clone, Debug)]
 pub struct BigRepoKeyhiveListener {
     pub(crate) evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    pub(crate) storage: crate::keyhive_storage::BigRepoKeyhiveStorage,
 }
 
 impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
     fn on_prekeys_expanded<'a>(
         &'a self,
         new_prekey: &'a Arc<Signed<AddKeyOp>>,
+        local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        self.evt_tx
-            .try_send(crate::runtime2::Runtime2Evt::PrekeyExpanded {
-                new_prekey: Arc::clone(new_prekey),
-            })
-            .inspect_err(|_| warn!(ERROR_CHANNEL))
-            .ok();
-        Sendable::ready(())
+        Sendable::from_future(async move {
+            if let Some(local_secret) = local_secret {
+                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                    .await
+                    .expect("local prekey secret must be durable before its public operation");
+            }
+            self.evt_tx
+                .send(crate::runtime2::Runtime2Evt::PrekeyExpanded {
+                    new_prekey: Arc::clone(new_prekey),
+                })
+                .await
+                .expect(ERROR_CHANNEL);
+        })
     }
 
     fn on_prekey_rotated<'a>(
         &'a self,
         rotate_key: &'a Arc<Signed<RotateKeyOp>>,
+        local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        self.evt_tx
-            .try_send(crate::runtime2::Runtime2Evt::PrekeyRotated {
-                rotate_key: Arc::clone(rotate_key),
-            })
-            .inspect_err(|_| warn!(ERROR_CHANNEL))
-            .ok();
-        Sendable::ready(())
+        Sendable::from_future(async move {
+            if let Some(local_secret) = local_secret {
+                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                    .await
+                    .expect("local prekey secret must be durable before its public operation");
+            }
+            self.evt_tx
+                .send(crate::runtime2::Runtime2Evt::PrekeyRotated {
+                    rotate_key: Arc::clone(rotate_key),
+                })
+                .await
+                .expect(ERROR_CHANNEL);
+        })
     }
 }
 

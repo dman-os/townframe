@@ -75,12 +75,15 @@ pub async fn tier0_invariants(
     left: &crate::BigDocHandle,
     right: &crate::BigDocHandle,
 ) -> Res<()> {
-    // Handle commits and inbound sync application are acknowledged before
-    // their final materialized state is necessarily visible to doc_head_state.
-    // The invariant is about the settled document, not that intermediate
-    // acknowledgement boundary.
-    pair.left().repo.wait_for_quiescence(None).await?;
-    pair.right().repo.wait_for_quiescence(None).await?;
+    // Runtime quiescence alone does not fence BigSync's external workers. A
+    // worker may already be fetching a newly published fragment while both
+    // runtime hubs are idle, which exposes an intermediate Sedimentree
+    // frontier here. Fence the complete network + runtime fixed point.
+    super::fixtures::wait_for_network_rest(
+        &[pair.left(), pair.right()],
+        utils_rs::scale_timeout(std::time::Duration::from_secs(30)),
+    )
+    .await?;
 
     if let Err(error) = assert_sedimentree_parity(pair, doc_id).await {
         let diagnostics = super::dump::diagnostics(pair, doc_id).await?;

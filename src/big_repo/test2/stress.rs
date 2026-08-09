@@ -24,7 +24,6 @@ use std::{
 use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0002;
 
@@ -496,6 +495,15 @@ impl StressFixture for BigRepoStressFixture {
                 .wait_for_quiescence(Some(Duration::from_secs(20)))
                 .await?;
         }
+        for editor in &editors {
+            let local_group = editor.repo.keyhive().get_group(group.id()).await;
+            if local_group.is_none() {
+                return Err(crate::ferr!(
+                    "editor {} reached bootstrap quiescence without the shared Keyhive group",
+                    editor.peer_id()
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -519,36 +527,6 @@ impl StressFixture for BigRepoStressFixture {
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
         let parts = self.sync_parts().await;
-        for _pass in 0..2 {
-            try_join_all(nodes.iter().map(|node| async {
-                let peer_ids = node.connected_peer_ids().await;
-                let snapshot = node.worker.snapshot().await?;
-                for peer_id in peer_ids {
-                    let peer_parts: std::collections::BTreeSet<_> = snapshot
-                        .peer_parts
-                        .get(&peer_id)
-                        .ok_or_else(|| crate::ferr!("missing BigSync route for peer {peer_id}"))?
-                        .keys()
-                        .copied()
-                        .chain(parts.iter().copied())
-                        .collect();
-                    timeout(
-                        Duration::from_secs(20),
-                        node.worker.wait_for_full_sync([peer_id], peer_parts),
-                    )
-                    .await
-                    .map_err(|_| {
-                        crate::ferr!(
-                            "timed out waiting for existing BigSync route from {} to {peer_id}",
-                            node.peer_id(),
-                        )
-                    })??;
-                }
-                Ok::<_, crate::interlude::eyre::Report>(())
-            }))
-            .await?;
-        }
-
         let editors: Vec<&Node> = nodes
             .iter()
             .copied()
@@ -587,11 +565,17 @@ impl StressFixture for BigRepoStressFixture {
         // can participate in settlement.
         for left_index in 0..nodes.len() {
             for right_index in (left_index + 1)..nodes.len() {
-                let _ = self
-                    .connect_pair(nodes[left_index], nodes[right_index])
-                    .await;
+                self.connect_pair(nodes[left_index], nodes[right_index])
+                    .await?;
             }
         }
+
+        // `connect_pair` installs fresh BigSync peer state. Reach a fixed
+        // point only after the full mesh exists: applying a sync session can
+        // itself persist a causal checkpoint and advance a local part cursor.
+        // A fixed number of full-sync rounds can therefore stop one round too
+        // early.
+        super::harness::fixtures::wait_for_network_rest(nodes, Duration::from_secs(60)).await?;
 
         // Natural convergence: alignment is reached via notifs + automerge CRDT
         // semantics.
@@ -599,14 +583,6 @@ impl StressFixture for BigRepoStressFixture {
         let convergence_deadline = tokio::time::Instant::now() + Duration::from_secs(150);
         let mut last_report = tokio::time::Instant::now();
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
-            for left_index in 0..nodes.len() {
-                for right_index in (left_index + 1)..nodes.len() {
-                    let _ = self
-                        .connect_pair(nodes[left_index], nodes[right_index])
-                        .await;
-                }
-            }
-
             let observations: Vec<(PeerId, BigRepoStressObservation)> =
                 try_join_all(nodes.iter().map(|node| async {
                     Ok::<_, crate::interlude::eyre::Report>((

@@ -1,12 +1,78 @@
 use super::*;
 use keyhive_core::access::Access;
+use keyhive_crypto::{share_key::ShareKey, share_key::ShareSecretKey};
 use nonempty::nonempty;
+
+#[tokio::test]
+async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_compaction() -> Res<()>
+{
+    let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (evt_tx, evt_rx) = async_channel::unbounded();
+    let listener = BigRepoKeyhiveListener {
+        evt_tx,
+        storage: storage.clone(),
+    };
+    let seed = [40; 32];
+    let owner = BigKeyhiveHandle::new(seed, listener.clone()).await?;
+    let storage_id = subduction_keyhive::StorageHash::new(*owner.keyhive_peer_id().verifying_key());
+
+    // Establish a baseline archive and discard private deltas produced while
+    // constructing the initial contact card.
+    subduction_keyhive::compact(owner.clone_keyhive().as_ref(), &storage, storage_id).await?;
+    while evt_rx.try_recv().is_ok() {}
+
+    let add_op = owner.clone_keyhive().expand_prekeys().await?;
+    let persisted =
+        subduction_keyhive::load_local_prekey_secrets::<_, future_form::Sendable>(&storage).await?;
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].1.share_key(), add_op.payload.share_key);
+    assert!(
+        matches!(
+            evt_rx.try_recv(),
+            Ok(crate::runtime2::Runtime2Evt::PrekeyExpanded { .. })
+        ),
+        "the public event must only become observable after its secret is durable"
+    );
+
+    let restored = BigKeyhiveHandle::restore_from_storage_archive(seed, &storage, listener.clone())
+        .await?
+        .ok_or_eyre("baseline archive is missing")?;
+    restored.ingest_from_storage(&storage).await?;
+    let restored_pairs: BTreeMap<ShareKey, ShareSecretKey> =
+        bincode::deserialize(&restored.clone_keyhive().export_prekey_secrets().await?)?;
+    assert_eq!(
+        restored_pairs.get(&add_op.payload.share_key),
+        Some(&persisted[0].1.share_secret_key())
+    );
+
+    subduction_keyhive::compact(owner.clone_keyhive().as_ref(), &storage, storage_id).await?;
+    assert!(
+        subduction_keyhive::load_local_prekey_secrets::<_, future_form::Sendable>(&storage)
+            .await?
+            .is_empty(),
+        "compaction must absorb the prekey delta into the archive"
+    );
+    let compacted = BigKeyhiveHandle::restore_from_storage_archive(seed, &storage, listener)
+        .await?
+        .ok_or_eyre("compacted archive is missing")?;
+    let compacted_pairs: BTreeMap<ShareKey, ShareSecretKey> =
+        bincode::deserialize(&compacted.clone_keyhive().export_prekey_secrets().await?)?;
+    assert_eq!(
+        compacted_pairs.get(&add_op.payload.share_key),
+        Some(&persisted[0].1.share_secret_key())
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();
-    let listener = BigRepoKeyhiveListener { evt_tx };
+    let listener = BigRepoKeyhiveListener {
+        evt_tx,
+        storage: storage.clone(),
+    };
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
     owner.save_prekey_secrets(&storage).await?;
@@ -68,6 +134,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         [42; 32],
         BigRepoKeyhiveListener {
             evt_tx: clone_evt_tx,
+            storage: crate::keyhive_storage::BigRepoKeyhiveStorage::memory(),
         },
     )
     .await?;

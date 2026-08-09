@@ -3,6 +3,7 @@ use future_form::FutureForm;
 
 mod group_part_worker;
 pub(crate) use group_part_worker::group_part_id;
+mod causal_checkpoint_worker;
 mod io;
 mod lease;
 mod messages;
