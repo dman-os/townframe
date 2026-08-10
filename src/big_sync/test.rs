@@ -326,7 +326,7 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
 
     async fn prepare_case(&self, case: &SyncBackendScenario) -> Res<()> {
         if case.remote_payload.is_none() {
-            let remote_store = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+            let remote_store = Arc::new(MemoryPartStore::new());
             if let Some(payload) = &case.initial_payload {
                 remote_store
                     .set_obj_payload(case.obj_id, payload.clone())
@@ -394,7 +394,7 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_sync_backend_contract() -> Res<()> {
     let world = Arc::new(TestWorld::default());
-    let local = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+    let local = Arc::new(MemoryPartStore::new());
     let local_part_store: Arc<dyn HostPartStore> = Arc::clone(&local) as _;
     let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id(1),
@@ -536,7 +536,7 @@ async fn seed_objects(node: &NodeHarness, prefix: &str, count: usize) -> Res<Vec
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_part_store_root_bucket_contract() -> Res<()> {
-    let store = crate::part_store::memory::MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
+    let store = crate::part_store::memory::MemoryPartStore::new();
     let part_id = test_part();
     let seed = FingerprintSeed::new(1, 2);
     let mut obj_ids = Vec::new();
@@ -611,8 +611,8 @@ fn memory_part_store_terminal_bucket_bounds_do_not_wrap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
-    let store_a = MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
-    let store_b = MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
+    let store_a = MemoryPartStore::new();
+    let store_b = MemoryPartStore::new();
 
     let objs = [
         (
@@ -749,17 +749,13 @@ where
 
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
-    let store = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+    let store = Arc::new(MemoryPartStore::new());
     boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
 }
 
-async fn boot_policy_node(
-    world: Arc<TestWorld>,
-    peer_seed: u8,
-    policy: Arc<dyn crate::part_store::policy::ObjAccessPolicy>,
-) -> Res<NodeHarness> {
+async fn boot_policy_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
-    let store = Arc::new(MemoryPartStore::new(policy));
+    let store = Arc::new(MemoryPartStore::new());
     boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
 }
 
@@ -1251,8 +1247,8 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let world = Arc::new(TestWorld::default());
     let peer_a = peer_id(1);
     let peer_b = peer_id(2);
-    let store_a = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
-    let store_b = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+    let store_a = Arc::new(MemoryPartStore::new());
+    let store_b = Arc::new(MemoryPartStore::new());
     let store_b_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_b) as _;
 
     world.register_store(peer_a, Arc::clone(&store_a));
@@ -1289,8 +1285,8 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let world = Arc::new(TestWorld::default());
     let peer_a = peer_id(1);
     let peer_b = peer_id(2);
-    let store_a = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
-    let store_b = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+    let store_a = Arc::new(MemoryPartStore::new());
+    let store_b = Arc::new(MemoryPartStore::new());
     let store_a_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_a) as _;
     let store_b_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_b) as _;
 
@@ -1866,12 +1862,9 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
 
     let part = test_part();
     let hidden = PartId(Byte32Id::new([99u8; 32]));
-    let store = MemoryPartStore::with_config(
-        HostPartStoreConfig {
-            hidden_parts: HashSet::from([hidden]),
-        },
-        Arc::new(crate::AllowAllPolicy),
-    );
+    let store = MemoryPartStore::with_config(HostPartStoreConfig {
+        hidden_parts: HashSet::from([hidden]),
+    });
     let peer = PeerId::new([1u8; 32]);
 
     // Both parts exist in the store.

@@ -791,10 +791,10 @@ fn enqueue_member(
         && expanded
             .get(&id)
             .is_none_or(|existing_access| *existing_access < access)
-        {
-            expanded.insert(id, access);
-            explore.push(ExploreNode { membered, access });
-        }
+    {
+        expanded.insert(id, access);
+        explore.push(ExploreNode { membered, access });
+    }
 }
 
 #[cfg(test)]

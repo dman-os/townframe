@@ -128,7 +128,10 @@ struct SessionHandle {
 
 impl SessionHandle {
     fn request_cancel(&self) {
-        self.resume_tx.send(SessionResume::Stop).inspect_err(|err| warn!(ERROR_CHANNEL, ?err)).ok();
+        self.resume_tx
+            .send(SessionResume::Stop)
+            .inspect_err(|err| warn!(ERROR_CHANNEL, ?err))
+            .ok();
         self.cancel_token.cancel();
     }
 }
@@ -518,7 +521,11 @@ impl WflowPlugin {
     }
 
     fn drop_session_handle(&self, session: SessionHandle) {
-        session.resume_tx.send(SessionResume::Stop).inspect_err(|err| warn!(ERROR_CHANNEL, ?err)).ok();
+        session
+            .resume_tx
+            .send(SessionResume::Stop)
+            .inspect_err(|err| warn!(ERROR_CHANNEL, ?err))
+            .ok();
         session.cancel_token.cancel();
         session.join_handle.abort();
         self.active_contexts.remove(&session.ctx_id);

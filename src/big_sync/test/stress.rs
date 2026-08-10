@@ -250,7 +250,6 @@ async fn boot_sqlite_node_at(
             sql,
             format!("big-sync-stress://peer/{peer_seed}"),
             BuckId::MAX_LEVEL,
-            Arc::new(crate::AllowAllPolicy),
         )
         .await?,
     );
@@ -320,8 +319,7 @@ impl StressFixture for PolicyMembershipFixture {
     }
 
     async fn boot_node(&self, world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node> {
-        let policy = Arc::new(crate::part_store::policy::MembershipPolicy::default());
-        boot_policy_node(world, peer_seed, policy).await
+        boot_policy_node(world, peer_seed).await
     }
 
     async fn stop_node(&self, node: Self::Node) -> Res<()> {

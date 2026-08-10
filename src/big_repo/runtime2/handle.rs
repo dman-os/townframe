@@ -457,7 +457,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::WaitForQuiescence { freeze, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        
+
         if let Some(duration) = timeout {
             match self.race_timeout(rx, duration).await {
                 Ok(Ok(result)) => result,

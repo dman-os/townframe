@@ -111,7 +111,6 @@ impl Node {
                 big_sync::HostPartStoreConfig {
                     hidden_parts: hidden_parts.clone(),
                 },
-                Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
             )
             .await?,
         );

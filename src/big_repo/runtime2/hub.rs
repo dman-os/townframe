@@ -676,7 +676,10 @@ where
                 if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                     entry.local_handles += 1;
                     entry.eviction_deadline = None;
-                    registered.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                    registered
+                        .send(())
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
             }
             Runtime2Cmd::ReleaseDocLease { doc_id } => {

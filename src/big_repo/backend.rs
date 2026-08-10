@@ -40,17 +40,18 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         // short circuit if the payloads are equal
         let local_heads = repo.doc_payload_heads(doc_id).await?;
         if let Some(remote_payload) = &remote_payload
-            && let Some(local_heads) = &local_heads {
-                let remote_heads = super::doc_heads_from_payload(remote_payload);
-                if local_heads.as_ref() == remote_heads.as_ref() {
-                    return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                        big_sync_core::SyncTaskCompletion {
-                            obj_id,
-                            deets: big_sync_core::SyncCompletionDeets::Noop,
-                        },
-                    ));
-                }
+            && let Some(local_heads) = &local_heads
+        {
+            let remote_heads = super::doc_heads_from_payload(remote_payload);
+            if local_heads.as_ref() == remote_heads.as_ref() {
+                return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                    big_sync_core::SyncTaskCompletion {
+                        obj_id,
+                        deets: big_sync_core::SyncCompletionDeets::Noop,
+                    },
+                ));
             }
+        }
         let receipt = match repo
             .runtime
             .sync_doc_with_peer_receipt(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))

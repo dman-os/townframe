@@ -540,10 +540,11 @@ impl CameraPreviewFfi {
                             frame.width_px,
                             frame.height_px,
                             &frame.frame_bytes,
-                        ) {
-                            listener_for_qr
-                                .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
-                        }
+                        )
+                    {
+                        listener_for_qr
+                            .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
+                    }
                 },
             )
             .map_err(|error| FfiError::from(eyre::eyre!("failed creating stream: {error}")))?;

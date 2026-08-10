@@ -325,10 +325,11 @@ fn tombstone_facet_meta(
             for ii in 0..len {
                 if let Some((automerge::Value::Scalar(uuid_scalar), _)) = tx.get(&uuid_list, ii)?
                     && let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref()
-                        && let Ok(uuid) = Uuid::parse_str(uuid_str) {
-                            invalidated_uuids.push(uuid);
-                            tx.delete(dmeta_facet_uuids_obj, uuid.to_string())?;
-                        }
+                    && let Ok(uuid) = Uuid::parse_str(uuid_str)
+                {
+                    invalidated_uuids.push(uuid);
+                    tx.delete(dmeta_facet_uuids_obj, uuid.to_string())?;
+                }
             }
         }
         let deleted_at_list = match tx.get(&facet_meta_obj, "deletedAt")? {

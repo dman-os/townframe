@@ -475,7 +475,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn real_iroh_rpc_roundtrip_matches_store() -> Res<()> {
         let part_id = test_part();
-        let store = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
+        let store = Arc::new(MemoryPartStore::new());
         seed_test_store(&store, part_id).await?;
 
         let expected_peer_summary = PeerSummaryResult {

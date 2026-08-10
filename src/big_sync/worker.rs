@@ -525,7 +525,7 @@ impl BigSyncWorker {
                 {
                     resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 }
-                self.stats_tx.send(event).expect(ERROR_CHANNEL);
+                self.stats_tx.send(event).ok();
             }
         }
         Ok(())

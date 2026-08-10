@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
+use crate::test::{InitialWorkload, WflowTestContext, test_wflows_wasm_path};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_recv_message_then_effect_succeeds() -> Res<()> {

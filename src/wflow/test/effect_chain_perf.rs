@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
+use crate::test::{InitialWorkload, WflowTestContext, test_wflows_wasm_path};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
@@ -72,9 +72,10 @@ async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
                         partition_runjob_effect_count += 1;
                         if let wflow_core::partition::effects::PartitionEffectDeets::RunJob(run) =
                             &effect.deets
-                            && run.preferred_worker_id.is_some() {
-                                runjob_preferred_worker_hint_count += 1;
-                            }
+                            && run.preferred_worker_id.is_some()
+                        {
+                            runjob_preferred_worker_hint_count += 1;
+                        }
                     }
                 }
             }
@@ -194,9 +195,10 @@ async fn test_effect_chain_multi_job_latency_baseline() -> Res<()> {
                         partition_runjob_effect_count += 1;
                         if let wflow_core::partition::effects::PartitionEffectDeets::RunJob(run) =
                             &effect.deets
-                            && run.preferred_worker_id.is_some() {
-                                runjob_preferred_worker_hint_count += 1;
-                            }
+                            && run.preferred_worker_id.is_some()
+                        {
+                            runjob_preferred_worker_hint_count += 1;
+                        }
                     }
                 }
             }

@@ -428,7 +428,6 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
             sql,
             sqlite_url.to_owned(),
             big_sync_core::BuckId::MAX_LEVEL,
-            Arc::new(big_sync::AllowAllPolicy),
         )
         .await?,
     );

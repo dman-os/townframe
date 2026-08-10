@@ -396,9 +396,9 @@ impl DispatchRepo {
                 wflow_job_id: Some(job),
                 ..
             } = &old.deets
-            {
-                state.wflow_to_dispatch.remove(job);
-            }
+        {
+            state.wflow_to_dispatch.remove(job);
+        }
 
         match dispatch.status {
             DispatchStatus::Active => {
@@ -474,9 +474,10 @@ impl DispatchRepo {
             wflow_job_id: Some(job),
             ..
         } = &next.deets
-            && next.status == DispatchStatus::Active {
-                state.wflow_to_dispatch.insert(job.clone(), id.clone());
-            }
+            && next.status == DispatchStatus::Active
+        {
+            state.wflow_to_dispatch.insert(job.clone(), id.clone());
+        }
 
         let next_head = dispatch_head_for_dispatch(&id, &next);
         state.active_dispatches.remove(&id);

@@ -9,7 +9,6 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
 
-use super::policy::ObjAccessPolicy;
 use super::{HostPartStore, obj_id_bounds_for_bucket};
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
@@ -81,27 +80,28 @@ structstruck::strike! {
                 >,
                 tombstoned_objs: HashMap<ObjId, CursorIndex>,
                 peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
+                members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
             }
         >>,
         hidden_parts: Arc<HashSet<PartId>>,
-        /// Access-control policy consulted at event-forward time.
-        policy: Arc<dyn ObjAccessPolicy>,
+    }
+}
+
+impl Default for MemoryPartStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl MemoryPartStore {
-    pub fn new(policy: Arc<dyn ObjAccessPolicy>) -> Self {
-        Self::with_config(Default::default(), policy)
+    pub fn new() -> Self {
+        Self::with_config(Default::default())
     }
 
-    pub fn with_config(
-        config: super::HostPartStoreConfig,
-        policy: Arc<dyn ObjAccessPolicy>,
-    ) -> Self {
+    pub fn with_config(config: super::HostPartStoreConfig) -> Self {
         Self {
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
             hidden_parts: Arc::new(config.hidden_parts),
-            policy,
         }
     }
 }
@@ -200,8 +200,32 @@ impl PartState {
         }
     }
 }
+fn is_permitted_members(
+    members: &HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
+    _part_id: Option<PartId>,
+    obj_id: ObjId,
+    principal: Option<PeerId>,
+) -> bool {
+    let Some(principal) = principal else {
+        return true;
+    };
+    members
+        .get(&obj_id)
+        .and_then(|member_map| member_map.get(&principal))
+        .map_or(!members.contains_key(&obj_id), |access| access.is_fetcher())
+}
+
 impl MemoryPartStoreScopeState {
-    fn flush(&mut self, policy: &Arc<dyn ObjAccessPolicy>) {
+    fn is_event_permitted(
+        &self,
+        part_id: Option<PartId>,
+        obj_id: ObjId,
+        principal: Option<PeerId>,
+    ) -> bool {
+        is_permitted_members(&self.members, part_id, obj_id, principal)
+    }
+
+    fn flush(&mut self) {
         for ii in self.bus.events_to_drop.drain(..) {
             self.events.remove(&ii);
         }
@@ -272,27 +296,33 @@ impl MemoryPartStoreScopeState {
                 }
             }
             if let Some(object_evt) = object_evt
-                && let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
-                    for &sub_id in subs {
-                        recipients
-                            .entry(sub_id)
-                            .or_insert_with(|| object_evt.clone());
-                    }
+                && let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id)
+            {
+                for &sub_id in subs {
+                    recipients
+                        .entry(sub_id)
+                        .or_insert_with(|| object_evt.clone());
                 }
+            }
+
             for (sub_id, sub_evt) in recipients {
-                let Some(mut sub) = self.bus.subs.remove(&sub_id) else {
+                let Some(sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
                 };
                 let mut should_drop = false;
-                sub = match sub {
+                let sub = match sub {
                     MemorySubscription::Pending {
                         sender,
                         principal,
                         state,
                     } => {
                         if state.mark_dirty() {
-                            if policy.is_event_permitted(evt_part_id, evt_obj_id, Some(principal))
-                                && sender.try_send(sub_evt.clone()).is_err()
+                            if is_permitted_members(
+                                &self.members,
+                                evt_part_id,
+                                evt_obj_id,
+                                Some(principal),
+                            ) && sender.try_send(sub_evt.clone()).is_err()
                             {
                                 should_drop = true;
                             }
@@ -306,8 +336,12 @@ impl MemoryPartStoreScopeState {
                         }
                     }
                     MemorySubscription::Live { sender, principal } => {
-                        if policy.is_event_permitted(evt_part_id, evt_obj_id, Some(principal))
-                            && sender.try_send(sub_evt).is_err()
+                        if is_permitted_members(
+                            &self.members,
+                            evt_part_id,
+                            evt_obj_id,
+                            Some(principal),
+                        ) && sender.try_send(sub_evt).is_err()
                         {
                             should_drop = true;
                         }
@@ -593,21 +627,20 @@ impl HostPartStore for MemoryPartStore {
                         } => (sender, principal, Some(state)),
                         MemorySubscription::Live { sender, principal } => (sender, principal, None),
                     };
-                    let permitted = self
-                        .policy
-                        .is_event_permitted(None, obj_id, Some(principal));
+                    let permitted = guard.is_event_permitted(None, obj_id, Some(principal));
                     if let Some(state) = pending
-                        && !state.mark_dirty() {
-                            guard.bus.subs.insert(
-                                sub_id,
-                                MemorySubscription::Pending {
-                                    sender,
-                                    principal,
-                                    state,
-                                },
-                            );
-                            continue;
-                        }
+                        && !state.mark_dirty()
+                    {
+                        guard.bus.subs.insert(
+                            sub_id,
+                            MemorySubscription::Pending {
+                                sender,
+                                principal,
+                                state,
+                            },
+                        );
+                        continue;
+                    }
                     if permitted && sender.try_send(event.clone()).is_err() {
                         guard.bus.remove_subscription(sub_id);
                     } else {
@@ -673,7 +706,7 @@ impl HostPartStore for MemoryPartStore {
                         }));
                 }
             }
-            guard.flush(&self.policy);
+            guard.flush();
             Ok(())
         })
     }
@@ -738,7 +771,7 @@ impl HostPartStore for MemoryPartStore {
                         payload: payload.clone(),
                     }));
             }
-            guard.flush(&self.policy);
+            guard.flush();
             Ok(())
         })
     }
@@ -797,7 +830,7 @@ impl HostPartStore for MemoryPartStore {
                 guard.objs.remove(&obj_id);
             }
 
-            guard.flush(&self.policy);
+            guard.flush();
 
             Ok(())
         })
@@ -937,7 +970,6 @@ impl HostPartStore for MemoryPartStore {
 
         let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
         let state = Arc::clone(&self.inner);
-        let policy = Arc::clone(&self.policy);
         let sub_id = Uuid::new_v4();
         let pending = PendingSubscription::new();
         let pending_for_replay = Arc::clone(&pending);
@@ -1001,8 +1033,7 @@ impl HostPartStore for MemoryPartStore {
                             PartEvent::Added(inner) => Some(inner.part_id),
                             PartEvent::Removed(inner) => Some(inner.part_id),
                         };
-                        let permitted =
-                            policy.is_event_permitted(part_id, obj_id, Some(subscriber));
+                        let permitted = guard.is_event_permitted(part_id, obj_id, Some(subscriber));
                         if !permitted {
                             continue;
                         }
@@ -1035,20 +1066,20 @@ impl HostPartStore for MemoryPartStore {
                     if object_replay_pending {
                         for obj_id in &objects {
                             let permitted =
-                                policy.is_event_permitted(None, *obj_id, Some(subscriber));
+                                guard.is_event_permitted(None, *obj_id, Some(subscriber));
                             if permitted
                                 && let Some(payload) = guard
                                     .objs
                                     .get(obj_id)
                                     .and_then(|details| details.payload.clone())
-                                {
-                                    replay.push(SubEvent::ObjectChanged(
-                                        big_sync_core::rpc::ObjChangedWithoutPart {
-                                            obj_id: *obj_id,
-                                            payload,
-                                        },
-                                    ));
-                                }
+                            {
+                                replay.push(SubEvent::ObjectChanged(
+                                    big_sync_core::rpc::ObjChangedWithoutPart {
+                                        obj_id: *obj_id,
+                                        payload,
+                                    },
+                                ));
+                            }
                         }
                     }
                 });
@@ -1099,7 +1130,10 @@ impl HostPartStore for MemoryPartStore {
         obj: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
     ) {
-        self.policy.set_obj_members(obj, agents);
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.members.insert(obj, agents);
+        });
     }
 
     async fn add_obj_member(
@@ -1108,11 +1142,32 @@ impl HostPartStore for MemoryPartStore {
         member: PeerId,
         access: keyhive_core::access::Access,
     ) {
-        self.policy.add_obj_member(obj, member, access);
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.members.entry(obj).or_default().insert(member, access);
+        });
     }
 
     async fn remove_obj_member(&self, obj: ObjId, member: PeerId) {
-        self.policy.remove_obj_member(obj, member);
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            if let Some(member_map) = guard.members.get_mut(&obj) {
+                member_map.remove(&member);
+            }
+        });
+    }
+
+    async fn is_event_permitted(
+        &self,
+        part_id: Option<PartId>,
+        obj_id: ObjId,
+        principal: Option<PeerId>,
+    ) -> Res<bool> {
+        let permitted = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard.is_event_permitted(part_id, obj_id, principal)
+        });
+        Ok(permitted)
     }
 }
 
@@ -1411,14 +1466,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_host_part_store_contract() -> Res<()> {
         let harness = MemoryHostHarness {
-            store: MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default())),
+            store: MemoryPartStore::new(),
         };
         host_contract::assert_host_part_store_contract(&harness).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn subscription_handoff_does_not_lose_immediate_mutation() -> Res<()> {
-        let store = MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
+        let store = MemoryPartStore::new();
         let part = PartId(Byte32Id::new([61u8; 32]));
         let first = ObjId(Byte32Id::new([62u8; 32]));
         let second = ObjId(Byte32Id::new([63u8; 32]));
@@ -1479,7 +1534,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_drops_non_readable_events() -> Res<()> {
-        let store = MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default()));
+        let store = MemoryPartStore::new();
         let part = PartId(Byte32Id::new([1u8; 32]));
         let obj = ObjId(Byte32Id::new([2u8; 32]));
         let reader = PeerId::new([3u8; 32]);
@@ -1493,7 +1548,7 @@ mod tests {
         // Set doc members: only `reader` has Read access.
         let mut agents = HashMap::new();
         agents.insert(reader, keyhive_core::access::Access::Read);
-        store.set_obj_members(obj, agents).await;
+        store.set_obj_members(obj, agents.clone()).await;
 
         // Subscribe as reader — should receive the Added event.
         let rx = store
@@ -1544,6 +1599,7 @@ mod tests {
         })
         .await??;
         let second_obj = ObjId(Byte32Id::new([5u8; 32]));
+        store.set_obj_members(second_obj, agents).await;
         store
             .set_obj_payload(second_obj, serde_json::json!("content2"))
             .await?;
@@ -1559,7 +1615,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_updates() -> Res<()> {
-        let store = MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default()));
+        let store = MemoryPartStore::new();
         let part = PartId(Byte32Id::new([10u8; 32]));
         let obj = ObjId(Byte32Id::new([20u8; 32]));
         let peer = PeerId::new([30u8; 32]);

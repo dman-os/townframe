@@ -694,9 +694,10 @@ pub(crate) async fn build_doc_facet_tokens(
                 continue;
             }
             if let Some(id) = &access.key_id
-                && id != &facet_key.id {
-                    continue;
-                }
+                && id != &facet_key.id
+            {
+                continue;
+            }
             rights |= caps::facet_rights_from_access(access);
         }
         if rights == capabilities::FacetRights::empty() {

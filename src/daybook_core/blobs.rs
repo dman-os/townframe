@@ -745,7 +745,10 @@ impl BlobsRepo {
         match tokio::fs::rename(&temp, dest).await {
             Ok(_) => {}
             Err(err) if Self::is_exists_error(&err) => {
-                tokio::fs::remove_file(&temp).await.inspect_err(|err| warn!(ERROR_CALLER, ?err)).ok();
+                tokio::fs::remove_file(&temp)
+                    .await
+                    .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+                    .ok();
             }
             Err(err) => return Err(err.into()),
         }

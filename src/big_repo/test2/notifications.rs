@@ -488,10 +488,11 @@ async fn tier7_doc_created_heads_only() -> crate::Res<()> {
             heads,
             origin: BigRepoChangeOrigin::Local,
         } = n
-            && *seen == doc_id {
-                found_created = true;
-                created_heads = Some(Arc::clone(heads));
-            }
+            && *seen == doc_id
+        {
+            found_created = true;
+            created_heads = Some(Arc::clone(heads));
+        }
     }
     assert!(
         found_created,
@@ -668,9 +669,10 @@ async fn tier7_local_mutations_notification_batching() -> crate::Res<()> {
                             match key.as_str() {
                                 "step" => {
                                     if let (automerge::Value::Scalar(s), _) = value
-                                        && let automerge::ScalarValue::Str(s) = s.as_ref() {
-                                            step_values_in_order.push(s.to_string());
-                                        }
+                                        && let automerge::ScalarValue::Str(s) = s.as_ref()
+                                    {
+                                        step_values_in_order.push(s.to_string());
+                                    }
                                 }
                                 "counter" => {
                                     saw_counter = true;

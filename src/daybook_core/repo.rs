@@ -138,13 +138,9 @@ pub(crate) struct RepoCtxParts {
 pub(crate) async fn open_blob_part_store(repo_root: &std::path::Path) -> Res<SharedPartStore> {
     let sql =
         crate::app::open_sql_ctx(SqlConfig::file(repo_root.join("blob_part_store.sqlite"))).await?;
-    let store = big_sync::SqlitePartStore::new(
-        sql,
-        "daybook-blobs",
-        big_sync_core::BuckId::MAX_LEVEL,
-        Arc::new(big_sync::AllowAllPolicy),
-    )
-    .await?;
+    let store =
+        big_sync::SqlitePartStore::new(sql, "daybook-blobs", big_sync_core::BuckId::MAX_LEVEL)
+            .await?;
     Ok(Arc::new(store))
 }
 

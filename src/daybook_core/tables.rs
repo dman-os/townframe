@@ -573,12 +573,11 @@ impl TablesRepo {
             })
             .await?;
 
-        if changed
-            && let Some(hash) = hash {
-                self.registry.notify([TablesEvent::ListChanged {
-                    heads: ChangeHashSet(Arc::from([hash])),
-                }]);
-            }
+        if changed && let Some(hash) = hash {
+            self.registry.notify([TablesEvent::ListChanged {
+                heads: ChangeHashSet(Arc::from([hash])),
+            }]);
+        }
 
         Ok(())
     }
@@ -1259,10 +1258,11 @@ impl TablesRepo {
                 if let Some(tab_updates) = patches.tab_updates {
                     for tab_patch in tab_updates {
                         if let Some(id) = tab_patch.id
-                            && let Some(tab) = store.tabs.get_mut(&id) {
-                                tab.apply(tab_patch);
-                                tab.vtag = VersionTag::update(self.local_actor_id.clone());
-                            }
+                            && let Some(tab) = store.tabs.get_mut(&id)
+                        {
+                            tab.apply(tab_patch);
+                            tab.vtag = VersionTag::update(self.local_actor_id.clone());
+                        }
                     }
                 }
 
@@ -1270,10 +1270,11 @@ impl TablesRepo {
                 if let Some(window_updates) = patches.window_updates {
                     for window_patch in window_updates {
                         if let Some(id) = window_patch.id
-                            && let Some(window) = store.windows.get_mut(&id) {
-                                window.apply(window_patch);
-                                window.vtag = VersionTag::update(self.local_actor_id.clone());
-                            }
+                            && let Some(window) = store.windows.get_mut(&id)
+                        {
+                            window.apply(window_patch);
+                            window.vtag = VersionTag::update(self.local_actor_id.clone());
+                        }
                     }
                 }
 
@@ -1281,10 +1282,11 @@ impl TablesRepo {
                 if let Some(panel_updates) = patches.panel_updates {
                     for panel_patch in panel_updates {
                         if let Some(id) = panel_patch.id
-                            && let Some(panel) = store.panels.get_mut(&id) {
-                                panel.apply(panel_patch);
-                                panel.vtag = VersionTag::update(self.local_actor_id.clone());
-                            }
+                            && let Some(panel) = store.panels.get_mut(&id)
+                        {
+                            panel.apply(panel_patch);
+                            panel.vtag = VersionTag::update(self.local_actor_id.clone());
+                        }
                     }
                 }
 
@@ -1292,10 +1294,11 @@ impl TablesRepo {
                 if let Some(table_updates) = patches.table_updates {
                     for table_patch in table_updates {
                         if let Some(id) = table_patch.id
-                            && let Some(table) = store.tables.get_mut(&id) {
-                                table.apply(table_patch);
-                                table.vtag = VersionTag::update(self.local_actor_id.clone());
-                            }
+                            && let Some(table) = store.tables.get_mut(&id)
+                        {
+                            table.apply(table_patch);
+                            table.vtag = VersionTag::update(self.local_actor_id.clone());
+                        }
                     }
                 }
 
@@ -1317,9 +1320,10 @@ impl TablesRepo {
                 // Find the first window with a selected table
                 for window in store.windows.values() {
                     if let Some(selected_table_id) = window.selected_table
-                        && let Some(table) = store.tables.get(&selected_table_id) {
-                            return Some(table.val.clone());
-                        }
+                        && let Some(table) = store.tables.get(&selected_table_id)
+                    {
+                        return Some(table.val.clone());
+                    }
                 }
 
                 // If no selected table found, return the first table
@@ -1499,9 +1503,10 @@ impl TablesRepo {
                     table.selected_tab = Some(tab_id);
                 }
                 if let Some(window) = store.windows.get_mut(&window_id)
-                    && !window.tabs.contains(&tab_id) {
-                        window.tabs.push(tab_id);
-                    }
+                    && !window.tabs.contains(&tab_id)
+                {
+                    window.tabs.push(tab_id);
+                }
 
                 // Update indices
                 store.tab_to_table.insert(tab_id, table_id);
@@ -1560,54 +1565,57 @@ impl TablesRepo {
 
                 // Update table to remove the tab
                 if let Some(table_id) = table_id
-                    && let Some(table) = store.tables.get_mut(&table_id) {
-                        table.tabs.retain(|&id| id != tab_id);
-                        // If this was the selected tab, select another one or clear selection
-                        if table.selected_tab == Some(tab_id) {
-                            table.selected_tab = table.tabs.first().copied();
-                        }
+                    && let Some(table) = store.tables.get_mut(&table_id)
+                {
+                    table.tabs.retain(|&id| id != tab_id);
+                    // If this was the selected tab, select another one or clear selection
+                    if table.selected_tab == Some(tab_id) {
+                        table.selected_tab = table.tabs.first().copied();
+                    }
 
-                        // Auto-create a new tab if this was the last tab
-                        if table.tabs.is_empty() {
-                            let new_tab_id = Uuid::new_v4();
-                            let new_panel_id = Uuid::new_v4();
-                            let tab = Versioned::mint(
-                                self.local_actor_id.clone(),
-                                Tab {
-                                    id: new_tab_id,
-                                    title: "New Tab".to_string(),
-                                    panels: vec![new_panel_id],
-                                    selected_panel: Some(new_panel_id),
-                                },
-                            );
-                            store.tabs.insert(new_tab_id, tab);
-                            let panel = Versioned::mint(
-                                self.local_actor_id.clone(),
-                                Panel {
-                                    id: new_panel_id,
-                                    title: "New Panel".to_string(),
-                                },
-                            );
-                            store.panels.insert(new_panel_id, panel);
-                            table.tabs.push(new_tab_id);
-                            table.selected_tab = Some(new_tab_id);
-                            // update indices for new tab
-                            store.tab_to_table.insert(new_tab_id, table_id);
-                            if let Some(window_id) = window_id {
-                                store.tab_to_window.insert(new_tab_id, window_id);
-                                if let Some(window) = store.windows.get_mut(&window_id)
-                                    && !window.tabs.contains(&new_tab_id) {
-                                        window.tabs.push(new_tab_id);
-                                    }
+                    // Auto-create a new tab if this was the last tab
+                    if table.tabs.is_empty() {
+                        let new_tab_id = Uuid::new_v4();
+                        let new_panel_id = Uuid::new_v4();
+                        let tab = Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Tab {
+                                id: new_tab_id,
+                                title: "New Tab".to_string(),
+                                panels: vec![new_panel_id],
+                                selected_panel: Some(new_panel_id),
+                            },
+                        );
+                        store.tabs.insert(new_tab_id, tab);
+                        let panel = Versioned::mint(
+                            self.local_actor_id.clone(),
+                            Panel {
+                                id: new_panel_id,
+                                title: "New Panel".to_string(),
+                            },
+                        );
+                        store.panels.insert(new_panel_id, panel);
+                        table.tabs.push(new_tab_id);
+                        table.selected_tab = Some(new_tab_id);
+                        // update indices for new tab
+                        store.tab_to_table.insert(new_tab_id, table_id);
+                        if let Some(window_id) = window_id {
+                            store.tab_to_window.insert(new_tab_id, window_id);
+                            if let Some(window) = store.windows.get_mut(&window_id)
+                                && !window.tabs.contains(&new_tab_id)
+                            {
+                                window.tabs.push(new_tab_id);
                             }
                         }
                     }
+                }
 
                 // Update window to remove the tab
                 if let Some(window_id) = window_id
-                    && let Some(window) = store.windows.get_mut(&window_id) {
-                        window.tabs.retain(|&id| id != tab_id);
-                    }
+                    && let Some(window) = store.windows.get_mut(&window_id)
+                {
+                    window.tabs.retain(|&id| id != tab_id);
+                }
 
                 // Update indices
                 store.tab_to_table.remove(&tab_id);

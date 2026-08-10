@@ -4,8 +4,8 @@
 use crate::interlude::*;
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -14,8 +14,8 @@ use utils_rs::prelude::tokio::task::JoinHandle;
 use wflow_core::partition::{effects, log};
 
 use crate::partition::{
-    state::JobCounts, state::PartitionWorkingState, EffectCancelTokens, PartitionCtx,
-    PartitionLogRef, WorkerEffectSenders,
+    EffectCancelTokens, PartitionCtx, PartitionLogRef, WorkerEffectSenders, state::JobCounts,
+    state::PartitionWorkingState,
 };
 use wflow_core::snapstore::SnapStore;
 
@@ -181,13 +181,14 @@ impl TokioPartitionReducer {
         preferred_worker_id: Option<&Arc<str>>,
     ) -> Res<()> {
         if let Some(worker_id) = preferred_worker_id
-            && let Some(tx) = self.worker_effect_senders.get(worker_id) {
-                if tx.send(effect_id.clone()).await.is_ok() {
-                    debug!(?effect_id, %worker_id, routing = "direct", "scheduled effect");
-                    return Ok(());
-                }
-                warn!(?effect_id, %worker_id, "direct worker queue send failed; falling back");
+            && let Some(tx) = self.worker_effect_senders.get(worker_id)
+        {
+            if tx.send(effect_id.clone()).await.is_ok() {
+                debug!(?effect_id, %worker_id, routing = "direct", "scheduled effect");
+                return Ok(());
             }
+            warn!(?effect_id, %worker_id, "direct worker queue send failed; falling back");
+        }
         debug!(?effect_id, routing = "shared", "scheduled effect");
         self.effect_tx.send(effect_id).await?;
         Ok(())

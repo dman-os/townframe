@@ -21,7 +21,7 @@ pub struct PartitionSnapshotRef<'a, 'b> {
 
 mod effect_map_serde {
     use super::*;
-    use serde::{ser::SerializeMap, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer, ser::SerializeMap};
     use std::collections::HashMap;
 
     pub fn serialize<S>(
@@ -52,15 +52,15 @@ mod effect_map_serde {
             if parts.len() == 2
                 && let (Ok(entry_id), Ok(effect_idx)) =
                     (parts[0].parse::<u64>(), parts[1].parse::<u64>())
-                {
-                    result.insert(
-                        EffectId {
-                            entry_id,
-                            effect_idx,
-                        },
-                        value,
-                    );
-                }
+            {
+                result.insert(
+                    EffectId {
+                        entry_id,
+                        effect_idx,
+                    },
+                    value,
+                );
+            }
         }
         Ok(result)
     }

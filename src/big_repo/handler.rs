@@ -220,9 +220,9 @@ where
                     if let Some(ref eph) = self.ephemeral
                         && let Err(err) =
                             Handler::<Sendable, C>::handle(eph.as_ref(), conn, ephemeral_msg).await
-                        {
-                            tracing::error!(%err, "ephemeral handler error");
-                        }
+                    {
+                        panic!("ephemeral handler error: {err}");
+                    }
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
@@ -278,9 +278,9 @@ where
                     if let Some(ref eph) = self.ephemeral
                         && let Err(err) =
                             Handler::<Local, C>::handle(eph.as_ref(), conn, ephemeral_msg).await
-                        {
-                            tracing::error!(%err, "ephemeral handler error");
-                        }
+                    {
+                        tracing::error!(%err, "ephemeral handler error");
+                    }
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {

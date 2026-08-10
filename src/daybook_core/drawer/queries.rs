@@ -287,9 +287,7 @@ impl DrawerRepo {
             return Ok(None);
         };
 
-        
-        self
-            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
+        self.get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
             .await
     }
 
@@ -542,30 +540,29 @@ impl DrawerRepo {
             && let Some(raw) = doc.facets.get(&FacetKey::from(
                 daybook_types::doc::WellKnownFacetTag::Dmeta,
             ))
-                && let Ok(WellKnownFacet::Dmeta(dmeta)) =
-                    serde_json::from_value::<WellKnownFacet>(raw.clone())
+            && let Ok(WellKnownFacet::Dmeta(dmeta)) =
+                serde_json::from_value::<WellKnownFacet>(raw.clone())
+        {
+            let local_segments: Vec<&str> = local_user_path
+                .as_str()
+                .trim_start_matches('/')
+                .split('/')
+                .collect();
+            for user_meta in dmeta.actors.values() {
+                let user_segments: Vec<&str> = user_meta
+                    .user_path
+                    .as_str()
+                    .trim_start_matches('/')
+                    .split('/')
+                    .collect();
+                if local_segments.first() == user_segments.first()
+                    && local_segments.get(1) == user_segments.get(1)
                 {
-                    let local_segments: Vec<&str> = local_user_path
-                        .as_str()
-                        .trim_start_matches('/')
-                        .split('/')
-                        .collect();
-                    for user_meta in dmeta.actors.values() {
-                        let user_segments: Vec<&str> = user_meta
-                            .user_path
-                            .as_str()
-                            .trim_start_matches('/')
-                            .split('/')
-                            .collect();
-                        if local_segments.first() == user_segments.first()
-                            && local_segments.get(1) == user_segments.get(1)
-                        {
-                            local_actor_ids.insert(
-                                self.content_actor_id(Some(&user_meta.user_path), branch_doc_id),
-                            );
-                        }
-                    }
+                    local_actor_ids
+                        .insert(self.content_actor_id(Some(&user_meta.user_path), branch_doc_id));
                 }
+            }
+        }
         let mut out = HashSet::new();
         for key in facet_keys {
             let local_actor_ids = local_actor_ids.clone();
@@ -576,9 +573,10 @@ impl DrawerRepo {
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
                         if let Some(change) = am_doc.get_change_by_hash(head)
-                            && local_actor_ids.contains(change.actor_id()) {
-                                return true;
-                            }
+                            && local_actor_ids.contains(change.actor_id())
+                        {
+                            return true;
+                        }
                     }
                     false
                 })

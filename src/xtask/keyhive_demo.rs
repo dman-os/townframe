@@ -160,7 +160,9 @@ pub async fn cli() -> Res<()> {
                             match locked.try_decrypt_content(pre_ec) {
                                 Ok(_) => println!("PRE-GRANT decrypt OK (unexpected!)"),
                                 Err(err) => {
-                                    println!("PRE-GRANT decrypt via CGKA: FAILED ({err}) — expected forward-secrecy");
+                                    println!(
+                                        "PRE-GRANT decrypt via CGKA: FAILED ({err}) — expected forward-secrecy"
+                                    );
 
                                     // Now try the application-level chain:
                                     // Use the post-grant key to unwrap the sealed predecessor key

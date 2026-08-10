@@ -1,35 +1,10 @@
 //! IO seams for runtime2.
 //!
 //! These traits are where IO is *externalized*. The actor logic (hub, doc-worker)
-//! depends on these traits, never on `tokio`/`iroh`/`redb` directly. Backends:
-//! - native: [`TokioTaskRuntime`](crate::runtime2::TokioTaskRuntime) + real storage/keyhive.
-//! - tests (D2): memory backends + a test task runtime (jitter-free; not step-deterministic).
-//! - future (full determinism): a step task runtime + `IoTask`-completing `DocIo`.
-//! - wasm: `FutureForm = Local`, wasm-bindgen task runtime, IndexedDB storage.
-//!
-//! # No big_sync in the runtime
-//!
-//! runtime2 does **not** touch `big_sync` / `HostPartStore`. The old runtime
-//! wrote materialized heads into the big_sync obj payload and read them back
-//! for no-op detection — both are gone here:
-//! - **writes** are gone: materialized heads are derived (walk+decrypt / live
-//!   `get_heads()`), never cached; sedimentree heads live in subduction. This
-//!   also dissolves the split-write atomicity bug (there is now a single
-//!   `store_commit` call — atomic by construction).
-//! - **reads** are gone: no-op detection snapshots the live doc; the pending
-//!   baseline reads `sedimentree_heads()`; the first-materialization heuristic
-//!   is the `DocWorker2` state machine.
-//!
-//! big_sync (sync routing, part_store, partition membership) lives in a sibling
-//! layer that owns its own sync and watches subduction for new content.
+//! depends on these traits, never on `tokio`/`iroh` directly.
 
 use crate::interlude::*;
 use future_form::FutureForm;
-
-// ─── Determinism levers: Timer / Clock ─────────────────────────────────────
-//
-// Spawning is handled by [`TaskRuntime`](crate::runtime2::TaskRuntime) /
-// [`TaskSet`](crate::runtime2::TaskSet), not by a local trait.
 
 /// Runtime-neutral sleep capability. Periodic workers recreate a sleep on
 /// each iteration, which also lets deterministic tests advance time explicitly.
@@ -42,15 +17,6 @@ pub trait Timer<F: FutureForm>: Send + Sync {
 pub trait Clock: Send + Sync {
     fn instant(&self) -> std::time::Instant;
 }
-
-// ─── DocIo: the doc-worker's centralized IO surface ────────────────────────
-// EVERY IO the doc-worker does goes through this trait — subduction sedimentree
-// storage AND keyhive (encrypt/decrypt). Hiding keyhive behind DocIo (rather
-// than exposing the keyhive doc handle) keeps the doc-worker free of keyhive's
-// deep generics and makes the full IO surface visible in one place.
-//
-// A future `IoTaskDocIo` impl wraps these in samod-style round-stepping for
-// full determinism, without rewriting the actor.
 
 /// Result of a causal decrypt.
 ///

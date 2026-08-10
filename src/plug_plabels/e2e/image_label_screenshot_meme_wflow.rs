@@ -52,11 +52,12 @@ async fn test_image_label_fallback_multi_label_screenshot_meme() -> Res<()> {
                 None,
             )
             .await?
-            && doc.facets.contains_key(&embedding_key) && doc.facets.contains_key(&pseudo_label_key)
-            {
-                updated_doc = Some(doc);
-                break;
-            }
+            && doc.facets.contains_key(&embedding_key)
+            && doc.facets.contains_key(&pseudo_label_key)
+        {
+            updated_doc = Some(doc);
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 

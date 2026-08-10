@@ -173,7 +173,6 @@ impl BigRepo {
             big_sync::HostPartStoreConfig {
                 hidden_parts: hidden_parts.clone(),
             },
-            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
         )
         .await?;
         Self::boot_inner(

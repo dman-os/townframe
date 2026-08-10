@@ -231,10 +231,10 @@ async fn wait_for_synced_doc_on_both_sides(
                 .await?;
             if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc)
                 && left_doc.doc.id == right_doc.doc.id
-                    && left_doc.doc.facets == right_doc.doc.facets
-                {
-                    return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
-                }
+                && left_doc.doc.facets == right_doc.doc.facets
+            {
+                return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     })

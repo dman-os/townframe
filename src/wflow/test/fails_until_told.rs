@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
+use crate::test::{InitialWorkload, WflowTestContext, test_wflows_wasm_path};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_until_told() -> Res<()> {
@@ -36,11 +36,12 @@ async fn test_fails_until_told() -> Res<()> {
 
             if let PartitionLogEntry::JobEffectResult(event) = entry
                 && event.job_id == job_id
-                    && let JobRunResult::WflowErr(JobError::Transient { error_json, .. }) =
-                        &event.result
-                        && error_json.contains("waiting for flag to be set") {
-                            return true;
-                        }
+                && let JobRunResult::WflowErr(JobError::Transient { error_json, .. }) =
+                    &event.result
+                && error_json.contains("waiting for flag to be set")
+            {
+                return true;
+            }
             false
         })
         .await?;

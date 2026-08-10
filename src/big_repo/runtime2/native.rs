@@ -801,10 +801,16 @@ where
         raw_blob: Vec<u8>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            let encrypted_blob =
-                encrypt_fragment_blob(&self.keyhive, &self.storage, sed_id, head, &boundary, &raw_blob)
-                    .await
-                    .wrap_err("failed encrypting fragment blob")?;
+            let encrypted_blob = encrypt_fragment_blob(
+                &self.keyhive,
+                &self.storage,
+                sed_id,
+                head,
+                &boundary,
+                &raw_blob,
+            )
+            .await
+            .wrap_err("failed encrypting fragment blob")?;
             let fragment = sedimentree_core::fragment::Fragment::new(
                 sed_id,
                 head,
@@ -1389,15 +1395,12 @@ async fn spawn_keyhive_change_subscription(
                 event = changes.recv() => {
                     match event {
                         Ok(Some(_)) => {
-                            if wiring
+                            wiring
                                 .evt_tx
                                 .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id })
                                 .await
-                                .is_err()
-                            {
-                                // Hub gone; nothing left to notify.
-                                break;
-                            }
+                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .ok();
                         }
                         Ok(None) | Err(_) => break,
                     }

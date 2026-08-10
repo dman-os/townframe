@@ -115,13 +115,14 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     _ => None,
                 };
 
-                runtime_evt_tx
-                    .send(Runtime2Evt::DocWorkerStopped {
-                        doc_id,
-                        error: error.clone(),
-                    })
-                    .await
-                    .expect(ERROR_CHANNEL);
+                if !runtime_evt_tx.is_closed() {
+                    let _res = runtime_evt_tx
+                        .send(Runtime2Evt::DocWorkerStopped {
+                            doc_id,
+                            error: error.clone(),
+                        })
+                        .await;
+                }
 
                 if let Some(err) = error {
                     Err(eyre::eyre!("{err}"))
@@ -387,7 +388,6 @@ impl<F: FutureForm> DocWorker2<F> {
         initial_content: Box<automerge::Automerge>,
         resp: futures::channel::oneshot::Sender<eyre::Result<Arc<LiveDocBundle>>>,
     ) -> eyre::Result<()> {
-        // ── 1. Occupancy check ─────────────────────────────────────────────
         if !matches!(self.state, DocState::Unloaded) {
             resp.send(Err(ferr!("doc already occupied: {:?}", self.doc_id)))
                 .inspect_err(|_| warn!(ERROR_CALLER))
@@ -400,7 +400,6 @@ impl<F: FutureForm> DocWorker2<F> {
             .persist_initial_document(self.sed_id, staged)
             .await?;
 
-        // ── 4. Build LiveDocBundle, transition to Live ─────────────────────
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
@@ -412,7 +411,6 @@ impl<F: FutureForm> DocWorker2<F> {
 
         self.state = DocState::Live(Arc::downgrade(&bundle));
 
-        // ── 6. Notify ──────────────────────────────────────────────────────
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager

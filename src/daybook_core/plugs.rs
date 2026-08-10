@@ -1915,12 +1915,13 @@ impl PlugsRepo {
                     .facets
                     .iter()
                     .find(|prop| prop.key_tag == old_prop.key_tag)
-                    && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema) {
-                        eyre::bail!(
-                            "Incompatible schema for property tag '{}'",
-                            old_prop.key_tag
-                        );
-                    }
+                    && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema)
+                {
+                    eyre::bail!(
+                        "Incompatible schema for property tag '{}'",
+                        old_prop.key_tag
+                    );
+                }
             }
         }
 
@@ -1932,13 +1933,14 @@ impl PlugsRepo {
             .query_sync(|store| {
                 for prop in &manifest.facets {
                     if let Some(owner) = store.tag_to_plug.get(&prop.key_tag.to_string())
-                        && owner != &plug_id {
-                            return Err(eyre::eyre!(
-                                "Tag clash: tag '{}' is already owned by plug '{}'",
-                                prop.key_tag,
-                                owner
-                            ));
-                        }
+                        && owner != &plug_id
+                    {
+                        return Err(eyre::eyre!(
+                            "Tag clash: tag '{}' is already owned by plug '{}'",
+                            prop.key_tag,
+                            owner
+                        ));
+                    }
                 }
                 Ok(())
             })

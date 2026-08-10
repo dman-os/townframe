@@ -688,9 +688,10 @@ async fn wait_for_title(
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if let crate::DocLookup::Ready(handle) = repo.get_doc(&doc_id).await?
-                && read_title(&handle).await == expected {
-                    return crate::eyre::Ok(());
-                }
+                && read_title(&handle).await == expected
+            {
+                return crate::eyre::Ok(());
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })

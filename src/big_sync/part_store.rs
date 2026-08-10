@@ -8,7 +8,6 @@ use big_sync_core::rpc::{
 use big_sync_core::{BuckId, Byte32Id, ObjId, PartId, PeerId, mpsc};
 
 pub mod memory;
-pub mod policy;
 pub mod sqlite;
 pub mod sqlite_core;
 
@@ -130,6 +129,19 @@ pub trait HostPartStore: Send + Sync {
     ///
     /// **Default: no-op** — impls without a policy-driven store are unaffected.
     async fn remove_obj_member(&self, _obj: ObjId, _member: PeerId) {}
+
+    /// Whether `principal` may receive events for `obj_id`.
+    ///
+    /// - `principal == None` (trusted local subscriber): always permitted.
+    /// - `part_id` is the part the event belongs to when known.
+    async fn is_event_permitted(
+        &self,
+        _part_id: Option<PartId>,
+        _obj_id: ObjId,
+        _principal: Option<PeerId>,
+    ) -> Res<bool> {
+        Ok(true)
+    }
 }
 
 pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
