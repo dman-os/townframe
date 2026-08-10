@@ -79,6 +79,7 @@ pub struct IrohSyncRepo {
     authority: crate::authority::RepoAuthority,
 
     router: iroh::protocol::Router,
+    address_lookup: iroh::address_lookup::MemoryLookup,
 
     config_repo: Arc<crate::config::ConfigRepo>,
     blobs_sync_backend: Arc<crate::blobs::sync::BlobSyncBackend>,
@@ -197,11 +198,12 @@ impl IrohSyncRepo {
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
         progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
+        let address_lookup = iroh::address_lookup::MemoryLookup::default();
         let endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .secret_key(rcx.iroh_secret_key.clone());
+            .secret_key(rcx.iroh_secret_key.clone())
+            .address_lookup(address_lookup.clone());
         #[cfg(test)]
         let endpoint_builder = endpoint_builder
-            .clear_ip_transports()
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
             .relay_mode(iroh::RelayMode::Disabled);
         let endpoint = endpoint_builder.bind().await?;
@@ -215,7 +217,9 @@ impl IrohSyncRepo {
             Arc::clone(&blobs_repo),
             Arc::clone(&rcx.blob_part_store),
             endpoint.clone(),
+            address_lookup.clone(),
         ));
+        blobs_repo.set_sync_backend((*blobs_sync_backend).clone());
 
         let cancel_token = CancellationToken::new();
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
@@ -239,11 +243,7 @@ impl IrohSyncRepo {
             big_repo::BigRepo::BACKEND_ID.into(),
             Arc::clone(&repo_sync_backend) as _,
         );
-        let max_task_backoff = std::env::var("DAYB_SYNC_MAX_BACKOFF_SECS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .or(Some(Duration::from_mins(1)));
+        let max_task_backoff = rcx.options.sync_max_task_backoff;
 
         let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&rcx.part_store),
@@ -314,6 +314,7 @@ impl IrohSyncRepo {
             rcx,
             authority,
             router: router.clone(),
+            address_lookup,
             config_repo,
             blobs_sync_backend,
             _doc_blobs_index_repo: doc_blobs_index_repo,
@@ -335,6 +336,8 @@ impl IrohSyncRepo {
 
         #[cfg(test)]
         let router_for_shutdown = router.clone();
+
+
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             async move {
@@ -430,6 +433,8 @@ impl IrohSyncRepo {
         }
         (doc, blob)
     }
+
+
 
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
         let Ok(mut reconnect_task) = self.reconnect_task.try_lock() else {
@@ -581,7 +586,6 @@ impl IrohSyncRepo {
             .collect::<Vec<_>>();
         for peer_id in active_peers {
             self.big_repo_rpc.unregister_peer(peer_id);
-            self.blobs_sync_backend.unregister_remote_peer(peer_id);
             self.big_sync_worker.remove_peer(peer_id).await.ok();
         }
         self.active_peers.write().await.clear();
@@ -650,6 +654,8 @@ impl IrohSyncRepo {
                 remote_endpoint_id,
                 remote_info.into_addrs().map(|info| info.into_addr()),
             );
+            self.address_lookup.add_endpoint_info(addr.clone());
+            self.blobs_sync_backend.register_peer_addr(conn.peer_id, addr.clone());
             self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
             let doc_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
@@ -661,8 +667,6 @@ impl IrohSyncRepo {
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
-            self.blobs_sync_backend
-                .register_remote_peer(conn.peer_id, addr.clone());
             let partition_ids = self.peer_partition_ids(&peer_key, true);
             let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             self.big_sync_worker
@@ -774,7 +778,7 @@ impl IrohSyncRepo {
     /// caller manages that). Idempotent per peer.
     async fn teardown_peer_registration(&self, peer_id: PeerId) {
         self.big_repo_rpc.unregister_peer(peer_id);
-        self.blobs_sync_backend.unregister_remote_peer(peer_id);
+        self.blobs_sync_backend.unregister_peer_addr(peer_id);
         self.big_sync_worker.remove_peer(peer_id).await.ok();
         self.blob_sync_worker.remove_peer(peer_id).await.ok();
     }
@@ -798,8 +802,7 @@ impl IrohSyncRepo {
             .big_repo
             .add_admin_member_to_group(requester, &self.authority.repo_agents)
             .await?;
-        // self.sync_store.allow_peer(requester_peer_key).await?;
-        let endpoint_addr = self.router.endpoint().addr();
+        let endpoint_addr = self.endpoint_addr();
         let device_name = req
             .requested_device_name
             .unwrap_or_else(|| format!("clone-{}", endpoint_id));
@@ -917,15 +920,25 @@ impl IrohSyncRepo {
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
+            self.address_lookup.add_endpoint_info(endpoint_addr.clone());
+            self.blobs_sync_backend.register_peer_addr(conn.peer_id, endpoint_addr.clone());
             self.big_repo_rpc.register_peer(endpoint_id, conn.peer_id);
-            self.blobs_sync_backend
-                .register_remote_peer(conn.peer_id, endpoint_addr.clone());
             self.big_sync_worker
-                .set_peer(conn.peer_id, doc_rpc_client, doc_parts, HashMap::new())
+                .set_peer(
+                    conn.peer_id,
+                    Arc::clone(&doc_rpc_client) as Arc<dyn big_sync::rpc::HostBigRpcClient>,
+                    doc_parts,
+                    HashMap::new(),
+                )
                 .await?;
             if !blob_parts.is_empty() {
                 self.blob_sync_worker
-                    .set_peer(conn.peer_id, blob_rpc_client, blob_parts, HashMap::new())
+                    .set_peer(
+                        conn.peer_id,
+                        Arc::clone(&blob_rpc_client) as Arc<dyn big_sync::rpc::HostBigRpcClient>,
+                        blob_parts,
+                        HashMap::new(),
+                    )
                     .await?;
             }
             info!(
@@ -971,6 +984,18 @@ impl IrohSyncRepo {
         let endpoint_addr = bootstrap::parse_clone_endpoint_addr(source_url)?;
         self.connect_endpoint_addr(endpoint_addr.clone()).await?;
         Ok(endpoint_addr)
+    }
+
+    pub async fn ensure_local_blob_from_active_peers(&self, blob_id: crate::blobs::BlobId) -> Res<()> {
+        let peers = self.active_peers.read().await.keys().copied().collect::<Vec<_>>();
+        for peer_id in peers {
+            if let Err(err) = self.blobs_sync_backend.ensure_local_blob(peer_id, blob_id).await {
+                tracing::warn!(%peer_id, %blob_id, ?err, "failed to download missing blob from active peer");
+            } else {
+                return Ok(());
+            }
+        }
+        eyre::bail!("unable to download missing blob {blob_id} from any active peer");
     }
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {

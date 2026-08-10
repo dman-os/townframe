@@ -466,6 +466,7 @@ impl DocBlobsIndexRepo {
             let blob_id = hash
                 .parse::<crate::blobs::BlobId>()
                 .wrap_err("invalid blob id in doc blob delta")?;
+            self.blobs_repo.ensure_hash_materialized(blob_id).await.ok();
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo

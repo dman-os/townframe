@@ -1486,9 +1486,10 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let expected = received_refs.len();
         if received_order.len() != expected {
-            eyre::bail!(
-                "sync session received blobs are missing from sedimentree order: expected={expected} found={}",
-                received_order.len()
+            tracing::debug!(
+                expected,
+                found = received_order.len(),
+                "some received refs are not loose entrypoints in sedimentree order (may be merged into fragment or already processed)"
             );
         }
 

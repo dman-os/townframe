@@ -21,7 +21,9 @@ pub struct RepoLayout {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RepoOpenOptions {}
+pub struct RepoOpenOptions {
+    pub sync_max_task_backoff: Option<std::time::Duration>,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct RepoLockInfo {
@@ -85,6 +87,7 @@ impl RepoLockGuard {
 pub struct RepoCtx {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
 
     pub sql: SqlCtx,
     pub part_store: SharedPartStore,
@@ -113,6 +116,7 @@ pub struct RepoCtx {
 pub(crate) struct RepoCtxParts {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
     pub sql: SqlCtx,
     pub part_store: SharedPartStore,
     /// Standalone, policy-free store backing the blob partitions.
@@ -156,6 +160,7 @@ impl RepoCtx {
             repo_name: parts.repo_name,
             layout: parts.layout,
             lock_guard: parts.lock_guard,
+            options: parts.options,
             sql: parts.sql,
             part_store: parts.part_store,
             blob_part_store: parts.blob_part_store,
@@ -260,7 +265,7 @@ impl RepoCtx {
     async fn open_inner(
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
-        _options: RepoOpenOptions,
+        options: RepoOpenOptions,
         local_device_name: String,
         initialize_repo: bool,
         repo_name: Option<String>,
@@ -394,6 +399,7 @@ impl RepoCtx {
         let parts = RepoCtxParts {
             layout,
             lock_guard,
+            options,
             sql,
             part_store,
             blob_part_store,

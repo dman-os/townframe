@@ -230,7 +230,7 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -314,7 +314,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -369,7 +369,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -508,7 +508,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -564,7 +564,7 @@ async fn init_and_copy_repo_pair(
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -579,7 +579,7 @@ async fn init_and_copy_repo_pair(
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
 
-        let ctx = RepoCtx::open(repo_b_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let ctx = RepoCtx::open(repo_b_path, RepoOpenOptions::default(), "test-device".into()).await?;
         if ctx.repo_id != source_repo_id {
             eyre::bail!(
                 "init repo_id mismatch after clone (source={}, cloned={})",
@@ -617,6 +617,9 @@ async fn bootstrap_clone_repo_from_url_for_tests(
         destination,
         crate::sync::CloneRepoInitOptions {
             timeout: Duration::from_secs(30),
+            repo_options: RepoOpenOptions {
+                sync_max_task_backoff: Some(Duration::from_millis(500)),
+            },
         },
     )
     .await?;
@@ -624,7 +627,14 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 }
 
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    let rtx = RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?;
+    let rtx = RepoCtx::open(
+        repo_root,
+        RepoOpenOptions {
+            sync_max_task_backoff: Some(Duration::from_millis(500)),
+        },
+        "test-device".into(),
+    )
+    .await?;
     let blobs_repo = BlobsRepo::new(
         rtx.layout.blobs_root.clone(),
         rtx.local_user_path.clone(),

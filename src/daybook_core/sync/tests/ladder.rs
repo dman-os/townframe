@@ -12,7 +12,7 @@ async fn boot_connected_sync_pair()
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -265,7 +265,7 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -344,7 +344,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -361,6 +361,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         .blobs_repo
         .put(&payload, crate::blobs::BlobUseHints::Docs)
         .await?;
+    eprintln!(">>> NODE A HAS HASH: {} <<<", node_a.blobs_repo.has_hash(hash).await?);
     let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     {
         let doc_id = node_a
@@ -425,6 +426,12 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             )))
         );
 
+        let blob_part = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        node_b
+            .sync_repo
+            .wait_for_full_sync(&[peer_id_a], &[blob_part], Duration::from_secs(60))
+            .await?;
         let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
         assert_eq!(got, payload);
     }
@@ -445,7 +452,7 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -526,7 +533,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -573,6 +580,13 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
             .await?;
 
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+        let blob_part = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let endpoint_id_a = node_a.sync_repo.endpoint_addr().id;
+        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        node_b
+            .sync_repo
+            .wait_for_full_sync(&[peer_id_a], &[blob_part], Duration::from_secs(60))
+            .await?;
         let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
         assert_eq!(got, payload);
         wait_for_doc_head_parity(
@@ -1206,7 +1220,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -1223,7 +1237,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     node_a.stop().await?;
 
     let cloned =
-        RepoCtx::open(&repo_b_path, RepoOpenOptions {}, "clone-device".to_string()).await?;
+        RepoCtx::open(&repo_b_path, RepoOpenOptions::default(), "clone-device".to_string()).await?;
 
     assert_eq!(
         cloned.repo_id, source_repo_id,

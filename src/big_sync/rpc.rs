@@ -56,6 +56,7 @@ pub enum BigSyncIrpc {
     LeafBuckets(LeafBucketsRequest),
 }
 impl IrohBigSyncRpcClient {
+
     pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
         Self::new_with_alpn(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN)
     }
@@ -320,8 +321,7 @@ impl BigSyncRpcWorker {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let out = {
-                    let parts = self.store.summarize_parts(inner.parts).await.unwrap();
-                    parts.map(|parts| PeerSummaryResult {
+                    self.store.summarize_parts(inner.parts).await.unwrap().map(|parts| PeerSummaryResult {
                         parts: parts
                             .into_iter()
                             .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))

@@ -18,6 +18,11 @@ pub trait PartitionMembershipWriter: Send + Sync {
         member_id: BlobId,
         payload: &serde_json::Value,
     ) -> Res<()>;
+    async fn add_member_to_partition(
+        &self,
+        partition_id: Arc<str>,
+        member_id: BlobId,
+    ) -> Res<()>;
     async fn remove_item(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()>;
 }
 
@@ -50,6 +55,18 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
         Ok(())
     }
 
+    async fn add_member_to_partition(
+        &self,
+        partition_id: Arc<str>,
+        member_id: BlobId,
+    ) -> Res<()> {
+        let part_id = crate::part_id_from_label(&partition_id);
+        self.partition_store
+            .add_obj_to_parts(member_id, vec![part_id])
+            .await?;
+        Ok(())
+    }
+
     async fn remove_item(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()> {
         let part_id = crate::part_id_from_label(&partition_id);
         self.partition_store
@@ -72,6 +89,15 @@ impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
     ) -> Res<()> {
         Ok(())
     }
+
+    async fn add_member_to_partition(
+        &self,
+        _partition_id: Arc<str>,
+        _member_id: BlobId,
+    ) -> Res<()> {
+        Ok(())
+    }
+
     async fn remove_item(&self, _partition_id: Arc<str>, _member_id: BlobId) -> Res<()> {
         Ok(())
     }
@@ -85,6 +111,7 @@ pub struct BlobsRepo {
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     partition_writer: Arc<dyn PartitionMembershipWriter>,
+    sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,13 +238,44 @@ impl BlobsRepo {
             iroh_store: fs_store.into(),
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             partition_writer,
+            sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
         }))
     }
 
+    pub fn set_sync_backend(&self, backend: crate::blobs::sync::BlobSyncBackend) {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.sync_backend);
+            *guard = Some(backend);
+        });
+    }
+
+    pub async fn has_blob_on_disk(&self, blob_id: BlobId) -> Res<bool> {
+        let object_paths = self.object_paths(blob_id)?;
+        tokio::fs::try_exists(&object_paths.blob).await.map_err(Into::into)
+    }
+
+    pub async fn ensure_hash_materialized(&self, blob_id: BlobId) -> Res<()> {
+        if self.has_blob_on_disk(blob_id).await? {
+            return Ok(());
+        }
+        let backend = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.sync_backend);
+            guard.clone()
+        });
+        if let Some(backend) = backend {
+            let peers = backend.active_peer_ids();
+            for peer_id in peers {
+                if let Ok(()) = backend.ensure_local_blob(peer_id, blob_id).await {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn add_hash_to_scope(&self, scope: BlobScope, blob_id: BlobId) -> Res<()> {
-        let payload = serde_json::json!({});
         self.partition_writer
-            .upsert_item(scope.partition_id().into(), blob_id, &payload)
+            .add_member_to_partition(scope.partition_id().into(), blob_id)
             .await
     }
 
@@ -355,6 +413,9 @@ impl BlobsRepo {
 
     pub async fn get_path(&self, blob_id: BlobId) -> Result<PathBuf, eyre::Report> {
         let object_paths = self.object_paths(blob_id)?;
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            self.ensure_hash_materialized(blob_id).await.ok();
+        }
         if tokio::fs::try_exists(&object_paths.blob).await? {
             if self.read_meta(&object_paths.meta).await?.is_none() {
                 let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
@@ -684,7 +745,7 @@ impl BlobsRepo {
     }
 
     async fn ingest_path_with_iroh(&self, path: &Path, blob_id: BlobId) -> Res<()> {
-        self.iroh_store
+        let outcome = self.iroh_store
             .blobs()
             .add_path_with_opts(AddPathOptions {
                 path: path.to_path_buf(),
@@ -694,6 +755,9 @@ impl BlobsRepo {
             .with_named_tag(blob_hash_from_id(blob_id).as_bytes())
             .await
             .map_err(|err| eyre::eyre!("error ingesting path into iroh store: {err:?}"))?;
+        let iroh_hash = blob_id_to_iroh_hash(blob_id);
+        let has_in_iroh = self.iroh_store.blobs().has(iroh_hash).await?;
+        eprintln!(">>> INGESTED BLOB {:?}, IROH HASH {:?}, HAS IN IROH STORE: {}, OUTCOME HASH: {:?} <<<", blob_id, iroh_hash, has_in_iroh, outcome.hash);
         Ok(())
     }
 

@@ -232,6 +232,7 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
+            let part_id = self.replicated_partition_id();
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
                 .set_obj_payload(
@@ -240,6 +241,9 @@ impl DrawerRepo {
                         "heads": heads
                     }),
                 )
+                .await?;
+            self.partition_store
+                .add_obj_to_parts(branch_doc_id, vec![part_id])
                 .await?;
         }
         Ok(())

@@ -315,6 +315,7 @@ pub async fn test_cx_with_options(
         crate::repo::RepoCtxParts {
             layout,
             lock_guard,
+            options: crate::repo::RepoOpenOptions::default(),
             sql: sql_ctx.clone(),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),

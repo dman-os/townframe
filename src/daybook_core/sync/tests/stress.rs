@@ -192,7 +192,9 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     let device_name = "stress-test-device".to_string();
     let rtx = RepoCtx::init(
         &paths[0],
-        RepoOpenOptions::default(),
+        RepoOpenOptions {
+            sync_max_task_backoff: Some(Duration::from_millis(500)),
+        },
         device_name.clone(),
         device_name,
     )
@@ -208,8 +210,14 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         for dst in paths.iter().skip(1) {
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
-            let ctx =
-                RepoCtx::open(dst, RepoOpenOptions::default(), "stress-test-device".into()).await?;
+            let ctx = RepoCtx::open(
+                dst,
+                RepoOpenOptions {
+                    sync_max_task_backoff: Some(Duration::from_millis(500)),
+                },
+                "stress-test-device".into(),
+            )
+            .await?;
             if ctx.repo_id != source_repo_id {
                 eyre::bail!(
                     "stress init repo_id mismatch after clone (source={}, cloned={})",

@@ -267,18 +267,25 @@ impl DrawerRepo {
                 .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
-                eyre::bail!(
-                    "missing branch heads for drawer branch ref {branch_name} ({bdoc_id})",
-                    bdoc_id = branch_ref.branch_doc_id
+                debug!(
+                    %doc_id,
+                    %branch_name,
+                    bdoc_id = %branch_ref.branch_doc_id,
+                    "branch doc not ready yet during current_doc_branches_from_entry"
                 );
+                continue;
             };
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
             let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
-                eyre::bail!(
-                    "missing branch heads for local branch ref {branch_path}({branch_doc_id}) on {doc_id}"
+                debug!(
+                    %doc_id,
+                    %branch_path,
+                    %branch_doc_id,
+                    "local branch doc not ready yet during current_doc_branches_from_entry"
                 );
+                continue;
             };
             branches.insert(branch_path, latest_heads);
         }
