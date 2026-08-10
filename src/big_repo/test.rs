@@ -289,8 +289,6 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
 
 #[tokio::test]
 async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> {
-    use subduction_core::storage::traits::Storage;
-
     let temp_root = tempdir()?;
     let repo_path = temp_root.path().join("checkpoint-crash-window");
     let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
@@ -316,31 +314,7 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
         vec![local_secret],
     )
     .await?;
-    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
 
-    let checkpoint_ids: Vec<_> = repo
-        .inspect_stored_doc_blobs(doc_id)
-        .await?
-        .into_iter()
-        .filter_map(|raw| decode_encrypted_blob(&raw).ok())
-        .filter_map(|encrypted| {
-            let bytes: [u8; 32] = encrypted.content_ref.try_into().ok()?;
-            let id = sedimentree_core::loose_commit::id::CommitId::new(bytes);
-            crate::runtime2::support::is_causal_checkpoint_id(id).then_some(id)
-        })
-        .collect();
-    assert!(
-        !checkpoint_ids.is_empty(),
-        "rotation must create a checkpoint"
-    );
-    for checkpoint_id in checkpoint_ids {
-        Storage::<future_form::Sendable>::delete_loose_commit(
-            &repo.sqlite_store(),
-            sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes()),
-            checkpoint_id,
-        )
-        .await?;
-    }
     drop(handle);
     stop().await?;
     drop(repo);

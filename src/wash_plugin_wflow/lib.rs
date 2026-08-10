@@ -657,10 +657,8 @@ impl WflowPlugin {
                                 JobTrap::RunComplete(Err(terminal))
                             }
                         };
-                        if yield_tx.send(trap).is_err() {
-                            if !cancel_token.is_cancelled() {
-                                panic!("{}", ERROR_CALLER);
-                            }
+                        if yield_tx.send(trap).is_err() && !cancel_token.is_cancelled() {
+                            panic!("{}", ERROR_CALLER);
                         }
                     })
                     .await;

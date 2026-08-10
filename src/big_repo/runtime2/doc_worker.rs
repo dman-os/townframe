@@ -516,7 +516,6 @@ impl<F: FutureForm> DocWorker2<F> {
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
-        tracing::debug!(%self.doc_id, "passed point L2: load_doc_snapshot hydrate done");
         tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
 
         let order = tree
@@ -537,9 +536,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             };
             let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, head);
-            tracing::debug!(%self.doc_id, "passed point L4: before try_causal_decrypt");
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-            tracing::debug!(%self.doc_id, "passed point L5: after try_causal_decrypt");
             plaintexts.extend(result.complete);
             blockers.extend(result.blockers);
         }
@@ -547,7 +544,6 @@ impl<F: FutureForm> DocWorker2<F> {
         let mut partially_decrypted = false;
         let mut pending: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = Vec::new();
         let mut blocked_refs = Vec::new();
-        tracing::debug!(%self.doc_id, "passed point L1: load_doc_snapshot entry");
         for item in &order {
             let (kind, head) = match item {
                 SedimentreeItem::Fragment(index) => {
@@ -665,7 +661,6 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         self.partially_decrypted = partial;
-        tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point S1: sync_partial_state before evt send");
         if let DocState::Live(bundle) = &self.state
             && let Some(bundle) = bundle.upgrade()
         {
@@ -1045,8 +1040,6 @@ impl<F: FutureForm> DocWorker2<F> {
             &self.state,
             DocState::Live(bundle) if bundle.strong_count() > 0
         );
-        tracing::debug!(%self.doc_id, "passed point A1: apply_sync_session entry");
-
         if received {
             // Incremental apply of the received content into the live
             // document. Content for documents without live handles never
@@ -1071,24 +1064,19 @@ impl<F: FutureForm> DocWorker2<F> {
                         "received sync session has no persisted Sedimentree content"
                     ));
                 };
-                tracing::debug!(%self.doc_id, "passed point A2: hydrate_tree done");
                 tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
                 let (resolved, unresolved) = self
                     .try_decrypt_received_blobs(&mut tree, &received_refs)
                     .await?;
-                tracing::debug!(%self.doc_id, "passed point A3: try_decrypt_received_blobs done");
                 // Hold every ref we could not decrypt: the precise A7 record.
                 self.blocked_refs.extend(unresolved);
                 self.sync_partial_state().await?;
-                tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point A4: sync_partial_state done");
                 if resolved.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
-                    tracing::debug!(%self.doc_id, "passed point A5: notif_pending_heads (empty) done");
                     return self.report_sync_outcome(peer_id, has_live, reply).await;
                 }
                 if !self.blocked_refs.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
-                    tracing::debug!(%self.doc_id, "passed point A6: notif_pending_heads (partial) done");
                 }
 
                 let origin = BigRepoChangeOrigin::Remote { peer_id };
@@ -1105,9 +1093,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 // A7: reconsider previously-held blocked refs — this session's
                 // keys/deps may unlock content from an earlier session. Precise
                 // retry of the held set; no coarse full-tree rewalk.
-                if self.retry_blocked_refs(&bundle, &origin).await? {
-                    tracing::debug!(%self.doc_id, "passed point A7b: blocked refs retried and heads advanced");
-                }
+                self.retry_blocked_refs(&bundle, &origin).await?;
             }
 
             if !has_live {
@@ -1122,7 +1108,6 @@ impl<F: FutureForm> DocWorker2<F> {
             );
         }
 
-        tracing::debug!(%self.doc_id, "passed point A7: calling report_sync_outcome");
         self.report_sync_outcome(peer_id, has_live, reply).await
     }
 
@@ -1375,7 +1360,6 @@ impl<F: FutureForm> DocWorker2<F> {
         >,
     ) -> eyre::Result<()> {
         let pending = matches!(self.state, DocState::PendingMaterialization);
-        tracing::debug!(%self.doc_id, "passed point P1: report_sync_outcome entry");
         // Only a doc with no live bundle (cold: pending, or persisted-only)
         // runs the full walk here. A live doc's session path already applied
         // the received content incrementally and retried the held blocked
@@ -1513,7 +1497,6 @@ impl<F: FutureForm> DocWorker2<F> {
             .take(received_order.len())
             .collect();
         let mut made_progress = true;
-        tracing::debug!(%self.doc_id, "passed point T1: try_decrypt_received_blobs entry, items={}", received_order.len());
 
         while made_progress && plaintext_by_index.iter().any(Option::is_none) {
             made_progress = false;
@@ -1530,12 +1513,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 let locator = BigRepoCiphertextLocator::new(*kind, self.sed_id, *head);
 
                 // Try entrypoint decrypt first.
-                tracing::debug!(%self.doc_id, "passed point T2: before try_decrypt_content_keyed");
                 let entrypoint = self
                     .io
                     .try_decrypt_content_keyed(self.sed_id, locator)
                     .await?;
-                tracing::debug!(%self.doc_id, "passed point T3: after try_decrypt_content_keyed");
                 let Some(entrypoint_raw) = entrypoint else {
                     // Key not found — skip; may resolve via causal chain.
                     continue;
@@ -1550,7 +1531,6 @@ impl<F: FutureForm> DocWorker2<F> {
 
                 // Then causal decrypt to unlock ancestors.
                 let state = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-                tracing::debug!(%self.doc_id, "passed point T4: after try_causal_decrypt");
                 for (ancestor_ref, ancestor_plaintext) in &state.complete {
                     if plaintext_by_ref
                         .insert(ancestor_ref.clone(), ancestor_plaintext.clone())
@@ -1561,7 +1541,6 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
         }
-        tracing::debug!(%self.doc_id, "passed point T5: try_decrypt_received_blobs loop end");
 
         let decrypted_refs: HashSet<_> = plaintext_by_ref.keys().cloned().collect();
         let resolved: Vec<_> = ordered_items
@@ -1652,15 +1631,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 blocked_refs,
                 causal_checkpoints,
             } => {
-                tracing::debug!(%self.doc_id, "passed point R2: load_doc_snapshot Ready");
                 self.blocked_refs = blocked_refs.into_iter().collect();
                 self.causal_checkpoints.extend(causal_checkpoints);
                 self.sync_partial_state().await?;
                 let after_heads = doc.get_heads();
-                tracing::debug!(%self.doc_id, "passed point R5: non-live path, before transition_to_ready");
                 self.transition_to_ready(was_pending, Arc::from(after_heads.clone()))
                     .await?;
-                tracing::debug!(%self.doc_id, "passed point R6: transition_to_ready done");
                 if was_pending {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);

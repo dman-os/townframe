@@ -177,15 +177,16 @@ impl PartSummary {
     /// decision side consumes: cursor strat (latest cursor) + bucket strat
     /// (that part's deepest bucket level and member count).
     pub fn into_strat_summaries(self) -> Vec<PartStratSummary> {
-        vec![
-            PartStratSummary::Cursor(CursorPartSummary {
-                latest_cursor: self.latest_cursor,
-            }),
-            PartStratSummary::Bucket(BucketPartSummary {
+        let mut summaries = vec![PartStratSummary::Cursor(CursorPartSummary {
+            latest_cursor: self.latest_cursor,
+        })];
+        if self.deepest_bucket_level > 0 {
+            summaries.push(PartStratSummary::Bucket(BucketPartSummary {
                 deepest_bucket_level: self.deepest_bucket_level,
                 member_count: self.member_count,
-            }),
-        ]
+            }));
+        }
+        summaries
     }
 }
 

@@ -297,7 +297,10 @@ impl BigRepo {
             )
             .await?;
 
-        runtime.wait_for_keyhive_reconciliation(None).await?;
+        runtime
+            .wait_for_keyhive_reconciliation(None)
+            .await
+            .inspect_err(|err| warn!(?err, "initial keyhive reconciliation failed"))?;
 
         let connection_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
         let out = Arc::new(Self {

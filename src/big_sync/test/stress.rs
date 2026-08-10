@@ -120,12 +120,13 @@ fn diff_scoped_obj_snapshots(
     right: &ObservedStoreSnapshot,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(
+    writeln!(
         out,
         "scoped_objs differ: left_peer={left_peer:?} left_count={} right_peer={right_peer:?} right_count={}",
         left.objs.len(),
         right.objs.len()
-    );
+    )
+    .ok();
 
     let mut only_left = Vec::new();
     let mut only_right = Vec::new();
@@ -151,44 +152,48 @@ fn diff_scoped_obj_snapshots(
     let differing_count = differing.len();
 
     if only_left_count > 0 {
-        let _ = writeln!(out, "only in left (showing up to {max_items}):");
+        writeln!(out, "only in left (showing up to {max_items}):").ok();
         for (obj, snapshot) in only_left.into_iter().take(max_items) {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "  - {obj:?} => payload={:?} parts={:?}",
                 snapshot.payload, snapshot.parts
-            );
+            )
+            .ok();
         }
     }
     if only_right_count > 0 {
-        let _ = writeln!(out, "only in right (showing up to {max_items}):");
+        writeln!(out, "only in right (showing up to {max_items}):").ok();
         for (obj, snapshot) in only_right.into_iter().take(max_items) {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "  - {obj:?} => payload={:?} parts={:?}",
                 snapshot.payload, snapshot.parts
-            );
+            )
+            .ok();
         }
     }
     if differing_count > 0 {
-        let _ = writeln!(out, "differing entries (showing up to {max_items}):");
+        writeln!(out, "differing entries (showing up to {max_items}):").ok();
         for (obj, left_snapshot, right_snapshot) in differing.into_iter().take(max_items) {
-            let _ = writeln!(out, "  - {obj:?}:");
-            let _ = writeln!(
+            writeln!(out, "  - {obj:?}:").ok();
+            writeln!(
                 out,
                 "      left : payload={:?} parts={:?}",
                 left_snapshot.payload, left_snapshot.parts
-            );
-            let _ = writeln!(
+            )
+            .ok();
+            writeln!(
                 out,
                 "      right: payload={:?} parts={:?}",
                 right_snapshot.payload, right_snapshot.parts
-            );
+            )
+            .ok();
         }
     }
 
     if only_left_count == 0 && only_right_count == 0 && differing_count == 0 {
-        let _ = writeln!(out, "snapshots differ for an unknown reason");
+        writeln!(out, "snapshots differ for an unknown reason").ok();
     }
 
     out

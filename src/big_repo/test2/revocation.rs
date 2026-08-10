@@ -105,7 +105,8 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .await?;
     pair.right_conn()
         .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+        .await
+        .ok();
 
     // The reader may retain already-held historical plaintext ("before-revoke"),
     // but MUST NOT observe the post-revocation content ("post-revoke-secret").

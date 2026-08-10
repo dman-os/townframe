@@ -309,13 +309,7 @@ pub async fn test_cx_with_options(
         [app_doc_id, drawer_doc_id],
     )
     .await?;
-    crate::repo::ensure_expected_partitions_for_docs(
-        &part_store,
-        &authority,
-        app_doc_id,
-        drawer_doc_id,
-    )
-    .await?;
+    crate::repo::ensure_authority_partitions(&part_store, &authority).await?;
     crate::repo::ensure_blob_partitions(&blob_part_store).await?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {

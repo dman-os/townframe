@@ -836,8 +836,6 @@ async fn tier0_sync_diagnostics_do_not_create_worker() -> crate::Res<()> {
 }
 
 // ─── Racing handle acquisition with concurrent doc sync ────────────────────
-
-// ─── Racing handle acquisition with concurrent doc sync ────────────────────
 //
 // A sync session delivering content while a handle is being acquired must not
 // miss the update.  We race sync_doc_with_peer and get_doc on the Owner→Reader
@@ -1007,7 +1005,7 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     utils_rs::testing::setup_tracing_once();
     let tasks = utils_rs::AbortableJoinSet::new();
     let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (_end_tx, end_rx) = futures::channel::oneshot::channel();
+    let (end_tx, end_rx) = futures::channel::oneshot::channel();
     let (signal_tx, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
     let peer_id = big_sync_core::PeerId::new([246u8; 32]);
 
@@ -1020,6 +1018,8 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     );
     assert_eq!(tasks.len(), 1, "watch_connection_end must register task in AbortableJoinSet");
 
+    drop(end_tx);
+    tasks.abort();
     tasks.stop(std::time::Duration::from_secs(2)).await?;
     assert_eq!(tasks.len(), 0, "tasks must be empty after stop");
     Ok(())

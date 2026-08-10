@@ -1408,11 +1408,14 @@ impl HostPartStore for SqliteBigRepoStore {
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
             .await?;
-        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
+        )
+        .bind(self.scope_id)
+        .bind(&doc_blob)
+        .bind(Self::peer_blob(member))
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
         )

@@ -297,14 +297,14 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<ChangeHashSet>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
-            debug!(%doc_id, %branch_path, "presence probe: no branch ref");
+            debug!(%doc_id, %branch_path, op = "get_branch_heads_for_path", "no branch ref");
             return Ok(None);
         };
         let Some(heads) = self
             .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
-            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "presence probe: branch doc heads unavailable");
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "get_branch_heads_for_path", "branch doc heads unavailable");
             return Ok(None);
         };
         Ok(Some(heads))
@@ -329,7 +329,7 @@ impl DrawerRepo {
                 Ok(Some(handle))
             }
             other => {
-                debug!(%document_id, lookup = ?other, "presence probe: branch doc not ready");
+                debug!(%document_id, lookup = ?other, op = "get_handle_by_branch_doc_id", "branch doc not ready");
                 Ok(None)
             }
         }
@@ -342,14 +342,14 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<Option<big_repo::BigDocHandle>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
-            debug!(%doc_id, %branch_path, "presence probe: resolve: no branch ref");
+            debug!(%doc_id, %branch_path, op = "resolve_handle_for_branch_heads", "no branch ref");
             return Ok(None);
         };
         let Some(handle) = self
             .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
-            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "presence probe: resolve: no handle");
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "resolve_handle_for_branch_heads", "no handle");
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle

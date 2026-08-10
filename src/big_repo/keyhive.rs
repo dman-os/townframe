@@ -366,8 +366,7 @@ impl BigKeyhiveHandle {
             }
         }
         // Enumerate groups
-        #[allow(unused_mut)]
-        let mut group_ids: Vec<KhGroupId> = {
+        let group_ids: Vec<KhGroupId> = {
             let groups = keyhive.groups().lock().await;
             groups.keys().copied().collect()
         };

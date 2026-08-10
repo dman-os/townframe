@@ -369,13 +369,7 @@ impl RepoCtx {
             .await?;
         }
 
-        ensure_expected_partitions_for_docs(
-            &part_store,
-            &authority,
-            doc_app.document_id(),
-            doc_drawer.document_id(),
-        )
-        .await?;
+        ensure_authority_partitions(&part_store, &authority).await?;
         ensure_blob_partitions(&blob_part_store).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: core partitions ensured");
 
@@ -720,17 +714,14 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         .await?
         .into_ready(doc_id_drawer)?;
     let authority = crate::authority::ensure(&parts.big_repo, sql, None).await?;
-    ensure_expected_partitions_for_docs(&parts.part_store, &authority, doc_id_app, doc_id_drawer)
-        .await?;
+    ensure_authority_partitions(&parts.part_store, &authority).await?;
     ensure_blob_partitions(&parts.blob_part_store).await?;
     Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
 }
 
-pub(crate) async fn ensure_expected_partitions_for_docs(
+pub(crate) async fn ensure_authority_partitions(
     partition_store: &SharedPartStore,
     authority: &crate::authority::RepoAuthority,
-    _doc_app_id: DocumentId,
-    _doc_drawer_id: DocumentId,
 ) -> Res<()> {
     for part_id in [
         authority.core_docs_part_id(),

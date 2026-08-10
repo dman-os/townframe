@@ -292,95 +292,33 @@ impl DocIdFilter {
     }
 }
 
-pub struct ChangeListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for ChangeListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
+macro_rules! impl_listener_registration {
+    ($name:ident, $field:ident) => {
+        pub struct $name {
+            manager: std::sync::Weak<ChangeListenerManager>,
+            id: Uuid,
         }
-    }
-}
 
-pub struct LocalListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for LocalListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .local_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
+        impl Drop for $name {
+            fn drop(&mut self) {
+                if let Some(manager) = self.manager.upgrade() {
+                    let id = self.id;
+                    manager
+                        .$field
+                        .lock()
+                        .expect(ERROR_MUTEX)
+                        .retain(|listener| listener.id != id);
+                }
+            }
         }
-    }
+    };
 }
 
-pub struct HeadListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for HeadListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .head_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct PendingHeadListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for PendingHeadListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .pending_head_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct DomainListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for DomainListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .domain_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
+impl_listener_registration!(ChangeListenerRegistration, listeners);
+impl_listener_registration!(LocalListenerRegistration, local_listeners);
+impl_listener_registration!(HeadListenerRegistration, head_listeners);
+impl_listener_registration!(PendingHeadListenerRegistration, pending_head_listeners);
+impl_listener_registration!(DomainListenerRegistration, domain_listeners);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ChangeListenerManager implementation
@@ -1559,6 +1497,24 @@ mod tests {
             }] if *d == doc_id && *m == member_id && *a == BigRepoAccess::Relay
         ));
 
+        manager.notify_document_removed_from_group(doc_id, group_id)?;
+        let batch_rem_group = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch_rem_group.as_slice(),
+            [BigRepoDomainNotification::DocumentRemovedFromGroup {
+                doc_id: d, group_id: g, ..
+            }] if *d == doc_id && *g == group_id
+        ));
+
+        manager.notify_document_access_revoked(doc_id, member_id)?;
+        let batch_rev = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch_rev.as_slice(),
+            [BigRepoDomainNotification::DocumentAccessRevoked {
+                doc_id: d, member_id: m, ..
+            }] if *d == doc_id && *m == member_id
+        ));
+
         manager.notify_document_key_rotated(doc_id)?;
         let batch5 = recv_batch(&mut rx).await;
         assert!(matches!(
@@ -1583,5 +1539,35 @@ mod tests {
             .is_none();
         assert!(closed, "domain listener should be removed on drop");
         Ok(())
+    }
+
+    #[test]
+    fn test_patch_matches_path_and_action_prop_matches() {
+        let mut doc = automerge::Automerge::new();
+        let heads1 = doc.get_heads();
+        doc.transact(|tx| tx.put(automerge::ROOT, "title", "hello"))
+            .expect("put title");
+        let heads2 = doc.get_heads();
+        let patches = doc.diff(&heads1, &heads2);
+        assert!(!patches.is_empty());
+        let patch = &patches[0];
+
+        let path_empty: Vec<Prop<'_>> = Vec::new();
+        assert!(patch_matches_path(&path_empty, patch));
+
+        let path_title = vec![Prop::Key(std::borrow::Cow::Borrowed("title"))];
+        assert!(patch_matches_path(&path_title, patch));
+
+        let path_wrong = vec![Prop::Key(std::borrow::Cow::Borrowed("other"))];
+        assert!(!patch_matches_path(&path_wrong, patch));
+
+        assert!(action_prop_matches(
+            &Prop::Key(std::borrow::Cow::Borrowed("title")),
+            &patch.action
+        ));
+        assert!(!action_prop_matches(
+            &Prop::Key(std::borrow::Cow::Borrowed("other")),
+            &patch.action
+        ));
     }
 }

@@ -131,33 +131,7 @@ pub trait StressFixture: Sync {
         timeout: Duration,
         label: &str,
     ) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let deadline = std::time::Instant::now() + timeout;
-        let mut last_snapshot = None;
-        let mut stable_rounds = 0usize;
-        loop {
-            let mut current = Vec::with_capacity(nodes.len());
-            for node in nodes {
-                current.push(self.observed_state(node).await?);
-            }
-            if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
-                stable_rounds += 1;
-                if stable_rounds >= STRESS_SETTLE_STABLE_ROUNDS {
-                    log_if_slow(label, started_at);
-                    return Ok(());
-                }
-            } else {
-                stable_rounds = 1;
-            }
-            last_snapshot = Some(current);
-            if std::time::Instant::now() >= deadline {
-                log_if_slow(label, started_at);
-                return Err(ferr!(
-                    "timed out waiting for stress cluster to settle at {label}: last_snapshot={last_snapshot:?}"
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_cluster_settled(self, nodes, timeout, label).await
     }
 }
 
@@ -442,9 +416,7 @@ pub async fn apply_random_mutation<F: StressFixture>(
         if !creators.is_empty() {
             let node_idx = creators[rng.random_range(0..creators.len())];
             let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
-            journal.record(format!(
-                "{phase}:step={step}:create(no-mutator) node={node_idx}"
-            ));
+
             let obj = fixture.make_stress_obj(rng);
             let obj = state.publish_new_obj(obj);
             let nonce = rng.random::<u64>();
@@ -547,7 +519,7 @@ pub async fn maybe_restart_node<F: StressFixture>(
     Ok(())
 }
 
-pub async fn wait_for_cluster_settled<F: StressFixture>(
+pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
     fixture: &F,
     nodes: &[&F::Node],
     timeout: Duration,

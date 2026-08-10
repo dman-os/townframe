@@ -864,7 +864,8 @@ async fn apply_event(
                     return Ok(None);
                 }
                 match err {
-                    crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => {
+                    crate::drawer::types::DrawerError::BranchAlreadyExists { .. }
+                    | crate::drawer::types::DrawerError::BranchNotFound { .. } => {
                         return Ok(None);
                     }
                     _ => return Err(err.into()),

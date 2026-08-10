@@ -84,11 +84,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             head_count = heads.len(),
             "loaded persisted heads after document sync"
         );
-        let deets = if remote_payload.is_none()
-            && local_heads
-                .as_ref()
-                .map(|prev| prev.as_ref() == heads.as_ref())
-                .unwrap_or_default()
+        let deets = if local_heads
+            .as_ref()
+            .map(|prev| prev.as_ref() == heads.as_ref())
+            .unwrap_or_default()
         {
             big_sync_core::SyncCompletionDeets::Noop
         } else {

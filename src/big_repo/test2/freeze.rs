@@ -27,9 +27,11 @@ async fn freeze_holds_commands_until_unfreeze() -> Res<()> {
     // A query command sent while frozen must not complete until unfreeze:
     // the hub buffers it instead of processing it.
     let doc_id = crate::DocumentId::new([9; 32]);
+    let held_fut = pair.left().repo.contains_sedimentree_id(doc_id);
+    tokio::pin!(held_fut);
     let held = timeout(
         Duration::from_millis(500),
-        pair.left().repo.contains_sedimentree_id(doc_id),
+        &mut held_fut,
     )
     .await;
     assert!(
@@ -37,11 +39,11 @@ async fn freeze_holds_commands_until_unfreeze() -> Res<()> {
         "command must be held while the hub is frozen"
     );
 
-    // Reopen: the buffered command replays and resolves.
+    // Reopen: the original buffered command replays and resolves.
     pair.left().repo.unfreeze().await?;
     let resolved = timeout(
         Duration::from_secs(5),
-        pair.left().repo.contains_sedimentree_id(doc_id),
+        held_fut,
     )
     .await??;
     assert!(!resolved, "unknown document must not be present");

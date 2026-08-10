@@ -214,26 +214,20 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
             .try_into()
             .map_err(|_| ferr!("content_ref must be 32 bytes, got {}", content_ref.len()))?;
         let commit_id = CommitId::new(commit_id_bytes);
-        // FIXME: use select! and race these two loads
-        if let Some(_verified) =
+        let (frag_res, loose_res) = tokio::join!(
             <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                 &self.storage,
                 self.sed_id,
                 commit_id,
-            )
-            .await
-            .wrap_err("failed loading fragment for ciphertext")?
-        {
-            return Ok(true);
-        }
-        if let Some(_verified) =
+            ),
             <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
                 &self.storage,
                 self.sed_id,
                 commit_id,
             )
-            .await
-            .wrap_err("failed loading loose commit for ciphertext")?
+        );
+        if frag_res.wrap_err("failed loading fragment for ciphertext")?.is_some()
+            || loose_res.wrap_err("failed loading loose commit for ciphertext")?.is_some()
         {
             return Ok(true);
         }
@@ -1704,7 +1698,7 @@ where
             let peer_keyhive = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
             let owns_adapter = keyhive_adapter_owner
                 .lock()
-                .unwrap()
+                .expect(ERROR_MUTEX)
                 .get(&peer_keyhive)
                 .is_some_and(|owner| std::sync::Arc::ptr_eq(owner, &closed));
 
@@ -1713,7 +1707,7 @@ where
             // disturbing other live connections to the same peer.
             let mut auth = None;
             {
-                let mut guard = conns.lock().unwrap();
+                let mut guard = conns.lock().expect(ERROR_MUTEX);
                 guard.retain(|(flag, auth_conn)| {
                     if std::sync::Arc::ptr_eq(flag, &closed) {
                         auth = Some(auth_conn.clone());
@@ -1738,7 +1732,7 @@ where
             if owns_adapter {
                 let fallback = conns
                     .lock()
-                    .unwrap()
+                    .expect(ERROR_MUTEX)
                     .iter()
                     .rev()
                     .find(|(_, auth)| auth.peer_id().as_bytes() == peer_id.as_bytes())
@@ -1751,12 +1745,15 @@ where
                         .await;
                     keyhive_adapter_owner
                         .lock()
-                        .unwrap()
+                        .expect(ERROR_MUTEX)
                         .insert(peer_keyhive, Arc::clone(&fallback_flag));
                     replacement = Some(fallback_flag);
                 } else {
                     keyhive_protocol.remove_peer(&peer_keyhive).await;
-                    keyhive_adapter_owner.lock().unwrap().remove(&peer_keyhive);
+                    keyhive_adapter_owner
+                        .lock()
+                        .expect(ERROR_MUTEX)
+                        .remove(&peer_keyhive);
                 }
             }
             Ok(replacement)

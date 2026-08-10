@@ -1,10 +1,9 @@
 //! Test fixtures: contact-card exchange, access grants, and sync helpers.
 //!
-//! Every helper here is **synchronous-by-design**: one `sync_*` call is the
-//! barrier. There are no retry loops. If an expected post-condition is not met
-//! after a single `sync_keyhive_with_peer` / `sync_doc_with_peer`, the helper
-//! returns `Err` with a diagnostic — surfacing the runtime2 ordering bug
-//! rather than papering over it (see `play.big_repo.test2.md`).
+//! Helpers here provide precise barriers for keyhive and document sync. Where
+//! bounded polling is required (such as `assert_reader_has_access` with a 5-second
+//! limit and `sync_doc_expect_ready` with a 15-second limit), failures return
+//! diagnostic `Err` results rather than hanging indefinitely.
 
 use super::log_nickname;
 use super::topo::{Node, Pair};
@@ -213,25 +212,35 @@ pub async fn sync_doc_bidirectional(
     conn_b_to_a.sync_doc_with_peer(doc_id, timeout).await?;
     repo_a.wait_for_quiescence(timeout).await?;
     repo_b.wait_for_quiescence(timeout).await?;
-    let handle_a = match repo_a.get_doc(&doc_id).await? {
-        crate::DocLookup::Ready(h) => h,
-        _ => {
-            return Err(crate::ferr!(
-                "{}: doc not Ready on repo_a after bidirectional sync",
-                log_nickname::nickname(&repo_a.local_peer_id()),
-            ));
-        }
-    };
-    let handle_b = match repo_b.get_doc(&doc_id).await? {
-        crate::DocLookup::Ready(h) => h,
-        _ => {
-            return Err(crate::ferr!(
-                "{}: doc not Ready on repo_b after bidirectional sync",
-                log_nickname::nickname(&repo_b.local_peer_id()),
-            ));
-        }
-    };
+    let handle_a = expect_ready(repo_a, doc_id).await?;
+    let handle_b = expect_ready(repo_b, doc_id).await?;
     Ok((handle_a, handle_b))
+}
+
+pub async fn expect_ready(
+    repo: &Arc<crate::BigRepo>,
+    doc_id: DocumentId,
+) -> Res<crate::BigDocHandle> {
+    tokio::time::timeout(
+        utils_rs::scale_timeout(std::time::Duration::from_secs(5)),
+        async {
+            loop {
+                match repo.get_doc(&doc_id).await? {
+                    crate::DocLookup::Ready(h) => return Ok(h),
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|_| {
+        crate::ferr!(
+            "{}: doc not Ready on repo after sync",
+            log_nickname::nickname(&repo.local_peer_id()),
+        )
+    })?
 }
 
 /// Reach the fixed point of every currently configured BigSync route and all

@@ -37,12 +37,13 @@ async fn boot_connected_sync_pair()
     Ok((temp_root, node_a, node_b, endpoint_id_a))
 }
 
-async fn wait_for_facet_manifest(node: &SyncTestNode, tag: &'static str) -> Res<()> {
+async fn wait_for_facet_manifest(node: &SyncTestNode, tag: WellKnownFacetTag) -> Res<()> {
+    let tag_str = daybook_types::doc::FacetTag::from(tag).to_string();
     tokio::time::timeout(utils_rs::scale_timeout(Duration::from_secs(30)), async {
         loop {
             if node
                 ._plugs_repo
-                .get_facet_manifest_by_tag(tag)
+                .get_facet_manifest_by_tag(&tag_str)
                 .await
                 .is_some()
             {
@@ -52,12 +53,12 @@ async fn wait_for_facet_manifest(node: &SyncTestNode, tag: &'static str) -> Res<
         }
     })
     .await
-    .map_err(|_| eyre::eyre!("timed out waiting for facet manifest: {tag}"))
+    .map_err(|_| eyre::eyre!("timed out waiting for facet manifest: {tag_str}"))
 }
 
 async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title: &str) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-    wait_for_facet_manifest(node, "org.example.daybook.titlegeneric").await?;
+    wait_for_facet_manifest(node, WellKnownFacetTag::TitleGeneric).await?;
     let branch = BranchPathBuf::from("main");
     let Some((_, heads)) = node.drawer.get_with_heads(doc_id, &branch, None).await? else {
         eyre::bail!("missing doc while updating title: {doc_id}");
@@ -86,7 +87,7 @@ async fn update_title_at_heads(
     title: &str,
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-    wait_for_facet_manifest(node, "org.example.daybook.titlegeneric").await?;
+    wait_for_facet_manifest(node, WellKnownFacetTag::TitleGeneric).await?;
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
@@ -111,7 +112,7 @@ async fn update_note_at_heads(
     note: &str,
 ) -> Res<()> {
     let note_key = FacetKey::from(WellKnownFacetTag::Note);
-    wait_for_facet_manifest(node, "org.example.daybook.note").await?;
+    wait_for_facet_manifest(node, WellKnownFacetTag::Note).await?;
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
@@ -1029,10 +1030,10 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
 
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let note_key = FacetKey::from(WellKnownFacetTag::Note);
-    wait_for_facet_manifest(&node_a, "org.example.daybook.titlegeneric").await?;
-    wait_for_facet_manifest(&node_a, "org.example.daybook.note").await?;
-    wait_for_facet_manifest(&node_b, "org.example.daybook.titlegeneric").await?;
-    wait_for_facet_manifest(&node_b, "org.example.daybook.note").await?;
+    wait_for_facet_manifest(&node_a, WellKnownFacetTag::TitleGeneric).await?;
+    wait_for_facet_manifest(&node_a, WellKnownFacetTag::Note).await?;
+    wait_for_facet_manifest(&node_b, WellKnownFacetTag::TitleGeneric).await?;
+    wait_for_facet_manifest(&node_b, WellKnownFacetTag::Note).await?;
 
     let main_branch = BranchPathBuf::from("main");
 

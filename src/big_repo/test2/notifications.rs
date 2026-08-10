@@ -261,7 +261,7 @@ async fn tier7_origin_filter_remote() -> crate::Res<()> {
     });
     assert!(
         has_remote,
-        "remote sync must deliver a DocChanged with Remote origin to the reader"
+        "remote sync must deliver a DocChanged with Remote origin to the owner"
     );
 
     drop(owner_doc);

@@ -371,7 +371,16 @@ impl IrohSyncRepo {
         }
         Ok(())
     }
+}
 
+#[inline]
+pub fn is_blob_part(part_id: PartId) -> bool {
+    let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+    let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
+    part_id == docs_blob || part_id == plugs_blob
+}
+
+impl IrohSyncRepo {
     fn peer_partition_ids(
         &self,
         _peer_key: &str,
@@ -1004,11 +1013,9 @@ impl IrohSyncRepo {
         if peer_ids.is_empty() {
             return Ok(());
         }
-        let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-        let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
-            .partition(|part| **part == docs_blob || **part == plugs_blob);
+            .partition(|part| is_blob_part(**part));
         let timeout_outcome = tokio::time::timeout(timeout, async {
             let doc_wait = self
                 .big_sync_worker
@@ -1020,13 +1027,14 @@ impl IrohSyncRepo {
             eyre::Ok(())
         })
         .await;
+
         match timeout_outcome {
-            Ok(out) => out?,
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
             Err(_) => {
-                eyre::bail!("timed out waiting for full sync");
+                eyre::bail!("wait_for_full_sync timed out after {timeout:?}");
             }
         }
-        Ok(())
     }
 
     /// Test-support fence for the fixed point of BigSync and BigRepo local
@@ -1040,12 +1048,10 @@ impl IrohSyncRepo {
         timeout: Duration,
     ) -> Res<()> {
         self.ensure_repo_live()?;
-        let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-        let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
             .copied()
-            .partition(|part| *part == docs_blob || *part == plugs_blob);
+            .partition(|part| is_blob_part(*part));
         let targets = [
             big_sync::test_support::NetworkRestTarget {
                 worker: self.big_sync_worker.clone(),
