@@ -429,9 +429,10 @@ impl IrohSyncRepo {
             return;
         };
         if let Some(existing) = reconnect_task.as_ref()
-            && !existing.is_finished() {
-                return;
-            }
+            && !existing.is_finished()
+        {
+            return;
+        }
         // NOTE: we just drop the old handle since we're using
         // a mutex which we shouldn't hold across await points
         // if let Some(done) = reconnect_task.take() {
@@ -439,14 +440,15 @@ impl IrohSyncRepo {
         // }
         let repo = Arc::clone(self);
         let handle = tokio::spawn(async move {
-            let _ = repo
+            let _cancelled = repo
                 .cancel_token
                 .clone()
                 .run_until_cancelled(async move {
                     if let Err(err) = repo.connect_known_devices_once().await
-                        && !repo.cancel_token.is_cancelled() {
-                            warn!(?err, trigger, "known-device reconnect failed");
-                        }
+                        && !repo.cancel_token.is_cancelled()
+                    {
+                        warn!(?err, trigger, "known-device reconnect failed");
+                    }
                 })
                 .await;
         });
@@ -481,9 +483,11 @@ impl IrohSyncRepo {
                     use irpc::WithChannels;
                     match msg {
                         bootstrap::CloneProvisionRpcMessage::ResolveCloneInfo(req) => {
-                            let WithChannels { inner, tx, .. } = req;
-                            let out = self.handle_resolve_clone_info(inner.req).await;
-                            tx.send(out.map_err(|err| format!("{err:#}")))
+                            let WithChannels { tx, .. } = req;
+                            tx.send(Ok(bootstrap::CloneInfoResponse {
+                                repo_name: self.rcx.repo_name.clone(),
+                                device_name: Some(self.rcx.local_device_name.clone()),
+                                }))
                                 .await
                                 .inspect_err(|_| warn!(ERROR_CALLER))
                                 .ok();
@@ -764,16 +768,6 @@ impl IrohSyncRepo {
         self.blobs_sync_backend.unregister_remote_peer(peer_id);
         self.big_sync_worker.remove_peer(peer_id).await.ok();
         self.blob_sync_worker.remove_peer(peer_id).await.ok();
-    }
-    async fn handle_resolve_clone_info(
-        &self,
-        req: bootstrap::CloneInfoRequest,
-    ) -> Res<bootstrap::CloneInfoResponse> {
-        let _ = req;
-        Ok(bootstrap::CloneInfoResponse {
-            repo_name: self.rcx.repo_name.clone(),
-            device_name: Some(self.rcx.local_device_name.clone()),
-        })
     }
 
     async fn handle_request_clone_provision(

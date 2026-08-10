@@ -25,7 +25,7 @@ use tokio::time::timeout;
 #[tokio::test(flavor = "multi_thread")]
 async fn create_doc_emits_observable_keyhive_change_notification() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let pair = Pair::boot(252, 253, "Creator", "Coparent").await?;
+    let pair = Pair::boot(250, 251, "Creator", "Coparent").await?;
 
     // Direct observer on the same broadcast `BigRepo::subscribe_keyhive_changes`
     // that `rpc.rs` forwards to remote peers.

@@ -609,7 +609,10 @@ pub async fn clone_repo_init_from_url(
     let bootstrap = match cloned {
         Ok(bootstrap) => bootstrap,
         Err(err) => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
+            tokio::fs::remove_dir_all(&staging)
+                .await
+                .inspect_err(|err| error!("error deleting temp dir: {err}"))
+                .ok();
             return Err(err);
         }
     };
@@ -617,7 +620,10 @@ pub async fn clone_repo_init_from_url(
     if destination.exists() {
         let mut read_dir = tokio::fs::read_dir(&destination).await?;
         if read_dir.next_entry().await?.is_some() {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
+            tokio::fs::remove_dir_all(&staging)
+                .await
+                .inspect_err(|err| error!("error deleting temp dir: {err}"))
+                .ok();
             eyre::bail!(
                 "clone destination became non-empty during clone: {}",
                 destination.display()

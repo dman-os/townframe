@@ -1313,10 +1313,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a_dyn), Arc::clone(&world));
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
-    let _ = backend_a
+    backend_a
         .sync_obj(peer_b, obj_b, Some(right_payload.clone()))
         .await?;
-    let _ = backend_b
+    backend_b
         .sync_obj(peer_a, obj_a, Some(left_payload.clone()))
         .await?;
 

@@ -268,8 +268,11 @@ pub async fn boot_cluster<F: StressFixture>(
     world: Arc<F::World>,
     node_count: usize,
 ) -> Res<Vec<Option<F::Node>>> {
+    let node_count_u8 =
+        u8::try_from(node_count).expect("stress node_count must fit in a u8 peer seed");
+    assert!(node_count_u8 > 0, "stress node_count must be non-zero");
     let mut nodes = Vec::with_capacity(node_count);
-    for peer_seed in 1..=(node_count as u8) {
+    for peer_seed in 1..=node_count_u8 {
         let node = fixture.boot_node(Arc::clone(&world), peer_seed).await?;
         nodes.push(Some(node));
     }

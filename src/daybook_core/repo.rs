@@ -583,22 +583,40 @@ impl RepoCtx {
         if let Err(err) = init_result {
             info!(?err, "repo init dance: failed, starting cleanup");
             if let Some(stop) = drawer_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = plugs_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = config_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = tables_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = dispatch_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = init_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Err(shutdown_err) = blobs_repo.shutdown().await {
                 return Err(err.wrap_err(format!(

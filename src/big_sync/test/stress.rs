@@ -204,13 +204,9 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
         node.wait_for_full_sync(connected_peers, part_ids.iter().copied())
             .await?;
     }
-    let mut worker_snaps = Vec::with_capacity(nodes.len());
     let mut store_snaps = Vec::with_capacity(nodes.len());
 
     for node in nodes {
-        let worker_snapshot = node.handle.snapshot().await?;
-        let _part_id = stress_support::test_part();
-        worker_snaps.push(worker_snapshot);
         let snapshot = node.snapshot().await?;
         for &(_, part_id) in snapshot.peer_part_cursors.keys() {
             assert_eq!(part_id, stress_support::test_part());
@@ -232,7 +228,6 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
         }
     }
 
-    let _ = worker_snaps;
     Ok(())
 }
 

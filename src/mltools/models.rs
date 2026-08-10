@@ -251,13 +251,14 @@ async fn hf_download_with_progress(
         .await
         .wrap_err_with(|| format!("error downloading {file} from {model_id}"));
     if let Err(err) = &result
-        && let Some(observer) = observer {
-            observer.emit(MobileDefaultEvent::DownloadFailed {
-                source: "hf-hub".to_string(),
-                file: file.to_string(),
-                message: format!("{err:?}"),
-            });
-        }
+        && let Some(observer) = observer
+    {
+        observer.emit(MobileDefaultEvent::DownloadFailed {
+            source: "hf-hub".to_string(),
+            file: file.to_string(),
+            message: format!("{err:?}"),
+        });
+    }
     result
 }
 
@@ -419,14 +420,15 @@ pub async fn mobile_default_with_observer(
 
     // In tests, prefer Gemini chat first when available so cloud chat smoke tests can bypass
     // gateway/proxy issues affecting Ollama routes.
-    if cfg!(any(test, feature = "tests")) && gemini_api_key.is_some()
+    if cfg!(any(test, feature = "tests"))
+        && gemini_api_key.is_some()
         && let Some(gemini_llm_ix) = llm_backends
             .iter()
             .position(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))
-        {
-            let gemini_backend = llm_backends.remove(gemini_llm_ix);
-            llm_backends.insert(0, gemini_backend);
-        }
+    {
+        let gemini_backend = llm_backends.remove(gemini_llm_ix);
+        llm_backends.insert(0, gemini_backend);
+    }
 
     Ok(Config {
         ocr: OcrConfig {
@@ -470,7 +472,9 @@ pub fn test_cache_dir() -> PathBuf {
             .open(&probe_path);
         match create_res {
             Ok(_) => {
-                let _ = std::fs::remove_file(probe_path);
+                std::fs::remove_file(probe_path)
+                    .inspect_err(|err| warn!("error removing temp file: {err}"))
+                    .ok();
                 true
             }
             Err(_) => false,

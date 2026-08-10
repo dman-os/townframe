@@ -286,6 +286,10 @@ panic = "abort"
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"
+clippy.let_underscore_must_use = "warn"
+clippy.let_underscore_untyped = "deny"
+rust.let_underscore_drop = "deny"
+# clippy.used_underscore_binding = "warn"
 
 [[workspace.metadata.leptos]]
 name = "wflow_webui"

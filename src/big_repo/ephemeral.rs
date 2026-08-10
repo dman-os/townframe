@@ -230,9 +230,12 @@ impl BigEphemeralSubscription {
 
 impl Drop for BigEphemeralSubscription {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(BigEphemeralSwitchboardCmd::Unregister {
-            subscription_id: self.subscription_id,
-        });
+        self.cmd_tx
+            .send(BigEphemeralSwitchboardCmd::Unregister {
+                subscription_id: self.subscription_id,
+            })
+            .inspect_err(|_| trace!(ERROR_CHANNEL))
+            .ok();
     }
 }
 

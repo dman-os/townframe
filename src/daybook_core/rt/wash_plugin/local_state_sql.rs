@@ -239,7 +239,10 @@ impl sqlite_connection::HostTransaction for SharedWashCtx {
             .delete(rep)
             .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
         if let Some(tx) = token.transaction {
-            let _ = tx.rollback().await;
+            tx.rollback()
+                .await
+                .inspect_err(|err| error!("rollback err: {err}"))
+                .ok();
         }
         Ok(())
     }

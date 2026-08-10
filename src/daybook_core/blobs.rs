@@ -262,7 +262,10 @@ impl BlobsRepo {
             Ok(hash)
         }
         .await;
-        let _ = tokio::fs::remove_file(&source_snapshot).await;
+        tokio::fs::remove_file(&source_snapshot)
+            .await
+            .inspect_err(|err| error!("error deleting temp file: {err}"))
+            .ok();
         result
     }
 
@@ -316,7 +319,10 @@ impl BlobsRepo {
             Ok(hash)
         }
         .await;
-        let _ = tokio::fs::remove_file(&source_snapshot).await;
+        tokio::fs::remove_file(&source_snapshot)
+            .await
+            .inspect_err(|err| warn!("error deleting temp file: {err}"))
+            .ok();
         result
     }
 
@@ -556,9 +562,10 @@ impl BlobsRepo {
         let object_paths = self.object_paths(blob_id)?;
         if let Some(meta) = self.read_meta(&object_paths.meta).await? {
             if let Some(mime) = meta.mime.as_deref()
-                && let Some(ext) = Self::extension_from_mime(mime) {
-                    return Ok(ext.to_string());
-                }
+                && let Some(ext) = Self::extension_from_mime(mime)
+            {
+                return Ok(ext.to_string());
+            }
             if let Some(source_ext) = meta
                 .source_paths
                 .iter()
@@ -738,7 +745,7 @@ impl BlobsRepo {
         match tokio::fs::rename(&temp, dest).await {
             Ok(_) => {}
             Err(err) if Self::is_exists_error(&err) => {
-                let _ = tokio::fs::remove_file(&temp).await;
+                tokio::fs::remove_file(&temp).await.inspect_err(|err| warn!(ERROR_CALLER, ?err)).ok();
             }
             Err(err) => return Err(err.into()),
         }

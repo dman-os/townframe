@@ -95,7 +95,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
                 .ok_or_eyre("active node unexpectedly missing")?;
             let kind = random_event_kind(&mut rng);
             let transfer_idx = EVENT_COUNT + idx;
-            let _ = apply_event(node, kind, transfer_idx, &mut rng).await?;
+            apply_event(node, kind, transfer_idx, &mut rng).await?;
         }
 
         let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;
@@ -291,18 +291,18 @@ async fn connect_topology(
         let peer_a_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
         endpoint_sets[*b].insert(peer_a_id);
 
-        let _ = node_a
+        node_a
             .sync_repo
             .rcx
             .big_repo
             .sync_keyhive_with_peer(peer_b_id, Some(Duration::from_secs(5)))
-            .await;
-        let _ = node_b
+            .await?;
+        node_b
             .sync_repo
             .rcx
             .big_repo
             .sync_keyhive_with_peer(peer_a_id, Some(Duration::from_secs(5)))
-            .await;
+            .await?;
     }
     Ok(endpoint_sets)
 }
@@ -661,13 +661,14 @@ async fn collect_doc_branch_heads(
         };
         if branches.branches.is_empty() {
             if let Some(entry) = node.drawer.get_entry(&doc_id).await?
-                && !entry.branches.is_empty() {
-                    eyre::bail!(
-                        "node {}: document {doc_id} present in drawer index with branches but heads not yet materialized; branch_docs={:?}",
-                        node.sync_repo.router.endpoint().id(),
-                        entry.branches
-                    );
-                }
+                && !entry.branches.is_empty()
+            {
+                eyre::bail!(
+                    "node {}: document {doc_id} present in drawer index with branches but heads not yet materialized; branch_docs={:?}",
+                    node.sync_repo.router.endpoint().id(),
+                    entry.branches
+                );
+            }
             continue;
         }
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();

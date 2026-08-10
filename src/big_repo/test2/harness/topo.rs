@@ -11,6 +11,8 @@
 //! node down — even on assertion failure / panic — which is the leak-flake fix
 //! called out in `play.big_repo.test2.md`. Tests do not call `.stop()` by hand.
 
+use crate::interlude::*;
+
 use super::log_nickname;
 use crate::test::StressBigSyncRpcClient;
 use crate::{
@@ -19,10 +21,8 @@ use crate::{
 };
 use big_sync::{HostPartStore, stress_support};
 use sqlx_utils_rs::SqlCtx;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{Duration, timeout};
+use tokio::time::timeout;
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
 ///
@@ -340,9 +340,21 @@ impl Node {
             }
         }
         self.endpoint.close().await;
-        let _ = self.repo_rpc_stop.stop().await;
-        let _ = self.repo_stop.stop().await;
-        let _ = self.big_sync_stop.stop().await;
+        self.repo_rpc_stop
+            .stop()
+            .await
+            .inspect_err(|err| error!("shutdown err: {err}"))
+            .ok();
+        self.repo_stop
+            .stop()
+            .await
+            .inspect_err(|err| error!("shutdown err: {err}"))
+            .ok();
+        self.big_sync_stop
+            .stop()
+            .await
+            .inspect_err(|err| error!("shutdown err: {err}"))
+            .ok();
     }
 }
 

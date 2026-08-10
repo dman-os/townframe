@@ -590,7 +590,9 @@ mod local {
                 .embed(vec![image_path_for_embed], None)
                 .map_err(|err| eyre::eyre!("failed to embed image: {err}"));
             if let Some(path) = temp_image_path.as_ref() {
-                let _ = std::fs::remove_file(path);
+                std::fs::remove_file(path)
+                    .inspect_err(|err| warn!("error removing temp file: {err}"))
+                    .ok();
             }
             let mut vectors = embed_result?;
             let Some(vector) = vectors.pop() else {

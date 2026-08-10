@@ -109,7 +109,7 @@ pub enum CreateDocError {
 #[derive(thiserror::Error, displaydoc::Display, Debug)]
 pub enum PutDocError {
     /// IdOccpuied {id}
-    IdOccpuied { id: DocumentId },
+    IdOccupied { id: DocumentId },
     /// {0:}
     Other(#[from] eyre::Report),
 }

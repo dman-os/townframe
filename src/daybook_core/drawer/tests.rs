@@ -2722,6 +2722,8 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     assert!(docs_per_sec > 0.0);
     stop_token.stop().await?;
     acx_stop().await?;
-    let _ = std::fs::remove_dir_all(&storage_path);
+    std::fs::remove_dir_all(&storage_path)
+        .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
+        .ok();
     Ok(())
 }

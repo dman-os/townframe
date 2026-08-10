@@ -40,14 +40,14 @@ impl SecretRepo {
                 ) as _
             } else {
                 tokio::task::spawn_blocking(move || {
-                    #[cfg(target_os = "linux")]
-                    {
+                cfg_select! {
+                    target_os = "linux" => {
                         match zbus_secret_service_keyring_store::Store::new() {
                             Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
                             Err(_) => {
                                 tracing::warn!(
                                     "secret-service keyring unavailable, \
-                                     falling back to kernel keyring"
+                                    falling back to kernel keyring"
                                 );
                                 linux_keyutils_keyring_store::Store::new()
                                     .map(|sec| sec as Arc<keyring_core::CredentialStore>)
@@ -57,27 +57,25 @@ impl SecretRepo {
                             }
                         }
                     }
-                    #[cfg(target_os = "android")]
-                    {
+                    target_os = "android" => {
                         android_native_keyring_store::Store::new()
                             .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("android keyring unavailable"))
                     }
-                    #[cfg(target_os = "windows")]
-                    {
+                    target_os = "windows" => {
                         windows_native_keyring_store::Store::new()
                             .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("windows keyring unavailable"))
                     }
-                    #[cfg(any(target_os = "macos", target_os = "ios"))]
-                    {
+                    any(target_os = "macos", target_os = "ios") => {
                         apple_native_keyring_store::keychain::Store::new()
                             .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("apple keychain unavailable"))
                     }
-                })
-                .await
-                .expect(ERROR_TOKIO)?
+                }
+            })
+            .await
+            .expect(ERROR_TOKIO)?
             };
 
         Ok(Self { store: Some(store) })
@@ -153,7 +151,7 @@ impl SecretRepo {
 impl Drop for SecretRepo {
     fn drop(&mut self) {
         if let Some(store) = self.store.take() {
-            let _ = Self::spawn_drop_thread(store);
+            Self::spawn_drop_thread(store);
         }
     }
 }

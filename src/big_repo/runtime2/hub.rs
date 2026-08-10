@@ -348,9 +348,10 @@ where
         barrier_id: u64,
     ) -> eyre::Result<()> {
         if let Some(probe) = self.quiescence_probe.as_mut()
-            && probe.barrier_id == barrier_id {
-                probe.pending_docs.remove(&doc_id);
-            }
+            && probe.barrier_id == barrier_id
+        {
+            probe.pending_docs.remove(&doc_id);
+        }
         self.try_resolve_quiescence()
     }
 
@@ -486,7 +487,8 @@ where
             Runtime2Cmd::EnsureCausalCoverage { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
-                    .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease }).wrap_err(ERROR_CHANNEL)?;
+                    .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
+                    .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
                 if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
@@ -674,7 +676,7 @@ where
                 if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                     entry.local_handles += 1;
                     entry.eviction_deadline = None;
-                    let _ = registered.send(());
+                    registered.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 }
             }
             Runtime2Cmd::ReleaseDocLease { doc_id } => {
@@ -957,7 +959,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let _ = lease_rx.await;
+            lease_rx.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
             cmd_tx
@@ -978,7 +980,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             // The worker replies once its mailbox work has drained past the
             // fence. A dropped reply (worker evicted mid-fence) still acks:
             // `DocWorkerStopped` clears the doc from the probe anyway.
-            let _ = reply.await;
+            reply.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
             evt_tx
                 .send(Runtime2Evt::DocWorkerFenced { doc_id, barrier_id })
                 .await
@@ -1052,7 +1054,10 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // Send the end flag alongside the result so the
                         // caller can identify WHICH connection ended (peer
                         // ids can be reused across connections).
-                        let _ = watcher_end_tx.send((Arc::clone(&watcher_closed), result));
+                        watcher_end_tx
+                            .send((Arc::clone(&watcher_closed), result))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
                                 peer_id: watcher_peer,
@@ -1138,7 +1143,10 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // Send the end flag alongside the result so the
                         // caller can identify WHICH connection ended (peer
                         // ids can be reused across connections).
-                        let _ = watcher_end_tx.send((Arc::clone(&watcher_closed), result));
+                        watcher_end_tx
+                            .send((Arc::clone(&watcher_closed), result))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
                                 peer_id: watcher_peer,
@@ -2341,9 +2349,6 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
         if self.machine_tasks.stop(timeout).await.is_err() {
             tracing::warn!("runtime2 graceful shutdown timed out; aborting machine loop");
             self.cancel.abort();
-            // The join set was consumed by the first `stop`; this second
-            // call is a no-op (returns `Aborted`), kept for symmetry.
-            let _ = self.machine_tasks.stop(timeout).await;
         }
 
         // Not every child operation observes the runtime cancellation token
@@ -2483,10 +2488,6 @@ impl<
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SPAWN
-// ═══════════════════════════════════════════════════════════════════════════
-
 /// Top-standing runtime spawn. Spawns background workers + the machine loop and
 /// returns the handle + stop token.
 ///
@@ -2545,7 +2546,6 @@ where
     let doc_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let keyhive_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
-    // ── Build the hub ──────────────────────────────────────────────────────
     let hub: Runtime2Hub<F, R> = Runtime2Hub {
         local_peer_id,
         sync_policy,
@@ -2583,7 +2583,6 @@ where
         materialization_retries_in_flight: HashMap::new(),
     };
 
-    // ── Construct handle ───────────────────────────────────────────────────
     let handle = Runtime2Handle::<F>::new(
         cmd_tx.clone(),
         hub.sync_policy,
@@ -2592,7 +2591,6 @@ where
         keyhive_sync_waiter_ids,
     );
 
-    // ── Spawn (machine): the hub machine loop ──────────────────────────────
     // The dispatcher is stopped before child work so it cannot accept late
     // events that would spawn into an aborted child task set.
     machine_tasks.spawn(F::machine_loop(

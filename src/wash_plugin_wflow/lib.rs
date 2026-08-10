@@ -5,8 +5,8 @@ mod interlude {
 use crate::interlude::*;
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicU64;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
@@ -128,7 +128,7 @@ struct SessionHandle {
 
 impl SessionHandle {
     fn request_cancel(&self) {
-        let _ = self.resume_tx.send(SessionResume::Stop);
+        self.resume_tx.send(SessionResume::Stop).inspect_err(|err| warn!(ERROR_CHANNEL, ?err)).ok();
         self.cancel_token.cancel();
     }
 }
@@ -167,12 +167,12 @@ impl host::Host for SharedWashCtx {
                 use wflow_core::partition::state::JobStepState;
                 let JobStepState::Effect { attempts } = state;
                 attempts.last().and_then(|attempt| match &attempt.deets {
-                    JobEffectResultDeets::Success { value_json } => Some(value_json.to_string()),
+                    JobEffectResultDeets::Success { .. } => Some(()),
                     JobEffectResultDeets::EffectErr(_) => None,
                 })
             });
             drop(journal);
-            if let Some(value_json) = stale_completed {
+            if stale_completed.is_some() {
                 active_step.take();
                 job.cur_step
                     .compare_exchange(
@@ -182,7 +182,6 @@ impl host::Host for SharedWashCtx {
                         std::sync::atomic::Ordering::Relaxed,
                     )
                     .expect("impossible: wasm is single threaded");
-                let _ = value_json;
             } else {
                 return Err(wasmtime_err("concurrent steps not allowed"));
             }
@@ -519,12 +518,11 @@ impl WflowPlugin {
     }
 
     fn drop_session_handle(&self, session: SessionHandle) {
-        let _ = session.resume_tx.send(SessionResume::Stop);
+        session.resume_tx.send(SessionResume::Stop).inspect_err(|err| warn!(ERROR_CHANNEL, ?err)).ok();
         session.cancel_token.cancel();
         session.join_handle.abort();
-        let _ = self.active_contexts.remove(&session.ctx_id);
-        let _ = self
-            .active_jobs
+        self.active_contexts.remove(&session.ctx_id);
+        self.active_jobs
             .write()
             .expect(ERROR_MUTEX)
             .remove(&session.job_id);
@@ -635,18 +633,31 @@ impl WflowPlugin {
 
         self.active_contexts
             .insert(Arc::clone(&ctx_id), Arc::clone(&job_id));
-        let join_handle = tokio::spawn(async move {
-            let fut = instance
-                .townframe_wflow_bundle()
-                .call_run(&mut store, &bundle_args);
-            let trap = match fut.await {
-                Ok(res) => JobTrap::RunComplete(res),
-                Err(err) => {
-                    let terminal = types::JobError::Terminal(format!("wasm error: {err:?}"));
-                    JobTrap::RunComplete(Err(terminal))
-                }
-            };
-            let _ = yield_tx.send(trap);
+        let join_handle = tokio::spawn({
+            let cancel_token = pause_cancel.clone();
+            async move {
+                cancel_token
+                    .clone()
+                    .run_until_cancelled(async move {
+                        let fut = instance
+                            .townframe_wflow_bundle()
+                            .call_run(&mut store, &bundle_args);
+                        let trap = match fut.await {
+                            Ok(res) => JobTrap::RunComplete(res),
+                            Err(err) => {
+                                let terminal =
+                                    types::JobError::Terminal(format!("wasm error: {err:?}"));
+                                JobTrap::RunComplete(Err(terminal))
+                            }
+                        };
+                        if yield_tx.send(trap).is_err() {
+                            if !cancel_token.is_cancelled() {
+                                panic!("{}", ERROR_CALLER);
+                            }
+                        }
+                    })
+                    .await;
+            }
         });
 
         Ok(SessionHandle {
@@ -834,11 +845,12 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
                 .active_keys
                 .insert(Arc::clone(key), Arc::clone(&workload_id));
             if let Some(old_workload_id) = old
-                && old_workload_id != workload_id {
-                    anyhow::bail!(
-                        "wflow key '{key}' already mapped to workload '{old_workload_id}', cannot remap to '{workload_id}'"
-                    );
-                }
+                && old_workload_id != workload_id
+            {
+                anyhow::bail!(
+                    "wflow key '{key}' already mapped to workload '{old_workload_id}', cannot remap to '{workload_id}'"
+                );
+            }
         }
         let wflow = WflowWorkload {
             wflow_keys,

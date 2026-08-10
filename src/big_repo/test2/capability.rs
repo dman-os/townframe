@@ -1492,10 +1492,9 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     if write_attempt.is_ok() {
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        let _ = pair
-            .right_conn()
+        pair.right_conn()
             .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await;
+            .await?;
         let owner_final = pair
             .left()
             .repo

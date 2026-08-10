@@ -582,13 +582,6 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
             .map_err(|error| ferr!("failed inspecting document CGKA before encryption: {error}"))?;
         (cgka.owner_sks().len(), cgka.ops_count(), cgka.has_pcs_key())
     };
-    let key_tag = |key: &SymmetricKey| {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        hasher.write(b"townframe_key_tag_domain_spec_v1");
-        key.as_slice().hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    };
     let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = {
         let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
         parents
@@ -643,7 +636,6 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     tracing::debug!(
         %sedimentree_id,
         %head,
-        app_key_id = %key_tag(&app_key),
         parent_count = parents.len(),
         "generated application encryption key for loose commit"
     );
@@ -660,6 +652,7 @@ pub(crate) async fn encrypt_fragment_blob<S>(
     sedimentree_id: SedimentreeId,
     head: CommitId,
     boundary: &BTreeSet<CommitId>,
+    fragment_bytes: &[u8],
 ) -> Res<Blob>
 where
     S: BigRepoSubductionStorage,
@@ -693,13 +686,11 @@ where
         )
     })?;
     let head_encrypted = decode_encrypted_blob(head_verified.blob().as_slice())?;
-    let (head_plaintext, head_key) = kh_doc
+    let (_head_plaintext, head_key) = kh_doc
         .lock()
         .await
         .try_decrypt_content_keyed(&head_encrypted)
         .map_err(|error| ferr!("failed recovering fragment head snapshot: {error}"))?;
-    let head_envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&head_plaintext)
-        .map_err(|error| ferr!("failed decoding fragment head envelope: {error}"))?;
 
     let mut ancestors = std::collections::HashMap::with_capacity(boundary.len());
     for predecessor in boundary {
@@ -732,7 +723,7 @@ where
     }
 
     let envelope = Envelope {
-        plaintext: head_envelope.plaintext,
+        plaintext: fragment_bytes.to_vec(),
         ancestors,
     };
     let envelope_bytes =

@@ -53,9 +53,9 @@ impl CasGuard {
     pub fn new(
         current_cb: impl Fn() -> Option<Arc<[u8]>> + Send + Sync + 'static,
         swap_cb: impl Fn(Arc<[u8]>) -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self {
             current_cb: Arc::new(current_cb),
@@ -334,7 +334,7 @@ pub mod tests {
                 .collect();
 
             for t in threads {
-                let _ = t.join();
+                t.join().expect("panic on threads");
             }
 
             let final_val = block_on(store.get(&key)).unwrap().unwrap();

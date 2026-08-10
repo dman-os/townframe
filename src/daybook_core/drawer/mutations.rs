@@ -47,7 +47,7 @@ impl DrawerRepo {
             .await
         {
             Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
                 panic!("keyhive document ID conflict")
             }
             Err(err) => {
@@ -472,7 +472,7 @@ impl DrawerRepo {
             .await
         {
             Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
                 panic!("keyhive document ID conflict")
             }
             Err(err) => {
@@ -483,7 +483,7 @@ impl DrawerRepo {
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &heads)
             .await?;
 
-        let _ = user_path;
+        let _user_path = user_path;
         let drawer_heads = if branch_kind == BranchKind::Local {
             let vtag = VersionTag::update(self.local_actor_id.clone());
             self.upsert_local_branch_ref(id, to_branch, branch_doc_id, &vtag)

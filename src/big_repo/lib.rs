@@ -709,7 +709,7 @@ impl BigRepo {
             .runtime
             .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
-        watch_connection_end(peer_id, end_rx, end_signal_tx);
+        watch_connection_end(peer_id, Arc::clone(&closed), end_rx, end_signal_tx);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -731,7 +731,7 @@ impl BigRepo {
             .runtime
             .accept_connection(Box::new((conn, Some(endpoint))))
             .await?;
-        watch_connection_end(peer_id, end_rx, end_signal_tx);
+        watch_connection_end(peer_id, Arc::clone(&closed), end_rx, end_signal_tx);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -745,6 +745,7 @@ impl BigRepo {
 /// connection drops, whether outbound or inbound).
 fn watch_connection_end(
     peer_id: PeerId,
+    closed_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     end_rx: futures::channel::oneshot::Receiver<(
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         eyre::Result<()>,
@@ -757,13 +758,10 @@ fn watch_connection_end(
     tokio::spawn(async move {
         let (closed, result) = end_rx.await.unwrap_or_else(|_| {
             // The runtime stopped before its watcher fired; treat the
-            // connection as ended without a transport error. No end flag is
-            // available — synthesize a fresh one (the connection is dead
-            // either way).
-            (
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                Ok(()),
-            )
+            // connection as ended without a transport error. Use the connection's
+            // existing closed flag to preserve pointer identity.
+            closed_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            (closed_flag, Ok(()))
         });
         let err = result.err();
         end_signal_tx

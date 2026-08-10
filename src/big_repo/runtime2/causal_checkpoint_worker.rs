@@ -13,7 +13,7 @@ const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 /// durable cursor.
 pub(crate) struct CausalCheckpointWorker {
     store: SqliteBigRepoStore,
-    keyhive: BigKeyhiveHandle,
+    _keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
@@ -24,7 +24,7 @@ pub(crate) struct CausalCheckpointWorker {
 impl CausalCheckpointWorker {
     pub(crate) fn new(
         store: SqliteBigRepoStore,
-        keyhive: BigKeyhiveHandle,
+        _keyhive: BigKeyhiveHandle,
         runtime: crate::runtime2::Runtime2Handle<Sendable>,
         timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
         evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
@@ -32,7 +32,7 @@ impl CausalCheckpointWorker {
     ) -> Self {
         Self {
             store,
-            keyhive,
+            _keyhive,
             runtime,
             timer,
             evt_tx,
@@ -42,12 +42,6 @@ impl CausalCheckpointWorker {
     }
 
     pub(crate) async fn run(mut self) -> Res<()> {
-        // The cursor is authoritative for logged work. The startup audit also
-        // covers databases created before this consumer existed, pruned event
-        // history, and crashes after an Update was persisted but before its
-        // covering ciphertext.
-        let _ = self.attempt_all_documents().await;
-
         let mut announced_idle = false;
         loop {
             if self.runtime.is_stopped() {
@@ -120,23 +114,5 @@ impl CausalCheckpointWorker {
                 announced_idle = true;
             }
         }
-    }
-
-    async fn attempt_all_documents(&self) -> Res<bool> {
-        for doc_id in self.keyhive.document_ids().await {
-            if self.runtime.is_stopped() {
-                return Ok(false);
-            }
-            let doc_id = crate::DocumentId::new(*doc_id.as_bytes());
-            let complete = match self.runtime.ensure_causal_coverage(doc_id).await {
-                Ok(complete) => complete,
-                Err(_) if self.runtime.is_stopped() => return Ok(false),
-                Err(error) => return Err(error),
-            };
-            if !complete {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 }

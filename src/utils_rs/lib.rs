@@ -80,6 +80,7 @@ pub mod expect_tags {
     pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
     pub const ERROR_UNRECONIZED: &str = "unrecognized identifier";
+    // pub const ERROR_SHUTDOWN: &str = "something went wrong during shutdown";
 }
 
 #[inline]
@@ -192,7 +193,7 @@ pub fn setup_tracing_once() {
 static APP_STARTUP_INSTANT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 pub fn init_app_startup_clock() {
-    let _ = APP_STARTUP_INSTANT.get_or_init(std::time::Instant::now);
+    APP_STARTUP_INSTANT.get_or_init(std::time::Instant::now);
 }
 
 pub fn app_startup_elapsed() -> std::time::Duration {
@@ -835,14 +836,15 @@ impl AbortableJoinSet {
         // must surface immediately rather than remain hidden until shutdown.
         while let Some(result) = join_set.try_join_next() {
             if let Err(err) = result
-                && !err.is_cancelled() {
-                    std::panic::resume_unwind(err.into_panic());
-                }
+                && !err.is_cancelled()
+            {
+                std::panic::resume_unwind(err.into_panic());
+            }
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let abort = join_set.spawn(async move {
             fut.await;
-            let _ = done_tx.send(());
+            done_tx.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         });
         Ok(TaskHandle { abort, done_rx })
     }

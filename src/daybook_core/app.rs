@@ -115,7 +115,10 @@ impl AppCtx {
     ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::init(repo_root, options, repo_name, local_device_name).await?;
         if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
-            let _ = rcx.shutdown().await;
+            rcx.shutdown()
+                .await
+                .inspect_err(|err| error!("error shutting down repo: {err}"))
+                .ok();
             return Err(err);
         }
         Ok(rcx)
@@ -129,7 +132,10 @@ impl AppCtx {
     ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
         if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
-            let _ = rcx.shutdown().await;
+            rcx.shutdown()
+                .await
+                .inspect_err(|err| error!("error shutting down repo: {err}"))
+                .ok();
             return Err(err);
         }
         Ok(rcx)

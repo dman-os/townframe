@@ -1024,8 +1024,8 @@ async fn wait_for_doc_head_parity(
 ) -> Res<()> {
     let mut last_left = None::<Vec<String>>;
     let mut last_right = None::<Vec<String>>;
-    let mut last_left_facets = None::<Vec<String>>;
-    let mut last_right_facets = None::<Vec<String>>;
+    let mut last_left_facet_keys = None::<Vec<String>>;
+    let mut last_right_facet_keys = None::<Vec<String>>;
     let mut last_left_facet_values = None::<String>;
     let mut last_right_facet_values = None::<String>;
     let mut last_runtime = None::<String>;
@@ -1033,28 +1033,30 @@ async fn wait_for_doc_head_parity(
     tokio::time::timeout(timeout, async {
         let mut last_heartbeat = std::time::Instant::now();
         loop {
-            let (left_doc, left_facet_values, left_heads) = left
+            let (_left_doc, left_facet_keys, left_facet_values, left_heads) = left
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
                 .map(|(doc, heads)| {
-                    let mut facets = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
-                    facets.sort_unstable();
-                    (facets, format!("{doc:?}"), heads)
+                    let mut keys = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    keys.sort_unstable();
+                    let debug_val = format!("{doc:?}");
+                    (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
-            let (right_doc, right_facet_values, right_heads) = right
+            let (_right_doc, right_facet_keys, right_facet_values, right_heads) = right
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
                 .map(|(doc, heads)| {
-                    let mut facets = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
-                    facets.sort_unstable();
-                    (facets, format!("{doc:?}"), heads)
+                    let mut keys = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    keys.sort_unstable();
+                    let debug_val = format!("{doc:?}");
+                    (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("right missing doc heads for {doc_id}"))?;
-            last_left_facets = Some(left_doc.clone());
-            last_right_facets = Some(right_doc.clone());
+            last_left_facet_keys = Some(left_facet_keys.clone());
+            last_right_facet_keys = Some(right_facet_keys.clone());
             last_left_facet_values = Some(left_facet_values.clone());
             last_right_facet_values = Some(right_facet_values.clone());
             let mut left_heads = left_heads.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -1063,7 +1065,7 @@ async fn wait_for_doc_head_parity(
             right_heads.sort_unstable();
             last_left = Some(left_heads);
             last_right = Some(right_heads);
-            if last_left == last_right && left_doc == right_doc && left_facet_values == right_facet_values {
+            if last_left == last_right && left_facet_keys == right_facet_keys && left_facet_values == right_facet_values {
                 break eyre::Ok(());
             }
             let now = std::time::Instant::now();
@@ -1106,13 +1108,13 @@ async fn wait_for_doc_head_parity(
     .await
     .map_err(|_| {
         eyre::eyre!(
-            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?} left_facets={:?} right_facets={:?} left_doc={:?} right_doc={:?} runtime={:?} sync_diagnostics={:?}",
+            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?} left_facet_keys={:?} right_facet_keys={:?} left_doc={:?} right_doc={:?} runtime={:?} sync_diagnostics={:?}",
             doc_id,
             branch,
             last_left,
             last_right,
-            last_left_facets,
-            last_right_facets,
+            last_left_facet_keys,
+            last_right_facet_keys,
             last_left_facet_values,
             last_right_facet_values,
             last_runtime,

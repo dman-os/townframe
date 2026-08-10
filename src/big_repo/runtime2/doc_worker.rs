@@ -115,12 +115,13 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     _ => None,
                 };
 
-                let _ = runtime_evt_tx
+                runtime_evt_tx
                     .send(Runtime2Evt::DocWorkerStopped {
                         doc_id,
                         error: error.clone(),
                     })
-                    .await;
+                    .await
+                    .expect(ERROR_CHANNEL);
 
                 if let Some(err) = error {
                     Err(eyre::eyre!("{err}"))
@@ -658,9 +659,10 @@ impl<F: FutureForm> DocWorker2<F> {
         self.partially_decrypted = partial;
         tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point S1: sync_partial_state before evt send");
         if let DocState::Live(bundle) = &self.state
-            && let Some(bundle) = bundle.upgrade() {
-                bundle.set_partially_decrypted(partial);
-            }
+            && let Some(bundle) = bundle.upgrade()
+        {
+            bundle.set_partially_decrypted(partial);
+        }
         let event = if partial {
             Runtime2Evt::DocWorkerMaterializationPending {
                 doc_id: self.doc_id,
@@ -804,21 +806,23 @@ impl<F: FutureForm> DocWorker2<F> {
         // ── 3. Notify heads changed ────────────────────────────────────────
 
         let heads = Arc::from(heads);
-        self.change_manager.notify_doc_heads_changed(
-            self.doc_id,
-            Arc::clone(&heads),
-            origin.clone(),
-        )?;
+        self.change_manager
+            .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
+            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+            .ok();
 
         // Fire patches even if heads didn't change (delta can have content
         // changes within the same head set — e.g. tombstone compaction).
         for patch in &patches {
-            self.change_manager.notify_doc_changed(
-                self.doc_id,
-                Arc::new(patch.clone()),
-                Arc::clone(&heads),
-                origin.clone(),
-            )?;
+            self.change_manager
+                .notify_doc_changed(
+                    self.doc_id,
+                    Arc::new(patch.clone()),
+                    Arc::clone(&heads),
+                    origin.clone(),
+                )
+                .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+                .ok();
         }
 
         // ── 4. Process pending fragment requests ───────────────────────────
@@ -883,7 +887,7 @@ impl<F: FutureForm> DocWorker2<F> {
         blockers: Vec<MaterializationBlocker>,
     ) -> eyre::Result<()> {
         debug!(?blockers, "document materialization pending");
-        let _ = &blockers; // logged above; the state only carries the pending flag
+        drop(blockers); // logged above; the state only carries the pending flag
         self.state = DocState::PendingMaterialization;
         if !was_pending {
             self.change_manager
@@ -1045,10 +1049,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 DocState::Live(bundle) => bundle.upgrade(),
                 _ => None,
             } {
-                let received_refs: HashSet<Vec<u8>> = commit_ids
+                let received_refs: HashSet<&[u8]> = commit_ids
                     .iter()
                     .chain(&fragment_ids)
-                    .map(|id| id.as_bytes().to_vec())
+                    .map(|id| id.as_bytes().as_slice())
                     .collect();
                 let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
                     error!(
@@ -1100,9 +1104,14 @@ impl<F: FutureForm> DocWorker2<F> {
 
             if !has_live {
                 let origin = BigRepoChangeOrigin::Remote { peer_id };
-                let _ = self.retry_materialization(origin).await?;
+                self.retry_materialization(origin).await?;
             }
             self.reconcile_causal_coverage().await?;
+        } else {
+            debug_assert!(
+                commit_ids.is_empty() && fragment_ids.is_empty(),
+                "non-received sync session path must have empty commit_ids and fragment_ids"
+            );
         }
 
         tracing::debug!(%self.doc_id, "passed point A7: calling report_sync_outcome");
@@ -1124,8 +1133,7 @@ impl<F: FutureForm> DocWorker2<F> {
         ) || matches!(&self.state, DocState::Live(bundle) if bundle.upgrade().is_none());
         if needs_reload {
             self.state = DocState::Unloaded;
-            let _ = self
-                .retry_materialization(BigRepoChangeOrigin::Local)
+            self.retry_materialization(BigRepoChangeOrigin::Local)
                 .await?;
         }
         if !self.blocked_refs.is_empty() {
@@ -1447,7 +1455,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn try_decrypt_received_blobs(
         &self,
         tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
-        received_refs: &HashSet<Vec<u8>>,
+        received_refs: &HashSet<&[u8]>,
     ) -> eyre::Result<(
         Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
         Vec<(BigRepoCiphertextKind, CommitId)>,
@@ -1480,7 +1488,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // must still be returned to the materializer below.
         let received_order: Vec<_> = ordered_items
             .iter()
-            .filter(|(_, _, content_ref)| received_refs.contains(content_ref))
+            .filter(|(_, _, content_ref)| received_refs.contains(content_ref.as_slice()))
             .cloned()
             .collect();
 
@@ -1619,7 +1627,10 @@ impl<F: FutureForm> DocWorker2<F> {
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
             tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point R1b: live precise retry");
-            let _ = self.retry_blocked_refs(&bundle, &origin).await?;
+            let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
+            if advanced {
+                tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");
+            }
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,

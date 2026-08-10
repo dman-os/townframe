@@ -14,8 +14,7 @@
 //! - two live connections to one peer must both sync (the hub entry is
 //!   peer-keyed, the transports are independent);
 //! - stopping the *superseded* handle must not invalidate the replacement
-//!   (this is the contract the daybook's replace semantics imply — it
-//!   currently **fails**, because `stop` is peer-scoped);
+//!   (stop is per-connection and only removes the matching registration);
 //! - reconnect churn (the shape of the daybook ladder's
 //!   `survives_remote_restart_and_reconnect`) must converge deterministically
 //!   at this layer;

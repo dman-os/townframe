@@ -520,7 +520,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         resolved: &wash_runtime::engine::workload::ResolvedWorkload,
         component_id: &str,
     ) -> anyhow::Result<()> {
-        let _ = (resolved, component_id);
+        let _resolved = (resolved, component_id);
         Ok(())
     }
 
@@ -529,7 +529,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
         workload_id: &str,
         _interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
-        let _ = workload_id;
+        let _workload_id = workload_id;
         Ok(())
     }
 

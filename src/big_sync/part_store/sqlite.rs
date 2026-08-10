@@ -448,14 +448,85 @@ impl HostPartStore for SqlitePartStore {
         .execute(&mut *tx)
         .await?;
         if live_part_ids.is_empty() {
-            tx.commit().await?;
             if pending_part_ids.is_empty() {
+                tx.commit().await?;
                 self.publish(vec![SubEvent::ObjectChanged(
                     big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
                 )])
                 .await;
             } else {
-                self.add_obj_to_parts(obj_id, pending_part_ids).await?;
+                let cursor = Self::next_cursor(&mut tx).await?;
+                let added_payload_json =
+                    Some(serde_json::to_string(&payload).wrap_err(ERROR_JSON)?);
+                let mut events = Vec::with_capacity(pending_part_ids.len());
+                for part_id in &pending_part_ids {
+                    let old_state = self.load_member_state(&mut tx, *part_id, obj_id).await?;
+                    if matches!(old_state, MemberState::Live(_)) {
+                        continue;
+                    }
+                    sqlx::query(
+                        "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
+                         VALUES (?1, ?2, 0)
+                         ON CONFLICT(scope_id, part_id) DO NOTHING",
+                    )
+                    .bind(self.core.scope_id)
+                    .bind(Self::part_blob(*part_id))
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
+                         ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
+                            added_at = excluded.added_at,
+                            added_payload_json = excluded.added_payload_json,
+                            changed_at = excluded.changed_at,
+                            removed_at = NULL,
+                            latest_cursor = excluded.latest_cursor",
+                    )
+                    .bind(self.core.scope_id)
+                    .bind(Self::part_blob(*part_id))
+                    .bind(Self::obj_blob(obj_id))
+                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                    .bind(added_payload_json.as_deref())
+                    .execute(&mut *tx)
+                    .await?;
+                    self.apply_bucket_transition(
+                        &mut tx,
+                        *part_id,
+                        obj_id,
+                        cursor,
+                        &old_state,
+                        &MemberState::Live(payload.clone()),
+                    )
+                    .await?;
+                    sqlx::query(
+                        "UPDATE big_sync_parts
+                         SET latest_cursor = ?1
+                         WHERE scope_id = ?2 AND part_id = ?3",
+                    )
+                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                    .bind(self.core.scope_id)
+                    .bind(Self::part_blob(*part_id))
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM big_sync_pending_members
+                         WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                    )
+                    .bind(self.core.scope_id)
+                    .bind(Self::part_blob(*part_id))
+                    .bind(Self::obj_blob(obj_id))
+                    .execute(&mut *tx)
+                    .await?;
+                    events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        cursor,
+                        part_id: *part_id,
+                        obj_id,
+                        payload: payload.clone(),
+                    }));
+                }
+                tx.commit().await?;
+                self.publish(events).await;
             }
             return Ok(());
         }
@@ -1878,7 +1949,7 @@ mod tests {
         store1
             .set_obj_payload(obj, serde_json::json!("second"))
             .await?;
-        let _ = timeout(Duration::from_secs(2), auth_rx1.recv())
+        timeout(Duration::from_secs(2), auth_rx1.recv())
             .await
             .expect("authorized must receive live event in first session")
             .expect("channel must not close for authorized");
@@ -1932,7 +2003,7 @@ mod tests {
         store2
             .set_obj_payload(obj, serde_json::json!("third"))
             .await?;
-        let _ = timeout(Duration::from_secs(2), auth_rx2.recv())
+        timeout(Duration::from_secs(2), auth_rx2.recv())
             .await
             .expect("authorized must receive live event after restart")
             .expect("channel must not close for authorized after restart");

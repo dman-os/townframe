@@ -212,7 +212,7 @@ impl BigRepoStressFixture {
         parts.into_iter().collect()
     }
     async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartId>> {
-        let _ = (left, right);
+        let _left_and_right = (left, right);
         Ok(self.sync_parts().await)
     }
 
@@ -308,7 +308,7 @@ impl StressFixture for BigRepoStressFixture {
         // No initial parts: the route set is derived below from the shared
         // groups (GLOBAL is hidden cluster-wide in this fixture).
         let _connection = left.connect_with_parts(right, Vec::new()).await?;
-        let _ = right.accepted_connection().await;
+        right.accepted_connection().await;
         // Keyhive convergence is notification-driven. The quiescence waits
         // below only let the resulting work settle; they do not initiate a
         // manual sync round.
@@ -435,8 +435,8 @@ impl StressFixture for BigRepoStressFixture {
         // disconnects it before randomized phase 1 begins.
         for left_index in 0..live.len() {
             for right_index in (left_index + 1)..live.len() {
-                let _connection = live[left_index].connect(live[right_index]).await?;
-                let _ = live[right_index].accepted_connection().await;
+                live[left_index].connect(live[right_index]).await?;
+                live[right_index].accepted_connection().await;
             }
         }
 

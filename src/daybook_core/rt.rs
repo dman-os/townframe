@@ -493,13 +493,12 @@ impl Rt {
         plug_ids.sort();
         let stage_started = std::time::Instant::now();
         for plug_id in plug_ids {
-            let _ = rt
-                .ensure_plug_init_dispatches(
-                    &plug_id,
-                    startup_progress_task_id.as_deref(),
-                    Some(total_started),
-                )
-                .await?;
+            rt.ensure_plug_init_dispatches(
+                &plug_id,
+                startup_progress_task_id.as_deref(),
+                Some(total_started),
+            )
+            .await?;
         }
         Self::emit_startup_progress_status(
             &rt.progress_repo,
@@ -919,13 +918,14 @@ impl Rt {
             };
             let (idx, entry) = entry?;
             if let Some(entry) = entry
-                && let Err(err) = self.handle_wflow_entry(idx, entry).await {
-                    if self.cancel_token.is_cancelled() {
-                        debug!(error = %err, "ignoring wflow entry error during shutdown");
-                        break;
-                    }
-                    return Err(err);
-                };
+                && let Err(err) = self.handle_wflow_entry(idx, entry).await
+            {
+                if self.cancel_token.is_cancelled() {
+                    debug!(error = %err, "ignoring wflow entry error during shutdown");
+                    break;
+                }
+                return Err(err);
+            };
             if let Err(err) = self
                 .dispatch_repo
                 .set_wflow_part_frontier(self.local_wflow_part_id.clone(), idx)
@@ -1667,13 +1667,14 @@ impl Rt {
             .update_active_deets(&dispatch_id, deets)
             .await
         {
-            let _ = self
-                .wflow_ingress
+            self.wflow_ingress
                 .cancel_job(
                     Arc::from(job_id.as_ref()),
                     format!("rollback scheduling for dispatch {dispatch_id}"),
                 )
-                .await;
+                .await
+                .inspect_err(|err| warn!("error cancelling job: {err}"))
+                .ok();
             return Err(err);
         }
         self.progress_repo

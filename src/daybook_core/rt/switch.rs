@@ -590,7 +590,7 @@ impl SwitchWorker {
                 if next_state.present && prev_heads.as_ref() == Some(&new_heads) {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
-                let (diff, origin, deleted_facet_keys) = self
+                let (diff, origin, _deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
                         &BranchPathBuf::from("main"),
@@ -627,13 +627,12 @@ impl SwitchWorker {
                     .await?;
                 next_state.present = true;
                 next_state.last_heads = Some(new_heads);
-                let _ = deleted_facet_keys;
             }
             SubEvent::Removed(_) => {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
-                let (diff, origin, deleted_facet_keys) = self
+                let (_diff, origin, deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
                         &BranchPathBuf::from("main"),
@@ -652,7 +651,6 @@ impl SwitchWorker {
                     .await?;
                 self.dispatch_to_listeners(&SwitchEvent::Drawer(evt))
                     .await?;
-                let _ = diff;
                 next_state.present = false;
                 next_state.last_heads = None;
             }
@@ -974,7 +972,7 @@ impl SwitchWorker {
     }
 
     async fn track_event_heads(&self, event: &SwitchEvent) -> Res<()> {
-        let _ = event;
+        let _event = event;
         Ok(())
     }
 }

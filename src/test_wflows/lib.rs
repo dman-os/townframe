@@ -163,8 +163,7 @@ fn sleep_then_succeed(cx: &mut WflowCtx, args: SleepThenSucceedArgs) -> Result<(
 struct RecvMessageArgs {}
 
 fn recv_message(cx: &mut WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
-    let Json(value) = cx.recv::<Json<serde_json::Value>>()?;
-    let _ = value;
+    let Json(_) = cx.recv::<Json<serde_json::Value>>()?;
     Ok(())
 }
 

@@ -43,7 +43,7 @@ use keyhive_core::{
 };
 use nonempty::NonEmpty;
 use sedimentree_core::{
-    blob::{Blob, BlobMeta},
+    blob::BlobMeta,
     depth::CountLeadingZeroBytes,
     id::SedimentreeId,
     loose_commit::id::CommitId,
@@ -99,7 +99,10 @@ impl KeyhiveChangeNotifier {
         }
         // Broadcast delivery is intentionally best effort; the event is only
         // a wake-up hint and is not the source of Keyhive state.
-        let _ = self.keyhive_change_tx.send(None);
+        self.keyhive_change_tx
+            .send(None)
+            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+            .ok();
         Ok(())
     }
 
@@ -110,7 +113,10 @@ impl KeyhiveChangeNotifier {
     /// that state here would turn a finite gossip round into an echo loop.
     /// Only the payload-free wake-up hint needs forwarding.
     pub(crate) fn note_remote_keyhive_changed(&self, source_peer_id: PeerId) {
-        let _ = self.keyhive_change_tx.send(Some(source_peer_id));
+        self.keyhive_change_tx
+            .send(Some(source_peer_id))
+            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+            .ok();
     }
 }
 
@@ -200,7 +206,7 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
         // Check cache first.
         {
             let cache = self.cache.lock().expect(ERROR_MUTEX);
-            if let Some(_encrypted) = cache.get(content_ref) {
+            if cache.contains_key(content_ref) {
                 return Ok(true);
             }
         }
@@ -795,9 +801,8 @@ where
         raw_blob: Vec<u8>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            let _raw_blob = Blob::new(raw_blob);
             let encrypted_blob =
-                encrypt_fragment_blob(&self.keyhive, &self.storage, sed_id, head, &boundary)
+                encrypt_fragment_blob(&self.keyhive, &self.storage, sed_id, head, &boundary, &raw_blob)
                     .await
                     .wrap_err("failed encrypting fragment blob")?;
             let fragment = sedimentree_core::fragment::Fragment::new(
@@ -2332,7 +2337,7 @@ mod tests {
         let h2_verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
             &signer,
             (sed_id, h2, h2_parents.clone()),
-            VerifiedBlobMeta::new(h2_blob),
+            VerifiedBlobMeta::new(h2_blob.clone()),
         )
         .await;
         Storage::<Sendable>::save_loose_commit(&storage, sed_id, h2_verified).await?;
@@ -2342,6 +2347,7 @@ mod tests {
             sed_id,
             h2,
             &h2_parents,
+            b"head-bytes",
         )
         .await?;
         let fragment_verified = VerifiedMeta::<Fragment>::seal::<Sendable, _>(

@@ -338,9 +338,10 @@ pub fn spawn_big_sync_worker_with_options(
                 return Err(err);
             }
             if let Some(shutdown) = Arc::into_inner(shutdown)
-                && let Some(res) = shutdown.err.into_inner() {
-                    return Err(res);
-                }
+                && let Some(res) = shutdown.err.into_inner()
+            {
+                return Err(res);
+            }
             Ok(())
         }
     };
@@ -366,7 +367,10 @@ struct BigRedToken {
 
 impl BigRedToken {
     fn set_err(&self, err: eyre::Report) {
-        let _ = self.err.set(err);
+        self.err
+            .set(err)
+            .inspect_err(|err| warn!("dropping double error: {err}"))
+            .ok();
         self.master_cancel.cancel();
     }
 }
@@ -517,10 +521,11 @@ impl BigSyncWorker {
             for event in self.machine.drain_stat_evts() {
                 trace!(?event, "XXX stat event");
                 if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event
-                    && let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
-                        let _ = resp.send(Ok(()));
-                    }
-                let _ = self.stats_tx.send(event);
+                    && let Some(resp) = self.full_sync_waiters.remove(&waiter_id)
+                {
+                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                }
+                self.stats_tx.send(event).expect(ERROR_CHANNEL);
             }
         }
         Ok(())
@@ -852,7 +857,7 @@ struct MachineTaskWorker {
 impl MachineTaskWorker {
     #[tracing::instrument(skip(self))]
     async fn run(self) {
-        let _ = self
+        let _cancelled = self
             .cancel_token
             .run_until_cancelled(async move {
                 let (trap, mut err_rx) = trap::TaskTrap::new();
@@ -960,7 +965,7 @@ impl SyncTaskWorker {
                 }
             }
         };
-        let _ = self.cancel_token.run_until_cancelled(fut).await;
+        let _cancelled = self.cancel_token.run_until_cancelled(fut).await;
     }
 }
 

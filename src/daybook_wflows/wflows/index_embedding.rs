@@ -164,7 +164,9 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         })();
 
         if let Err(err) = tx_result {
-            let _ = tx.rollback();
+             tx.rollback()
+                .inspect_err(|err| warn!("error on rollback: {err}"))
+                .ok();
             return Err(err);
         }
 

@@ -906,7 +906,7 @@ async fn client_keyhive_decrypts_postwrite_blob_after_edit_grant_sync() -> Res<(
         .expect("client keyhive doc should exist after explicit sync");
     {
         let mut locked = client_kh_doc.lock().await;
-        let _ = locked
+        locked
             .try_decrypt_content_keyed(&postwrite_blob)
             .expect("client should decrypt the post-write blob after edit-grant sync");
     }

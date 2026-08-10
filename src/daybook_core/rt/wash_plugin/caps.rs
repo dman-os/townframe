@@ -234,9 +234,10 @@ impl capabilities::HostDocToken for SharedWashCtx {
                     continue;
                 }
                 if let Some(ref id) = access.key_id
-                    && *id != facet_key.id {
-                        continue;
-                    }
+                    && *id != facet_key.id
+                {
+                    continue;
+                }
                 rights |= facet_rights_from_access(access);
             }
             if rights == capabilities::FacetRights::empty() {
@@ -291,9 +292,10 @@ impl capabilities::HostDocToken for SharedWashCtx {
                 continue;
             }
             if let Some(ref id) = access.key_id
-                && *id != facet_key.id {
-                    continue;
-                }
+                && *id != facet_key.id
+            {
+                continue;
+            }
             rights |= facet_rights_from_access(access);
         }
         if rights == capabilities::FacetRights::empty() {
@@ -1139,7 +1141,7 @@ impl capabilities::Host for SharedWashCtx {
             .await
         {
             Ok(_) => {
-                let _ = self.table.delete(token);
+                self.table.delete(token).expect(ERROR_IMPOSSIBLE);
                 Ok(Ok(()))
             }
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => {

@@ -437,13 +437,14 @@ impl SqliteBigRepoStore {
                     SubEvent::ReplayComplete => unreachable!(),
                 }
                 if let Some(object_event) = object_event
-                    && let Some(subs) = bus.by_obj.get(&obj_id) {
-                        for &sub_id in subs {
-                            recipients
-                                .entry(sub_id)
-                                .or_insert_with(|| object_event.clone());
-                        }
+                    && let Some(subs) = bus.by_obj.get(&obj_id)
+                {
+                    for &sub_id in subs {
+                        recipients
+                            .entry(sub_id)
+                            .or_insert_with(|| object_event.clone());
                     }
+                }
                 for (sub_id, event) in recipients {
                     let Some(sub) = bus.subs.get(&sub_id) else {
                         continue;
@@ -1478,9 +1479,10 @@ impl SqliteBigRepoStore {
             .collect();
         let parts: HashSet<_> = part_cursors.keys().copied().collect();
         if subscriber.is_some()
-            && let Err(err) = self.summarize_parts(parts.clone()).await? {
-                return Ok(Err(err));
-            }
+            && let Err(err) = self.summarize_parts(parts.clone()).await?
+        {
+            return Ok(Err(err));
+        }
 
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
@@ -1584,14 +1586,14 @@ impl SqliteBigRepoStore {
                         if permitted
                             && let Some(payload) =
                                 store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
-                            {
-                                output.push(SubEvent::ObjectChanged(
-                                    big_sync_core::rpc::ObjChangedWithoutPart {
-                                        obj_id: *obj_id,
-                                        payload,
-                                    },
-                                ));
-                            }
+                        {
+                            output.push(SubEvent::ObjectChanged(
+                                big_sync_core::rpc::ObjChangedWithoutPart {
+                                    obj_id: *obj_id,
+                                    payload,
+                                },
+                            ));
+                        }
                     }
                     object_replay_pending = false;
                 }
@@ -1860,6 +1862,7 @@ impl SqliteBigRepoStore {
                 FOREIGN KEY(scope_id, event_hash)
                     REFERENCES big_repo_keyhive_event_log(scope_id, event_hash)
             ) STRICT",
+            // FIXME: let's just have a single table for all cursor wtf
             "CREATE TABLE IF NOT EXISTS big_repo_group_part_cursor (
                 scope_id INTEGER PRIMARY KEY,
                 cursor INTEGER NOT NULL DEFAULT 0,
