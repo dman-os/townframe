@@ -383,11 +383,10 @@ async fn tier7_local_mutation_emits_doc_changed() -> crate::Res<()> {
 
 // ─── No live handle: remote mutation ───────────────────────────────────────
 
-/// A subscribed change listener must continue to receive remote-mutation
-/// notifications even after every document handle has been dropped. The
-/// runtime's doc worker survives handle drop and emits both
-/// `DocHeadsChanged` and `DocChanged` notifications for incoming remote
-/// commits.
+/// After all document handles are dropped, the subscribed listener should not
+/// receive remote-mutation notifications. Dropping the last handle leaves no
+/// materialized state to update, so sync sessions do not wake the idle
+/// document worker or emit notifications.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();

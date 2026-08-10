@@ -577,14 +577,17 @@ impl<F: FutureForm> DocWorker2<F> {
         // still returns. Include those dependencies in the same fixed-point
         // application pass. A topological sedimentree order does not guarantee
         // that every decrypted Automerge dependency precedes its child.
-        pending.extend(plaintexts.into_iter().map(|(ref_bytes, plaintext)| {
-            let commit = CommitId::new(
-                ref_bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("content ref must be 32 bytes"),
-            );
-            (BigRepoCiphertextKind::LooseCommit, commit, plaintext)
+        pending.extend(plaintexts.into_iter().filter_map(|(ref_bytes, plaintext)| {
+            let Ok(array) = ref_bytes.as_slice().try_into() else {
+                warn!(
+                    doc_id = %self.doc_id,
+                    len = ref_bytes.len(),
+                    "skipping content ref with invalid length (expected 32 bytes)"
+                );
+                return None;
+            };
+            let commit = CommitId::new(array);
+            Some((BigRepoCiphertextKind::LooseCommit, commit, plaintext))
         }));
         LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,

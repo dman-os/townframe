@@ -397,9 +397,12 @@ impl BigSyncRpcWorker {
                     }
                     eyre::Ok(())
                 };
-                self.subscription_tasks
+                if let Err(err) = self
+                    .subscription_tasks
                     .spawn(async move { fut.await.unwrap() })
-                    .expect(ERROR_TOKIO);
+                {
+                    warn!(?err, "failed spawning subscription task");
+                }
             }
             BigSyncRpcMessage::GetChangedBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;

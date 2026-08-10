@@ -313,10 +313,11 @@ impl DrawerRepo {
                 let mut deleted_facet_keys_set = HashSet::new();
                 if let Some(tombstone) = &tombstone {
                     for snapshot in tombstone.branches.values() {
-                        deleted_facet_keys_set.extend(
-                            self.facet_keys_at_branch_snapshot(&doc_id, snapshot)
-                                .await?,
-                        );
+                        if let Some(keys) =
+                            self.facet_keys_at_branch_snapshot(&doc_id, snapshot).await?
+                        {
+                            deleted_facet_keys_set.extend(keys);
+                        }
                     }
                 }
                 let mut deleted_facet_keys: Vec<FacetKey> =

@@ -204,31 +204,44 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
         node.wait_for_full_sync(connected_peers, part_ids.iter().copied())
             .await?;
     }
-    let mut store_snaps = Vec::with_capacity(nodes.len());
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+    let mut last_diff = None;
 
-    for node in nodes {
-        let snapshot = node.snapshot().await?;
-        for &(_, part_id) in snapshot.peer_part_cursors.keys() {
-            assert_eq!(part_id, stress_support::test_part());
+    loop {
+        let mut store_snaps = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let snapshot = node.snapshot().await?;
+            for &(_, part_id) in snapshot.peer_part_cursors.keys() {
+                assert_eq!(part_id, stress_support::test_part());
+            }
+            store_snaps.push((node.peer_id, snapshot));
         }
-        store_snaps.push((node.peer_id, snapshot));
-    }
 
-    for snapshot in store_snaps.iter().skip(1) {
-        if store_snaps[0].1.objs != snapshot.1.objs {
-            panic!(
-                "{}",
-                diff_scoped_obj_snapshots(
+        let mut converged = true;
+        for snapshot in store_snaps.iter().skip(1) {
+            if store_snaps[0].1.objs != snapshot.1.objs {
+                converged = false;
+                last_diff = Some(diff_scoped_obj_snapshots(
                     store_snaps[0].0,
                     &store_snaps[0].1,
                     snapshot.0,
-                    &snapshot.1
-                )
-            );
+                    &snapshot.1,
+                ));
+                break;
+            }
         }
-    }
 
-    Ok(())
+        if converged {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            let diff = last_diff.unwrap_or_else(|| "cluster failed to converge".to_string());
+            panic!("{diff}");
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn boot_sqlite_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {

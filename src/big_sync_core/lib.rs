@@ -751,8 +751,8 @@ impl BigSyncMachine {
             object_count = objects.len(),
             "set peer event"
         );
-        // clear out everything, avoid reuising any old state
-        // treating SetPeer as a refresh peer cmd in a way
+        // Incrementally update peer state: preserve sync_workers, cursor_machine,
+        // and resolved parts while stopping only pending/obsolete strategy tasks.
         self.all_seen_peer.insert(peer_id);
         let mut peer_state = self.peers.remove(&peer_id).unwrap_or_else(|| PeerState {
             sync_workers: default(),

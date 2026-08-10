@@ -33,6 +33,7 @@ pub struct BigRepoStressConfig {
     pub relay_idx: Option<usize>,
     pub seed: u64,
     pub peer_seed_offset: u8,
+    pub test_revocations: bool,
 }
 
 impl Default for BigRepoStressConfig {
@@ -42,6 +43,7 @@ impl Default for BigRepoStressConfig {
             relay_idx: None,
             seed: DEFAULT_STRESS_SEED,
             peer_seed_offset: 0,
+            test_revocations: false,
         }
     }
 }
@@ -216,7 +218,6 @@ impl BigRepoStressFixture {
         Ok(self.sync_parts().await)
     }
 
-    #[expect(dead_code)]
     pub async fn revoke_access(&self, node: &Node, obj: &ObjId, target_peer: PeerId) -> Res<()> {
         let doc_id = self.doc_id(obj).await?;
         let keyhive_peer = KeyhivePeerId::from_bytes(*target_peer.as_bytes());
@@ -400,6 +401,12 @@ impl StressFixture for BigRepoStressFixture {
                     .expect("failed transacting stress mutation");
             })
             .await?;
+        if self.config.test_revocations {
+            let editors = self.editor_peer_ids.lock().await;
+            if let Some(&target_peer) = editors.iter().find(|&&p| p != node.peer_id()) {
+                drop(self.revoke_access(node, obj, target_peer).await);
+            }
+        }
         Ok(())
     }
 
@@ -580,7 +587,8 @@ impl StressFixture for BigRepoStressFixture {
         // Natural convergence: alignment is reached via notifs + automerge CRDT
         // semantics.
         let tracked_docs = self.tracked_docs().await;
-        let convergence_deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+        let convergence_deadline =
+            tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(150));
         let mut last_report = tokio::time::Instant::now();
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
             let observations: Vec<(PeerId, BigRepoStressObservation)> =
@@ -923,6 +931,7 @@ mod tests {
         let config = BigRepoStressConfig {
             relay_idx: Some(3),
             peer_seed_offset: 128,
+            test_revocations: true,
             ..BigRepoStressConfig::default()
         };
         let fixture = BigRepoStressFixture::new(config.clone());

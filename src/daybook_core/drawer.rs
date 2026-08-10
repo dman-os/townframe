@@ -398,10 +398,10 @@ impl DrawerRepo {
         &self,
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
-    ) -> Res<HashSet<FacetKey>> {
+    ) -> Res<Option<HashSet<FacetKey>>> {
         let branch_doc_id = snapshot.branch_doc_id;
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
-            return Ok(HashSet::new());
+            return Ok(None);
         };
         let keys = handle
             .with_document_read(|am_doc| {
@@ -426,7 +426,7 @@ impl DrawerRepo {
                 Ok(out)
             })
             .await?;
-        Ok(keys)
+        Ok(Some(keys))
     }
 
     async fn non_tmp_branch_snapshots_for_entry(

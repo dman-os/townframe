@@ -1154,6 +1154,9 @@ impl HostPartStore for MemoryPartStore {
             let (mut guard, _key) = key.lock(&self.inner);
             if let Some(member_map) = guard.members.get_mut(&obj) {
                 member_map.remove(&member);
+                if member_map.is_empty() {
+                    guard.members.remove(&obj);
+                }
             }
         });
         Ok(())

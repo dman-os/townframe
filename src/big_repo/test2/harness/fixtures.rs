@@ -154,9 +154,8 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
         "Keyhive access assertion failed after synchronization"
     );
     Err(crate::ferr!(
-        "{} has no access on {} after grant + keyhive sync",
+        "{} has no access on {doc_id} after grant + keyhive sync",
         log_nickname::nickname(&peer),
-        log_nickname::nickname(&peer), // doc_id has no nickname; peer stands in
     ))
 }
 

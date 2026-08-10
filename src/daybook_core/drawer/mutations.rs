@@ -809,7 +809,9 @@ impl DrawerRepo {
             .await?;
         let mut deleted_facet_keys_set = HashSet::new();
         for snapshot in deleted_branch_snapshots.values() {
-            deleted_facet_keys_set.extend(self.facet_keys_at_branch_snapshot(id, snapshot).await?);
+            if let Some(keys) = self.facet_keys_at_branch_snapshot(id, snapshot).await? {
+                deleted_facet_keys_set.extend(keys);
+            }
         }
         let mut deleted_facet_keys: Vec<FacetKey> = deleted_facet_keys_set.into_iter().collect();
         deleted_facet_keys.sort();

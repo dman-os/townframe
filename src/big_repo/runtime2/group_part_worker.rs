@@ -305,9 +305,9 @@ pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
 fn affected_documents(
     bytes: &[u8],
     group_documents: &HashMap<[u8; 32], std::collections::BTreeSet<ObjId>>,
-) -> Vec<ObjId> {
+) -> Res<Vec<ObjId>> {
     let event: StaticEvent<Vec<u8>> =
-        bincode::deserialize(bytes).expect("persisted Keyhive event must decode");
+        bincode::deserialize(bytes).map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
     let mut documents = Vec::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {
@@ -339,7 +339,7 @@ fn affected_documents(
         }
         StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {}
     }
-    documents
+    Ok(documents)
 }
 
 #[cfg(test)]

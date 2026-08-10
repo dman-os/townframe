@@ -603,7 +603,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    /// Notify that a member was added to a group.
+    /// Notify that a document was removed from a group.
     pub(super) fn notify_document_removed_from_group(
         &self,
         doc_id: DocumentId,
@@ -666,7 +666,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    /// Notify that a document's encryption key was rotated.
+    /// Notify that a document's access was revoked from a member.
     pub(super) fn notify_document_access_revoked(
         &self,
         doc_id: DocumentId,
@@ -1256,6 +1256,16 @@ fn action_prop_matches(listener_prop: &Prop<'_>, action: &automerge::PatchAction
             let start = *index as u32;
             let end = start.saturating_add(*length as u32);
             *listener_idx >= start && *listener_idx < end
+        }
+        (Prop::Index(listener_idx), automerge::PatchAction::SpliceText { index, value, .. }) => {
+            let start = *index as u32;
+            let del_len = value.make_string().len() as u32;
+            let end = start.saturating_add(del_len);
+            if del_len > 0 {
+                *listener_idx >= start && *listener_idx < end
+            } else {
+                *listener_idx >= start
+            }
         }
         (listener_prop, automerge::PatchAction::Increment { prop, .. })
         | (listener_prop, automerge::PatchAction::Conflict { prop }) => {

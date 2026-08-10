@@ -2542,9 +2542,10 @@ mod tests {
 
     /// Boot a repo + plugs registry for tests.
     ///
-    /// The first tuple element is the boot stop token: dropping it cancels
-    /// the runtime's machine loop, so tests must hold it for the duration
-    /// (they bind it as `_acx`/`_big_repo` — never used otherwise).
+    /// The first tuple element is the stop callback for the booted repository:
+    /// calling it invokes shutdown, while cancellation occurs through any
+    /// captured owning guard rather than by dropping the closure itself unless
+    /// `boot_repo` confirms that ownership. Tests bind it as `_acx`.
     async fn setup_repo() -> Res<(
         Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
         SharedPartStore,
@@ -2576,7 +2577,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_test_plug_oci_layout() -> Res<()> {
-        let (_big_repo, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/oci")
             .join("@daybook/test");
@@ -3521,7 +3522,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_blob_scope_partition_tracks_add_and_remove() -> Res<()> {
-        let (_big_repo, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
 
         let temp_dir = tempfile::tempdir()?;
