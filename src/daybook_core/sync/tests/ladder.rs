@@ -970,8 +970,13 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .connect_endpoint_addr(reopened_addr_a)
             .await?;
 
-        wait_for_sync_convergence(&reopened_a, &node_b, reopened_endpoint_id, Duration::from_secs(60))
-            .await?;
+        wait_for_sync_convergence(
+            &reopened_a,
+            &node_b,
+            reopened_endpoint_id,
+            Duration::from_secs(60),
+        )
+        .await?;
 
         wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60))
             .await?;
@@ -1104,8 +1109,7 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
     else {
         eyre::bail!("missing main heads on reopened_b: {doc_id}");
     };
-    let user_path_b =
-        daybook_types::doc::UserPathBuf::from(reopened_b.ctx.local_user_path.clone());
+    let user_path_b = daybook_types::doc::UserPathBuf::from(reopened_b.ctx.local_user_path.clone());
     reopened_b
         .drawer
         .create_branch_at_heads_from_branch(

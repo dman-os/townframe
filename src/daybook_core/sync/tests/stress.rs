@@ -434,11 +434,15 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
                 v.sort_unstable();
                 v
             });
+            let is_materialized = matches!(
+                head_state.state,
+                big_repo::MaterializationState::Materialized
+                    | big_repo::MaterializationState::PartiallyMaterialized
+            );
             doc_states.insert(
                 big_doc_id.to_string(),
                 format!(
-                    "sedimentree_heads={sed_heads:?}, mat_state={:?}, mat_heads={mat_heads:?}",
-                    head_state.state
+                    "sedimentree_heads={sed_heads:?}, is_mat={is_materialized}, mat_heads={mat_heads:?}",
                 ),
             );
         }

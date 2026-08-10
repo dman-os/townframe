@@ -1854,6 +1854,7 @@ where
         OpenEphemeralPolicy,
         EphemeralConfig::default(),
         StdClock,
+        TokioSpawn,
     );
     let ephemeral_handler: Arc<BigRepoEphemeralHandler> = Arc::new(ephemeral_handler);
     let ephemeral_backend: Arc<dyn BigEphemeralBackend> = Arc::new(BigRepoEphemeralBackend::new(

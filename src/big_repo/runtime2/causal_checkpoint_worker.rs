@@ -98,9 +98,7 @@ impl CausalCheckpointWorker {
                     let doc_id = crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
                     let _ = self.runtime.ensure_causal_coverage(doc_id).await;
                 }
-                self.store
-                    .advance_causal_checkpoint_cursor(row.seq)
-                    .await?;
+                self.store.advance_causal_checkpoint_cursor(row.seq).await?;
             }
 
             if self.last_acked_generation < generation {

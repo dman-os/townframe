@@ -58,8 +58,10 @@ pub(crate) type BigRepoKeyhiveHandler<C = BigRepoIrohTransport> = SendableKeyhiv
 >;
 
 /// Ephemeral handler for BigRepo, parameterised over the connection type.
-pub(crate) type BigRepoEphemeralHandler<C = BigRepoIrohTransport> =
-    EphemeralHandler<Sendable, C, OpenEphemeralPolicy, StdClock>;
+pub(crate) type BigRepoEphemeralHandler<
+    C = BigRepoIrohTransport,
+    Sp = subduction_websocket::tokio::TokioSpawn,
+> = EphemeralHandler<Sendable, C, OpenEphemeralPolicy, StdClock, Sp>;
 
 // ─── Generic composed error ────────────────────────────────────────────────
 

@@ -244,33 +244,36 @@ pub(crate) trait BigEphemeralBackend: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(crate) struct BigRepoEphemeralBackend<C = BigRepoIrohTransport>
-where
+pub(crate) struct BigRepoEphemeralBackend<
+    C = BigRepoIrohTransport,
+    Sp = subduction_websocket::tokio::TokioSpawn,
+> where
     C: Clone + 'static,
 {
     signer: MemorySigner,
-    handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock>>,
+    handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock, Sp>>,
 }
 
-impl<C> BigRepoEphemeralBackend<C>
+impl<C, Sp> BigRepoEphemeralBackend<C, Sp>
 where
     C: Clone,
 {
     pub(crate) fn new(
         signer: MemorySigner,
-        handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock>>,
+        handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock, Sp>>,
     ) -> Self {
         Self { signer, handler }
     }
 }
 
-impl<C> BigEphemeralBackend for BigRepoEphemeralBackend<C>
+impl<C, Sp> BigEphemeralBackend for BigRepoEphemeralBackend<C, Sp>
 where
     C: subduction_core::connection::Connection<future_form::Sendable, EphemeralMessage>
         + Clone
         + Send
         + Sync
         + 'static,
+    Sp: subduction_core::spawn::Spawn<future_form::Sendable> + Send + Sync + 'static,
 {
     fn publish(&self, topic: BigEphemeralTopic, payload: Vec<u8>) -> BoxFuture<'_, Res<()>> {
         Box::pin(async move {

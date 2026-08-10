@@ -567,7 +567,10 @@ impl BigRepo {
             .create_group_with_parents(parents, &self.keyhive_storage)
             .await?;
         self.keyhive_notifier.note_local_keyhive_changed().await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(5)))).await?;
+        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
+            std::time::Duration::from_secs(5),
+        )))
+        .await?;
         Ok(group)
     }
 
@@ -611,7 +614,10 @@ impl BigRepo {
         }
 
         self.keyhive_notifier.note_local_keyhive_changed().await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(5)))).await?;
+        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
+            std::time::Duration::from_secs(5),
+        )))
+        .await?;
         Ok(())
     }
 
@@ -650,7 +656,10 @@ impl BigRepo {
         }
 
         self.keyhive_notifier.note_local_keyhive_changed().await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(5)))).await?;
+        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
+            std::time::Duration::from_secs(5),
+        )))
+        .await?;
         Ok(())
     }
 
@@ -676,7 +685,10 @@ impl BigRepo {
             tracing::debug!(%doc_id, "document revocation causal checkpoint deferred to durable event reconciliation");
         }
         self.keyhive_notifier.note_local_keyhive_changed().await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(std::time::Duration::from_secs(5)))).await?;
+        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
+            std::time::Duration::from_secs(5),
+        )))
+        .await?;
         Ok(())
     }
 }
