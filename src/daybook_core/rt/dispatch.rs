@@ -391,15 +391,14 @@ impl DispatchRepo {
             .entry(dispatch_head_for_dispatch(&id, &dispatch))
             .or_insert_with(|| id.clone());
 
-        if let Some(old) = state.dispatches.insert(id.clone(), Arc::clone(&dispatch)) {
-            if let ActiveDispatchDeets::Wflow {
+        if let Some(old) = state.dispatches.insert(id.clone(), Arc::clone(&dispatch))
+            && let ActiveDispatchDeets::Wflow {
                 wflow_job_id: Some(job),
                 ..
             } = &old.deets
             {
                 state.wflow_to_dispatch.remove(job);
             }
-        }
 
         match dispatch.status {
             DispatchStatus::Active => {
@@ -475,11 +474,9 @@ impl DispatchRepo {
             wflow_job_id: Some(job),
             ..
         } = &next.deets
-        {
-            if next.status == DispatchStatus::Active {
+            && next.status == DispatchStatus::Active {
                 state.wflow_to_dispatch.insert(job.clone(), id.clone());
             }
-        }
 
         let next_head = dispatch_head_for_dispatch(&id, &next);
         state.active_dispatches.remove(&id);
@@ -627,11 +624,7 @@ impl DispatchRepo {
             origin: self.local_origin(),
         }]);
 
-        if ready {
-            Ok(Some(updated))
-        } else {
-            Ok(None)
-        }
+        if ready { Ok(Some(updated)) } else { Ok(None) }
     }
 
     pub async fn activate_waiting(

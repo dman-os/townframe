@@ -979,14 +979,18 @@ mod tests {
         assert!(hashes.contains(&hash_b));
         let blob_refs = repo.list_blob_refs_for_doc(&doc_id).await?;
         assert_eq!(blob_refs.len(), 2);
-        assert!(blob_refs
-            .iter()
-            .all(|blob_ref| blob_ref.length_octets == 42));
+        assert!(
+            blob_refs
+                .iter()
+                .all(|blob_ref| blob_ref.length_octets == 42)
+        );
 
         let memberships = repo.list_docs_for_hash(&hash_a).await?;
-        assert!(memberships
-            .iter()
-            .any(|value| value.doc_id == doc_id && value.length_octets == 42));
+        assert!(
+            memberships
+                .iter()
+                .any(|value| value.doc_id == doc_id && value.length_octets == 42)
+        );
 
         test_context.stop().await?;
         Ok(())

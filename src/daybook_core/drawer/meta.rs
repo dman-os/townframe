@@ -2,8 +2,8 @@ use crate::interlude::*;
 
 pub mod version_updates {
     use crate::interlude::*;
-    use automerge::transaction::Transactable;
     use automerge::ROOT;
+    use automerge::transaction::Transactable;
 
     pub fn version_latest() -> Res<Vec<u8>> {
         let mut doc = automerge::Automerge::new();
@@ -267,24 +267,18 @@ impl DrawerRepo {
                 .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
-                tracing::warn!(
-                    branch_name = %branch_name,
-                    branch_doc_id = %branch_ref.branch_doc_id,
-                    "missing branch heads for drawer branch ref; requesting doc handle from big_repo"
+                eyre::bail!(
+                    "missing branch heads for drawer branch ref {branch_name} ({bdoc_id})",
+                    bdoc_id = branch_ref.branch_doc_id
                 );
-                let _ = self.big_repo.get_doc(&branch_ref.branch_doc_id).await;
-                continue;
             };
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
             let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
-                tracing::warn!(
-                    branch_path = %branch_path,
-                    branch_doc_id = %branch_doc_id,
-                    "missing branch heads for local branch ref"
+                eyre::bail!(
+                    "missing branch heads for local branch ref {branch_path}({branch_doc_id}) on {doc_id}"
                 );
-                continue;
             };
             branches.insert(branch_path, latest_heads);
         }

@@ -22,9 +22,9 @@
 //! parity) at the end. Seeds are unique per test; RAII `Pair` teardown
 //! handles all cleanup — no manual `.stop()` calls.
 
-use super::harness::{fixtures, heads, Pair};
+use super::harness::{Pair, fixtures, heads};
 use crate::StorageConfig;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -687,11 +687,10 @@ async fn wait_for_title(
 ) -> crate::Res<()> {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let crate::DocLookup::Ready(handle) = repo.get_doc(&doc_id).await? {
-                if read_title(&handle).await == expected {
+            if let crate::DocLookup::Ready(handle) = repo.get_doc(&doc_id).await?
+                && read_title(&handle).await == expected {
                     return crate::eyre::Ok(());
                 }
-            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })

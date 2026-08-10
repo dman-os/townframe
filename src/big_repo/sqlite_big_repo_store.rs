@@ -1,16 +1,16 @@
 use crate::interlude::*;
-use big_sync::sqlite_core::{
-    encode_access, MemberState, PendingSubscription, SqliteCore, SUB_REPLAYING_CLEAN,
-    SUB_REPLAY_DONE,
-};
 use big_sync::HostPartStore;
+use big_sync::sqlite_core::{
+    MemberState, PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, SqliteCore,
+    encode_access,
+};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint};
+use big_sync_core::{BuckId, Byte32Id, Fingerprint, mpsc};
 use futures::future::BoxFuture;
 use sedimentree_core::{
     blob::Blob,
@@ -19,7 +19,7 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     fragment::Fragment,
     id::SedimentreeId,
-    loose_commit::{id::CommitId, LooseCommit},
+    loose_commit::{LooseCommit, id::CommitId},
     sedimentree::Sedimentree,
 };
 use sqlx::{QueryBuilder, Row};
@@ -436,15 +436,14 @@ impl SqliteBigRepoStore {
                     SubEvent::ObjectChanged(_) => {}
                     SubEvent::ReplayComplete => unreachable!(),
                 }
-                if let Some(object_event) = object_event {
-                    if let Some(subs) = bus.by_obj.get(&obj_id) {
+                if let Some(object_event) = object_event
+                    && let Some(subs) = bus.by_obj.get(&obj_id) {
                         for &sub_id in subs {
                             recipients
                                 .entry(sub_id)
                                 .or_insert_with(|| object_event.clone());
                         }
                     }
-                }
                 for (sub_id, event) in recipients {
                     let Some(sub) = bus.subs.get(&sub_id) else {
                         continue;
@@ -1478,11 +1477,10 @@ impl SqliteBigRepoStore {
             })
             .collect();
         let parts: HashSet<_> = part_cursors.keys().copied().collect();
-        if subscriber.is_some() {
-            if let Err(err) = self.summarize_parts(parts.clone()).await? {
+        if subscriber.is_some()
+            && let Err(err) = self.summarize_parts(parts.clone()).await? {
                 return Ok(Err(err));
             }
-        }
 
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
@@ -1583,8 +1581,8 @@ impl SqliteBigRepoStore {
                 if object_replay_pending {
                     for obj_id in &objects {
                         let permitted = store.policy.is_event_permitted(None, *obj_id, subscriber);
-                        if permitted {
-                            if let Some(payload) =
+                        if permitted
+                            && let Some(payload) =
                                 store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
                             {
                                 output.push(SubEvent::ObjectChanged(
@@ -1594,7 +1592,6 @@ impl SqliteBigRepoStore {
                                     },
                                 ));
                             }
-                        }
                     }
                     object_replay_pending = false;
                 }
@@ -2992,7 +2989,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync::{host_part_store_contract, HostPartStoreContractHarness};
+    use big_sync::{HostPartStoreContractHarness, host_part_store_contract};
     use sedimentree_core::blob::BlobMeta;
     use subduction_crypto::signer::memory::MemorySigner;
 
@@ -3271,12 +3268,16 @@ mod tests {
         .await?;
 
         let commit = make_commit(&signer, tree, 1).await;
-        assert!(Storage::<Sendable>::save_loose_commit(&store, tree, commit)
-            .await
-            .is_err());
-        assert!(Storage::<Sendable>::load_loose_commits(&store, tree)
-            .await?
-            .is_empty());
+        assert!(
+            Storage::<Sendable>::save_loose_commit(&store, tree, commit)
+                .await
+                .is_err()
+        );
+        assert!(
+            Storage::<Sendable>::load_loose_commits(&store, tree)
+                .await?
+                .is_empty()
+        );
         assert_eq!(
             HostPartStore::obj_payload(&store, obj_id).await?,
             Some(old_payload)
@@ -3749,10 +3750,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         }];
-        assert!(store
-            .reconcile_group_part_batch(&mutations, 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&mutations, 42, true)
+                .await
+                .is_err()
+        );
 
         assert!(
             HostPartStore::obj_parts(&store, doc).await?.is_empty(),
@@ -4185,10 +4188,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         };
-        assert!(store
-            .reconcile_group_part_batch(&[mutation], 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&[mutation], 42, true)
+                .await
+                .is_err()
+        );
         assert_eq!(store.keyhive_group_part_cursor().await?, 0);
         assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
         Ok(())
@@ -4223,10 +4228,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         };
-        assert!(store
-            .reconcile_group_part_batch(&[mutation], 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&[mutation], 42, true)
+                .await
+                .is_err()
+        );
         assert_eq!(store.keyhive_group_part_cursor().await?, 0);
         assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
         Ok(())

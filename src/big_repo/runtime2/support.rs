@@ -8,9 +8,9 @@
 use crate::interlude::*;
 
 use crate::{
+    BigKeyhiveHandle,
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
     keyhive_storage::BigRepoKeyhiveStorage,
-    BigKeyhiveHandle,
 };
 use future_form::Sendable;
 use futures::future::BoxFuture;
@@ -20,8 +20,8 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     fragment::Fragment,
     id::SedimentreeId,
-    loose_commit::{id::CommitId, LooseCommit},
-    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+    loose_commit::{LooseCommit, id::CommitId},
+    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
 use std::collections::BTreeSet;
 use std::time::Duration;

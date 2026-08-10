@@ -1138,11 +1138,7 @@ fn trim_updates(updates: &mut VecDeque<ProgressUpdateEntry>) {
 
 fn optional_title_from_db(value: Option<String>) -> Option<String> {
     let value = value?;
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn normalize_tag_path(tag: &str) -> String {

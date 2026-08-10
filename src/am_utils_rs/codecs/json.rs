@@ -53,11 +53,9 @@ fn timestamp_seconds_from_string(raw: &str) -> Option<i64> {
     if let Some(with_utc_offset) = raw
         .strip_suffix('Z')
         .map(|prefix| format!("{prefix}+00:00"))
-    {
-        if let Ok(ts) = with_utc_offset.parse::<Timestamp>() {
+        && let Ok(ts) = with_utc_offset.parse::<Timestamp>() {
             return Some(ts.as_second());
         }
-    }
     let parsed_int = raw.parse::<i64>().ok()?;
     Some(epoch_int_to_seconds(parsed_int))
 }
@@ -331,15 +329,14 @@ pub fn reconcile_value<R: Reconciler>(
             }
             // Put or update entries
             for (key, value) in val {
-                if is_base64_field(key) {
-                    if let serde_json::Value::String(encoded) = value {
+                if is_base64_field(key)
+                    && let serde_json::Value::String(encoded) = value {
                         if let Some(bytes) = decode_base64_field(encoded) {
                             map_reconciler.put(key, autosurgeon::bytes::ByteVec::from(bytes))?;
                             continue;
                         }
                         warn!(key, "invalid base64 payload, storing as string");
                     }
-                }
                 if is_timestamp_field(key) {
                     if let Some(seconds) = timestamp_seconds_from_json(value) {
                         map_reconciler.put(key, TimestampScalarValue(seconds))?;

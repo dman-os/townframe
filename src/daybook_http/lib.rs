@@ -37,26 +37,26 @@ mod wit {
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
             "townframe:daybook-api/ctx": generate,
-            "townframe:daybook-api/doc": crate::gen::doc,
-            "townframe:daybook-api/doc/doc": crate::gen::doc::Doc,
+            "townframe:daybook-api/doc": crate::r#gen::doc,
+            "townframe:daybook-api/doc/doc": crate::r#gen::doc::Doc,
             "townframe:daybook-api/doc/doc-kind": generate,
-            "townframe:daybook-api/doc/doc-prop": crate::gen::doc::DocProp,
-            "townframe:daybook-api/doc/doc-blob": crate::gen::doc::DocBlob,
-            "townframe:daybook-api/doc/doc-content": crate::gen::doc::DocContent,
-            // "townframe:daybook-api/doc/doc-kind": crate::gen::doc::DocKind,
-            "townframe:daybook-api/doc/doc-image": crate::gen::doc::DocImage,
+            "townframe:daybook-api/doc/doc-prop": crate::r#gen::doc::DocProp,
+            "townframe:daybook-api/doc/doc-blob": crate::r#gen::doc::DocBlob,
+            "townframe:daybook-api/doc/doc-content": crate::r#gen::doc::DocContent,
+            // "townframe:daybook-api/doc/doc-kind": crate::r#gen::doc::DocKind,
+            "townframe:daybook-api/doc/doc-image": crate::r#gen::doc::DocImage,
 
-            "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
-            "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
-            // "townframe:daybook-api/doc/doc-prop-kind": crate::gen::doc::DocPropKind,
+            "townframe:daybook-api/doc-create/input": crate::r#gen::doc::doc_create::Input,
+            "townframe:daybook-api/doc-create/error-id-occupied": crate::r#gen::doc::doc_create::ErrorIdOccupied,
+            // "townframe:daybook-api/doc/doc-prop-kind": crate::r#gen::doc::DocPropKind,
             "townframe:daybook-api/doc-create": generate,
-            "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
+            "townframe:daybook-api/doc-create/error": crate::r#gen::doc::doc_create::Error,
         }
     });
 }
 
 mod doc;
-mod gen;
+mod r#gen;
 mod request;
 
 use crate::interlude::*;

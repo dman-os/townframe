@@ -19,9 +19,9 @@
 //! - **stop-waits-for-save-tasks**: Every test2 test exercises the RAII
 //!   [`ShutdownGuard`] / [`Pair`] teardown path.
 
-use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair, Topo};
+use super::harness::{Node, Pair, Topo, fixtures, topo::ShutdownGuard};
 use crate::SyncDocError;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;

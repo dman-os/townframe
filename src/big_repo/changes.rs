@@ -1264,7 +1264,7 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use std::sync::Arc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
         let doc_id = DocumentId::random();

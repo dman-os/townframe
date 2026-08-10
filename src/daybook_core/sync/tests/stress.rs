@@ -28,8 +28,8 @@ enum EventKind {
 #[tokio::test(flavor = "multi_thread")]
 async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    TEST_ENV_INIT.call_once(|| {
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+    // FIXME: use a config field on the repo settings
+    TEST_ENV_INIT.call_once(|| unsafe {
         std::env::set_var("DAYB_SYNC_MAX_BACKOFF_SECS", "5");
     });
 
@@ -181,11 +181,7 @@ fn generate_connected_edges(rng: &mut StdRng) -> Vec<(usize, usize)> {
 }
 
 fn canon_edge(a: usize, b: usize) -> (usize, usize) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a < b { (a, b) } else { (b, a) }
 }
 
 async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>> {
@@ -569,7 +565,7 @@ async fn wait_for_big_repo_sedimentree_parity(
     nodes: &[&SyncTestNode],
     timeout: Duration,
 ) -> Res<()> {
-    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut last_log = tokio::time::Instant::now();
     loop {
         match assert_big_repo_sedimentree_parity(nodes).await {
@@ -593,7 +589,7 @@ async fn wait_for_doc_head_parity(
     right: &SyncTestNode,
     timeout: Duration,
 ) -> Res<()> {
-    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut last_log = tokio::time::Instant::now();
     loop {
         match assert_doc_head_parity(left, right).await {
@@ -664,15 +660,14 @@ async fn collect_doc_branch_heads(
             continue;
         };
         if branches.branches.is_empty() {
-            if let Some(entry) = node.drawer.get_entry(&doc_id).await? {
-                if !entry.branches.is_empty() {
+            if let Some(entry) = node.drawer.get_entry(&doc_id).await?
+                && !entry.branches.is_empty() {
                     eyre::bail!(
                         "node {}: document {doc_id} present in drawer index with branches but heads not yet materialized; branch_docs={:?}",
                         node.sync_repo.router.endpoint().id(),
                         entry.branches
                     );
                 }
-            }
             continue;
         }
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();

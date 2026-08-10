@@ -1317,26 +1317,34 @@ mod tests {
             assert!(onnx_path.exists());
             assert!(preprocessor_config_path.exists());
 
-            assert!(config
-                .embed
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, EmbedBackendConfig::CloudOllama { .. })));
-            assert!(config
-                .embed
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, EmbedBackendConfig::CloudGemini { .. })));
-            assert!(config
-                .llm
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, LlmBackendConfig::CloudOllama { .. })));
-            assert!(config
-                .llm
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. })));
+            assert!(
+                config
+                    .embed
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, EmbedBackendConfig::CloudOllama { .. }))
+            );
+            assert!(
+                config
+                    .embed
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, EmbedBackendConfig::CloudGemini { .. }))
+            );
+            assert!(
+                config
+                    .llm
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, LlmBackendConfig::CloudOllama { .. }))
+            );
+            assert!(
+                config
+                    .llm
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))
+            );
 
             if std::env::var("GEMINI_API_KEY").is_ok() {
                 assert!(matches!(

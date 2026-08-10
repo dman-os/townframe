@@ -49,8 +49,8 @@ mod effect_map_serde {
         let mut result = HashMap::new();
         for (key, value) in map {
             let parts: Vec<&str> = key.split('_').collect();
-            if parts.len() == 2 {
-                if let (Ok(entry_id), Ok(effect_idx)) =
+            if parts.len() == 2
+                && let (Ok(entry_id), Ok(effect_idx)) =
                     (parts[0].parse::<u64>(), parts[1].parse::<u64>())
                 {
                     result.insert(
@@ -61,7 +61,6 @@ mod effect_map_serde {
                         value,
                     );
                 }
-            }
         }
         Ok(result)
     }

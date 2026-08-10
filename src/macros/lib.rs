@@ -12,7 +12,7 @@ pub fn http_error_derive(input: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(name, "HttpError can only be derived for enums")
                 .to_compile_error()
-                .into()
+                .into();
         }
     };
 

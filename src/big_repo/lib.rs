@@ -70,15 +70,14 @@ pub use ephemeral::{
 pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
 pub use keyhive_core;
 
+pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 pub use changes::{
-    path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
-    BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
     DomainListenerRegistration as BigRepoDomainListenerRegistration,
-    OriginFilter as BigRepoOriginFilter,
+    OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
-pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;

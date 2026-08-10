@@ -2,18 +2,18 @@
 
 use crate::interlude::*;
 
+use crate::DocumentId;
 use crate::changes::BigRepoChangeOrigin;
+use crate::runtime2::Runtime2Evt;
 use crate::runtime2::support::{
-    is_causal_checkpoint_id, stage_automerge_ingest, BigRepoCiphertextKind,
-    BigRepoCiphertextLocator, CausalCheckpoint,
+    BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, is_causal_checkpoint_id,
+    stage_automerge_ingest,
 };
 use crate::runtime2::types::{DocLookup, LiveDocBundle};
-use crate::runtime2::Runtime2Evt;
 use crate::runtime2::{
-    messages::DocWorkerMsg, DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
-    MaterializationBlocker, MaterializationStatus,
+    DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
+    MaterializationStatus, messages::DocWorkerMsg,
 };
-use crate::DocumentId;
 use big_sync_core::PeerId;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
@@ -657,11 +657,10 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         self.partially_decrypted = partial;
         tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point S1: sync_partial_state before evt send");
-        if let DocState::Live(bundle) = &self.state {
-            if let Some(bundle) = bundle.upgrade() {
+        if let DocState::Live(bundle) = &self.state
+            && let Some(bundle) = bundle.upgrade() {
                 bundle.set_partially_decrypted(partial);
             }
-        }
         let event = if partial {
             Runtime2Evt::DocWorkerMaterializationPending {
                 doc_id: self.doc_id,
@@ -1772,13 +1771,13 @@ mod tests {
 
     #[test]
     fn non_automerge_shadow_node_contracts_out_of_materialized_history() {
-        use automerge::{transaction::Transactable, ReadDoc};
+        use automerge::{ReadDoc, transaction::Transactable};
         use sedimentree_core::{
             blob::{Blob, BlobMeta},
             depth::CountLeadingZeroBytes,
             id::SedimentreeId,
             loose_commit::LooseCommit,
-            sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+            sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
         };
 
         let mut base = automerge::Automerge::new();

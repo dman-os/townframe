@@ -2,14 +2,14 @@ use std::collections::VecDeque;
 
 use crate::interlude::*;
 
-use crate::trap;
 use crate::SyncBackend;
+use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
-    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId, mpsc,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[cfg(any(test, feature = "test-support"))]
 use big_sync_core::TaskCounts;
@@ -337,11 +337,10 @@ pub fn spawn_big_sync_worker_with_options(
             if let Some(Err(err)) = maybe_res {
                 return Err(err);
             }
-            if let Some(shutdown) = Arc::into_inner(shutdown) {
-                if let Some(res) = shutdown.err.into_inner() {
+            if let Some(shutdown) = Arc::into_inner(shutdown)
+                && let Some(res) = shutdown.err.into_inner() {
                     return Err(res);
                 }
-            }
             Ok(())
         }
     };
@@ -517,11 +516,10 @@ impl BigSyncWorker {
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
                 trace!(?event, "XXX stat event");
-                if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event {
-                    if let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
+                if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event
+                    && let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
                         let _ = resp.send(Ok(()));
                     }
-                }
                 let _ = self.stats_tx.send(event);
             }
         }

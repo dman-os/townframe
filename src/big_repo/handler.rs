@@ -30,8 +30,8 @@ use subduction_ephemeral::{
     policy::OpenEphemeralPolicy,
 };
 use subduction_keyhive::{
-    handler::{HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol},
     KeyhiveMessage,
+    handler::{HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol},
 };
 
 // ─── Generic type aliases (connection-parameterised, old-runtime default) ──
@@ -217,13 +217,12 @@ where
                         .map_err(BigRepoComposedHandlerError::Sync)
                 }
                 BigRepoWireMessage::Ephemeral(ephemeral_msg) => {
-                    if let Some(ref eph) = self.ephemeral {
-                        if let Err(err) =
+                    if let Some(ref eph) = self.ephemeral
+                        && let Err(err) =
                             Handler::<Sendable, C>::handle(eph.as_ref(), conn, ephemeral_msg).await
                         {
                             tracing::error!(%err, "ephemeral handler error");
                         }
-                    }
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
@@ -276,13 +275,12 @@ where
                         .map_err(BigRepoComposedHandlerError::Sync)
                 }
                 BigRepoWireMessage::Ephemeral(ephemeral_msg) => {
-                    if let Some(ref eph) = self.ephemeral {
-                        if let Err(err) =
+                    if let Some(ref eph) = self.ephemeral
+                        && let Err(err) =
                             Handler::<Local, C>::handle(eph.as_ref(), conn, ephemeral_msg).await
                         {
                             tracing::error!(%err, "ephemeral handler error");
                         }
-                    }
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {

@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use crate::types::{
-    pseudo_label_candidates_key, PseudoLabel, PseudoLabelCandidate, PseudoLabelCandidatesFacet,
-    PseudoLabelEntry, PseudoLabelError,
+    PseudoLabel, PseudoLabelCandidate, PseudoLabelCandidatesFacet, PseudoLabelEntry,
+    PseudoLabelError, pseudo_label_candidates_key,
 };
 use crate::{row_i64, row_text};
 use wflow_sdk::JobErrorX;

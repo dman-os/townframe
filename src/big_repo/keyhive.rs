@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
+use crate::{DocumentId, keyhive_listener::BigRepoKeyhiveListener};
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
@@ -787,15 +787,14 @@ fn enqueue_member(
     {
         caps.insert(id, (agent.clone(), access));
     }
-    if let Some(membered) = agent.as_membered() {
-        if expanded
+    if let Some(membered) = agent.as_membered()
+        && expanded
             .get(&id)
             .is_none_or(|existing_access| *existing_access < access)
         {
             expanded.insert(id, access);
             explore.push(ExploreNode { membered, access });
         }
-    }
 }
 
 #[cfg(test)]

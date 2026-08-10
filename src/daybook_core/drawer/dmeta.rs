@@ -7,8 +7,8 @@
 
 use crate::interlude::*;
 
-use automerge::transaction::Transactable;
 use automerge::ReadDoc;
+use automerge::transaction::Transactable;
 use daybook_types::doc::{
     ChangeHashSet, FacetKey, FacetMeta, UserMeta, UserPath, WellKnownFacet, WellKnownFacetTag,
 };
@@ -323,14 +323,12 @@ fn tombstone_facet_meta(
         {
             let len = tx.length(&uuid_list);
             for ii in 0..len {
-                if let Some((automerge::Value::Scalar(uuid_scalar), _)) = tx.get(&uuid_list, ii)? {
-                    if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
-                        if let Ok(uuid) = Uuid::parse_str(uuid_str) {
+                if let Some((automerge::Value::Scalar(uuid_scalar), _)) = tx.get(&uuid_list, ii)?
+                    && let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref()
+                        && let Ok(uuid) = Uuid::parse_str(uuid_str) {
                             invalidated_uuids.push(uuid);
                             tx.delete(dmeta_facet_uuids_obj, uuid.to_string())?;
                         }
-                    }
-                }
             }
         }
         let deleted_at_list = match tx.get(&facet_meta_obj, "deletedAt")? {

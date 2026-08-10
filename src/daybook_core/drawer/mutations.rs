@@ -10,8 +10,8 @@ use crate::drawer::{
     },
 };
 
-use automerge::transaction::Transactable;
 use automerge::ReadDoc;
+use automerge::transaction::Transactable;
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey};
 
 struct PreparedAddDoc {
@@ -249,7 +249,7 @@ impl DrawerRepo {
             (None, None) => {
                 return Err(DrawerError::BranchNotFound {
                     name: branch_path.to_string(),
-                })
+                });
             }
         };
 
@@ -719,16 +719,13 @@ impl DrawerRepo {
                 // Identify modified facets from patches
                 let mut modified_facets = HashSet::new();
                 for patch in patches {
-                    if patch.path.len() >= 2 {
-                        if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
-                            if p0 == "facets" {
-                                if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1]
+                    if patch.path.len() >= 2
+                        && let (_, automerge::Prop::Map(p0)) = &patch.path[0]
+                            && p0 == "facets"
+                                && let (_, automerge::Prop::Map(facet_key_str)) = &patch.path[1]
                                 {
                                     modified_facets.insert(facet_key_str.to_string());
                                 }
-                            }
-                        }
-                    }
                 }
 
                 let invalidated_uuids = if modified_facets.is_empty() {

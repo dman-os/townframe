@@ -31,17 +31,13 @@ async fn test_cancel_job() -> Res<()> {
             use wflow_core::partition::job_events::{JobError, JobRunResult};
             use wflow_core::partition::log::PartitionLogEntry;
 
-            if let PartitionLogEntry::JobEffectResult(event) = entry {
-                if event.job_id == job_id {
-                    if let JobRunResult::WflowErr(JobError::Transient { error_json, .. }) =
+            if let PartitionLogEntry::JobEffectResult(event) = entry
+                && event.job_id == job_id
+                    && let JobRunResult::WflowErr(JobError::Transient { error_json, .. }) =
                         &event.result
-                    {
-                        if error_json.contains("waiting for flag to be set") {
+                        && error_json.contains("waiting for flag to be set") {
                             return true;
                         }
-                    }
-                }
-            }
             false
         })
         .await?;

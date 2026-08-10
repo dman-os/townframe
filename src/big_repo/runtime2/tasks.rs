@@ -14,8 +14,8 @@ use std::{sync::Arc, time::Duration};
 
 use future_form::{FutureForm, Sendable};
 use futures::{
-    future::{AbortHandle, Abortable},
     FutureExt,
+    future::{AbortHandle, Abortable},
 };
 
 /// Platform capability for creating independent task ownership scopes.

@@ -1,7 +1,7 @@
 //! Tier 9 — ephemeral topic delivery and filtering.
 
-use super::harness::topo::Node;
 use super::harness::Pair;
+use super::harness::topo::Node;
 use crate::{BigEphemeralEvent, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -92,11 +92,15 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
     let event =
         publish_until_delivered(pair.left(), topic, b"matching".to_vec(), &mut matching).await?;
     assert_eq!(event.payload, b"matching");
-    assert!(timeout(Duration::from_millis(250), wrong_sender.recv())
-        .await
-        .is_err());
-    assert!(timeout(Duration::from_millis(250), wrong_topic.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(250), wrong_sender.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(250), wrong_topic.recv())
+            .await
+            .is_err()
+    );
     Ok(())
 }

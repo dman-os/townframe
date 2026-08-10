@@ -20,6 +20,7 @@ use crate::runtime2::{
     SyncDocAttempt, TaskSet,
 };
 use crate::{
+    BigEphemeral, BigKeyhiveHandle, DocumentId,
     encrypted_blob::decode_encrypted_blob,
     ephemeral::{BigEphemeralBackend, BigEphemeralSwitchboard, BigRepoEphemeralBackend},
     handler::{
@@ -28,13 +29,12 @@ use crate::{
     },
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     runtime2::support::{
-        accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
+        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult,
+        SubductionSedimentrees, accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
         encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
-        persist_cgka_updates_durably, sedimentree_heads_payload, BigRepoIrohTransport,
-        BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult, SubductionSedimentrees,
+        persist_cgka_updates_durably, sedimentree_heads_payload,
     },
     runtime2::types::BigRepoSyncPolicy,
-    BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
 use keyhive_core::principal::document::{DecryptError, EncryptError};
 use keyhive_core::{
@@ -47,12 +47,12 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     id::SedimentreeId,
     loose_commit::id::CommitId,
-    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
 use subduction_core::{
     authenticated::Authenticated, handler::sync::SyncHandler, nonce_cache::NonceCache,
-    storage::powerbox::StoragePowerbox, subduction::request::FragmentRequested,
-    subduction::Subduction,
+    storage::powerbox::StoragePowerbox, subduction::Subduction,
+    subduction::request::FragmentRequested,
 };
 use subduction_ephemeral::{
     clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
@@ -467,7 +467,7 @@ where
         eyre::Result<Option<(CommitId, crate::runtime2::support::CausalCheckpoint)>>,
     > {
         Sendable::from_future(async move {
-            use crate::runtime2::support::{causal_checkpoint_id, CausalCheckpoint};
+            use crate::runtime2::support::{CausalCheckpoint, causal_checkpoint_id};
 
             let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
             let keyhive = self.keyhive.clone_keyhive();
@@ -489,7 +489,10 @@ where
                     Err(EncryptError::UnableToPcsUpdate(
                         beekem::error::CgkaError::IdentifierNotFound,
                     )) => {
-                        debug!(?sed_id, "causal checkpoint deferred: local principal is absent from the current CGKA tree");
+                        debug!(
+                            ?sed_id,
+                            "causal checkpoint deferred: local principal is absent from the current CGKA tree"
+                        );
                         return Ok(None);
                     }
                     Err(error) => {
@@ -1493,7 +1496,7 @@ where
             };
 
             let end_fut_inner = Sendable::from_future(async move {
-                use futures::future::{select, Either};
+                use futures::future::{Either, select};
                 match select(
                     Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
                     Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
@@ -1639,7 +1642,7 @@ where
             };
 
             let end_fut_inner = Sendable::from_future(async move {
-                use futures::future::{select, Either};
+                use futures::future::{Either, select};
                 match select(
                     Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
                     Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
@@ -2120,9 +2123,9 @@ impl crate::runtime2::Clock for subduction_ephemeral::clock::std_clock::StdClock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BigKeyhiveHandle;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
-    use crate::BigKeyhiveHandle;
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_core::store::ciphertext::CiphertextStore;
     use sedimentree_core::blob::verified::VerifiedBlobMeta;
@@ -2386,9 +2389,11 @@ mod tests {
             .get_ciphertext(&head.as_bytes().to_vec())
             .await
             .expect_err("plaintext blob must not decode as ciphertext");
-        assert!(error
-            .to_string()
-            .contains("failed decoding loose commit encrypted blob"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed decoding loose commit encrypted blob")
+        );
         Ok(())
     }
 }

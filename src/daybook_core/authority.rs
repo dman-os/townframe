@@ -126,11 +126,10 @@ async fn ensure_group(
     supplied_id: Option<[u8; 32]>,
 ) -> Res<(BigKeyhiveGroup, bool)> {
     let stored_id = load_group_id(sql, key).await?;
-    if let (Some(stored_id), Some(supplied_id)) = (stored_id, supplied_id) {
-        if stored_id != supplied_id {
+    if let (Some(stored_id), Some(supplied_id)) = (stored_id, supplied_id)
+        && stored_id != supplied_id {
             eyre::bail!("clone authority group id disagrees with local state: {key}");
         }
-    }
 
     let (group_id, created) = match (stored_id, supplied_id) {
         (Some(id), _) => (id, false),

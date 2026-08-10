@@ -1,7 +1,7 @@
 //! Tier 4 — convergence and delta-sync regressions.
 
-use super::harness::{fixtures, heads, Pair};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use super::harness::{Pair, fixtures, heads};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::time::Duration;
 

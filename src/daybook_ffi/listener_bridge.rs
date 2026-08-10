@@ -2,8 +2,8 @@
 
 use crate::interlude::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn register_uniffi_listener<R, E, F>(
     repo: &R,
@@ -20,16 +20,18 @@ where
     let registration = handle.registration();
     let dropped_warned = Arc::new(AtomicBool::new(false));
 
-    let join_handle = std::thread::spawn(move || loop {
-        match handle.recv_lossy_blocking() {
-            Ok(event) => on_event(event),
-            Err(daybook_core::repos::RecvError::Dropped { .. }) => {
-                let seen = dropped_warned.swap(true, Ordering::AcqRel);
-                if !seen {
-                    warn!("uniffi listener queue is full; dropping events");
+    let join_handle = std::thread::spawn(move || {
+        loop {
+            match handle.recv_lossy_blocking() {
+                Ok(event) => on_event(event),
+                Err(daybook_core::repos::RecvError::Dropped { .. }) => {
+                    let seen = dropped_warned.swap(true, Ordering::AcqRel);
+                    if !seen {
+                        warn!("uniffi listener queue is full; dropping events");
+                    }
                 }
+                Err(daybook_core::repos::RecvError::Closed) => break,
             }
-            Err(daybook_core::repos::RecvError::Closed) => break,
         }
     });
     let join_handle = Arc::new(Mutex::new(Some(join_handle)));

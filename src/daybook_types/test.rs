@@ -23,11 +23,13 @@ fn create_test_doc() -> Doc {
     props.insert(
         FacetKey::from(WellKnownFacetTag::Body),
         FacetRaw::from(WellKnownFacet::Body(Body {
-            order: vec![crate::url::build_facet_ref(
-                crate::url::FACET_SELF_DOC_ID,
-                &FacetKey::from(WellKnownFacetTag::Note),
-            )
-            .unwrap()],
+            order: vec![
+                crate::url::build_facet_ref(
+                    crate::url::FACET_SELF_DOC_ID,
+                    &FacetKey::from(WellKnownFacetTag::Note),
+                )
+                .unwrap(),
+            ],
         })),
     );
 

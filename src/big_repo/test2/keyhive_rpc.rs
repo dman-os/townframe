@@ -14,7 +14,7 @@
 //! the suite gates every Keyhive assertion behind an explicit sync call, so a
 //! missing notification is invisible there; this module is the exception.
 
-use super::harness::{fixtures, Pair, Topo};
+use super::harness::{Pair, Topo, fixtures};
 use crate::Res;
 use automerge::transaction::Transactable;
 use std::time::Duration;

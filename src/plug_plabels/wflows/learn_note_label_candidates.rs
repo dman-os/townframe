@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::interlude::*;
-use crate::types::{pseudo_label_candidates_key, PseudoLabelCandidatesFacet};
+use crate::types::{PseudoLabelCandidatesFacet, pseudo_label_candidates_key};
 use crate::wflows::learn_algo::{
     mean_normalized, merge_label_proposal_with_dedupe, parse_llm_answer,
     validate_and_normalize_proposal,

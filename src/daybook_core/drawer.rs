@@ -29,7 +29,7 @@ use types::{BranchSnapshot, DocDeleteTombstone};
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
-use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
+use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 
 use tokio_util::sync::CancellationToken;
 
@@ -638,8 +638,8 @@ impl DrawerRepo {
                         for value in values {
                             let serde_json::Value::String(commit_head) = value else {
                                 eyre::bail!(
-                                        "facet '{origin_facet_key}' at_commit path '{at_commit_json_path}' must be an array of commit-hash strings",
-                                    );
+                                    "facet '{origin_facet_key}' at_commit path '{at_commit_json_path}' must be an array of commit-hash strings",
+                                );
                             };
                             commit_head_strings.push(commit_head.clone());
                         }

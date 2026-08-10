@@ -291,13 +291,12 @@ impl TokioEffectWorker {
             }
             effects::PartitionEffectDeets::AbortRun { .. } => {
                 let run_effect_id = self.job_to_effect_id.lock().await.get(&job_id).cloned();
-                if let Some(run_effect_id) = run_effect_id {
-                    if let Some(abort_token) =
+                if let Some(run_effect_id) = run_effect_id
+                    && let Some(abort_token) =
                         self.effect_cancel_tokens.lock().await.get(&run_effect_id)
                     {
                         abort_token.cancel();
                     }
-                }
                 let mut effects_map = self.state.write_effects().await;
                 effects_map.remove(&effect_id);
             }
@@ -345,21 +344,19 @@ impl TokioEffectWorker {
             worker_id: Arc::clone(&self.worker_id),
         };
         let mut cached = self.take_session(&job_id);
-        if let Some(session) = cached.as_ref() {
-            if session.next_run_id != run_id || session.last_effect_id == effect_id {
+        if let Some(session) = cached.as_ref()
+            && (session.next_run_id != run_id || session.last_effect_id == effect_id) {
                 let session = cached.take().expect("checked is_some");
                 self.drop_cached_session(session);
             }
-        }
 
         let (host_kind, reply) = match &job_state_snapshot.wflow.service {
-            wflow_core::gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
-                if let Some(session) = cached.as_ref() {
-                    if !matches!(session.host_kind, CachedHostKind::Wasmcloud) {
+            wflow_core::r#gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
+                if let Some(session) = cached.as_ref()
+                    && !matches!(session.host_kind, CachedHostKind::Wasmcloud) {
                         let session = cached.take().expect("checked is_some");
                         self.drop_cached_session(session);
                     }
-                }
                 (
                     CachedHostKind::Wasmcloud,
                     self.pcx
@@ -376,12 +373,11 @@ impl TokioEffectWorker {
                 )
             }
             wflow_core::metastore::WflowServiceMeta::LocalNative => {
-                if let Some(session) = cached.as_ref() {
-                    if !matches!(session.host_kind, CachedHostKind::LocalNative) {
+                if let Some(session) = cached.as_ref()
+                    && !matches!(session.host_kind, CachedHostKind::LocalNative) {
                         let session = cached.take().expect("checked is_some");
                         self.drop_cached_session(session);
                     }
-                }
                 (
                     CachedHostKind::LocalNative,
                     self.pcx

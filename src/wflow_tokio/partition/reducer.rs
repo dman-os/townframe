@@ -180,15 +180,14 @@ impl TokioPartitionReducer {
         effect_id: effects::EffectId,
         preferred_worker_id: Option<&Arc<str>>,
     ) -> Res<()> {
-        if let Some(worker_id) = preferred_worker_id {
-            if let Some(tx) = self.worker_effect_senders.get(worker_id) {
+        if let Some(worker_id) = preferred_worker_id
+            && let Some(tx) = self.worker_effect_senders.get(worker_id) {
                 if tx.send(effect_id.clone()).await.is_ok() {
                     debug!(?effect_id, %worker_id, routing = "direct", "scheduled effect");
                     return Ok(());
                 }
                 warn!(?effect_id, %worker_id, "direct worker queue send failed; falling back");
             }
-        }
         debug!(?effect_id, routing = "shared", "scheduled effect");
         self.effect_tx.send(effect_id).await?;
         Ok(())

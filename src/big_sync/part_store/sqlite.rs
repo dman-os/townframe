@@ -1,9 +1,11 @@
-use super::policy::ObjAccessPolicy;
 use super::HostPartStore;
+use super::policy::ObjAccessPolicy;
 use crate::interlude::*;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
+#[cfg(test)]
+use big_sync_core::Byte32Id;
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
@@ -12,9 +14,7 @@ use big_sync_core::rpc::{
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest,
 };
-#[cfg(test)]
-use big_sync_core::Byte32Id;
-use big_sync_core::{mpsc, BuckId, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
 #[cfg(test)]
 use future_form::{FutureForm, Sendable};
 #[cfg(test)]
@@ -25,7 +25,7 @@ use sqlx_utils_rs::SqlCtx;
 use uuid::Uuid;
 
 use super::sqlite_core::{
-    encode_access, PendingSubscription, SUB_REPLAYING_CLEAN, SUB_REPLAY_DONE,
+    PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, encode_access,
 };
 
 struct SqliteSubscription {
@@ -231,15 +231,14 @@ impl SqlitePartStore {
                         }
                     }
                 }
-                if !matches!(object_event, SubEvent::ReplayComplete) {
-                    if let Some(subs) = bus.by_obj.get(&obj_id) {
+                if !matches!(object_event, SubEvent::ReplayComplete)
+                    && let Some(subs) = bus.by_obj.get(&obj_id) {
                         for &sub_id in subs {
                             recipients
                                 .entry(sub_id)
                                 .or_insert_with(|| object_event.clone());
                         }
                     }
-                }
                 for (sub_id, event) in recipients {
                     let Some(sub) = bus.subs.get(&sub_id) else {
                         continue;
@@ -1301,8 +1300,8 @@ impl HostPartStore for SqlitePartStore {
                             store
                                 .policy
                                 .is_event_permitted(None, *obj_id, Some(subscriber));
-                        if permitted {
-                            if let Some(payload) = HostPartStore::obj_payload(&store, *obj_id)
+                        if permitted
+                            && let Some(payload) = HostPartStore::obj_payload(&store, *obj_id)
                                 .await
                                 .expect(ERROR_IMPOSSIBLE)
                             {
@@ -1313,7 +1312,6 @@ impl HostPartStore for SqlitePartStore {
                                     },
                                 ));
                             }
-                        }
                     }
                     object_replay_pending = false;
                 }
@@ -1811,7 +1809,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_membership_cache_rehydrates_after_restart() -> Res<()> {
         use keyhive_core::access::Access;
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
 
         let sql = test_sql().await?;
         let scope_key = "big-sync-sqlite-test://membership-restart";

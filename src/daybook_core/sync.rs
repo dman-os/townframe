@@ -5,9 +5,9 @@ use std::str::FromStr;
 use big_repo::BigRepo;
 use big_sync::BackendId;
 use iroh::{
+    EndpointId,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    EndpointId,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -428,11 +428,10 @@ impl IrohSyncRepo {
             // or we're shutting down
             return;
         };
-        if let Some(existing) = reconnect_task.as_ref() {
-            if !existing.is_finished() {
+        if let Some(existing) = reconnect_task.as_ref()
+            && !existing.is_finished() {
                 return;
             }
-        }
         // NOTE: we just drop the old handle since we're using
         // a mutex which we shouldn't hold across await points
         // if let Some(done) = reconnect_task.take() {
@@ -444,11 +443,10 @@ impl IrohSyncRepo {
                 .cancel_token
                 .clone()
                 .run_until_cancelled(async move {
-                    if let Err(err) = repo.connect_known_devices_once().await {
-                        if !repo.cancel_token.is_cancelled() {
+                    if let Err(err) = repo.connect_known_devices_once().await
+                        && !repo.cancel_token.is_cancelled() {
                             warn!(?err, trigger, "known-device reconnect failed");
                         }
-                    }
                 })
                 .await;
         });

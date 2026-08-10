@@ -1,11 +1,11 @@
 //! runtime2 messages. Uses `futures::channel::oneshot` for request/response;
 //! no Tokio types.
 
-use crate::interlude::*;
 use crate::DocumentId;
+use crate::interlude::*;
 use big_sync_core::PeerId;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Response payload for `OpenConn`/`AcceptConn`: the peer id, the shared
 /// connection-closed flag, and a receiver that completes when the connection

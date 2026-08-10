@@ -2,13 +2,13 @@
 
 use crate::interlude::*;
 
+use crate::DocumentId;
 use crate::runtime2::doc_worker::DocWorkerLoop;
 use crate::runtime2::{
-    messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
     DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, Runtime2Config, Runtime2Handle,
     TaskRuntime, TaskSet,
+    messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
 };
-use crate::DocumentId;
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Local, Sendable};
 use std::collections::{HashMap, HashSet};
@@ -272,13 +272,13 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
 }
 
 impl<
-        F: FutureForm
-            + HubCommandFuture<F>
-            + HubBackgroundFuture<F>
-            + HubIoFutures<F, R::Tasks>
-            + DocWorkerLoop<F>,
-        R: TaskRuntime<F>,
-    > Runtime2Hub<F, R>
+    F: FutureForm
+        + HubCommandFuture<F>
+        + HubBackgroundFuture<F>
+        + HubIoFutures<F, R::Tasks>
+        + DocWorkerLoop<F>,
+    R: TaskRuntime<F>,
+> Runtime2Hub<F, R>
 where
     F: 'static,
 {
@@ -347,11 +347,10 @@ where
         doc_id: DocumentId,
         barrier_id: u64,
     ) -> eyre::Result<()> {
-        if let Some(probe) = self.quiescence_probe.as_mut() {
-            if probe.barrier_id == barrier_id {
+        if let Some(probe) = self.quiescence_probe.as_mut()
+            && probe.barrier_id == barrier_id {
                 probe.pending_docs.remove(&doc_id);
             }
-        }
         self.try_resolve_quiescence()
     }
 
@@ -486,32 +485,8 @@ where
             }
             Runtime2Cmd::EnsureCausalCoverage { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                match worker
-                    .msg_tx
-                    .try_send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
-                {
-                    Ok(()) => {}
-                    Err(async_channel::TrySendError::Closed(
-                        DocWorkerMsg::ReconcileCausalCoverage { resp, .. },
-                    )) => {
-                        // The worker can finish between the alive check in
-                        // `doc_worker_handle` and this send. Its stopped event
-                        // will remove the stale entry; a later durable causal
-                        // coverage wakeup will spawn a replacement.
-                        debug!(%doc_id, "causal coverage raced a stopped document worker");
-                        if let Some(resp) = resp {
-                            resp.send(Err(ferr!("document worker stopped before causal coverage")))
-                                .inspect_err(|_| warn!(ERROR_CALLER))
-                                .ok();
-                        }
-                    }
-                    Err(async_channel::TrySendError::Full(_)) => {
-                        unreachable!("document worker mailbox is unbounded")
-                    }
-                    Err(async_channel::TrySendError::Closed(_)) => {
-                        unreachable!("closed send must return the sent causal coverage message")
-                    }
-                }
+                worker
+                    .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease }).wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
                 if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
@@ -520,7 +495,9 @@ where
                         debug!(%doc_id, ?err, "failed sending InspectHeadState to worker");
                     }
                 } else {
-                    let _ = resp.send(Ok(None));
+                    resp.send(Ok(None))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
             }
             Runtime2Cmd::OpenConn { peer, addr, resp } => {
@@ -1356,13 +1333,13 @@ impl<F: FutureForm + HubBackgroundFuture<F> + 'static, R: TaskRuntime<F>> Runtim
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl<
-        F: FutureForm
-            + HubCommandFuture<F>
-            + HubBackgroundFuture<F>
-            + HubIoFutures<F, R::Tasks>
-            + DocWorkerLoop<F>,
-        R: TaskRuntime<F>,
-    > Runtime2Hub<F, R>
+    F: FutureForm
+        + HubCommandFuture<F>
+        + HubBackgroundFuture<F>
+        + HubIoFutures<F, R::Tasks>
+        + DocWorkerLoop<F>,
+    R: TaskRuntime<F>,
+> Runtime2Hub<F, R>
 where
     F: 'static,
 {
@@ -2390,9 +2367,9 @@ pub(crate) trait HubMachineFuture<F: FutureForm + FutureForm, R: TaskRuntime<F>>
 
 #[future_form::future_form(Sendable where R::Tasks: Send, Local)]
 impl<
-        F: FutureForm + HubCommandFuture<F> + HubBackgroundFuture<F> + HubIoFutures<F, R::Tasks>,
-        R: TaskRuntime<F>,
-    > HubMachineFuture<F, R> for F
+    F: FutureForm + HubCommandFuture<F> + HubBackgroundFuture<F> + HubIoFutures<F, R::Tasks>,
+    R: TaskRuntime<F>,
+> HubMachineFuture<F, R> for F
 {
     fn machine_loop(
         mut hub: Runtime2Hub<F, R>,

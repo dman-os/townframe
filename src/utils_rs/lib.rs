@@ -18,7 +18,7 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{default, CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre};
+    pub use crate::{CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre, default};
 
     pub use std::{
         collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -32,9 +32,9 @@ mod interlude {
     pub use crate::hash::UuidExt;
     pub use async_trait::async_trait;
     pub use color_eyre::eyre::{
-        self as eyre, format_err as ferr, OptionExt as EyreOptExt, Result as Res, WrapErr,
+        self as eyre, OptionExt as EyreOptExt, Result as Res, WrapErr, format_err as ferr,
     };
-    pub use indexmap::{indexmap, IndexMap};
+    pub use indexmap::{IndexMap, indexmap};
     pub use jiff::{self, Timestamp};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::json;
@@ -677,7 +677,9 @@ pub fn dotenv_hierarchical() -> Res<Vec<PathBuf>> {
         }
     }
     for (key, val) in found_vars {
-        std::env::set_var(key, val);
+        unsafe {
+            std::env::set_var(key, val);
+        }
     }
 
     Ok(path_bufs)
@@ -832,11 +834,10 @@ impl AbortableJoinSet {
         // every result until `stop()`. A failed task is an invariant break and
         // must surface immediately rather than remain hidden until shutdown.
         while let Some(result) = join_set.try_join_next() {
-            if let Err(err) = result {
-                if !err.is_cancelled() {
+            if let Err(err) = result
+                && !err.is_cancelled() {
                     std::panic::resume_unwind(err.into_panic());
                 }
-            }
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let abort = join_set.spawn(async move {

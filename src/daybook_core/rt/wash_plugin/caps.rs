@@ -5,7 +5,7 @@ use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{capabilities, root_doc, wit_doc, DaybookPlugin};
+use super::{DaybookPlugin, capabilities, root_doc, wit_doc};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
@@ -233,11 +233,10 @@ impl capabilities::HostDocToken for SharedWashCtx {
                 if access.tag.0 != facet_key.tag.to_string() {
                     continue;
                 }
-                if let Some(ref id) = access.key_id {
-                    if *id != facet_key.id {
+                if let Some(ref id) = access.key_id
+                    && *id != facet_key.id {
                         continue;
                     }
-                }
                 rights |= facet_rights_from_access(access);
             }
             if rights == capabilities::FacetRights::empty() {
@@ -291,11 +290,10 @@ impl capabilities::HostDocToken for SharedWashCtx {
             if access.tag.0 != facet_key.tag.to_string() {
                 continue;
             }
-            if let Some(ref id) = access.key_id {
-                if *id != facet_key.id {
+            if let Some(ref id) = access.key_id
+                && *id != facet_key.id {
                     continue;
                 }
-            }
             rights |= facet_rights_from_access(access);
         }
         if rights == capabilities::FacetRights::empty() {

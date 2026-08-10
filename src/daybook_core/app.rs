@@ -139,7 +139,7 @@ impl AppCtx {
 pub mod version_updates {
     use crate::interlude::*;
 
-    use automerge::{transaction::Transactable, ROOT};
+    use automerge::{ROOT, transaction::Transactable};
     use autosurgeon::reconcile_prop;
 
     use crate::config::ConfigStore;

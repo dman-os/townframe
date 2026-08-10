@@ -2,13 +2,13 @@ use crate::interlude::*;
 
 use crate::part_store::HostPartStore;
 
+use big_sync_core::PeerId;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
     SubPartsRequest,
 };
-use big_sync_core::PeerId;
-use irpc::{channel, rpc_requests, WithChannels};
+use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
 
 pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
@@ -419,8 +419,8 @@ impl BigSyncRpcWorker {
 mod tests {
     use super::*;
 
-    use crate::part_store::memory::MemoryPartStore;
     use crate::part_store::HostPartStore;
+    use crate::part_store::memory::MemoryPartStore;
     use big_sync_core::rpc::SubEvent;
     use big_sync_core::{BuckId, Byte32Id, FingerprintSeed, ObjId, PartId};
     use iroh::protocol::Router;

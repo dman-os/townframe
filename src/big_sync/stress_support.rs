@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tracing::{info, warn};

@@ -12,7 +12,7 @@ use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
-use wflow_core::gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
+use wflow_core::r#gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
 use wflow_core::metastore::MetdataStore;
 use wflow_core::partition::{effects, job_events, state};
 use wflow_tokio::partition::service;
@@ -833,13 +833,12 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             let old = self
                 .active_keys
                 .insert(Arc::clone(key), Arc::clone(&workload_id));
-            if let Some(old_workload_id) = old {
-                if old_workload_id != workload_id {
+            if let Some(old_workload_id) = old
+                && old_workload_id != workload_id {
                     anyhow::bail!(
                         "wflow key '{key}' already mapped to workload '{old_workload_id}', cannot remap to '{workload_id}'"
                     );
                 }
-            }
         }
         let wflow = WflowWorkload {
             wflow_keys,

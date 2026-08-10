@@ -773,15 +773,14 @@ impl BigSyncMachine {
                 Some(PeerPartState {
                     strat: PeerPartStrategy::Pending(_)
                 })
-            ) {
-                if let Some(PeerPartState {
+            )
+                && let Some(PeerPartState {
                     strat: PeerPartStrategy::Pending(task_id),
                 }) = peer_state.parts.remove(&part_id)
                 {
                     pending_parts.insert(part_id);
                     pending_tasks.insert(task_id);
                 }
-            }
         }
         for task_id in pending_tasks {
             let _state = self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
@@ -1130,16 +1129,14 @@ impl BigSyncMachine {
 // cursor support
 impl BigSyncMachine {
     fn refresh_peer_replay_worker(&mut self, peer_id: PeerId, force: bool) {
-        if force {
-            if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-                if let Some(old_state) = peer_state.replay_worker.take() {
+        if force
+            && let Some(peer_state) = self.peers.get_mut(&peer_id)
+                && let Some(old_state) = peer_state.replay_worker.take() {
                     let _state = self
                         .tasks
                         .stop_task(old_state.task_id)
                         .expect(ERROR_UNRECONIZED);
                 }
-            }
-        }
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return;
         };
@@ -1173,11 +1170,10 @@ impl BigSyncMachine {
                 .copied()
                 .map(|obj_id| SubscriptionTarget::Object { obj_id }),
         );
-        if let Some(worker) = peer_state.replay_worker.as_ref() {
-            if !force && replay_req_parts == worker.parts && replay_req_objects == worker.objects {
+        if let Some(worker) = peer_state.replay_worker.as_ref()
+            && !force && replay_req_parts == worker.parts && replay_req_objects == worker.objects {
                 return;
             }
-        }
         if let Some(old_state) = peer_state.replay_worker.take() {
             let _state = self
                 .tasks

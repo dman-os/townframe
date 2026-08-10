@@ -245,6 +245,7 @@ pub async fn wait_for_network_rest(
     nodes: &[&super::topo::Node],
     timeout: std::time::Duration,
 ) -> Res<()> {
+    let timeout = utils_rs::scale_timeout(timeout);
     let prepared = tokio::time::timeout(timeout, async {
         for node in nodes {
             loop {

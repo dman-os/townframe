@@ -1,7 +1,7 @@
 use color_eyre::eyre::{Result as Res, WrapErr};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::ConnectOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
 
 #[derive(Clone, Debug)]

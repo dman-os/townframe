@@ -2,8 +2,8 @@ use daybook_types::doc::{BranchPath, BranchPathBuf};
 
 use super::*;
 
-async fn boot_connected_sync_pair(
-) -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
+async fn boot_connected_sync_pair()
+-> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
     info!("XXX boot_connected_sync_pair");
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
@@ -229,13 +229,12 @@ async fn wait_for_synced_doc_on_both_sides(
                 .drawer
                 .get_doc_bundle_at_branch(doc_id, branch, None)
                 .await?;
-            if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc) {
-                if left_doc.doc.id == right_doc.doc.id
+            if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc)
+                && left_doc.doc.id == right_doc.doc.id
                     && left_doc.doc.facets == right_doc.doc.facets
                 {
                     return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
                 }
-            }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     })

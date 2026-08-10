@@ -199,8 +199,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 }
             }
 
-            use comfy_table::presets::NOTHING;
             use comfy_table::Table;
+            use comfy_table::presets::NOTHING;
             use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
             let mut table = Table::new();
@@ -350,8 +350,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let sync_repo = lazy::sync_repo().await?;
             let local_ticket_url = sync_repo.get_clone_ticket_url().await?;
             {
-                use qrcode::render::unicode;
                 use qrcode::QrCode;
+                use qrcode::render::unicode;
                 let code = QrCode::new(&local_ticket_url[..]).unwrap();
                 let image = code
                     .render::<unicode::Dense1x2>()
@@ -473,8 +473,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let config_repo = lazy::config_repo().await?;
             match command {
                 DevicesCommands::Ls => {
-                    use comfy_table::presets::NOTHING;
                     use comfy_table::Table;
+                    use comfy_table::presets::NOTHING;
 
                     let mut devices = config_repo.list_known_sync_devices().await?;
                     devices.sort_by_key(|device| device.added_at);

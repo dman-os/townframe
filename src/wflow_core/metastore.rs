@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-pub use crate::gen::metastore::*;
+pub use crate::r#gen::metastore::*;
 
 // Contains information about what wflows exist
 #[async_trait]

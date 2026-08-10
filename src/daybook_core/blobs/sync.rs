@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::blobs::{blob_hash_from_id, blob_id_to_iroh_hash, BlobId, BlobUseHints, BlobsRepo};
+use crate::blobs::{BlobId, BlobUseHints, BlobsRepo, blob_hash_from_id, blob_id_to_iroh_hash};
 use big_repo::SharedPartStore;
 
 use big_sync::{SyncBackend, SyncTaskRunOutcome};
@@ -162,11 +162,11 @@ mod tests {
     use super::*;
 
     use crate::blobs::NoopPartitionMembershipWriter;
+    use big_sync::HostPartStore;
+    use big_sync::MemoryPartStore;
     use big_sync::backend::contract::{
         self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
     };
-    use big_sync::HostPartStore;
-    use big_sync::MemoryPartStore;
     use tempfile::tempdir;
 
     fn test_part() -> PartId {

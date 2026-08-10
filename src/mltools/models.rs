@@ -3,12 +3,12 @@ use crate::{
     LlmBackendConfig, LlmConfig, OcrBackendConfig, OcrConfig,
 };
 use fs4::fs_std::FileExt;
-use hf_hub::{api::tokio::ApiBuilder, Cache, Repo};
+use hf_hub::{Cache, Repo, api::tokio::ApiBuilder};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use utils_rs::downloader::Downloader;
 use utils_rs::prelude::*;
@@ -250,15 +250,14 @@ async fn hf_download_with_progress(
         .download_with_progress(file, progress)
         .await
         .wrap_err_with(|| format!("error downloading {file} from {model_id}"));
-    if let Err(err) = &result {
-        if let Some(observer) = observer {
+    if let Err(err) = &result
+        && let Some(observer) = observer {
             observer.emit(MobileDefaultEvent::DownloadFailed {
                 source: "hf-hub".to_string(),
                 file: file.to_string(),
                 message: format!("{err:?}"),
             });
         }
-    }
     result
 }
 
@@ -420,15 +419,14 @@ pub async fn mobile_default_with_observer(
 
     // In tests, prefer Gemini chat first when available so cloud chat smoke tests can bypass
     // gateway/proxy issues affecting Ollama routes.
-    if cfg!(any(test, feature = "tests")) && gemini_api_key.is_some() {
-        if let Some(gemini_llm_ix) = llm_backends
+    if cfg!(any(test, feature = "tests")) && gemini_api_key.is_some()
+        && let Some(gemini_llm_ix) = llm_backends
             .iter()
             .position(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))
         {
             let gemini_backend = llm_backends.remove(gemini_llm_ix);
             llm_backends.insert(0, gemini_backend);
         }
-    }
 
     Ok(Config {
         ocr: OcrConfig {

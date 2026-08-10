@@ -72,11 +72,9 @@ async fn test_effect_chain_latency_smoke_baseline() -> Res<()> {
                         partition_runjob_effect_count += 1;
                         if let wflow_core::partition::effects::PartitionEffectDeets::RunJob(run) =
                             &effect.deets
-                        {
-                            if run.preferred_worker_id.is_some() {
+                            && run.preferred_worker_id.is_some() {
                                 runjob_preferred_worker_hint_count += 1;
                             }
-                        }
                     }
                 }
             }
@@ -196,11 +194,9 @@ async fn test_effect_chain_multi_job_latency_baseline() -> Res<()> {
                         partition_runjob_effect_count += 1;
                         if let wflow_core::partition::effects::PartitionEffectDeets::RunJob(run) =
                             &effect.deets
-                        {
-                            if run.preferred_worker_id.is_some() {
+                            && run.preferred_worker_id.is_some() {
                                 runjob_preferred_worker_hint_count += 1;
                             }
-                        }
                     }
                 }
             }

@@ -1,9 +1,9 @@
 //! Leases for runtime2. Lease drops enqueue release commands directly; worker
 //! operation leases use oneshots because their owner is an in-flight future.
 
+use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::messages::DocWorkerMsg;
-use crate::DocumentId;
 
 /// RAII lease held by a `BigDocHandle` (the public doc handle).
 ///

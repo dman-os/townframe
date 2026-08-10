@@ -23,8 +23,8 @@
 //! | `triangle_replication`       | A↔B, B↔C, C↔A      | 3               |
 //! | `partition_then_heal`        | A↔B, partition, heal | 2               |
 
-use super::harness::{fixtures, keyhive as kh_snap, topo::ShutdownGuard, Node, Topo};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use super::harness::{Node, Topo, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 // ─── Read helpers ───────────────────────────────────────────────────────────
 

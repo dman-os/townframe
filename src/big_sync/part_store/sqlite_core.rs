@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
-use big_sync_core::rpc::{BucketSummary, BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED};
+use big_sync_core::rpc::{BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary};
 use big_sync_core::{BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
 
 use sqlx::{QueryBuilder, Row};

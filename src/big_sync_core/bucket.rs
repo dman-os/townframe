@@ -4,12 +4,12 @@
 /// - Use batched Leafing to minimize RPC
 use crate::interlude::*;
 
+use crate::SyncJobEvt;
 use crate::fingerprint::{Fingerprint, FingerprintSeed};
 use crate::part_store::{CursorIndex, ObjPayload, PartStoreReadOnly};
 use crate::rpc::{
     BuckLevel, BucketSummary, LeafBucketPage as RawLeafBucketPage, LeafBucketRequest,
 };
-use crate::SyncJobEvt;
 
 use std::collections::BTreeMap;
 

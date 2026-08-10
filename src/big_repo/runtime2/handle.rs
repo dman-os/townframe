@@ -8,12 +8,12 @@
 //! [`Runtime2Cmd`]: super::Runtime2Cmd
 //! [`Timer`]: super::Timer
 
+use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::{
-    messages::{fresh_waiter_id, Runtime2Cmd},
     Timer,
+    messages::{Runtime2Cmd, fresh_waiter_id},
 };
-use crate::DocumentId;
 use big_sync_core::PeerId;
 use future_form::FutureForm;
 use std::sync::Arc;
@@ -457,7 +457,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::WaitForQuiescence { freeze, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let result = if let Some(duration) = timeout {
+        
+        if let Some(duration) = timeout {
             match self.race_timeout(rx, duration).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
@@ -466,8 +467,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         } else {
             rx.await
                 .map_err(|_| eyre::eyre!("caller dropped before response"))?
-        };
-        result
+        }
     }
 
     /// Resume event/command processing after a frozen quiescence wait.
@@ -539,7 +539,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx: futures::channel::oneshot::Receiver<T>,
         duration: std::time::Duration,
     ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
-        use futures::future::{select, Either};
+        use futures::future::{Either, select};
         let sleep = Box::pin(self.timer.sleep(duration));
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),

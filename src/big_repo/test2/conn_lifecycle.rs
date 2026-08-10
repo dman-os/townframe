@@ -26,9 +26,9 @@
 //! `sync_doc_with_peer`) so the runs are deterministic; the harness `Pair`
 //! drives transport connect/accept.
 
-use super::harness::{fixtures, heads, Pair};
+use super::harness::{Pair, fixtures, heads};
 use crate::{BigRepoConnection, Res};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;

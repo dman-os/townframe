@@ -533,8 +533,8 @@ impl CameraPreviewFfi {
                         listener_guard.as_ref().map(std::sync::Arc::clone)
                     };
 
-                    if let Some(listener_for_qr) = listener_for_qr {
-                        if let Err(error) = publish_qr_for_frame(
+                    if let Some(listener_for_qr) = listener_for_qr
+                        && let Err(error) = publish_qr_for_frame(
                             &listener_for_qr,
                             &frame.encoding,
                             frame.width_px,
@@ -544,7 +544,6 @@ impl CameraPreviewFfi {
                             listener_for_qr
                                 .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
                         }
-                    }
                 },
             )
             .map_err(|error| FfiError::from(eyre::eyre!("failed creating stream: {error}")))?;

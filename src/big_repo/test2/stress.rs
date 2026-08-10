@@ -8,8 +8,8 @@ use super::harness::topo::Node;
 use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use big_sync::{
-    stress_support::{self, StressFixture},
     HostPartStore,
+    stress_support::{self, StressFixture},
 };
 use big_sync_core::{ObjId, PartId};
 use futures::future::try_join_all;
@@ -874,7 +874,7 @@ impl StressFixture for BigRepoStressFixture {
 mod tests {
     use super::*;
     use big_sync::stress_support::{
-        run_randomized_stress, PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS,
+        PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS, run_randomized_stress,
     };
     fn settle_timeout() -> Duration {
         utils_rs::scale_timeout(Duration::from_secs(300))

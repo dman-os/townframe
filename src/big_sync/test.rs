@@ -1,4 +1,4 @@
-use crate::{interlude::*, SyncBackend};
+use crate::{SyncBackend, interlude::*};
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -13,12 +13,12 @@ use big_sync_core::{
     BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId, SyncStatEvent, SyncTaskCompletion,
 };
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
-use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::HostPartStore;
+use crate::part_store::memory::MemoryPartStore;
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot};
 use crate::{Ctx, SyncTaskRunOutcome};
 
@@ -974,9 +974,11 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
         SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
             if *synced_part_id == part_id
     )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
+    );
     let (snapshot_a, snapshot_b) = assert_same_observed_state(&node_a, &node_b).await?;
     assert_eq!(snapshot_a.objs.len(), 1);
     assert_eq!(
@@ -1547,9 +1549,11 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
             if *synced_part_id == part_id
     )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
+    );
 
     node_a.stop().await?;
     node_b.stop().await?;
@@ -1695,9 +1699,11 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
     let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. }))
+    );
 
     let (snapshot_a, snapshot_b, snapshot_c) = (
         node_a.snapshot().await?,

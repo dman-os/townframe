@@ -33,7 +33,7 @@ pub struct Config {}
 
 // mod bindings;
 mod doc;
-mod gen;
+mod r#gen;
 
 fn init() -> Res<()> {
     // CX.set(Arc::new(Context {
@@ -84,18 +84,18 @@ mod wit {
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
             "townframe:daybook-api/ctx": generate,
-            "townframe:daybook-types/doc": daybook_types::gen::wit::doc,
+            "townframe:daybook-types/doc": daybook_types::r#gen::wit::doc,
             "townframe:daybook-types/doc/doc": daybook_types::wit::Doc,
             "townframe:daybook-types/doc/doc-content-kind": generate,
-            "townframe:daybook-types/doc/doc-prop": daybook_types::gen::wit::doc::DocProp,
-            "townframe:daybook-types/doc/doc-blob": daybook_types::gen::wit::doc::DocBlob,
-            "townframe:daybook-types/doc/doc-content": daybook_types::gen::wit::doc::DocContent,
-            "townframe:daybook-types/doc/image-meta": daybook_types::gen::wit::doc::ImageMeta,
+            "townframe:daybook-types/doc/doc-prop": daybook_types::r#gen::wit::doc::DocProp,
+            "townframe:daybook-types/doc/doc-blob": daybook_types::r#gen::wit::doc::DocBlob,
+            "townframe:daybook-types/doc/doc-content": daybook_types::r#gen::wit::doc::DocContent,
+            "townframe:daybook-types/doc/image-meta": daybook_types::r#gen::wit::doc::ImageMeta,
 
-            "townframe:daybook-api/doc-create/input": crate::gen::doc::doc_create::Input,
-            "townframe:daybook-api/doc-create/error-id-occupied": crate::gen::doc::doc_create::ErrorIdOccupied,
+            "townframe:daybook-api/doc-create/input": crate::r#gen::doc::doc_create::Input,
+            "townframe:daybook-api/doc-create/error-id-occupied": crate::r#gen::doc::doc_create::ErrorIdOccupied,
             "townframe:daybook-api/doc-create": generate,
-            "townframe:daybook-api/doc-create/error": crate::gen::doc::doc_create::Error,
+            "townframe:daybook-api/doc-create/error": crate::r#gen::doc::doc_create::Error,
         }
     });
 }

@@ -33,7 +33,7 @@ mod handle;
 mod hub;
 
 pub use handle::Runtime2Handle;
-pub use hub::{spawn_runtime2, Runtime2StopToken};
+pub use hub::{Runtime2StopToken, spawn_runtime2};
 
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the

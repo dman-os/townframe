@@ -2,7 +2,7 @@ use super::*;
 
 use crate::encrypted_blob::decode_encrypted_blob;
 use am_utils_rs::codecs::ThroughJson;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use autosurgeon::Prop;
 use big_sync::backend::contract::{
     self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
@@ -665,12 +665,16 @@ async fn concurrent_bidirectional_keyhive_sync_is_safe() -> Res<()> {
     );
     owner_sync?;
     client_sync?;
-    assert!(get_keyhive_agent(&owner.repo, client.peer_id())
-        .await?
-        .is_some());
-    assert!(get_keyhive_agent(&client.repo, owner.peer_id())
-        .await?
-        .is_some());
+    assert!(
+        get_keyhive_agent(&owner.repo, client.peer_id())
+            .await?
+            .is_some()
+    );
+    assert!(
+        get_keyhive_agent(&client.repo, owner.peer_id())
+            .await?
+            .is_some()
+    );
     drop(owner_conn);
     drop(client_conn);
     owner.shutdown().await?;
@@ -678,8 +682,8 @@ async fn concurrent_bidirectional_keyhive_sync_is_safe() -> Res<()> {
     Ok(())
 }
 #[tokio::test]
-async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_without_reboot(
-) -> Res<()> {
+async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_without_reboot()
+-> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
@@ -2418,12 +2422,16 @@ async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
         })
         .await?;
 
-    assert!(timeout(Duration::from_millis(250), change_rx.recv())
-        .await
-        .is_err());
-    assert!(timeout(Duration::from_millis(250), head_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(250), change_rx.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(250), head_rx.recv())
+            .await
+            .is_err()
+    );
     Ok(())
 }
 

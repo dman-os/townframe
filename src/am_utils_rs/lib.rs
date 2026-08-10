@@ -35,8 +35,8 @@ pub fn serialize_commit_heads(heads: &[ChangeHash]) -> Vec<String> {
 
 #[test]
 fn play() -> Res<()> {
-    use automerge::transaction::Transactable;
     use automerge::ReadDoc;
+    use automerge::transaction::Transactable;
 
     let mut doc = automerge::AutoCommit::new();
     let map = doc.put_object(automerge::ROOT, "map", automerge::ObjType::Map)?;

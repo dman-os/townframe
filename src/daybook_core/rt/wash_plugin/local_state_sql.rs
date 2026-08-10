@@ -5,7 +5,7 @@ use sqlx_utils_rs::SqlCtx;
 use std::ops::DerefMut;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{binds_guest, sqlite_connection, DaybookPlugin};
+use super::{DaybookPlugin, binds_guest, sqlite_connection};
 
 pub struct SqliteConnectionToken {
     pub local_state_id: String,

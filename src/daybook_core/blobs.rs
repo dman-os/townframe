@@ -555,11 +555,10 @@ impl BlobsRepo {
         let hash = blob_hash_from_id(blob_id);
         let object_paths = self.object_paths(blob_id)?;
         if let Some(meta) = self.read_meta(&object_paths.meta).await? {
-            if let Some(mime) = meta.mime.as_deref() {
-                if let Some(ext) = Self::extension_from_mime(mime) {
+            if let Some(mime) = meta.mime.as_deref()
+                && let Some(ext) = Self::extension_from_mime(mime) {
                     return Ok(ext.to_string());
                 }
-            }
             if let Some(source_ext) = meta
                 .source_paths
                 .iter()

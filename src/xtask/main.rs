@@ -7,7 +7,7 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
-mod gen;
+mod r#gen;
 mod keyhive_demo;
 
 use clap::builder::styling::AnsiColor;
@@ -33,7 +33,7 @@ async fn main_main() -> Res<()> {
     let args = Args::parse();
     match args.command {
         Commands::Gen {} => {
-            gen::cli()?;
+            r#gen::cli()?;
         }
         Commands::KeyhiveDemo {} => {
             keyhive_demo::cli().await?;

@@ -287,10 +287,10 @@ impl DrawerRepo {
             return Ok(None);
         };
 
-        let out = self
+        
+        self
             .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
-            .await;
-        out
+            .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
@@ -539,11 +539,10 @@ impl DrawerRepo {
                 )]),
             )
             .await?
-        {
-            if let Some(raw) = doc.facets.get(&FacetKey::from(
+            && let Some(raw) = doc.facets.get(&FacetKey::from(
                 daybook_types::doc::WellKnownFacetTag::Dmeta,
-            )) {
-                if let Ok(WellKnownFacet::Dmeta(dmeta)) =
+            ))
+                && let Ok(WellKnownFacet::Dmeta(dmeta)) =
                     serde_json::from_value::<WellKnownFacet>(raw.clone())
                 {
                     let local_segments: Vec<&str> = local_user_path
@@ -567,8 +566,6 @@ impl DrawerRepo {
                         }
                     }
                 }
-            }
-        }
         let mut out = HashSet::new();
         for key in facet_keys {
             let local_actor_ids = local_actor_ids.clone();
@@ -578,11 +575,10 @@ impl DrawerRepo {
             let is_local = handle
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
-                        if let Some(change) = am_doc.get_change_by_hash(head) {
-                            if local_actor_ids.contains(change.actor_id()) {
+                        if let Some(change) = am_doc.get_change_by_hash(head)
+                            && local_actor_ids.contains(change.actor_id()) {
                                 return true;
                             }
-                        }
                     }
                     false
                 })

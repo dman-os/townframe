@@ -1,9 +1,9 @@
 use crate::interlude::*;
 use crate::part_store::HostPartStore;
 
-use big_sync_core::part_store::CursorIndex;
 #[cfg(test)]
 use big_sync_core::ObjId;
+use big_sync_core::part_store::CursorIndex;
 use big_sync_core::{PartId, PeerId};
 
 use std::collections::BTreeMap;

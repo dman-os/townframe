@@ -329,6 +329,7 @@ mod local_state_sql;
 mod mltools;
 mod stateless_view_host;
 
+pub(crate) use binds_guest::AllGuestPre;
 pub(crate) use binds_guest::exports::townframe::daybook::stateless_view;
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
@@ -339,7 +340,6 @@ pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::daybook::sqlite_connection;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
-pub(crate) use binds_guest::AllGuestPre;
 pub(crate) use stateless_view_host::StatelessViewPlugin;
 
 use daybook_types::doc::ChangeHashSet;
@@ -693,11 +693,10 @@ pub(crate) async fn build_doc_facet_tokens(
             if access.tag.0 != facet_key.tag.to_string() {
                 continue;
             }
-            if let Some(id) = &access.key_id {
-                if id != &facet_key.id {
+            if let Some(id) = &access.key_id
+                && id != &facet_key.id {
                     continue;
                 }
-            }
             rights |= caps::facet_rights_from_access(access);
         }
         if rights == capabilities::FacetRights::empty() {
@@ -803,12 +802,11 @@ impl facet_routine::Host for SharedWashCtx {
             for config_doc_meta in config_docs {
                 let owner_plug_id =
                     config_doc_owner_plug_id(&config_doc_meta.facet_acl, plug_id.as_str())?;
-                let (config_doc_id, config_heads) = if let Some(found) =
-                    owner_config_docs.get(&owner_plug_id)
-                {
-                    found.clone()
-                } else {
-                    let config_doc_id = dayook_plugin
+                let (config_doc_id, config_heads) =
+                    if let Some(found) = owner_config_docs.get(&owner_plug_id) {
+                        found.clone()
+                    } else {
+                        let config_doc_id = dayook_plugin
                         .plugs_repo
                         .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
                         .await
@@ -817,25 +815,25 @@ impl facet_routine::Host for SharedWashCtx {
                             "error getting/initializing config doc for plug {owner_plug_id}: {err}"
                         ))
                         })?;
-                    let config_heads = dayook_plugin
-                        .drawer_repo
-                        .get_doc_branches(&config_doc_id)
-                        .await
-                        .map_err(|err| {
-                            wasmtime_err(format!("error getting config doc branches: {err}"))
-                        })?
-                        .and_then(|doc| doc.branches.get("main").cloned())
-                        .ok_or_else(|| {
-                            wasmtime_err(format!(
-                                "config doc missing main branch for plug {owner_plug_id}"
-                            ))
-                        })?;
-                    owner_config_docs.insert(
-                        owner_plug_id.clone(),
-                        (config_doc_id.clone(), config_heads.clone()),
-                    );
-                    (config_doc_id, config_heads)
-                };
+                        let config_heads = dayook_plugin
+                            .drawer_repo
+                            .get_doc_branches(&config_doc_id)
+                            .await
+                            .map_err(|err| {
+                                wasmtime_err(format!("error getting config doc branches: {err}"))
+                            })?
+                            .and_then(|doc| doc.branches.get("main").cloned())
+                            .ok_or_else(|| {
+                                wasmtime_err(format!(
+                                    "config doc missing main branch for plug {owner_plug_id}"
+                                ))
+                            })?;
+                        owner_config_docs.insert(
+                            owner_plug_id.clone(),
+                            (config_doc_id.clone(), config_heads.clone()),
+                        );
+                        (config_doc_id, config_heads)
+                    };
                 let config_doc_tokens_meta = dispatch::DocFacetTokens {
                     doc_id: config_doc_id,
                     branch_path: daybook_types::doc::BranchPathBuf::from("main"),

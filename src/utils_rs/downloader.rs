@@ -1,6 +1,6 @@
 use crate::interlude::*;
 use futures::TryStreamExt;
-use reqwest::header::{HeaderValue, CONTENT_LENGTH, RANGE};
+use reqwest::header::{CONTENT_LENGTH, HeaderValue, RANGE};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone)]

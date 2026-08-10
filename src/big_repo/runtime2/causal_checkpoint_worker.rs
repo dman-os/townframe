@@ -88,6 +88,8 @@ impl CausalCheckpointWorker {
             }
 
             announced_idle = false;
+            // FIXME: do ensure in parallel for all evts
+            // and advance to the last cursor
             for row in &events {
                 if self.runtime.is_stopped() {
                     return Ok(());
@@ -96,7 +98,7 @@ impl CausalCheckpointWorker {
                     bincode::deserialize(&row.bytes).expect("persisted Keyhive event must decode");
                 if let StaticEvent::CgkaOperation(operation) = event {
                     let doc_id = crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
-                    let _ = self.runtime.ensure_causal_coverage(doc_id).await;
+                    self.runtime.ensure_causal_coverage(doc_id).await?;
                 }
                 self.store.advance_causal_checkpoint_cursor(row.seq).await?;
             }

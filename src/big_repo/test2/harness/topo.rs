@@ -17,12 +17,12 @@ use crate::{
     BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
     StorageConfig,
 };
-use big_sync::{stress_support, HostPartStore};
+use big_sync::{HostPartStore, stress_support};
 use sqlx_utils_rs::SqlCtx;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
 ///

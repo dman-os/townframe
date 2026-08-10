@@ -768,7 +768,7 @@ mod tests {
 pub mod version_updates {
     use crate::interlude::*;
 
-    use automerge::{transaction::Transactable, ROOT};
+    use automerge::{ROOT, transaction::Transactable};
     use autosurgeon::reconcile_prop;
 
     pub fn version_latest() -> Res<Vec<u8>> {

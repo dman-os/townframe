@@ -21,7 +21,7 @@ use crate::interlude::*;
 
 use std::path::PathBuf;
 use wash_runtime::*;
-use wflow_core::{gen::types::PartitionId, kvstore::KvStore};
+use wflow_core::{r#gen::types::PartitionId, kvstore::KvStore};
 
 // pub struct Config {}
 
@@ -44,7 +44,7 @@ impl Ctx {
         let metastore = Arc::new(
             wflow_core::kvstore::metastore::KvStoreMetadtaStore::new(
                 metastore_kv as Arc<dyn KvStore + Send + Sync>,
-                wflow_core::gen::metastore::PartitionsMeta {
+                wflow_core::r#gen::metastore::PartitionsMeta {
                     version: "0".into(),
                     partition_count: 1,
                 },

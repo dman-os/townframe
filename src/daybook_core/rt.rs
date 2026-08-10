@@ -19,12 +19,12 @@ use wash_runtime::{
 };
 use wflow::{
     wflow_core::partition::{
+        RetryPolicy,
         job_events::{JobError, JobRunResult},
         log::PartitionLogEntry,
-        RetryPolicy,
     },
     wflow_tokio::partition::{
-        state::PartitionWorkingState, PartitionLogRef, TokioPartitionWorkerHandle,
+        PartitionLogRef, TokioPartitionWorkerHandle, state::PartitionWorkingState,
     },
 };
 
@@ -35,8 +35,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
-    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
+    FacetRoutineArgs, facet_routine_args_fingerprint,
 };
 use init::InitRepo;
 use wash_plugin::stateless_view;
@@ -918,15 +918,14 @@ impl Rt {
                 break;
             };
             let (idx, entry) = entry?;
-            if let Some(entry) = entry {
-                if let Err(err) = self.handle_wflow_entry(idx, entry).await {
+            if let Some(entry) = entry
+                && let Err(err) = self.handle_wflow_entry(idx, entry).await {
                     if self.cancel_token.is_cancelled() {
                         debug!(error = %err, "ignoring wflow entry error during shutdown");
                         break;
                     }
                     return Err(err);
-                }
-            };
+                };
             if let Err(err) = self
                 .dispatch_repo
                 .set_wflow_part_frontier(self.local_wflow_part_id.clone(), idx)
@@ -2162,9 +2161,9 @@ impl Rt {
                 entry_id,
                 ..
             } = &active_dispatch.deets;
-            if entry_id.is_some() {
-                if let Some(wflow_job_id) = wflow_job_id.as_ref() {
-                    if let Err(cancel_err) = self
+            if entry_id.is_some()
+                && let Some(wflow_job_id) = wflow_job_id.as_ref()
+                    && let Err(cancel_err) = self
                         .wflow_ingress
                         .cancel_job(
                             Arc::from(wflow_job_id.as_ref()),
@@ -2181,8 +2180,6 @@ impl Rt {
                             "failed to rollback queued wflow job after dispatch add failure"
                         );
                     }
-                }
-            }
             return Err(add_err);
         }
 
@@ -2819,8 +2816,8 @@ mod tests {
     use super::*;
     use big_sync::HostPartStore;
 
-    async fn make_partition_store(
-    ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    async fn make_partition_store()
+    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store = big_sync::SqlitePartStore::new(

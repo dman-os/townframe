@@ -1,14 +1,14 @@
 use crate::interlude::*;
 
 use crate::{
-    bucket::{calc_working_level, BucketMachine},
+    SyncMode,
+    bucket::{BucketMachine, calc_working_level},
     part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
         PartStratSummary, PeerSummaryRequest, RpcError,
     },
     tasks::{TaskCtx, TaskResultDeets},
-    SyncMode,
 };
 
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use super::{IrohSyncRepo, CLONE_PROVISION_ALPN, IROH_CLONE_URL_SCHEME};
+use super::{CLONE_PROVISION_ALPN, IROH_CLONE_URL_SCHEME, IrohSyncRepo};
 
 use std::str::FromStr;
 

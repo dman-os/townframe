@@ -5,7 +5,7 @@ use big_sync_core::rpc::{
     BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
 };
-use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Byte32Id, ObjId, PartId, PeerId, mpsc};
 
 pub mod memory;
 pub mod policy;
@@ -168,8 +168,8 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
 pub mod contract {
     use super::*;
     use big_sync_core::rpc::{
-        BucketSummary, GetChangedBucketsRequest, LeafBucketRequest, LeafBucketsRequest,
-        BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED,
+        BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary, GetChangedBucketsRequest,
+        LeafBucketRequest, LeafBucketsRequest,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use std::collections::BTreeSet;
@@ -378,10 +378,11 @@ pub mod contract {
             assert_eq!(result.bucks.len(), 1);
 
             let page = result.bucks.get(&BuckId::ROOT).expect(ERROR_IMPOSSIBLE);
-            assert!(page
-                .entries
-                .windows(2)
-                .all(|pair| pair[0].obj_id < pair[1].obj_id));
+            assert!(
+                page.entries
+                    .windows(2)
+                    .all(|pair| pair[0].obj_id < pair[1].obj_id)
+            );
             assert!(page.entries.len() <= limit_hint as usize);
 
             if page.entries.is_empty() {
@@ -452,12 +453,12 @@ pub mod contract {
 pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{
-        BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest, LeafBucketsRequest,
-        ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest, BUCKET_LIVE_FP_SEED,
+        BUCKET_LIVE_FP_SEED, BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest,
+        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use keyhive_core::access::Access;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[async_trait]
     pub trait HostPartStoreContractHarness {
@@ -676,9 +677,11 @@ pub mod host_contract {
             .collect::<Vec<_>>();
         assert_eq!(changed.len(), 3);
         assert!(changed.windows(2).all(|pair| pair[0].id < pair[1].id));
-        assert!(changed
-            .iter()
-            .all(|buck| buck.id.level() == bucket_a.level()));
+        assert!(
+            changed
+                .iter()
+                .all(|buck| buck.id.level() == bucket_a.level())
+        );
         for buck in &changed {
             assert_eq!(store.get_bucket_summary(part, buck.id).await?, *buck);
         }
@@ -1205,7 +1208,11 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
-            [SubEvent::Added(added), SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
+            [
+                SubEvent::Added(added),
+                SubEvent::Changed(changed),
+                SubEvent::ReplayComplete,
+            ] => {
                 assert_eq!(added.part_id, part_b);
                 assert_eq!(added.obj_id, obj);
                 assert_eq!(added.payload, payload("sub-1", 1));

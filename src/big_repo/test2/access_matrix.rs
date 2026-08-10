@@ -18,8 +18,8 @@
 //! | grant_after_content_admin     | after content   | Admin   | yes                 |
 //! | no_grant_blocks_materialize   | N/A             | None    | no (Missing/…ation) |
 
-use super::harness::{fixtures, heads, Pair};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use super::harness::{Pair, fixtures, heads};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 
 // ─── Grant-before-content ────────────────────────────────────────────────────

@@ -7,10 +7,10 @@ use big_sync_core::rpc::{
     LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary, SubEvent,
     SubPartsRequest,
 };
-use big_sync_core::{mpsc, BuckId, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
 
 use super::policy::ObjAccessPolicy;
-use super::{obj_id_bounds_for_bucket, HostPartStore};
+use super::{HostPartStore, obj_id_bounds_for_bucket};
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
@@ -271,15 +271,14 @@ impl MemoryPartStoreScopeState {
                     }
                 }
             }
-            if let Some(object_evt) = object_evt {
-                if let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
+            if let Some(object_evt) = object_evt
+                && let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
                     for &sub_id in subs {
                         recipients
                             .entry(sub_id)
                             .or_insert_with(|| object_evt.clone());
                     }
                 }
-            }
             for (sub_id, sub_evt) in recipients {
                 let Some(mut sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
@@ -597,8 +596,8 @@ impl HostPartStore for MemoryPartStore {
                     let permitted = self
                         .policy
                         .is_event_permitted(None, obj_id, Some(principal));
-                    if let Some(state) = pending {
-                        if !state.mark_dirty() {
+                    if let Some(state) = pending
+                        && !state.mark_dirty() {
                             guard.bus.subs.insert(
                                 sub_id,
                                 MemorySubscription::Pending {
@@ -609,7 +608,6 @@ impl HostPartStore for MemoryPartStore {
                             );
                             continue;
                         }
-                    }
                     if permitted && sender.try_send(event.clone()).is_err() {
                         guard.bus.remove_subscription(sub_id);
                     } else {
@@ -1038,8 +1036,8 @@ impl HostPartStore for MemoryPartStore {
                         for obj_id in &objects {
                             let permitted =
                                 policy.is_event_permitted(None, *obj_id, Some(subscriber));
-                            if permitted {
-                                if let Some(payload) = guard
+                            if permitted
+                                && let Some(payload) = guard
                                     .objs
                                     .get(obj_id)
                                     .and_then(|details| details.payload.clone())
@@ -1051,7 +1049,6 @@ impl HostPartStore for MemoryPartStore {
                                         },
                                     ));
                                 }
-                            }
                         }
                     }
                 });

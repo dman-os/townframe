@@ -9,15 +9,15 @@ pub mod wit {
         with: {
             "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
-            "townframe:daybook-api/doc/doc-prop": daybook_types::gen::wit::doc::DocProp,
-            "townframe:daybook-api/doc-create/error": daybook_types::gen::wit::doc::doc_create::Error,
-            "townframe:daybook-api/doc/doc-kind": daybook_types::gen::wit::doc::DocKind,
-            "townframe:daybook-api/doc/doc-blob": daybook_types::gen::wit::doc::DocBlob,
-            "townframe:daybook-api/doc/doc-image": daybook_types::gen::wit::doc::DocImage,
-            "townframe:daybook-api/doc-create/input": daybook_types::gen::wit::doc::doc_create::Input,
+            "townframe:daybook-api/doc/doc-prop": daybook_types::r#gen::wit::doc::DocProp,
+            "townframe:daybook-api/doc-create/error": daybook_types::r#gen::wit::doc::doc_create::Error,
+            "townframe:daybook-api/doc/doc-kind": daybook_types::r#gen::wit::doc::DocKind,
+            "townframe:daybook-api/doc/doc-blob": daybook_types::r#gen::wit::doc::DocBlob,
+            "townframe:daybook-api/doc/doc-image": daybook_types::r#gen::wit::doc::DocImage,
+            "townframe:daybook-api/doc-create/input": daybook_types::r#gen::wit::doc::doc_create::Input,
             "townframe:daybook-api/doc/doc": daybook_types::wit::Doc,
-            "townframe:daybook-api/doc-create/error-id-occupied": daybook_types::gen::wit::doc::doc_create::ErrorIdOccupied,
-            "townframe:daybook-api/doc/doc-content": daybook_types::gen::wit::doc::DocContent,
+            "townframe:daybook-api/doc-create/error-id-occupied": daybook_types::r#gen::wit::doc::doc_create::ErrorIdOccupied,
+            "townframe:daybook-api/doc/doc-content": daybook_types::r#gen::wit::doc::DocContent,
         }
     });
 }

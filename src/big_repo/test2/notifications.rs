@@ -16,11 +16,11 @@
 //! | `noop_mutation_emits_nothing`             | Empty transaction produces no DocChanged.           |
 //! | `local_mutation_emits_doc_changed`        | Local write emits DocChanged with Local origin.     |
 
-use super::harness::{fixtures, Pair};
+use super::harness::{Pair, fixtures};
 use crate::changes::{
     BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter, DocIdFilter, OriginFilter,
 };
-use automerge::{transaction::Transactable, ReadDoc};
+use automerge::{ReadDoc, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;
@@ -488,12 +488,10 @@ async fn tier7_doc_created_heads_only() -> crate::Res<()> {
             heads,
             origin: BigRepoChangeOrigin::Local,
         } = n
-        {
-            if *seen == doc_id {
+            && *seen == doc_id {
                 found_created = true;
                 created_heads = Some(Arc::clone(heads));
             }
-        }
     }
     assert!(
         found_created,
@@ -669,11 +667,10 @@ async fn tier7_local_mutations_notification_batching() -> crate::Res<()> {
                         if let automerge::PatchAction::PutMap { key, value, .. } = &patch.action {
                             match key.as_str() {
                                 "step" => {
-                                    if let (automerge::Value::Scalar(s), _) = value {
-                                        if let automerge::ScalarValue::Str(s) = s.as_ref() {
+                                    if let (automerge::Value::Scalar(s), _) = value
+                                        && let automerge::ScalarValue::Str(s) = s.as_ref() {
                                             step_values_in_order.push(s.to_string());
                                         }
-                                    }
                                 }
                                 "counter" => {
                                     saw_counter = true;

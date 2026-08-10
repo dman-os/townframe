@@ -5,7 +5,7 @@ mod interlude {
 use crate::interlude::*;
 
 #[expect(unused)]
-pub mod gen;
+pub mod r#gen;
 pub mod kvstore;
 pub mod log;
 pub mod metastore;
