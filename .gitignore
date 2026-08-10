@@ -37,3 +37,6 @@ jniLibs
 __pycache__
 
 .codex
+node_modules
+src/btress_auth
+src/btress_sysadmin

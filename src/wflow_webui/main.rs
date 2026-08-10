@@ -7,10 +7,10 @@ use crate::interlude::*;
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() -> Res<()> {
-    use axum::http;
     use axum::Router;
+    use axum::http;
     use leptos::prelude::*;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum::{LeptosRoutes, generate_route_list};
     use tower_http::ServiceBuilderExt;
     use wflow_webui::app::*;
     use wflow_webui::server;

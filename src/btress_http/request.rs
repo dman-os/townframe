@@ -22,12 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::CHUNK_BYTE_SIZE;
 use crate::wit::wasi::{
     http::types::{IncomingBody, IncomingRequest, Method, Scheme},
     io::streams::StreamError,
 };
-use crate::CHUNK_BYTE_SIZE;
-use http::{uri::Parts, Uri};
+use http::{Uri, uri::Parts};
 use thiserror::Error;
 
 pub struct Request(pub IncomingRequest);
@@ -62,7 +62,7 @@ impl TryFrom<Request> for http::Request<axum::body::Body> {
             match body_stream.blocking_read(CHUNK_BYTE_SIZE as u64) {
                 Err(StreamError::Closed) => break,
                 Err(StreamError::LastOperationFailed(err)) => {
-                    return Err(StreamError::LastOperationFailed(err).into())
+                    return Err(StreamError::LastOperationFailed(err).into());
                 }
                 Ok(data) => {
                     body_bytes.extend(data);

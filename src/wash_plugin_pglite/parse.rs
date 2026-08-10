@@ -2,9 +2,9 @@ use crate::interlude::*;
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
+use postgres_protocol::Oid;
 use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::types as pg_types;
-use postgres_protocol::Oid;
 use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
 use uuid::Uuid;
 
