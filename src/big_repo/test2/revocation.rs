@@ -91,8 +91,24 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         "revoked reader must lose effective document access"
     );
 
-    // The reader may retain already-held historical plaintext; revocation is
-    // forward secrecy, not backward erasure.
+    // Owner writes distinct post-revocation content.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "post-revoke-secret"))
+                .map_err(|err| crate::ferr!("owner post-revoke write failed: {err:?}"))
+        })
+        .await??;
+
+    // Sync doc between nodes.
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // The reader may retain already-held historical plaintext ("before-revoke"),
+    // but MUST NOT observe the post-revocation content ("post-revoke-secret").
     let title = reader_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -108,6 +124,7 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         })
         .await;
     assert_eq!(title.as_deref(), Some("before-revoke"));
+    assert_ne!(title.as_deref(), Some("post-revoke-secret"));
     drop(reader_doc);
     drop(owner_doc);
     Ok(())

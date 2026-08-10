@@ -66,11 +66,11 @@ pub enum SyncDocError {
     /// The remote peer refused the document request.
     Unauthorized,
     /// The storage policy rejected the sync: {0}
-    Policy(SyncDocPolicyError),
+    Policy(#[source] SyncDocPolicyError),
     /// TransportError
     TransportError,
     /// IO error: {0}
-    IoError(eyre::Report),
+    IoError(#[source] eyre::Report),
     /// Unexpected {0}
     Other(#[from] eyre::Report),
 }

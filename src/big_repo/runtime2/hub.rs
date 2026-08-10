@@ -823,7 +823,7 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
         peer_id: PeerId,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn sync_doc_with_peer(
@@ -1200,7 +1200,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         peer_id: PeerId,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = match connect.close(peer_id, closed).await {
@@ -1217,9 +1217,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
-            if let Some(resp) = resp {
-                resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-            }
+            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             Ok(())
         })
     }

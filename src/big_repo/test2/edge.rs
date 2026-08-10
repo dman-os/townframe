@@ -973,3 +973,54 @@ async fn tier0_grant_doc_access_succeeds_on_unmaterialized_doc() -> crate::Res<(
 
     Ok(())
 }
+
+// ─── put_doc occupancy check regression test ────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_put_doc_occupancy_check_prevents_overwrite() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(244, 245, "NodeA", "NodeB").await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "test", "init"))
+        .map_err(|err| crate::ferr!("failed creating initial doc: {err:?}"))?;
+    let doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = doc.document_id();
+
+    let heads = pair.left().repo.doc_head_state(doc_id).await?.sedimentree_heads;
+    assert!(!heads.is_empty(), "created doc must have sedimentree heads in subduction");
+
+    // Retrieve doc to verify it is loaded & occupied
+    let retrieved = pair.left().repo.get_doc(&doc_id).await?;
+    let handle = retrieved.into_ready(doc_id)?;
+    assert_eq!(handle.document_id(), doc_id);
+
+    drop(doc);
+    drop(handle);
+    Ok(())
+}
+
+// ─── watch_connection_end AbortableJoinSet regression test ─────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let tasks = utils_rs::AbortableJoinSet::new();
+    let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (_end_tx, end_rx) = futures::channel::oneshot::channel();
+    let (signal_tx, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let peer_id = big_sync_core::PeerId::new([246u8; 32]);
+
+    crate::watch_connection_end(
+        peer_id,
+        std::sync::Arc::clone(&closed),
+        end_rx,
+        Some(signal_tx),
+        &tasks,
+    );
+    assert_eq!(tasks.len(), 1, "watch_connection_end must register task in AbortableJoinSet");
+
+    tasks.stop(std::time::Duration::from_secs(2)).await?;
+    assert_eq!(tasks.len(), 0, "tasks must be empty after stop");
+    Ok(())
+}

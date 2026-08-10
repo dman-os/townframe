@@ -886,6 +886,7 @@ impl HostPartStore for MemoryPartStore {
                 };
                 let mut next_cursor = None;
                 let mut events = vec![];
+                let mut has_more = false;
                 for (&_ii, evt) in guard.events.range(cursor.saturating_add(1)..) {
                     let push = match evt {
                         PartEvent::Changed(inner) => inner.part_ids.contains(&part_id),
@@ -894,15 +895,13 @@ impl HostPartStore for MemoryPartStore {
                     };
                     if push {
                         if events.len() >= limit as usize {
-                            // next_cursor is the LAST returned event, not the first
-                            // excluded one.  The API docs say the input cursor means
-                            // "return events after this cursor", so the caller adds 1.
+                            has_more = true;
                             break;
                         }
                         events.push(evt.clone());
                     }
                 }
-                if events.len() >= limit as usize {
+                if has_more {
                     next_cursor = events.last().map(|evt| match evt {
                         PartEvent::Changed(inner) => inner.cursor,
                         PartEvent::Added(inner) => inner.cursor,
@@ -1129,11 +1128,12 @@ impl HostPartStore for MemoryPartStore {
         &self,
         obj: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
-    ) {
+    ) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.members.insert(obj, agents);
         });
+        Ok(())
     }
 
     async fn add_obj_member(
@@ -1141,20 +1141,22 @@ impl HostPartStore for MemoryPartStore {
         obj: ObjId,
         member: PeerId,
         access: keyhive_core::access::Access,
-    ) {
+    ) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.members.entry(obj).or_default().insert(member, access);
         });
+        Ok(())
     }
 
-    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) {
+    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             if let Some(member_map) = guard.members.get_mut(&obj) {
                 member_map.remove(&member);
             }
         });
+        Ok(())
     }
 
     async fn is_event_permitted(
@@ -1486,7 +1488,7 @@ mod tests {
                     obj,
                     HashMap::from([(peer, keyhive_core::access::Access::Read)]),
                 )
-                .await;
+                .await?;
         }
         for (obj, value) in [(first, "first"), (second, "second")] {
             store.set_obj_payload(obj, serde_json::json!(value)).await?;
@@ -1548,7 +1550,7 @@ mod tests {
         // Set doc members: only `reader` has Read access.
         let mut agents = HashMap::new();
         agents.insert(reader, keyhive_core::access::Access::Read);
-        store.set_obj_members(obj, agents.clone()).await;
+        store.set_obj_members(obj, agents.clone()).await?;
 
         // Subscribe as reader — should receive the Added event.
         let rx = store
@@ -1599,7 +1601,7 @@ mod tests {
         })
         .await??;
         let second_obj = ObjId(Byte32Id::new([5u8; 32]));
-        store.set_obj_members(second_obj, agents).await;
+        store.set_obj_members(second_obj, agents).await?;
         store
             .set_obj_payload(second_obj, serde_json::json!("content2"))
             .await?;
@@ -1628,7 +1630,7 @@ mod tests {
         // Initially peer has Read access.
         let mut agents = HashMap::new();
         agents.insert(peer, keyhive_core::access::Access::Read);
-        store.set_obj_members(obj, agents).await;
+        store.set_obj_members(obj, agents).await?;
 
         let rx = store
             .subscribe(
@@ -1671,7 +1673,7 @@ mod tests {
         .ok();
 
         // Now revoke access: set empty members.
-        store.set_obj_members(obj, HashMap::new()).await;
+        store.set_obj_members(obj, HashMap::new()).await?;
         store
             .set_obj_payload(obj, serde_json::json!("updated"))
             .await?;

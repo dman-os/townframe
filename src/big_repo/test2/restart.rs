@@ -581,6 +581,7 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     assert_eq!(read_title(&reader_doc).await, "both-restart");
     drop(reader_doc);
+    drop(owner_doc);
 
     // --- Restart both nodes.
     let old_left = pair.left_conn.take().expect("left connection");
@@ -603,7 +604,6 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
 
     drop(reader_doc2);
     drop(owner_doc2);
-    drop(owner_doc);
     Ok(())
 }
 
@@ -648,6 +648,7 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
                 .map_err(|err| crate::ferr!("local write failed: {err:?}"))
         })
         .await??;
+    drop(owner_doc);
 
     // --- Restart the left node WITHOUT syncing the content first.
     let old_left = pair.left_conn.take().expect("left connection");
@@ -675,7 +676,6 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     drop(reader_doc);
     drop(owner_doc2);
-    drop(owner_doc);
     Ok(())
 }
 

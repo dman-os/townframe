@@ -322,55 +322,6 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_repo
         .sync_keyhive_with_peer(peer_id, Some(timeout))
         .await?;
-    // Clone provisioning is an explicit protocol. Notifications are advisory;
-    // after subscription readiness, poll the authoritative grant by exchanging
-    // Keyhive state and attempting the two required document syncs.
-    let timeout = utils_rs::scale_timeout(timeout);
-    let attempt_timeout = std::cmp::max(timeout / 4, Duration::from_secs(2));
-    tokio::time::timeout(timeout, async {
-        loop {
-            big_repo
-                .sync_keyhive_with_peer(
-                    peer_id,
-                    Some(utils_rs::scale_timeout(Duration::from_secs(30))),
-                )
-                .await?;
-            big_repo
-                .wait_for_keyhive_reconciliation(Some(attempt_timeout))
-                .await?;
-            let docs = [bootstrap.app_doc_id, bootstrap.drawer_doc_id];
-            let mut ready = true;
-            for doc_id in docs {
-                match big_repo
-                    .sync_doc_with_peer(doc_id, peer_id, Some(attempt_timeout))
-                    .await
-                {
-                    Ok(_receipt) => {}
-                    Err(
-                        big_repo::SyncDocError::NotFound
-                        | big_repo::SyncDocError::Unauthorized
-                        | big_repo::SyncDocError::Policy(_),
-                    ) => {
-                        ready = false;
-                        break;
-                    }
-                    Err(error) => {
-                        return Err(ferr!(
-                            "failed syncing clone bootstrap document {doc_id}: {error}"
-                        ));
-                    }
-                }
-            }
-            if ready {
-                return eyre::Ok(());
-            }
-            // A sync can overlap grant persistence. Retry this explicit
-            // clone-bootstrap protocol until both authoritative docs are visible.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| ferr!("timed out waiting for clone authority grant"))??;
     let big_sync_rpc_client =
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
     let big_sync_rpc_client = Arc::new(big_sync_rpc_client);

@@ -176,8 +176,6 @@ pub async fn sync_doc_expect_ready(
     tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
-                .await?;
             match repo.get_doc(&doc_id).await? {
                 crate::DocLookup::Ready(handle) => return Ok(handle),
                 crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {

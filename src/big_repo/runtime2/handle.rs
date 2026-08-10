@@ -274,7 +274,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::CloseConn {
                 peer_id,
                 closed,
-                resp: Some(resp),
+                resp,
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;

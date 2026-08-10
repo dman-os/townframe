@@ -46,7 +46,13 @@ impl FsKeyhiveStorage {
     pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
         std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
         std::fs::create_dir_all(root.join(OPS_SUBDIR))?;
-        std::fs::create_dir_all(root.join(LOCAL_SECRETS_SUBDIR))?;
+        let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
+        std::fs::create_dir_all(&secrets_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
         Ok(Self { root })
     }
@@ -145,6 +151,13 @@ impl FsKeyhiveStorage {
             std::process::id()
         ));
         tokio::fs::write(&tmp, data).await?;
+        #[cfg(unix)]
+        {
+            if parent_dir.ends_with(LOCAL_SECRETS_SUBDIR) || parent_dir == self.local_secret_dir() {
+                use std::os::unix::fs::PermissionsExt;
+                drop(std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)));
+            }
+        }
         let result = match tokio::fs::hard_link(&tmp, &dest).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),

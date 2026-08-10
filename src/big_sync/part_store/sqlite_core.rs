@@ -638,40 +638,4 @@ impl SqliteCore {
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Rehydrate doc_members_cache from persisted syncable rows.
-    // -----------------------------------------------------------------------
-
-    pub async fn load_doc_members(
-        &self,
-    ) -> Res<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>> {
-        let mut doc_members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>> =
-            HashMap::new();
-        let rows = sqlx::query(
-            "SELECT obj_id, principal_id, access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        for row in rows {
-            let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-            let principal = Self::peer_from_blob(row.try_get("principal_id")?);
-            let access: u8 = row
-                .try_get::<i64, _>("access_level")?
-                .try_into()
-                .expect(ERROR_IMPOSSIBLE);
-            let access = decode_access(access);
-            doc_members
-                .entry(obj_id)
-                .or_default()
-                .insert(principal, access);
-        }
-        Ok(doc_members)
-    }
 }
-
-// Re-export for convenience
-pub use std::collections::HashMap;

@@ -414,15 +414,16 @@ where
         Sendable::from_future(async move {
             let mut fragment_requests = BTreeSet::new();
             let mut keyhive_changed = false;
+            let mut batch_keys = HashMap::new();
             for (head, parents, blob) in commits {
-                let (encrypted_blob, _app_key, update_op, local_secret) =
+                let (encrypted_blob, app_key, update_op, local_secret) =
                     encrypt_loose_commit_with_update_op(
                         &self.keyhive,
                         sed_id,
                         head,
                         &parents,
                         &blob,
-                        &HashMap::new(),
+                        &batch_keys,
                     )
                     .await
                     .map_err(|error| {
@@ -435,6 +436,7 @@ where
                             ferr!("encrypt commit failed: {error}")
                         }
                     })?;
+                batch_keys.insert(head, app_key);
                 if let Some(update_op) = update_op {
                     persist_cgka_updates_durably(
                         &self.keyhive_storage,
@@ -1324,6 +1326,7 @@ where
             std::collections::HashMap<KeyhivePeerId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
         >,
     >,
+    subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
 impl<S> std::fmt::Debug for IrohTransportConnect<S>
@@ -1349,6 +1352,7 @@ async fn spawn_keyhive_change_subscription(
     endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
     cancel: tokio_util::sync::CancellationToken,
+    tasks: &utils_rs::AbortableJoinSet,
 ) {
     // Supersede any earlier subscription for the same peer (reconnect).
     let mut cancels = wiring.cancels.lock().await;
@@ -1357,9 +1361,7 @@ async fn spawn_keyhive_change_subscription(
     }
     drop(cancels);
 
-    // tokio::spawn cannot fail to spawn; a JoinHandle dropped here detaches
-    // the task (it ends via `cancel` or stream close).
-    tokio::spawn(async move {
+    drop(tasks.spawn(async move {
         let client = crate::rpc::IrohBigRepoRpcClient::new(endpoint, endpoint_addr);
         let mut changes = match client.subscribe_keyhive_changes(64).await {
             Ok(changes) => changes,
@@ -1407,7 +1409,7 @@ async fn spawn_keyhive_change_subscription(
                 }
             }
         }
-    });
+    }));
 }
 
 impl<S> crate::runtime2::TransportConnect<Sendable> for IrohTransportConnect<S>
@@ -1433,6 +1435,7 @@ where
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         let keyhive_notif = self.keyhive_notif.clone();
+        let subscription_tasks = Arc::clone(&self.subscription_tasks);
         Sendable::from_future(async move {
             let (endpoint, endpoint_addr): (iroh::Endpoint, iroh::EndpointAddr) = *addr_blob
                 .downcast::<(iroh::Endpoint, iroh::EndpointAddr)>()
@@ -1496,6 +1499,7 @@ where
                     rpc_endpoint,
                     rpc_addr,
                     cancel.clone(),
+                    &subscription_tasks,
                 )
                 .await;
                 Some(cancel)
@@ -1556,6 +1560,7 @@ where
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         let keyhive_notif = self.keyhive_notif.clone();
+        let subscription_tasks = Arc::clone(&self.subscription_tasks);
         Sendable::from_future(async move {
             let (conn, rpc_endpoint): (iroh::endpoint::Connection, Option<iroh::Endpoint>) =
                 *incoming
@@ -1633,6 +1638,7 @@ where
                             endpoint.clone(),
                             remote_addr,
                             cancel.clone(),
+                            &subscription_tasks,
                         )
                         .await;
                         Some(cancel)
@@ -1984,6 +1990,7 @@ where
         keyhive_adapter_owner: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        subscription_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
         keyhive_notif: Some(KeyhiveNotifWiring {
             evt_tx: evt_tx.clone(),
             cancels: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

@@ -77,8 +77,11 @@ pub trait HostPartStore: Send + Sync {
         parts: HashSet<PartId>,
         cursor: CursorIndex,
         limit: u32,
-        _enforce_policy: bool,
+        enforce_policy: bool,
     ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+        if enforce_policy {
+            return Err(ferr!("policy enforcement not supported on this store"));
+        }
         self.list_events(parts, cursor, limit).await
     }
 
@@ -103,32 +106,22 @@ pub trait HostPartStore: Send + Sync {
 
     /// Set the agents who have access to `obj` and their [`Access`] level.
     /// The store's [`ObjAccessPolicy`] uses this to determine fetchability.
-    ///
-    /// The store persists the members (SQL `big_sync_syncable`) and forwards
-    /// the mutation to its policy. **Default: no-op** — impls without a
-    /// policy-driven store are unaffected.
     async fn set_obj_members(
         &self,
-        _obj: ObjId,
-        _agents: HashMap<PeerId, keyhive_core::access::Access>,
-    ) {
-    }
+        obj: ObjId,
+        agents: HashMap<PeerId, keyhive_core::access::Access>,
+    ) -> Res<()>;
 
     /// Add a single member to `obj` with the given [`Access`] level.
-    ///
-    /// **Default: no-op** — impls without a policy-driven store are unaffected.
     async fn add_obj_member(
         &self,
-        _obj: ObjId,
-        _member: PeerId,
-        _access: keyhive_core::access::Access,
-    ) {
-    }
+        obj: ObjId,
+        member: PeerId,
+        access: keyhive_core::access::Access,
+    ) -> Res<()>;
 
     /// Remove a single member from `obj`.
-    ///
-    /// **Default: no-op** — impls without a policy-driven store are unaffected.
-    async fn remove_obj_member(&self, _obj: ObjId, _member: PeerId) {}
+    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()>;
 
     /// Whether `principal` may receive events for `obj_id`.
     ///
@@ -570,6 +563,8 @@ pub mod host_contract {
         assert_list_events_pagination_contract(harness).await?;
         assert_peer_cursor_monotonicity_contract(harness).await?;
         assert_obj_occupancy_contract(harness).await?;
+        assert_remove_obj_advances_latest_cursor_contract(harness).await?;
+        assert_list_events_next_cursor_exactness_contract(harness).await?;
         Ok(())
     }
 
@@ -1141,7 +1136,7 @@ pub mod host_contract {
                 obj,
                 std::collections::HashMap::from([(reader, Access::Read)]),
             )
-            .await;
+            .await?;
         let rx = store
             .subscribe(
                 SubPartsRequest {
@@ -1199,7 +1194,7 @@ pub mod host_contract {
                 obj,
                 std::collections::HashMap::from([(sub_peer, Access::Read)]),
             )
-            .await;
+            .await?;
 
         seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;
@@ -1276,7 +1271,7 @@ pub mod host_contract {
                 obj,
                 std::collections::HashMap::from([(auth_peer, Access::Read)]),
             )
-            .await;
+            .await?;
 
         // Subscribe the authorized peer.
         let auth_rx = store
@@ -1383,7 +1378,7 @@ pub mod host_contract {
                     (relay_peer, Access::Relay),
                 ]),
             )
-            .await;
+            .await?;
 
         // Subscribe all three and drain through ReplayComplete so each
         // is registered for live events.
@@ -1497,7 +1492,7 @@ pub mod host_contract {
                 obj,
                 HashMap::from([(peer, keyhive_core::access::Access::Read)]),
             )
-            .await;
+            .await?;
         // Build events: cursor 1-4 only for part_a, 5-6 involve part_b.
         // First set payload while obj has no parts (no event recorded).
         store.set_obj_payload(obj, payload("per-cursor", 1)).await?;
@@ -1683,6 +1678,113 @@ pub mod host_contract {
         assert!(
             cursor >= 42,
             "peer part cursor regressed from 42 to {cursor}"
+        );
+        Ok(())
+    }
+
+    pub async fn assert_remove_obj_advances_latest_cursor_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(111);
+        let obj = test_obj(112);
+
+        store.ensure_part(part).await?;
+        store.set_obj_payload(obj, payload("cursor-adv", 1)).await?;
+        store.add_obj_to_parts(obj, vec![part]).await?;
+
+        let summaries_after_add = store.summarize_parts(HashSet::from([part])).await??;
+        let cursor_after_add = summaries_after_add
+            .get(&part)
+            .expect("summary must contain part")
+            .latest_cursor;
+
+        store.remove_obj_from_part(obj, part).await?;
+
+        let summaries_after_remove = store.summarize_parts(HashSet::from([part])).await??;
+        let cursor_after_remove = summaries_after_remove
+            .get(&part)
+            .expect("summary must contain part")
+            .latest_cursor;
+
+        assert!(
+            cursor_after_remove > cursor_after_add,
+            "removing an object from a part must advance latest_cursor: initial={cursor_after_add}, post_remove={cursor_after_remove}"
+        );
+
+        let page = store
+            .list_events(HashSet::from([part]), cursor_after_add, u32::MAX)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert!(
+            page.events.iter().any(|evt| matches!(evt, PartEvent::Removed(rem) if rem.obj_id == obj && rem.cursor == cursor_after_remove)),
+            "list_events must contain Removed event with advanced cursor {cursor_after_remove}: {:?}",
+            page.events
+        );
+        Ok(())
+    }
+
+    pub async fn assert_list_events_next_cursor_exactness_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(121);
+        let obj1 = test_obj(122);
+        let obj2 = test_obj(123);
+        let obj3 = test_obj(124);
+
+        store.ensure_part(part).await?;
+
+        // Seed 2 objects
+        store.set_obj_payload(obj1, payload("exactness", 1)).await?;
+        store.add_obj_to_parts(obj1, vec![part]).await?;
+        store.set_obj_payload(obj2, payload("exactness", 2)).await?;
+        store.add_obj_to_parts(obj2, vec![part]).await?;
+
+        // Query exactly limit=2 matching 2 events: next_cursor MUST be None
+        let page_exact = store
+            .list_events(HashSet::from([part]), 0, 2)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert_eq!(page_exact.events.len(), 2);
+        assert_eq!(
+            page_exact.next_cursor, None,
+            "next_cursor must be None when no further events remain beyond limit page"
+        );
+
+        // Seed 3rd object
+        store.set_obj_payload(obj3, payload("exactness", 3)).await?;
+        store.add_obj_to_parts(obj3, vec![part]).await?;
+
+        // Query limit=2 when 3 events exist: next_cursor MUST be Some
+        let page_more = store
+            .list_events(HashSet::from([part]), 0, 2)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert_eq!(page_more.events.len(), 2);
+        let next = page_more
+            .next_cursor
+            .expect("next_cursor must be Some when matching events remain beyond limit page");
+
+        // Fetching page starting from next_cursor gets the 3rd event with next_cursor == None
+        let page_tail = store
+            .list_events(HashSet::from([part]), next, 2)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert_eq!(page_tail.events.len(), 1);
+        assert_eq!(
+            page_tail.next_cursor, None,
+            "next_cursor must be None on tail page"
         );
         Ok(())
     }

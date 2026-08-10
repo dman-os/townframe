@@ -259,6 +259,9 @@ impl DrawerRepo {
             self.big_repo
                 .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
                 .await?;
+            self.big_repo
+                .revoke_doc_access(branch_doc_id, self.content_docs_group.clone())
+                .await?;
         }
         Ok(())
     }

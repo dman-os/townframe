@@ -1045,6 +1045,16 @@ impl HostPartStore for SqlitePartStore {
         .bind(Self::obj_blob(obj_id))
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "UPDATE big_sync_parts
+             SET latest_cursor = MAX(latest_cursor, ?1)
+             WHERE scope_id = ?2 AND part_id = ?3",
+        )
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+        .bind(self.core.scope_id)
+        .bind(Self::part_blob(part_id))
+        .execute(&mut *tx)
+        .await?;
         self.apply_bucket_transition(
             &mut tx,
             part_id,
@@ -1440,34 +1450,32 @@ impl HostPartStore for SqlitePartStore {
         &self,
         obj: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
-    ) {
+    ) -> Res<()> {
         let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.core.scope_id)
             .bind(&obj_blob)
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         for (principal, access) in &agents {
             sqlx::query(
                 "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
             )
             .bind(self.core.scope_id)
-.bind(&obj_blob)
+            .bind(&obj_blob)
             .bind(Self::peer_blob(*principal))
             .bind(encode_access(access))
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         }
-        tx.commit().await.unwrap();
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn add_obj_member(
@@ -1475,22 +1483,20 @@ impl HostPartStore for SqlitePartStore {
         obj: ObjId,
         member: PeerId,
         access: keyhive_core::access::Access,
-    ) {
+    ) -> Res<()> {
         let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.core.scope_id)
             .bind(&obj_blob)
             .bind(Self::peer_blob(member))
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         sqlx::query(
             "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
         )
@@ -1499,28 +1505,27 @@ impl HostPartStore for SqlitePartStore {
         .bind(Self::peer_blob(member))
         .bind(encode_access(&access))
         .execute(&mut *tx)
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
-    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) {
+    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()> {
         let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.core.scope_id)
             .bind(&obj_blob)
             .bind(Self::peer_blob(member))
             .execute(&mut *tx)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn is_event_permitted(
@@ -1929,7 +1934,7 @@ mod tests {
         // Persist membership.
         store1
             .set_obj_members(obj, std::collections::HashMap::from([(auth, Access::Read)]))
-            .await;
+            .await?;
 
         // Helper to drain through ReplayComplete.
         async fn drain_through_replay(rx: &mpsc::Receiver<SubEvent>) -> Res<()> {

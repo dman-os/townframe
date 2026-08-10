@@ -388,7 +388,14 @@ impl<F: FutureForm> DocWorker2<F> {
         initial_content: Box<automerge::Automerge>,
         resp: futures::channel::oneshot::Sender<eyre::Result<Arc<LiveDocBundle>>>,
     ) -> eyre::Result<()> {
-        if !matches!(self.state, DocState::Unloaded) {
+        if !matches!(self.state, DocState::Unloaded)
+            || !self
+                .io
+                .sedimentree_heads(self.sed_id)
+                .await
+                .map_err(|err| ferr!("failed checking sedimentree heads for put_doc: {err}"))?
+                .is_empty()
+        {
             resp.send(Err(ferr!("doc already occupied: {:?}", self.doc_id)))
                 .inspect_err(|_| warn!(ERROR_CALLER))
                 .ok();

@@ -137,6 +137,8 @@ pub struct BigRepo {
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
+    #[educe(Debug(ignore))]
+    connection_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -297,6 +299,7 @@ impl BigRepo {
 
         runtime.wait_for_keyhive_reconciliation(None).await?;
 
+        let connection_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
         let out = Arc::new(Self {
             local_peer_id: peer_id,
             keyhive,
@@ -310,6 +313,7 @@ impl BigRepo {
             keyhive_notifier,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
+            connection_tasks: Arc::clone(&connection_tasks),
         });
 
         let change_manager_stop = out
@@ -324,6 +328,7 @@ impl BigRepo {
             BigRepoStopToken {
                 runtime_stop,
                 change_manager_stop: Some(change_manager_stop),
+                connection_tasks,
             },
         ))
     }
@@ -708,7 +713,13 @@ impl BigRepo {
             .runtime
             .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
-        watch_connection_end(peer_id, Arc::clone(&closed), end_rx, end_signal_tx);
+        watch_connection_end(
+            peer_id,
+            Arc::clone(&closed),
+            end_rx,
+            end_signal_tx,
+            &self.connection_tasks,
+        );
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -730,7 +741,13 @@ impl BigRepo {
             .runtime
             .accept_connection(Box::new((conn, Some(endpoint))))
             .await?;
-        watch_connection_end(peer_id, Arc::clone(&closed), end_rx, end_signal_tx);
+        watch_connection_end(
+            peer_id,
+            Arc::clone(&closed),
+            end_rx,
+            end_signal_tx,
+            &self.connection_tasks,
+        );
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -742,7 +759,7 @@ impl BigRepo {
 /// Forward a runtime connection-end to the caller's `ConnFinishSignal`
 /// channel (used by the sync layer to release per-peer state when a
 /// connection drops, whether outbound or inbound).
-fn watch_connection_end(
+pub(crate) fn watch_connection_end(
     peer_id: PeerId,
     closed_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     end_rx: futures::channel::oneshot::Receiver<(
@@ -750,11 +767,12 @@ fn watch_connection_end(
         eyre::Result<()>,
     )>,
     end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
+    tasks: &utils_rs::AbortableJoinSet,
 ) {
     let Some(end_signal_tx) = end_signal_tx else {
         return;
     };
-    tokio::spawn(async move {
+    drop(tasks.spawn(async move {
         let (closed, result) = end_rx.await.unwrap_or_else(|_| {
             // The runtime stopped before its watcher fired; treat the
             // connection as ended without a transport error. Use the connection's
@@ -771,7 +789,7 @@ fn watch_connection_end(
             })
             .inspect_err(|_| warn!(ERROR_CALLER))
             .ok();
-    });
+    }));
 }
 
 #[derive(Clone, educe::Educe)]
@@ -898,10 +916,12 @@ impl BigRepo {
 pub struct BigRepoStopToken {
     runtime_stop: runtime2::Runtime2StopToken<future_form::Sendable, runtime2::TokioTaskRuntime>,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
+    connection_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
+        let _res = self.connection_tasks.stop(std::time::Duration::from_secs(5)).await;
         self.runtime_stop
             .stop(std::time::Duration::from_secs(5))
             .await?;

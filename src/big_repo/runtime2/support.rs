@@ -644,8 +644,6 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     Ok((Blob::new(encrypted_bytes), app_key, update_op, local_secret))
 }
 
-// ─── encrypt_fragment_blob ─────────────────────────────────────────────────────
-
 pub(crate) async fn encrypt_fragment_blob<S>(
     keyhive_handle: &BigKeyhiveHandle,
     storage_for_reads: &S,

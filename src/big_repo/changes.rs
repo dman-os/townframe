@@ -1246,10 +1246,16 @@ fn action_prop_matches(listener_prop: &Prop<'_>, action: &automerge::PatchAction
         | (Prop::Key(listener_key), automerge::PatchAction::DeleteMap { key }) => {
             listener_key == key
         }
-        (Prop::Index(listener_idx), automerge::PatchAction::PutSeq { index, .. })
-        | (Prop::Index(listener_idx), automerge::PatchAction::Insert { index, .. })
-        | (Prop::Index(listener_idx), automerge::PatchAction::DeleteSeq { index, .. }) => {
+        (Prop::Index(listener_idx), automerge::PatchAction::PutSeq { index, .. }) => {
             *listener_idx == (*index as u32)
+        }
+        (Prop::Index(listener_idx), automerge::PatchAction::Insert { index, .. }) => {
+            *listener_idx >= (*index as u32)
+        }
+        (Prop::Index(listener_idx), automerge::PatchAction::DeleteSeq { index, length }) => {
+            let start = *index as u32;
+            let end = start.saturating_add(*length as u32);
+            *listener_idx >= start && *listener_idx < end
         }
         (listener_prop, automerge::PatchAction::Increment { prop, .. })
         | (listener_prop, automerge::PatchAction::Conflict { prop }) => {

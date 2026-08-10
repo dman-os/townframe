@@ -822,6 +822,15 @@ impl AbortableJoinSet {
         }
     }
 
+    pub fn len(&self) -> usize {
+        let guard = self.inner.lock().expect(ERROR_MUTEX);
+        guard.as_ref().map_or(0, |set| set.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn spawn<F>(&self, fut: F) -> Result<TaskHandle, AbortableJoinSetError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -868,8 +877,12 @@ impl AbortableJoinSet {
             return Err(AbortableJoinSetStopError::Aborted);
         };
         match tokio::time::timeout(timeout, async {
-            while let Some(out) = join_set.join_next().await {
-                out?;
+            while let Some(res) = join_set.join_next().await {
+                match res {
+                    Ok(_) => {}
+                    Err(err) if err.is_cancelled() => {}
+                    Err(err) => return Err(err),
+                }
             }
             Ok::<(), tokio::task::JoinError>(())
         })

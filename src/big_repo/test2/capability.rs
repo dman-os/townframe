@@ -486,22 +486,27 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     assert_eq!(read_title(&reader_doc).await, "escalation");
 
-    // Escalator (who has no access) tries to grant itself Edit on the doc.
-    // This must fail because the Escalator is not the owner and has no
+    // Read-only node tries to grant Edit on the doc.
+    // This must fail because the read-only node is not the owner and has no
     // delegation authority over the document.
-    let pre_state = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
-    let result = guard
-        .node(0)
+    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let err = pair
+        .right()
         .repo
         .grant_doc_access(doc_id, escalator_agent.clone(), Access::Edit)
-        .await;
+        .await
+        .expect_err("grant through read-only node must be rejected");
+    let err_str = err.to_string().to_lowercase();
     assert!(
-        result.is_err(),
-        "non-owner grant of higher access must be rejected"
+        err_str.contains("authoriz")
+            || err_str.contains("proof missing")
+            || err_str.contains("access")
+            || err_str.contains("permission"),
+        "error must be authorization-specific: {err}"
     );
 
     // The document's keyhive state must not have changed.
-    let post_state = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
     assert_eq!(
         pre_state, post_state,
         "document keyhive state must not change after rejected escalation"
@@ -585,18 +590,30 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     owner_rb_conn.sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
 
+    let reader_a_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_a_doc).await, "unauth-revoke");
+
     // ReaderA tries to revoke ReaderB's access. This should fail because
     // ReaderA is not the document owner.
-    let pre_state = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
-    let result = pair
+    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let err = pair
         .right()
         .repo
         .revoke_doc_access(doc_id, reader_b_agent.clone())
-        .await;
-    assert!(result.is_err(), "non-owner revocation must be rejected");
+        .await
+        .expect_err("non-owner revocation must be rejected");
+    let err_str = err.to_string().to_lowercase();
+    assert!(
+        err_str.contains("authoriz")
+            || err_str.contains("proof missing")
+            || err_str.contains("access")
+            || err_str.contains("permission"),
+        "error must be authorization-specific: {err}"
+    );
 
     // State unchanged.
-    let post_state = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
     assert_eq!(
         pre_state, post_state,
         "document keyhive state must not change after rejected revocation"
@@ -1711,14 +1728,14 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
     // The keyhive may or may not reject this depending on the transitive
     // authority model.  What matters: Reader's effective access must
     // remain Read (not escalate to Edit/Admin).
-    let _grant_result = guard
+    let _err1 = guard
         .node(1)
         .repo
         .grant_doc_access(doc_id, observer_agent.clone(), Access::Edit)
-        .await;
+        .await
+        .expect_err("Reader attempt to grant Edit must be rejected");
 
-    // --- Reader attempts to revoke Observer.
-    let _revoke_result = guard
+    let _revoke_res = guard
         .node(1)
         .repo
         .revoke_doc_access(doc_id, observer_agent.clone())
@@ -1738,7 +1755,7 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
         "Reader must still have Read access after escalation attempts"
     );
 
-    // Observer must not have gained Edit through the Reader's attempt.
+    // Observer must not have gained access through the Reader's attempt.
     let obs_ident = keyhive_core::principal::identifier::Identifier::from(
         ed25519_dalek::VerifyingKey::from_bytes(guard.node(2).peer_id().as_bytes())
             .expect("peer id must be a verifying key"),
@@ -1750,8 +1767,8 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
         .agent_access_on(&obs_ident, doc_id_kh)
         .await;
     assert!(
-        obs_access.is_none() || obs_access == Some(Access::Edit),
-        "Observer must not unexpectedly gain Edit from Reader's attempt"
+        obs_access.is_none(),
+        "Observer must not gain access from Reader's attempt"
     );
 
     // Owner can still operate normally after the failed attempts.

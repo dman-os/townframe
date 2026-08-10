@@ -459,7 +459,7 @@ impl NodeHarness {
                 .copied()
                 .map(|peer_id| (peer_id, keyhive_core::access::Access::Read))
                 .collect();
-            store.set_obj_members(obj, agents).await;
+            store.set_obj_members(obj, agents).await?;
         }
         self.host.store.set_obj_payload(obj, payload).await?;
         self.host.store.add_obj_to_parts(obj, test_parts()).await?;
@@ -1177,14 +1177,14 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
             obj,
             HashMap::from([(node_b.peer_id, keyhive_core::access::Access::Read)]),
         )
-        .await;
+        .await?;
     node_b
         .store
         .set_obj_members(
             obj,
             HashMap::from([(node_a.peer_id, keyhive_core::access::Access::Read)]),
         )
-        .await;
+        .await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(

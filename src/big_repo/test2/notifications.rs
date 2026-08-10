@@ -60,13 +60,15 @@ async fn recv_until_doc_changed(
     }
 }
 
-/// Assert no notification is already queued.
-fn assert_no_notification(
+/// Assert no notification is received after waiting for repo quiescence.
+async fn assert_no_notification(
+    repo: &Arc<crate::BigRepo>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
-) {
+) -> crate::Res<()> {
+    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5))).await?;
     match rx.try_recv() {
         Ok(notifications) => panic!("unexpected notification(s): {notifications:?}"),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(()),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
             panic!("change listener closed unexpectedly")
         }
@@ -133,7 +135,7 @@ async fn tier7_doc_id_filter() -> crate::Res<()> {
         })
         .await??;
 
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     drop(doc_a);
     drop(doc_b);
@@ -195,7 +197,7 @@ async fn tier7_path_prefix_filter() -> crate::Res<()> {
         })
         .await??;
 
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     drop(owner_doc);
     Ok(())
@@ -299,7 +301,7 @@ async fn tier7_noop_mutation_emits_nothing() -> crate::Res<()> {
         })
         .await??;
 
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     // A real mutation should still fire afterward.
     owner_doc
@@ -443,7 +445,7 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     drop(owner_doc);
     Ok(())
@@ -586,7 +588,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
         .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
         .await?;
     pair.left().repo.wait_for_quiescence(None).await?;
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     drop(owner_doc);
     Ok(())
@@ -935,7 +937,7 @@ async fn tier7_nested_path_prefix_filter() -> crate::Res<()> {
         .await?;
     pair.left().repo.wait_for_quiescence(None).await?;
 
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     // --- Delete the nested key: delete config.theme.
     owner_doc
@@ -1206,7 +1208,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
     );
 
     // ── No further notifications after quiescence has settled ───────────
-    assert_no_notification(&mut rx);
+    assert_no_notification(&pair.left().repo, &mut rx).await?;
 
     drop(owner_doc);
     Ok(())

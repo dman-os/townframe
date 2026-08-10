@@ -272,6 +272,7 @@ impl SqliteBigRepoStore {
         config: big_sync::HostPartStoreConfig,
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
+        Self::init_subduction_tables(&sql.write_pool).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
 
         let store = Self {
@@ -1102,6 +1103,16 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(Self::obj_blob(obj_id))
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "UPDATE big_sync_parts
+             SET latest_cursor = MAX(latest_cursor, ?1)
+             WHERE scope_id = ?2 AND part_id = ?3",
+        )
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .execute(&mut *tx)
+        .await?;
         self.apply_bucket_transition(
             &mut tx,
             part_id,
@@ -1342,20 +1353,18 @@ impl HostPartStore for SqliteBigRepoStore {
         &self,
         doc: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
-    ) {
+    ) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
         let mut tx = self
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.scope_id)
             .bind(&doc_blob)
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         for (principal, access) in &agents {
             sqlx::query(
                 "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
@@ -1365,8 +1374,7 @@ impl HostPartStore for SqliteBigRepoStore {
             .bind(Self::peer_blob(*principal))
             .bind(encode_access(access))
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         }
         let payload_json: Option<String> = sqlx::query_scalar(
             "SELECT payload_json FROM big_sync_objs
@@ -1375,38 +1383,36 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(self.scope_id)
         .bind(&doc_blob)
         .fetch_optional(&mut *tx)
-        .await
-        .unwrap()
+        .await?
         .flatten();
-        tx.commit().await.unwrap();
+        tx.commit().await?;
         if let Some(payload_json) = payload_json.filter(|value| !value.is_empty()) {
             let payload = serde_json::from_str(&payload_json).expect(ERROR_JSON);
             // Re-emit the current object payload after a membership change.
             // A peer may have previously received the membership event while
             // unauthorized, leaving a pending object with no payload. The
             // normal part event promotes that pending object and wakes sync.
-            self.set_obj_payload(doc, payload).await.unwrap();
+            self.set_obj_payload(doc, payload).await?;
         }
+        Ok(())
     }
     async fn add_obj_member(
         &self,
         doc: ObjId,
         member: PeerId,
         access: keyhive_core::access::Access,
-    ) {
+    ) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
         let mut tx = self
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.scope_id)
             .bind(&doc_blob)
             .execute(&mut *tx)
-            .await
-            .unwrap();
+            .await?;
         sqlx::query(
             "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
         )
@@ -1415,27 +1421,26 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(Self::peer_blob(member))
         .bind(encode_access(&access))
         .execute(&mut *tx)
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
-    async fn remove_obj_member(&self, doc: ObjId, member: PeerId) {
+    async fn remove_obj_member(&self, doc: ObjId, member: PeerId) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
         let mut tx = self
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
+            .await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.scope_id)
             .bind(&doc_blob)
             .bind(Self::peer_blob(member))
             .execute(&mut *tx)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -1856,8 +1861,10 @@ impl SqliteBigRepoStore {
         })])
     }
 
-    async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    async fn init_subduction_tables(
+        pool: &sqlx::Pool<sqlx::Sqlite>,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         for statement in [
             "CREATE TABLE IF NOT EXISTS big_repo_subduction_trees (
                 scope_id INTEGER NOT NULL,
@@ -1932,6 +1939,12 @@ impl SqliteBigRepoStore {
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT OR IGNORE INTO big_repo_group_part_cursor(scope_id, cursor)
              VALUES (?1, 0)",
@@ -3943,7 +3956,7 @@ mod tests {
                 doc,
                 HashMap::from([(peer, keyhive_core::access::Access::Read)]),
             )
-            .await;
+            .await?;
 
         // Inject failure on the syncable DELETE (which runs before member UPDATE).
         sqlx::query(

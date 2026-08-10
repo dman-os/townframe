@@ -154,12 +154,15 @@ async fn tier3_relay_replication() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, relay_agent, Access::Relay)
         .await?;
-    // The public reader is used here because B's individual identity is not
-    // directly learned by A across a relay-only connection. This still lets
-    // us assert that the relay's own capability remains Relay, not Read.
+
+    // Propagate keyhive inward so Alice (0) learns Bob (2)'s identity through Relay (1).
+    topo.topo_conn(2, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+
+    let bob_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .grant_doc_access(doc_id, bob_agent, Access::Read)
         .await?;
 
     // Propagate keyhive: A→R, then R→B.
@@ -280,11 +283,15 @@ async fn tier3_line_replication() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, b_agent, Access::Relay)
         .await?;
-    // As with the relay case, C's identity is not directly learned by A;
-    // use the public reader while asserting B remains Relay-only.
+
+    // Propagate keyhive inward so Alice (0) learns Carol (2)'s identity through Bob (1).
+    topo.topo_conn(2, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+
+    let carol_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .grant_doc_access(doc_id, carol_agent, Access::Read)
         .await?;
 
     // Propagate keyhive along the line.

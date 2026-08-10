@@ -134,7 +134,7 @@ pub enum Runtime2Cmd {
         /// torn down when this flag matches the peer's current connection.
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         #[educe(Debug(ignore))]
-        resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     SyncDocWithPeer {
         doc_id: DocumentId,

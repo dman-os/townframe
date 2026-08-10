@@ -407,6 +407,7 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     // Pre-revoke blobs should still be decryptable by the owner (and the
     // revoked peer's local cache, but we only verify owner).
     let mut pre_revoke_decryptable = false;
+    let mut post_revoke_found = false;
     let mut post_revoke_undecryptable_by_revoked = true;
     for raw in &blobs {
         // Assert the blob is a well-formed encrypted blob; the value itself is
@@ -426,6 +427,7 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
                 .windows(b"postrevoke".len())
                 .any(|w| w == b"postrevoke")
             {
+                post_revoke_found = true;
                 // This is a post-revoke blob — revoked must NOT decrypt it.
                 if revoked_result.is_ok() {
                     post_revoke_undecryptable_by_revoked = false;
@@ -443,6 +445,10 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     assert!(
         pre_revoke_decryptable,
         "pre-revoke blobs must be decryptable by the owner"
+    );
+    assert!(
+        post_revoke_found,
+        "owner-decryptable post-revoke blob containing 'postrevoke' must be found"
     );
     assert!(
         post_revoke_undecryptable_by_revoked,

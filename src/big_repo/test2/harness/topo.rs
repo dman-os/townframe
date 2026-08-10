@@ -347,13 +347,11 @@ impl Node {
         self.repo_stop
             .stop()
             .await
-            .inspect_err(|err| error!("shutdown err: {err}"))
-            .ok();
+            .expect("repo_stop failed during shutdown");
         self.big_sync_stop
             .stop()
             .await
-            .inspect_err(|err| error!("shutdown err: {err}"))
-            .ok();
+            .expect("big_sync_stop failed during shutdown");
     }
 }
 
@@ -400,10 +398,8 @@ impl Drop for ShutdownGuard {
         // nested `block_on` can drive the async shutdown without deadlocking.
         // If no runtime is present (shouldn't happen in tests), we leak
         // teardown rather than panic-during-unwind.
-        if tokio::runtime::Handle::try_current().is_err() {
-            tracing::warn!("no tokio runtime at ShutdownGuard drop; leaking node teardown");
-            return;
-        }
+        let _handle = tokio::runtime::Handle::try_current()
+            .expect("ShutdownGuard dropped outside active tokio runtime");
         let nodes = std::mem::take(&mut self.nodes);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(Self::shutdown_all(nodes))
@@ -434,9 +430,11 @@ impl Pair {
         right_label: &'static str,
     ) -> crate::Res<Self> {
         let left = Node::boot(left_seed, left_label).await?;
+        let mut guard = ShutdownGuard::from(vec![left]);
         let right = Node::boot(right_seed, right_label).await?;
+        guard.nodes.push(right);
         Ok(Self {
-            guard: ShutdownGuard::from(vec![left, right]),
+            guard,
             left_idx: 0,
             right_idx: 1,
             left_conn: None,
@@ -459,17 +457,19 @@ impl Pair {
             StorageConfig::Disk { path: left_path },
         )
         .await?;
+        let mut guard = ShutdownGuard::from(vec![left]);
         let right = Node::boot_with_config(
             right_seed,
             right_label,
             StorageConfig::Disk { path: right_path },
         )
         .await?;
-        let left_conn = left.connect(&right).await?;
-        let right_conn = right.accepted_connection().await;
+        guard.nodes.push(right);
+        let left_conn = guard.node(0).connect(guard.node(1)).await?;
+        let right_conn = guard.node(1).accepted_connection().await;
         left_conn.sync_keyhive_with_peer(None).await?;
         Ok(Self {
-            guard: ShutdownGuard::from(vec![left, right]),
+            guard,
             left_idx: 0,
             right_idx: 1,
             left_conn: Some(left_conn),
@@ -604,6 +604,7 @@ pub(crate) struct TopoData3 {
 }
 
 impl TopoData3 {
+    #[allow(dead_code)]
     fn from(
         nodes: Vec<Node>,
         edges: Vec<(usize, BigRepoConnection, usize, BigRepoConnection)>,
@@ -640,23 +641,25 @@ impl Topo {
         label_b: &'static str,
     ) -> crate::Res<Self> {
         let a = Node::boot(seed_a, label_a).await?;
+        let mut guard = ShutdownGuard::from(vec![a]);
         let r = Node::boot(seed_r, label_r).await?;
+        guard.nodes.push(r);
         let b = Node::boot(seed_b, label_b).await?;
+        guard.nodes.push(b);
 
         // A → R
-        let a_r_conn = a.connect(&r).await?;
-        let r_a_conn = r.accepted_connection().await;
+        let a_r_conn = guard.node(0).connect(guard.node(1)).await?;
+        let r_a_conn = guard.node(1).accepted_connection().await;
         // R → B
-        let r_b_conn = r.connect(&b).await?;
-        let b_r_conn = b.accepted_connection().await;
+        let r_b_conn = guard.node(1).connect(guard.node(2)).await?;
+        let b_r_conn = guard.node(2).accepted_connection().await;
 
-        let nodes = vec![a, r, b];
         let edges = vec![(0, a_r_conn, 1, r_a_conn), (1, r_b_conn, 2, b_r_conn)];
         // Sync from the far end inward so A learns B's contact identity
         // through the relay before topology tests issue grants.
         edges[1].1.sync_keyhive_with_peer(None).await?;
         edges[0].1.sync_keyhive_with_peer(None).await?;
-        Ok(Self::Relay(TopoData3::from(nodes, edges)))
+        Ok(Self::Relay(TopoData3 { guard, edges }))
     }
 
     /// Build a line topology: A ↔ B ↔ C.
@@ -669,20 +672,22 @@ impl Topo {
         label_c: &'static str,
     ) -> crate::Res<Self> {
         let a = Node::boot(seed_a, label_a).await?;
+        let mut guard = ShutdownGuard::from(vec![a]);
         let b = Node::boot(seed_b, label_b).await?;
+        guard.nodes.push(b);
         let c = Node::boot(seed_c, label_c).await?;
+        guard.nodes.push(c);
 
-        let a_b_conn = a.connect(&b).await?;
-        let b_a_conn = b.accepted_connection().await;
-        let b_c_conn = b.connect(&c).await?;
-        let c_b_conn = c.accepted_connection().await;
+        let a_b_conn = guard.node(0).connect(guard.node(1)).await?;
+        let b_a_conn = guard.node(1).accepted_connection().await;
+        let b_c_conn = guard.node(1).connect(guard.node(2)).await?;
+        let c_b_conn = guard.node(2).accepted_connection().await;
 
-        let nodes = vec![a, b, c];
         let edges = vec![(0, a_b_conn, 1, b_a_conn), (1, b_c_conn, 2, c_b_conn)];
         // Sync from the far end inward so A learns C through B.
         edges[1].1.sync_keyhive_with_peer(None).await?;
         edges[0].1.sync_keyhive_with_peer(None).await?;
-        Ok(Self::Line(TopoData3::from(nodes, edges)))
+        Ok(Self::Line(TopoData3 { guard, edges }))
     }
 
     /// Build a star topology: hub ↔ leaf1, hub ↔ leaf2.
@@ -696,21 +701,23 @@ impl Topo {
         label_l2: &'static str,
     ) -> crate::Res<Self> {
         let hub = Node::boot(seed_h, label_h).await?;
+        let mut guard = ShutdownGuard::from(vec![hub]);
         let leaf1 = Node::boot(seed_l1, label_l1).await?;
+        guard.nodes.push(leaf1);
         let leaf2 = Node::boot(seed_l2, label_l2).await?;
+        guard.nodes.push(leaf2);
 
         // hub ↔ leaf1
-        let h_l1_conn = hub.connect(&leaf1).await?;
-        let l1_h_conn = leaf1.accepted_connection().await;
+        let h_l1_conn = guard.node(0).connect(guard.node(1)).await?;
+        let l1_h_conn = guard.node(1).accepted_connection().await;
         // hub ↔ leaf2
-        let h_l2_conn = hub.connect(&leaf2).await?;
-        let l2_h_conn = leaf2.accepted_connection().await;
+        let h_l2_conn = guard.node(0).connect(guard.node(2)).await?;
+        let l2_h_conn = guard.node(2).accepted_connection().await;
 
-        let nodes = vec![hub, leaf1, leaf2];
         let edges = vec![(0, h_l1_conn, 1, l1_h_conn), (0, h_l2_conn, 2, l2_h_conn)];
         edges[0].1.sync_keyhive_with_peer(None).await?;
         edges[1].1.sync_keyhive_with_peer(None).await?;
-        Ok(Self::Star(TopoData3::from(nodes, edges)))
+        Ok(Self::Star(TopoData3 { guard, edges }))
     }
 
     /// Build a partial-mesh (triangle) topology: A↔B, B↔C, C↔A (full
@@ -724,17 +731,19 @@ impl Topo {
         label_c: &'static str,
     ) -> crate::Res<Self> {
         let a = Node::boot(seed_a, label_a).await?;
+        let mut guard = ShutdownGuard::from(vec![a]);
         let b = Node::boot(seed_b, label_b).await?;
+        guard.nodes.push(b);
         let c = Node::boot(seed_c, label_c).await?;
+        guard.nodes.push(c);
 
-        let a_b_conn = a.connect(&b).await?;
-        let b_a_conn = b.accepted_connection().await;
-        let b_c_conn = b.connect(&c).await?;
-        let c_b_conn = c.accepted_connection().await;
-        let c_a_conn = c.connect(&a).await?;
-        let a_c_conn = a.accepted_connection().await;
+        let a_b_conn = guard.node(0).connect(guard.node(1)).await?;
+        let b_a_conn = guard.node(1).accepted_connection().await;
+        let b_c_conn = guard.node(1).connect(guard.node(2)).await?;
+        let c_b_conn = guard.node(2).accepted_connection().await;
+        let c_a_conn = guard.node(2).connect(guard.node(0)).await?;
+        let a_c_conn = guard.node(0).accepted_connection().await;
 
-        let nodes = vec![a, b, c];
         let edges = vec![
             (0, a_b_conn, 1, b_a_conn),
             (1, b_c_conn, 2, c_b_conn),
@@ -743,7 +752,7 @@ impl Topo {
         edges[0].1.sync_keyhive_with_peer(None).await?;
         edges[1].1.sync_keyhive_with_peer(None).await?;
         edges[2].1.sync_keyhive_with_peer(None).await?;
-        Ok(Self::Triangle(TopoData3::from(nodes, edges)))
+        Ok(Self::Triangle(TopoData3 { guard, edges }))
     }
 
     /// Return a reference to a node by index.

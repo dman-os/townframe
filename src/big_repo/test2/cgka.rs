@@ -28,6 +28,23 @@ use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 
+async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
+    handle
+        .with_document_read(|doc| {
+            doc.get(automerge::ROOT, key)
+                .ok()
+                .flatten()
+                .and_then(|(value, _)| match value {
+                    automerge::Value::Scalar(value) => match value.as_ref() {
+                        ScalarValue::Str(s) => Some(s.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        })
+        .await
+}
+
 /// A membership rotation and a write from a disconnected old-epoch member are
 /// concurrent siblings. Once the writer reconnects, current readers must gain
 /// a decryptable causal entrypoint covering that offline head; converging the
@@ -302,12 +319,17 @@ async fn tier6_reopen_after_authority_grant_keeps_new_documents_writable() -> cr
         .repo
         .create_doc_with_parents(initial, vec![content.into(), drawer.into()])
         .await?;
+    let doc_id = handle.document_id();
     handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "second"))
                 .map_err(|err| crate::ferr!("failed second write: {err:?}"))
         })
         .await??;
+
+    let snap = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    assert!(!snap.cgka_operation_hashes.is_empty(), "CGKA operations must be present for doc");
+    assert_eq!(read_text(&handle, "phase").await.as_deref(), Some("second"), "document must remain usable");
 
     Ok(())
 }
