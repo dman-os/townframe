@@ -970,19 +970,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .connect_endpoint_addr(reopened_addr_a)
             .await?;
 
-        let required_partitions = node_b
-            .sync_repo
-            .peer_partition_ids("", true)
-            .into_keys()
-            .collect::<Vec<_>>();
-        let reopened_peer_id = PeerId::new(*reopened_endpoint_id.as_bytes());
-        node_b
-            .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&reopened_peer_id),
-                &required_partitions,
-                Duration::from_secs(120),
-            )
+        wait_for_sync_convergence(&reopened_a, &node_b, reopened_endpoint_id, Duration::from_secs(60))
             .await?;
 
         wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60))
@@ -1026,6 +1014,180 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     }
 
     node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let (temp_root, node_a, node_b, _bootstrap_id) = boot_connected_sync_pair().await?;
+
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    wait_for_facet_manifest(&node_a, "org.example.daybook.titlegeneric").await?;
+    wait_for_facet_manifest(&node_a, "org.example.daybook.note").await?;
+    wait_for_facet_manifest(&node_b, "org.example.daybook.titlegeneric").await?;
+    wait_for_facet_manifest(&node_b, "org.example.daybook.note").await?;
+
+    let main_branch = BranchPathBuf::from("main");
+
+    // 1. Node A creates a base document on main.
+    let doc_id = node_a
+        .drawer
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: main_branch.clone(),
+            facets: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("Base Title".into()).into(),
+            )]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        })
+        .await?;
+
+    // 2. Wait for document to replicate to Node B while connected.
+    wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+    assert_title_synced(&node_a, &node_b, &doc_id, "Base Title").await?;
+
+    // 3. Disconnect/stop Node B to simulate offline divergent edits.
+    let repo_b_path = temp_root.path().join("repo-b");
+    node_b.stop().await?;
+
+    // 4. Node A creates branch '/tmp/feature-a' offline and updates title.
+    let branch_a = BranchPathBuf::from("/tmp/feature-a");
+    let Some((_, heads_a)) = node_a
+        .drawer
+        .get_with_heads(&doc_id, &main_branch, None)
+        .await?
+    else {
+        eyre::bail!("missing main heads on node_a: {doc_id}");
+    };
+    let user_path_a = daybook_types::doc::UserPathBuf::from(node_a.ctx.local_user_path.clone());
+    node_a
+        .drawer
+        .create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch_a,
+            &main_branch,
+            &heads_a,
+            Some(&user_path_a),
+        )
+        .await?;
+    node_a
+        .drawer
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("Title Updated on Feature A".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: Some(user_path_a.clone()),
+            },
+            &branch_a,
+            None,
+        )
+        .await?;
+
+    // 5. Node B reopens offline, creates branch '/tmp/feature-b', and adds a note facet.
+    let reopened_b = open_sync_node(&repo_b_path).await?;
+    let branch_b = BranchPathBuf::from("/tmp/feature-b");
+    let Some((_, heads_b)) = reopened_b
+        .drawer
+        .get_with_heads(&doc_id, &main_branch, None)
+        .await?
+    else {
+        eyre::bail!("missing main heads on reopened_b: {doc_id}");
+    };
+    let user_path_b =
+        daybook_types::doc::UserPathBuf::from(reopened_b.ctx.local_user_path.clone());
+    reopened_b
+        .drawer
+        .create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch_b,
+            &main_branch,
+            &heads_b,
+            Some(&user_path_b),
+        )
+        .await?;
+    reopened_b
+        .drawer
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    note_key.clone(),
+                    WellKnownFacet::Note(daybook_types::doc::Note {
+                        mime: "text/markdown".into(),
+                        content: "Note Added on Feature B".into(),
+                    })
+                    .into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: Some(user_path_b.clone()),
+            },
+            &branch_b,
+            None,
+        )
+        .await?;
+
+    // 6. Connect Node A and Reopened Node B, sync, and merge branches into main.
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    reopened_b
+        .sync_repo
+        .connect_endpoint_addr(addr_a.clone())
+        .await?;
+    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id, Duration::from_secs(60)).await?;
+
+    // Merge feature-a into main on Node A, and feature-b into main on Node B.
+    node_a
+        .drawer
+        .merge_from_branch(&doc_id, &main_branch, &branch_a, Some(&user_path_a))
+        .await?;
+    reopened_b
+        .drawer
+        .merge_from_branch(&doc_id, &main_branch, &branch_b, Some(&user_path_b))
+        .await?;
+
+    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id, Duration::from_secs(60)).await?;
+
+    // 7. Verify both nodes reach identical merged facet state on main branch.
+    let (doc_a, doc_b) = wait_for_synced_doc_on_both_sides(
+        &node_a,
+        &reopened_b,
+        &doc_id,
+        &main_branch,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    assert_eq!(doc_a.id, doc_b.id);
+    assert_eq!(doc_a.facets, doc_b.facets);
+    assert_eq!(
+        doc_a.facets.get(&title_key),
+        Some(&serde_json::Value::from(WellKnownFacet::TitleGeneric(
+            "Title Updated on Feature A".into()
+        )))
+    );
+    assert_eq!(
+        doc_a.facets.get(&note_key),
+        Some(&serde_json::Value::from(WellKnownFacet::Note(
+            daybook_types::doc::Note {
+                mime: "text/markdown".into(),
+                content: "Note Added on Feature B".into(),
+            }
+        )))
+    );
+
+    reopened_b.stop().await?;
+    node_a.stop().await?;
     Ok(())
 }
 

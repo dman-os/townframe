@@ -5,6 +5,7 @@ use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::sync::Arc;
 
+const EVENT_BATCH_SIZE: u32 = 64;
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Crash-recoverable consumer of Keyhive events that closes every document
@@ -15,6 +16,9 @@ pub(crate) struct CausalCheckpointWorker {
     keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    state_generation: Arc<std::sync::atomic::AtomicU64>,
+    last_acked_generation: u64,
 }
 
 impl CausalCheckpointWorker {
@@ -23,63 +27,97 @@ impl CausalCheckpointWorker {
         keyhive: BigKeyhiveHandle,
         runtime: crate::runtime2::Runtime2Handle<Sendable>,
         timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        state_generation: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
             store,
             keyhive,
             runtime,
             timer,
+            evt_tx,
+            state_generation,
+            last_acked_generation: 0,
         }
     }
 
-    pub(crate) async fn run(self) -> Res<()> {
+    pub(crate) async fn run(mut self) -> Res<()> {
         // The cursor is authoritative for logged work. The startup audit also
         // covers databases created before this consumer existed, pruned event
         // history, and crashes after an Update was persisted but before its
         // covering ciphertext.
-        while !self.attempt_all_documents().await? {
-            if self.runtime.is_stopped() {
-                return Ok(());
-            }
-            self.timer.sleep(IDLE_POLL).await;
-        }
+        let _ = self.attempt_all_documents().await;
 
+        let mut announced_idle = false;
         loop {
             if self.runtime.is_stopped() {
                 return Ok(());
             }
+            let generation = self
+                .state_generation
+                .load(std::sync::atomic::Ordering::Relaxed);
             let cursor = self.store.causal_checkpoint_cursor().await?;
-            let events = self.store.keyhive_events_after(cursor, 1).await?;
-            let Some(row) = events.first() else {
-                self.timer.sleep(IDLE_POLL).await;
-                continue;
-            };
+            let events = self
+                .store
+                .keyhive_events_after(cursor, EVENT_BATCH_SIZE)
+                .await?;
 
-            if row.seq > cursor.saturating_add(1) && !self.attempt_all_documents().await? {
-                self.timer.sleep(IDLE_POLL).await;
+            if events.is_empty() {
+                if !announced_idle || generation > self.last_acked_generation {
+                    self.last_acked_generation = generation;
+                    if self
+                        .evt_tx
+                        .send(
+                            crate::runtime2::Runtime2Evt::CausalCheckpointWorkerAdvanced {
+                                generation: self.last_acked_generation,
+                            },
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                    announced_idle = true;
+                }
+                let notified = self.store.keyhive_event_notifier();
+                tokio::select! {
+                    _ = notified.notified() => {}
+                    _ = self.timer.sleep(IDLE_POLL) => {}
+                }
                 continue;
             }
 
-            let event: StaticEvent<Vec<u8>> =
-                bincode::deserialize(&row.bytes).expect("persisted Keyhive event must decode");
-            let complete = match event {
-                StaticEvent::CgkaOperation(operation) => {
-                    let doc_id = crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
-                    match self.runtime.ensure_causal_coverage(doc_id).await {
-                        Ok(complete) => complete,
-                        Err(_) if self.runtime.is_stopped() => return Ok(()),
-                        Err(error) => return Err(error),
-                    }
+            announced_idle = false;
+            for row in &events {
+                if self.runtime.is_stopped() {
+                    return Ok(());
                 }
-                StaticEvent::Delegated(_)
-                | StaticEvent::Revoked(_)
-                | StaticEvent::PrekeysExpanded(_)
-                | StaticEvent::PrekeyRotated(_) => true,
-            };
-            if complete {
-                self.store.advance_causal_checkpoint_cursor(row.seq).await?;
-            } else {
-                self.timer.sleep(IDLE_POLL).await;
+                let event: StaticEvent<Vec<u8>> =
+                    bincode::deserialize(&row.bytes).expect("persisted Keyhive event must decode");
+                if let StaticEvent::CgkaOperation(operation) = event {
+                    let doc_id = crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
+                    let _ = self.runtime.ensure_causal_coverage(doc_id).await;
+                }
+                self.store
+                    .advance_causal_checkpoint_cursor(row.seq)
+                    .await?;
+            }
+
+            if self.last_acked_generation < generation {
+                self.last_acked_generation = generation;
+                if self
+                    .evt_tx
+                    .send(
+                        crate::runtime2::Runtime2Evt::CausalCheckpointWorkerAdvanced {
+                            generation: self.last_acked_generation,
+                        },
+                    )
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                announced_idle = true;
             }
         }
     }

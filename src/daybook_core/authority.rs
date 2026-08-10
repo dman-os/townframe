@@ -148,7 +148,7 @@ async fn ensure_group(
     if let Some(group) = big_repo.get_group_by_id(group_id).await {
         return Ok((group, created));
     }
-    let _ = big_repo.wait_for_keyhive_reconciliation(None).await;
+    big_repo.wait_for_keyhive_reconciliation(None).await?;
     if let Some(group) = big_repo.get_group_by_id(group_id).await {
         return Ok((group, created));
     }

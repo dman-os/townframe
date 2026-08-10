@@ -75,6 +75,7 @@ pub struct SqliteBigRepoStore {
     hidden_parts: Arc<HashSet<PartId>>,
     /// Access-control policy consulted at event-forward time.
     policy: Arc<dyn big_sync::ObjAccessPolicy>,
+    keyhive_event_notify: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(feature = "test-support")]
@@ -258,6 +259,10 @@ impl std::fmt::Debug for SqliteBigRepoStore {
 }
 
 impl SqliteBigRepoStore {
+    pub(crate) fn keyhive_event_notifier(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.keyhive_event_notify)
+    }
+
     pub async fn new(
         sql: SqlCtx,
         scope_key: impl Into<Arc<str>>,
@@ -286,6 +291,7 @@ impl SqliteBigRepoStore {
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
             policy,
+            keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -2304,6 +2310,9 @@ impl SqliteBigRepoStore {
             .await?;
         }
         tx.commit().await?;
+        if inserted {
+            self.keyhive_event_notify.notify_waiters();
+        }
         Ok(inserted)
     }
 

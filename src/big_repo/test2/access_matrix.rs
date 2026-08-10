@@ -764,20 +764,18 @@ async fn run_group_case(
             )))
             .await?;
         drop(owner_doc);
-        let owner_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        drop(member_doc);
+        let (owner_doc, member_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "member_note")
                 .await
                 .as_deref(),
             Some("group-member")
         );
+        heads::tier0_invariants(&pair, doc_id, &owner_doc, &member_doc).await?;
         drop(owner_doc);
-    } else {
-        drop(owner_doc);
+        drop(member_doc);
     }
-
-    drop(member_doc);
     Ok(())
 }
 
@@ -826,8 +824,8 @@ async fn run_public_case(
             })
             .await??;
     }
-    let public_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    drop(owner_doc);
+    let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
     assert_eq!(read_title(&public_doc).await, "public-matrix");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
     if access.is_editor() {
@@ -840,8 +838,8 @@ async fn run_public_case(
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
         drop(owner_doc);
-        let owner_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        drop(public_doc);
+        let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "public_note")
                 .await
@@ -850,10 +848,11 @@ async fn run_public_case(
         );
         heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
         drop(owner_doc);
+        drop(public_doc);
     } else {
         drop(owner_doc);
+        drop(public_doc);
     }
-    drop(public_doc);
     Ok(())
 }
 
@@ -987,8 +986,8 @@ async fn run_document_as_member_case(
         )))
         .await?;
 
-    let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, target_id).await?;
+    drop(target_doc);
+    let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;
     assert_eq!(read_title(&member_doc).await, "doc-member-matrix");
     heads::tier0_invariants(&pair, target_id, &target_doc, &member_doc).await?;
     if access.is_editor() {
@@ -1000,21 +999,9 @@ async fn run_document_as_member_case(
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.left()
-            .repo
-            .wait_for_quiescence(Some(utils_rs::scale_timeout(
-                std::time::Duration::from_secs(30),
-            )))
-            .await?;
-        pair.right()
-            .repo
-            .wait_for_quiescence(Some(utils_rs::scale_timeout(
-                std::time::Duration::from_secs(30),
-            )))
-            .await?;
         drop(target_doc);
-        let target_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, target_id).await?;
+        drop(member_doc);
+        let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;
         assert_eq!(
             read_optional_text(&target_doc, "member_note")
                 .await
@@ -1023,11 +1010,12 @@ async fn run_document_as_member_case(
         );
         heads::tier0_invariants(&pair, target_id, &target_doc, &member_doc).await?;
         drop(target_doc);
+        drop(member_doc);
     } else {
         drop(target_doc);
+        drop(member_doc);
     }
     drop(source_doc);
-    drop(member_doc);
     Ok(())
 }
 

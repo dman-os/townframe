@@ -325,6 +325,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     // Clone provisioning is an explicit protocol. Notifications are advisory;
     // after subscription readiness, poll the authoritative grant by exchanging
     // Keyhive state and attempting the two required document syncs.
+    let timeout = utils_rs::scale_timeout(timeout);
     let attempt_timeout = std::cmp::max(timeout / 4, Duration::from_secs(2));
     tokio::time::timeout(timeout, async {
         loop {
@@ -333,6 +334,9 @@ async fn pull_required_partitions_via_big_sync_worker(
                     peer_id,
                     Some(utils_rs::scale_timeout(Duration::from_secs(30))),
                 )
+                .await?;
+            big_repo
+                .wait_for_keyhive_reconciliation(Some(attempt_timeout))
                 .await?;
             let docs = [bootstrap.app_doc_id, bootstrap.drawer_doc_id];
             let mut ready = true;

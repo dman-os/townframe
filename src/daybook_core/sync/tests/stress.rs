@@ -377,11 +377,7 @@ async fn wait_network_rest(
 
     let active = nodes.iter().flatten().collect::<Vec<_>>();
 
-    // STEP 1: Verify BigRepo sedimentree head parity across all active nodes FIRST.
-    // If this passes but Step 2 fails, we know the issue is in daybook_core materialization.
-    wait_for_big_repo_sedimentree_parity(&active, timeout).await?;
-
-    // STEP 2: Verify DaybookCore drawer index & branch head parity.
+    // STEP 1: Verify DaybookCore drawer index & branch head parity.
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
             let left = active[i];
@@ -390,6 +386,9 @@ async fn wait_network_rest(
             wait_for_doc_head_parity(left, right, timeout).await?;
         }
     }
+
+    // STEP 2: Verify BigRepo sedimentree head parity across all active nodes.
+    wait_for_big_repo_sedimentree_parity(&active, timeout).await?;
 
     assert_blob_parity(nodes, blob_timeout).await?;
     Ok(())

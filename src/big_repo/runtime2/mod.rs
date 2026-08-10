@@ -70,6 +70,8 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
         async_channel::Sender<Runtime2Evt>,
         async_channel::Receiver<Runtime2Evt>,
     )>,
+    /// Optional notifier for Keyhive event log changes.
+    pub keyhive_event_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Transport-agnostic connect/accept/close — the seam that replaces iroh baked

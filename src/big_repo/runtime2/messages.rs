@@ -278,6 +278,11 @@ pub enum Runtime2Evt {
     GroupPartWorkerAdvanced {
         generation: u64,
     },
+    /// The highest Keyhive state generation the causal-checkpoint worker has
+    /// covered into causal checkpoints.
+    CausalCheckpointWorkerAdvanced {
+        generation: u64,
+    },
     DocWorkerStopped {
         doc_id: DocumentId,
         error: Option<String>,

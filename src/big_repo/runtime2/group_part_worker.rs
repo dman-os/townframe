@@ -82,7 +82,11 @@ impl GroupPartWorker {
                     }
                     announced_idle = true;
                 }
-                self.timer.sleep(IDLE_POLL).await;
+                let notified = self.store.keyhive_event_notifier();
+                tokio::select! {
+                    _ = notified.notified() => {}
+                    _ = self.timer.sleep(IDLE_POLL) => {}
+                }
                 continue;
             }
             tracing::debug!(
@@ -116,35 +120,7 @@ impl GroupPartWorker {
                     .await?;
             }
             let local_principal = self.local_peer_id;
-            let missed_history = events
-                .first()
-                .is_some_and(|event| event.seq > cursor.saturating_add(1));
-            let mut docs: Vec<_> = if missed_history {
-                tracing::warn!(
-                    cursor,
-                    first_retained_event = events.first().expect("non-empty event batch").seq,
-                    "group-part event history was pruned; rebuilding current document state"
-                );
-                self.keyhive.document_ids().await
-            } else {
-                let mut docs = HashSet::new();
-                for event in &events {
-                    docs.extend(affected_documents(&event.bytes, &group_documents));
-                }
-                docs.into_iter().collect()
-            };
-            if docs.is_empty() {
-                // Keyhive state may advance through a protocol exchange whose
-                // persisted events do not identify the affected document. A
-                // full reconciliation here prevents a newly granted document
-                // from remaining outside GLOBAL_PART_ID indefinitely.
-                tracing::debug!(
-                    cursor,
-                    event_cursor,
-                    "no directly affected documents; rebuilding current document state"
-                );
-                docs = self.keyhive.document_ids().await;
-            }
+            let docs = self.keyhive.document_ids().await;
             tracing::debug!(
                 cursor,
                 event_cursor,
@@ -325,6 +301,7 @@ pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
     PartId::new(raw.into())
 }
 
+#[allow(dead_code)]
 fn affected_documents(
     bytes: &[u8],
     group_documents: &HashMap<[u8; 32], std::collections::BTreeSet<ObjId>>,

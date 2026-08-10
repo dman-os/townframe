@@ -52,7 +52,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Res<()>>,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
     let mut stable_rounds = 0_u8;
     let mut before = cursor_snapshot(targets).await?;
     tracing::debug!(?before, "network-rest initial cursors");

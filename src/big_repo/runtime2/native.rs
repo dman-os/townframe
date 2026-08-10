@@ -94,10 +94,9 @@ impl KeyhiveChangeNotifier {
     /// that pulls in response to the broadcast must be served fresh state, and
     /// the protocol serves sync requests from its cache.
     pub(crate) async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
-        self.keyhive_protocol
-            .note_local_keyhive_changed()
-            .await
-            .wrap_err("keyhive local-change refresh failed")?;
+        if let Err(err) = self.keyhive_protocol.note_local_keyhive_changed().await {
+            tracing::debug!(%err, "keyhive network local-change notification deferred/best-effort");
+        }
         // Broadcast delivery is intentionally best effort; the event is only
         // a wake-up hint and is not the source of Keyhive state.
         let _ = self.keyhive_change_tx.send(None);
@@ -1997,6 +1996,7 @@ where
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
         keyhive_state_generation: Arc::clone(&keyhive_state_generation),
         event_channel: Some((evt_tx.clone(), evt_rx)),
+        keyhive_event_notify: Some(group_part_store.keyhive_event_notifier()),
     };
 
     let (handle, stop_token) =
@@ -2026,6 +2026,8 @@ where
             keyhive.clone(),
             handle.clone(),
             Arc::clone(&timer),
+            evt_tx.clone(),
+            Arc::clone(&keyhive_state_generation),
         );
     stop_token
         .child_tasks

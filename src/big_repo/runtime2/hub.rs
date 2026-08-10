@@ -70,6 +70,11 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// Highest Keyhive state generation the group-part projection has
     /// reconciled (from worker acks).
     group_part_generation: u64,
+    /// Highest Keyhive state generation the causal-checkpoint worker has
+    /// covered into causal checkpoints (from worker acks).
+    causal_checkpoint_generation: u64,
+    /// Notifier for Keyhive event log changes.
+    keyhive_event_notify: Arc<tokio::sync::Notify>,
 
     // ── doc sync bookkeeping ───────────────────────────────────────────────
     /// Waiters for caller-initiated doc sync rounds, keyed by waiter id.
@@ -141,6 +146,7 @@ struct QuiescenceProbe {
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
     group_part_generation: u64,
+    causal_checkpoint_generation: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -301,6 +307,7 @@ where
         let group_part_generation = self
             .keyhive_state_generation
             .load(std::sync::atomic::Ordering::Relaxed);
+        let causal_checkpoint_generation = group_part_generation;
         debug!(
             barrier_id,
             local_peer_id = %self.local_peer_id,
@@ -308,6 +315,7 @@ where
             doc_workers = doc_ids.len(),
             pending_materialization = self.pending_materialization.len(),
             group_part_generation,
+            causal_checkpoint_generation,
             "runtime2 quiescence probe started",
         );
         self.quiescence_probe = Some(QuiescenceProbe {
@@ -315,6 +323,7 @@ where
             activity_generation: generation,
             pending_docs: doc_ids.iter().copied().collect(),
             group_part_generation,
+            causal_checkpoint_generation,
         });
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
@@ -359,6 +368,7 @@ where
             || !self.active_keyhive_syncs.is_empty()
             || !self.keyhive_waiters.is_empty()
             || self.group_part_generation < probe.group_part_generation
+            || self.causal_checkpoint_generation < probe.causal_checkpoint_generation
         {
             return Ok(());
         }
@@ -401,6 +411,7 @@ where
                 | Runtime2Cmd::RegisterDocLease { .. }
                 | Runtime2Cmd::ReleaseDocLease { .. }
                 | Runtime2Cmd::ReleaseInternalLease { .. }
+                | Runtime2Cmd::EnsureCausalCoverage { .. }
         ) {
             self.note_activity();
         }
@@ -680,13 +691,14 @@ where
                 self.cancel_pending_keyhive_sync(&peer_id, waiter_id);
             }
             Runtime2Cmd::RegisterDocLease { doc_id, registered } => {
-                let entry = self
-                    .doc_workers
-                    .get_mut(&doc_id)
-                    .expect("doc worker must exist before registering its bundle lease");
-                entry.local_handles += 1;
-                entry.eviction_deadline = None;
-                registered.send(()).expect(ERROR_CHANNEL);
+                if !self.doc_workers.contains_key(&doc_id) {
+                    self.spawn_doc_worker(doc_id)?;
+                }
+                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+                    entry.local_handles += 1;
+                    entry.eviction_deadline = None;
+                    let _ = registered.send(());
+                }
             }
             Runtime2Cmd::ReleaseDocLease { doc_id } => {
                 self.handle_release_doc_lease(doc_id);
@@ -1416,6 +1428,7 @@ where
             Runtime2Evt::DocWorkerFenced { .. }
                 | Runtime2Evt::TrackedWorkDone { .. }
                 | Runtime2Evt::GroupPartWorkerAdvanced { .. }
+                | Runtime2Evt::CausalCheckpointWorkerAdvanced { .. }
                 | Runtime2Evt::ConnEstablished { .. }
                 | Runtime2Evt::ConnLost { .. }
                 | Runtime2Evt::KeyhiveSyncDone { .. }
@@ -1480,6 +1493,12 @@ where
                     }
                 }
                 self.keyhive_reconciliation_waiters = pending;
+                self.try_resolve_quiescence()?;
+            }
+            Runtime2Evt::CausalCheckpointWorkerAdvanced { generation } => {
+                self.causal_checkpoint_generation =
+                    self.causal_checkpoint_generation.max(generation);
+                self.try_resolve_quiescence()?;
             }
             Runtime2Evt::DocWorkerStopped { doc_id, error } => {
                 self.doc_workers.remove(&doc_id);
@@ -2087,6 +2106,7 @@ where
             .keyhive_state_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
+        self.keyhive_event_notify.notify_waiters();
         debug!(
             local_peer_id = %self.local_peer_id,
             generation,
@@ -2528,7 +2548,11 @@ where
         connect,
         keyhive_state_generation: keyhive_state_generation_config,
         event_channel,
+        keyhive_event_notify,
     } = config;
+
+    let keyhive_event_notify =
+        keyhive_event_notify.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
 
     // Create two independent task sets for reverse-order shutdown.
     let child_tasks = tasks.task_set();
@@ -2564,6 +2588,8 @@ where
         keyhive_round_ids: 0,
         keyhive_state_generation: keyhive_state_generation_config,
         group_part_generation: 0,
+        causal_checkpoint_generation: 0,
+        keyhive_event_notify,
         keyhive_reconciliation_waiters: Vec::new(),
         pending_doc_syncs: HashMap::new(),
         quiescence_waiters: Vec::new(),
