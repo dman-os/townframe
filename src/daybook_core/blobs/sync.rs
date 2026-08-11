@@ -138,25 +138,19 @@ impl BlobSyncBackend {
         let provider_addr = surelock::key::lock_scope(|key| {
             let (map, _key) = key.lock(&self.peer_addrs);
             map.get(&peer_id).cloned()
-        });
+        })
+        .ok_or_else(|| eyre::eyre!("peer {peer_id} is no longer registered for blob downloads"))?;
 
         tracing::info!(%peer_id, %blob_id, ?provider_addr, %iroh_hash, "downloading blob via iroh downloader from peer");
 
-        let downloader = self
-            .blobs_repo
-            .iroh_store()
-            .downloader(&self.endpoint);
-        let node_id = provider_addr
-            .as_ref()
-            .map(|addr| addr.id)
-            .unwrap_or_else(|| iroh::PublicKey::from_bytes(peer_id.as_bytes()).expect("invalid peer id"));
+        let downloader = self.blobs_repo.iroh_store().downloader(&self.endpoint);
 
-        if let Some(addr) = provider_addr {
-            self.address_lookup.add_endpoint_info(addr);
-        }
+        self.address_lookup.add_endpoint_info(provider_addr.clone());
 
-        let res = downloader.download(iroh_hash, vec![node_id]).await;
-        res.map_err(|err| eyre::eyre!("failed downloading blob {blob_id} from peer {peer_id}: {err:?}"))?;
+        let res = downloader.download(iroh_hash, vec![provider_addr.id]).await;
+        res.map_err(|err| {
+            eyre::eyre!("failed downloading blob {blob_id} from peer {peer_id}: {err:?}")
+        })?;
 
         self.blobs_repo
             .put_from_store(blob_id, BlobUseHints::Unknown)
@@ -456,7 +450,10 @@ mod tests {
 
         let addr_a = iroh::EndpointAddr::from_parts(
             endpoint_a.id(),
-            endpoint_a.bound_sockets().into_iter().map(iroh::TransportAddr::Ip),
+            endpoint_a
+                .bound_sockets()
+                .into_iter()
+                .map(iroh::TransportAddr::Ip),
         );
         let peer_id_a = PeerId::new(*endpoint_a.id().as_bytes());
 
@@ -524,7 +521,10 @@ mod tests {
 
         let addr_a = iroh::EndpointAddr::from_parts(
             endpoint_a.id(),
-            endpoint_a.bound_sockets().into_iter().map(iroh::TransportAddr::Ip),
+            endpoint_a
+                .bound_sockets()
+                .into_iter()
+                .map(iroh::TransportAddr::Ip),
         );
         let peer_id_a = PeerId::new(*endpoint_a.id().as_bytes());
         backend_b.register_peer_addr(peer_id_a, addr_a);
@@ -537,7 +537,9 @@ mod tests {
         assert!(!blobs_repo_b.has_hash(hash_added).await?);
 
         let remote_payload = serde_json::json!({ "mime": "text/plain" });
-        let outcome = backend_b.sync_obj(peer_id_a, obj_id_added, Some(remote_payload.clone())).await?;
+        let outcome = backend_b
+            .sync_obj(peer_id_a, obj_id_added, Some(remote_payload.clone()))
+            .await?;
 
         match outcome {
             big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -549,10 +551,15 @@ mod tests {
         assert!(blobs_repo_b.has_hash(hash_added).await?);
         let path_b = blobs_repo_b.get_path(hash_added).await?;
         assert_eq!(tokio::fs::read(path_b).await?, payload_added);
-        assert_eq!(part_store_b.obj_payload(obj_id_added).await?, Some(remote_payload.clone()));
+        assert_eq!(
+            part_store_b.obj_payload(obj_id_added).await?,
+            Some(remote_payload.clone())
+        );
 
         // Case 2: Subsequent sync_obj when blob is already materialized locally returns Noop
-        let noop_outcome = backend_b.sync_obj(peer_id_a, obj_id_added, Some(remote_payload)).await?;
+        let noop_outcome = backend_b
+            .sync_obj(peer_id_a, obj_id_added, Some(remote_payload))
+            .await?;
         match noop_outcome {
             big_sync::SyncTaskRunOutcome::Completion(comp) => {
                 assert_eq!(comp.deets, big_sync_core::SyncCompletionDeets::Noop);
@@ -627,7 +634,11 @@ mod tests {
                 if i != j {
                     let addr_j = iroh::EndpointAddr::from_parts(
                         nodes[j].endpoint.id(),
-                        nodes[j].endpoint.bound_sockets().into_iter().map(iroh::TransportAddr::Ip),
+                        nodes[j]
+                            .endpoint
+                            .bound_sockets()
+                            .into_iter()
+                            .map(iroh::TransportAddr::Ip),
                     );
                     let peer_id_j = PeerId::new(*nodes[j].endpoint.id().as_bytes());
                     nodes[i].backend.register_peer_addr(peer_id_j, addr_j);
@@ -638,8 +649,15 @@ mod tests {
         // Phase 1: Node 0 creates 5 blobs
         let mut created_blobs = Vec::new();
         for idx in 0..5 {
-            let payload = format!("stress-blob-payload-node0-{idx}-{}", "x".repeat(1024 * (idx + 1))).into_bytes();
-            let hash = nodes[0].blobs_repo.put(&payload, BlobUseHints::Docs).await?;
+            let payload = format!(
+                "stress-blob-payload-node0-{idx}-{}",
+                "x".repeat(1024 * (idx + 1))
+            )
+            .into_bytes();
+            let hash = nodes[0]
+                .blobs_repo
+                .put(&payload, BlobUseHints::Docs)
+                .await?;
             created_blobs.push((hash, payload));
         }
 
@@ -648,7 +666,10 @@ mod tests {
         for (hash, payload) in &created_blobs {
             let obj_id = ObjId::new(*hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
-            let outcome = nodes[1].backend.sync_obj(peer_0, obj_id, Some(remote_meta)).await?;
+            let outcome = nodes[1]
+                .backend
+                .sync_obj(peer_0, obj_id, Some(remote_meta))
+                .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(comp) => {
                     assert_eq!(comp.deets, big_sync_core::SyncCompletionDeets::AddedMember);
@@ -661,8 +682,15 @@ mod tests {
 
         // Phase 3: Node 1 creates 3 new blobs
         for idx in 0..3 {
-            let payload = format!("stress-blob-payload-node1-{idx}-{}", "y".repeat(2048 * (idx + 1))).into_bytes();
-            let hash = nodes[1].blobs_repo.put(&payload, BlobUseHints::Docs).await?;
+            let payload = format!(
+                "stress-blob-payload-node1-{idx}-{}",
+                "y".repeat(2048 * (idx + 1))
+            )
+            .into_bytes();
+            let hash = nodes[1]
+                .blobs_repo
+                .put(&payload, BlobUseHints::Docs)
+                .await?;
             created_blobs.push((hash, payload));
         }
 
@@ -671,7 +699,10 @@ mod tests {
         for (hash, payload) in &created_blobs {
             let obj_id = ObjId::new(*hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
-            let outcome = nodes[2].backend.sync_obj(peer_1, obj_id, Some(remote_meta)).await?;
+            let outcome = nodes[2]
+                .backend
+                .sync_obj(peer_1, obj_id, Some(remote_meta))
+                .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(_) => {}
                 other => panic!("expected Completion for node 2 sync_obj, got {other:?}"),

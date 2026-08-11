@@ -160,6 +160,7 @@ impl DrawerRepo {
         });
         repo.ensure_local_branch_schema().await?;
         repo.migrate_content_doc_authority().await?;
+        repo.ensure_replicated_branch_partitions().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -245,6 +246,22 @@ impl DrawerRepo {
             self.partition_store
                 .add_obj_to_parts(branch_doc_id, vec![part_id])
                 .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_replicated_branch_partitions(&self) -> Res<()> {
+        let (_, entries) = self.current_drawer_entries().await?;
+        let part_id = self.replicated_partition_id();
+        for (_doc_id, entry) in entries {
+            for (branch_name, branch_ref) in &entry.branches {
+                let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
+                if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
+                    self.partition_store
+                        .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                        .await?;
+                }
+            }
         }
         Ok(())
     }

@@ -954,6 +954,8 @@ pub mod globals {
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct SyncDeviceEntry {
         pub endpoint_id: iroh::EndpointId,
+        #[serde(default)]
+        pub agent_peer_id: Option<big_sync_core::PeerId>,
         pub name: String,
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,

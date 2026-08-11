@@ -924,7 +924,10 @@ pub struct BigRepoStopToken {
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
-        let _res = self.connection_tasks.stop(std::time::Duration::from_secs(5)).await;
+        let _res = self
+            .connection_tasks
+            .stop(std::time::Duration::from_secs(5))
+            .await;
         self.runtime_stop
             .stop(std::time::Duration::from_secs(5))
             .await?;

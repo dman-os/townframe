@@ -458,14 +458,14 @@ impl BigSyncWorker {
                     let Ok(evt) = evt else {
                         break;
                     };
-                    trace!(?evt, "received sync event");
+                    debug!(worker = %self.label, ?evt, "big_sync worker received sync event");
                     self.machine.handle_evt(evt);
                 }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
-                    trace!(?msg, "received host msg");
+                    debug!(worker = %self.label, ?msg, "big_sync worker received host msg");
                     self.handle_msg(msg).await?;
                 }
                 _ = janitor_tick.tick() => {
@@ -513,15 +513,16 @@ impl BigSyncWorker {
                 let Some(task) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
-                trace!(?task, "spawning sync task");
+                debug!(worker = %self.label, task_id = task.id, peer_id = %task.deets.peer_id, obj_id = %task.deets.obj_id, "spawning sync task");
                 self.spawn_sync_task(task).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
-                trace!(?event, "dispatching stat event");
+                debug!(worker = %self.label, ?event, "dispatching stat event");
                 if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event
                     && let Some(resp) = self.full_sync_waiters.remove(&waiter_id)
                 {
+                    info!(worker = %self.label, waiter_id, "full sync waiter satisfied");
                     resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 }
                 self.stats_tx.send(event).ok();

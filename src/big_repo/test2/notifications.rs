@@ -65,7 +65,8 @@ async fn assert_no_notification(
     repo: &Arc<crate::BigRepo>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
 ) -> crate::Res<()> {
-    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5))).await?;
+    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
+        .await?;
     match rx.try_recv() {
         Ok(notifications) => panic!("unexpected notification(s): {notifications:?}"),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(()),

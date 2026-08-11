@@ -29,11 +29,7 @@ async fn freeze_holds_commands_until_unfreeze() -> Res<()> {
     let doc_id = crate::DocumentId::new([9; 32]);
     let held_fut = pair.left().repo.contains_sedimentree_id(doc_id);
     tokio::pin!(held_fut);
-    let held = timeout(
-        Duration::from_millis(500),
-        &mut held_fut,
-    )
-    .await;
+    let held = timeout(Duration::from_millis(500), &mut held_fut).await;
     assert!(
         held.is_err(),
         "command must be held while the hub is frozen"
@@ -41,11 +37,7 @@ async fn freeze_holds_commands_until_unfreeze() -> Res<()> {
 
     // Reopen: the original buffered command replays and resolves.
     pair.left().repo.unfreeze().await?;
-    let resolved = timeout(
-        Duration::from_secs(5),
-        held_fut,
-    )
-    .await??;
+    let resolved = timeout(Duration::from_secs(5), held_fut).await??;
     assert!(!resolved, "unknown document must not be present");
 
     // The hub is a normal hub again: commands flow without freezing.

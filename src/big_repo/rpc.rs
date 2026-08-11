@@ -61,11 +61,8 @@ impl RpcPeerMap {
         }
     }
 
-    fn lookup(&self, endpoint_id: iroh::EndpointId) -> PeerId {
-        self.by_endpoint
-            .get(&endpoint_id)
-            .copied()
-            .unwrap_or_else(|| PeerId::new(*endpoint_id.as_bytes()))
+    fn lookup(&self, endpoint_id: iroh::EndpointId) -> Option<PeerId> {
+        self.by_endpoint.get(&endpoint_id).copied()
     }
 }
 
@@ -116,7 +113,12 @@ pub struct BigRepoRpcProtocolHandler {
 impl ProtocolHandler for BigRepoRpcProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let endpoint_id = conn.remote_id();
-        let peer_id = self.peer_map.read().expect(ERROR_MUTEX).lookup(endpoint_id);
+        let peer_id = self
+            .peer_map
+            .read()
+            .expect(ERROR_MUTEX)
+            .lookup(endpoint_id)
+            .unwrap_or_else(|| PeerId::new(*endpoint_id.as_bytes()));
         loop {
             let msg = match irpc_iroh::read_request::<RepoSyncRpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -311,13 +313,10 @@ mod tests {
         let mut map = RpcPeerMap::default();
 
         map.register(endpoint_id, application_peer);
-        assert_eq!(map.lookup(endpoint_id), application_peer);
+        assert_eq!(map.lookup(endpoint_id), Some(application_peer));
 
         map.unregister(application_peer);
-        assert_eq!(
-            map.lookup(endpoint_id),
-            PeerId::new(*endpoint_id.as_bytes())
-        );
+        assert_eq!(map.lookup(endpoint_id), None);
     }
 
     async fn test_endpoint() -> Res<iroh::Endpoint> {

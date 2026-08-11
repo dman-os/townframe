@@ -685,6 +685,7 @@ impl ConfigRepo {
             .known_devices
             .push(crate::repo::globals::SyncDeviceEntry {
                 endpoint_id,
+                agent_peer_id: None,
                 name: device_name.to_string(),
                 added_at: jiff::Timestamp::now(),
                 last_connected_at: None,

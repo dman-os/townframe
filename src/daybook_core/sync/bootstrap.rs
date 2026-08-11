@@ -149,6 +149,23 @@ impl CloneProvisionResponse {
 // Client-side RPC helpers
 // ---------------------------------------------------------------------------
 
+async fn bind_bootstrap_endpoint(secret_key: Option<iroh::SecretKey>) -> Res<iroh::Endpoint> {
+    let address_lookup = iroh::address_lookup::MemoryLookup::default();
+    let mut builder =
+        iroh::Endpoint::builder(iroh::endpoint::presets::Minimal).address_lookup(address_lookup);
+    if let Some(key) = secret_key {
+        builder = builder.secret_key(key);
+    }
+    #[cfg(test)]
+    {
+        builder = builder
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(iroh::RelayMode::Disabled);
+    }
+    let endpoint = builder.bind().await?;
+    Ok(endpoint)
+}
+
 #[tracing::instrument(skip(source_url))]
 pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoResponse> {
     let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
@@ -167,9 +184,7 @@ pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoRespo
             .map_err(|err| eyre::eyre!("clone info rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .bind()
-        .await?;
+    let endpoint = bind_bootstrap_endpoint(None).await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -200,9 +215,7 @@ pub async fn request_clone_provision_from_url(
             .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .bind()
-        .await?;
+    let endpoint = bind_bootstrap_endpoint(None).await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -234,14 +247,7 @@ pub async fn connect_and_pull_required_partitions_once(
 ) -> Res<()> {
     let timeout = utils_rs::scale_timeout(options.timeout);
     let address_lookup = iroh::address_lookup::MemoryLookup::default();
-    let endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .secret_key(iroh_secret_key)
-        .address_lookup(address_lookup.clone());
-    #[cfg(test)]
-    let endpoint_builder = endpoint_builder
-        .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
-        .relay_mode(iroh::RelayMode::Disabled);
-    let endpoint = endpoint_builder.bind().await?;
+    let endpoint = bind_bootstrap_endpoint(Some(iroh_secret_key)).await?;
     let result: Res<()> = pull_required_partitions_via_big_sync_worker(
         big_repo,
         blobs_repo,
@@ -533,6 +539,7 @@ pub async fn clone_repo_init_from_url(
                 .known_devices
                 .push(crate::repo::globals::SyncDeviceEntry {
                     endpoint_id: bootstrap.endpoint_id,
+                    agent_peer_id: None,
                     name: bootstrap
                         .device_name
                         .clone()

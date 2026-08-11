@@ -337,7 +337,6 @@ impl IrohSyncRepo {
         #[cfg(test)]
         let router_for_shutdown = router.clone();
 
-
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             async move {
@@ -433,8 +432,6 @@ impl IrohSyncRepo {
         }
         (doc, blob)
     }
-
-
 
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
         let Ok(mut reconnect_task) = self.reconnect_task.try_lock() else {
@@ -655,7 +652,8 @@ impl IrohSyncRepo {
                 remote_info.into_addrs().map(|info| info.into_addr()),
             );
             self.address_lookup.add_endpoint_info(addr.clone());
-            self.blobs_sync_backend.register_peer_addr(conn.peer_id, addr.clone());
+            self.blobs_sync_backend
+                .register_peer_addr(conn.peer_id, addr.clone());
             self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
             let doc_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
@@ -921,7 +919,8 @@ impl IrohSyncRepo {
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
             self.address_lookup.add_endpoint_info(endpoint_addr.clone());
-            self.blobs_sync_backend.register_peer_addr(conn.peer_id, endpoint_addr.clone());
+            self.blobs_sync_backend
+                .register_peer_addr(conn.peer_id, endpoint_addr.clone());
             self.big_repo_rpc.register_peer(endpoint_id, conn.peer_id);
             self.big_sync_worker
                 .set_peer(
@@ -986,10 +985,23 @@ impl IrohSyncRepo {
         Ok(endpoint_addr)
     }
 
-    pub async fn ensure_local_blob_from_active_peers(&self, blob_id: crate::blobs::BlobId) -> Res<()> {
-        let peers = self.active_peers.read().await.keys().copied().collect::<Vec<_>>();
+    pub async fn ensure_local_blob_from_active_peers(
+        &self,
+        blob_id: crate::blobs::BlobId,
+    ) -> Res<()> {
+        let peers = self
+            .active_peers
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
         for peer_id in peers {
-            if let Err(err) = self.blobs_sync_backend.ensure_local_blob(peer_id, blob_id).await {
+            if let Err(err) = self
+                .blobs_sync_backend
+                .ensure_local_blob(peer_id, blob_id)
+                .await
+            {
                 tracing::warn!(%peer_id, %blob_id, ?err, "failed to download missing blob from active peer");
             } else {
                 return Ok(());
@@ -1057,7 +1069,11 @@ impl IrohSyncRepo {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err),
             Err(_) => {
-                eyre::bail!("wait_for_full_sync timed out after {timeout:?}");
+                let doc_snapshot = self.big_sync_worker.snapshot().await;
+                let blob_snapshot = self.blob_sync_worker.snapshot().await;
+                eyre::bail!(
+                    "wait_for_full_sync timed out after {timeout:?}:\n  peers={peer_ids:?}\n  required_partitions={required_partitions:?}\n  doc_worker={doc_snapshot:?}\n  blob_worker={blob_snapshot:?}"
+                );
             }
         }
     }

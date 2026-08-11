@@ -160,7 +160,10 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
 
     let bob_card = topo.topo_node(2).repo.local_keyhive_contact_card();
-    topo.topo_node(0).repo.receive_keyhive_contact_card(&bob_card).await?;
+    topo.topo_node(0)
+        .repo
+        .receive_keyhive_contact_card(&bob_card)
+        .await?;
 
     let bob_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
@@ -292,7 +295,10 @@ async fn tier3_line_replication() -> crate::Res<()> {
     topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
 
     let carol_card = topo.topo_node(2).repo.local_keyhive_contact_card();
-    topo.topo_node(0).repo.receive_keyhive_contact_card(&carol_card).await?;
+    topo.topo_node(0)
+        .repo
+        .receive_keyhive_contact_card(&carol_card)
+        .await?;
 
     let carol_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
@@ -1182,7 +1188,6 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
             "sedimentree heads diverged at node {idx} after partition heal"
         );
     }
-
 
     drop(owner_doc);
     drop(c_doc);

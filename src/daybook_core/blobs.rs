@@ -18,11 +18,7 @@ pub trait PartitionMembershipWriter: Send + Sync {
         member_id: BlobId,
         payload: &serde_json::Value,
     ) -> Res<()>;
-    async fn add_member_to_partition(
-        &self,
-        partition_id: Arc<str>,
-        member_id: BlobId,
-    ) -> Res<()>;
+    async fn add_member_to_partition(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()>;
     async fn remove_item(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()>;
 }
 
@@ -55,11 +51,7 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
         Ok(())
     }
 
-    async fn add_member_to_partition(
-        &self,
-        partition_id: Arc<str>,
-        member_id: BlobId,
-    ) -> Res<()> {
+    async fn add_member_to_partition(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()> {
         let part_id = crate::part_id_from_label(&partition_id);
         self.partition_store
             .add_obj_to_parts(member_id, vec![part_id])
@@ -251,7 +243,9 @@ impl BlobsRepo {
 
     pub async fn has_blob_on_disk(&self, blob_id: BlobId) -> Res<bool> {
         let object_paths = self.object_paths(blob_id)?;
-        tokio::fs::try_exists(&object_paths.blob).await.map_err(Into::into)
+        tokio::fs::try_exists(&object_paths.blob)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn ensure_hash_materialized(&self, blob_id: BlobId) -> Res<()> {
@@ -745,7 +739,8 @@ impl BlobsRepo {
     }
 
     async fn ingest_path_with_iroh(&self, path: &Path, blob_id: BlobId) -> Res<()> {
-        let outcome = self.iroh_store
+        let outcome = self
+            .iroh_store
             .blobs()
             .add_path_with_opts(AddPathOptions {
                 path: path.to_path_buf(),
@@ -757,13 +752,20 @@ impl BlobsRepo {
             .map_err(|err| eyre::eyre!("error ingesting path into iroh store: {err:?}"))?;
         let iroh_hash = blob_id_to_iroh_hash(blob_id);
         let has_in_iroh = self.iroh_store.blobs().has(iroh_hash).await?;
-        eprintln!(">>> INGESTED BLOB {:?}, IROH HASH {:?}, HAS IN IROH STORE: {}, OUTCOME HASH: {:?} <<<", blob_id, iroh_hash, has_in_iroh, outcome.hash);
+        eprintln!(
+            ">>> INGESTED BLOB {:?}, IROH HASH {:?}, HAS IN IROH STORE: {}, OUTCOME HASH: {:?} <<<",
+            blob_id, iroh_hash, has_in_iroh, outcome.hash
+        );
         Ok(())
     }
 
     async fn publish_use_hints(&self, blob_id: BlobId, use_hints: BlobUseHints) -> Res<()> {
+        let payload = serde_json::json!({});
         for scope in use_hints.scopes() {
-            self.add_hash_to_scope(*scope, blob_id).await?;
+            let partition_id: Arc<str> = scope.partition_id().into();
+            self.partition_writer
+                .upsert_item(partition_id, blob_id, &payload)
+                .await?;
         }
         Ok(())
     }

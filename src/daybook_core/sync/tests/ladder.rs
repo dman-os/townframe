@@ -361,7 +361,10 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         .blobs_repo
         .put(&payload, crate::blobs::BlobUseHints::Docs)
         .await?;
-    eprintln!(">>> NODE A HAS HASH: {} <<<", node_a.blobs_repo.has_hash(hash).await?);
+    eprintln!(
+        ">>> NODE A HAS HASH: {} <<<",
+        node_a.blobs_repo.has_hash(hash).await?
+    );
     let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     {
         let doc_id = node_a
@@ -1236,8 +1239,12 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
     node_a.stop().await?;
 
-    let cloned =
-        RepoCtx::open(&repo_b_path, RepoOpenOptions::default(), "clone-device".to_string()).await?;
+    let cloned = RepoCtx::open(
+        &repo_b_path,
+        RepoOpenOptions::default(),
+        "clone-device".to_string(),
+    )
+    .await?;
 
     assert_eq!(
         cloned.repo_id, source_repo_id,

@@ -56,7 +56,6 @@ pub enum BigSyncIrpc {
     LeafBuckets(LeafBucketsRequest),
 }
 impl IrohBigSyncRpcClient {
-
     pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
         Self::new_with_alpn(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN)
     }
@@ -321,12 +320,16 @@ impl BigSyncRpcWorker {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let out = {
-                    self.store.summarize_parts(inner.parts).await.unwrap().map(|parts| PeerSummaryResult {
-                        parts: parts
-                            .into_iter()
-                            .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                            .collect(),
-                    })
+                    self.store
+                        .summarize_parts(inner.parts)
+                        .await
+                        .unwrap()
+                        .map(|parts| PeerSummaryResult {
+                            parts: parts
+                                .into_iter()
+                                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
+                                .collect(),
+                        })
                 };
                 tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
@@ -355,7 +358,7 @@ impl BigSyncRpcWorker {
                                     }
                                 };
                                 match &evt {
-                                    big_sync_core::rpc::SubEvent::Added(inner) => tracing::trace!(
+                                    big_sync_core::rpc::SubEvent::Added(inner) => tracing::debug!(
                                         ?subscriber,
                                         obj_id = %inner.obj_id,
                                         part_id = %inner.part_id,
@@ -363,7 +366,7 @@ impl BigSyncRpcWorker {
                                         payload = !inner.payload.is_null(),
                                         "rpc forwarding Added event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::Changed(inner) => tracing::trace!(
+                                    big_sync_core::rpc::SubEvent::Changed(inner) => tracing::debug!(
                                         ?subscriber,
                                         obj_id = %inner.obj_id,
                                         cursor = inner.cursor,
@@ -371,20 +374,20 @@ impl BigSyncRpcWorker {
                                         payload = !inner.payload.is_null(),
                                         "rpc forwarding Changed event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::Removed(inner) => tracing::trace!(
+                                    big_sync_core::rpc::SubEvent::Removed(inner) => tracing::debug!(
                                         ?subscriber,
                                         obj_id = %inner.obj_id,
                                         part_id = %inner.part_id,
                                         cursor = inner.cursor,
                                         "rpc forwarding Removed event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::trace!(
+                                    big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::debug!(
                                         ?subscriber,
                                         obj_id = %inner.obj_id,
                                         payload = !inner.payload.is_null(),
                                         "rpc forwarding ObjectChanged event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::ReplayComplete => tracing::trace!(
+                                    big_sync_core::rpc::SubEvent::ReplayComplete => tracing::debug!(
                                         ?subscriber,
                                         "rpc forwarding ReplayComplete",
                                     ),

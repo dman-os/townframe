@@ -1121,7 +1121,8 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     let unknown_peer = big_sync_core::PeerId::new([0x99; 32]);
 
     let mut seed = automerge::Automerge::new();
-    seed.transact(|tx| tx.put(automerge::ROOT, "test", true)).ok();
+    seed.transact(|tx| tx.put(automerge::ROOT, "test", true))
+        .ok();
     let doc = pair.left().repo.create_doc(seed).await?;
     let doc_id = doc.document_id();
     let obj_id = big_sync_core::ObjId::new(*doc_id.as_bytes());
@@ -1133,16 +1134,34 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     assert!(store.is_event_permitted(None, obj_id, None).await?);
 
     // 2. Unknown object returns false (denial)
-    assert!(!store.is_event_permitted(None, unknown_obj_id, Some(reader_peer)).await?);
+    assert!(
+        !store
+            .is_event_permitted(None, unknown_obj_id, Some(reader_peer))
+            .await?
+    );
 
     // 3. Unknown peer on known object returns false (denial)
-    assert!(!store.is_event_permitted(None, obj_id, Some(unknown_peer)).await?);
+    assert!(
+        !store
+            .is_event_permitted(None, obj_id, Some(unknown_peer))
+            .await?
+    );
 
     // 4. Add reader member, verify permitted, then remove via remove_obj_member and assert denial
-    store.add_obj_member(obj_id, reader_peer, keyhive_core::access::Access::Read).await?;
-    assert!(store.is_event_permitted(None, obj_id, Some(reader_peer)).await?);
+    store
+        .add_obj_member(obj_id, reader_peer, keyhive_core::access::Access::Read)
+        .await?;
+    assert!(
+        store
+            .is_event_permitted(None, obj_id, Some(reader_peer))
+            .await?
+    );
     store.remove_obj_member(obj_id, reader_peer).await?;
-    assert!(!store.is_event_permitted(None, obj_id, Some(reader_peer)).await?);
+    assert!(
+        !store
+            .is_event_permitted(None, obj_id, Some(reader_peer))
+            .await?
+    );
 
     Ok(())
 }

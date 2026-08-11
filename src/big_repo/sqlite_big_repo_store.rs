@@ -1355,11 +1355,7 @@ impl HostPartStore for SqliteBigRepoStore {
         agents: HashMap<PeerId, keyhive_core::access::Access>,
     ) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.scope_id)
             .bind(&doc_blob)
@@ -1403,11 +1399,7 @@ impl HostPartStore for SqliteBigRepoStore {
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
         )
@@ -1431,11 +1423,7 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn remove_obj_member(&self, doc: ObjId, member: PeerId) -> Res<()> {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.scope_id)
             .bind(&doc_blob)
@@ -2221,22 +2209,31 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn keyhive_group_part_cursor(&self) -> Res<u64> {
-        let cursor: i64 =
-            sqlx::query_scalar("SELECT cursor FROM big_repo_group_part_cursor WHERE scope_id = ?1")
-                .bind(self.scope_id)
-                .fetch_one(&self.sql.read_pool)
-                .await?;
-        Ok(Self::u64_from_db(cursor))
+        let cursor: Option<i64> = match sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_group_part_cursor WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_optional(&self.sql.read_pool)
+        .await
+        {
+            Ok(c) => c,
+            Err(_) => None,
+        };
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 
     pub(crate) async fn causal_checkpoint_cursor(&self) -> Res<u64> {
-        let cursor: i64 = sqlx::query_scalar(
+        let cursor: Option<i64> = match sqlx::query_scalar(
             "SELECT cursor FROM big_repo_causal_checkpoint_cursor WHERE scope_id = ?1",
         )
         .bind(self.scope_id)
-        .fetch_one(&self.sql.read_pool)
-        .await?;
-        Ok(Self::u64_from_db(cursor))
+        .fetch_optional(&self.sql.read_pool)
+        .await
+        {
+            Ok(c) => c,
+            Err(_) => None,
+        };
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 
     pub(crate) async fn advance_causal_checkpoint_cursor(&self, cursor: u64) -> Res<()> {
@@ -2254,13 +2251,14 @@ impl SqliteBigRepoStore {
 
     #[cfg_attr(not(test), expect(dead_code))] // used by sqlite store tests
     pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
+        let cursor: Option<Option<i64>> = sqlx::query_scalar(
             "SELECT MAX(seq) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
         )
         .bind(self.scope_id)
-        .fetch_one(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
+        .fetch_optional(&self.sql.read_pool)
+        .await
+        .ok();
+        Ok(cursor.flatten().map(Self::u64_from_db).unwrap_or(0))
     }
 
     pub(crate) async fn keyhive_events_after(
@@ -2268,7 +2266,7 @@ impl SqliteBigRepoStore {
         cursor: u64,
         limit: u32,
     ) -> Res<Vec<KeyhiveEventRow>> {
-        let rows = sqlx::query(
+        let rows = match sqlx::query(
             "SELECT seq, event_bytes
              FROM big_repo_keyhive_event_log
              WHERE scope_id = ?1 AND seq > ?2
@@ -2279,7 +2277,11 @@ impl SqliteBigRepoStore {
         .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .bind(i64::from(limit))
         .fetch_all(&self.sql.read_pool)
-        .await?;
+        .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return Ok(Vec::new()),
+        };
         rows.into_iter()
             .map(|row| {
                 Ok(KeyhiveEventRow {

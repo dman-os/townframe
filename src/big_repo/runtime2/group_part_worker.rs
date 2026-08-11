@@ -306,8 +306,8 @@ fn affected_documents(
     bytes: &[u8],
     group_documents: &HashMap<[u8; 32], std::collections::BTreeSet<ObjId>>,
 ) -> Res<Vec<ObjId>> {
-    let event: StaticEvent<Vec<u8>> =
-        bincode::deserialize(bytes).map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
+    let event: StaticEvent<Vec<u8>> = bincode::deserialize(bytes)
+        .map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
     let mut documents = Vec::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {

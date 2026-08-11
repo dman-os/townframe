@@ -226,8 +226,12 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
                 commit_id,
             )
         );
-        if frag_res.wrap_err("failed loading fragment for ciphertext")?.is_some()
-            || loose_res.wrap_err("failed loading loose commit for ciphertext")?.is_some()
+        if frag_res
+            .wrap_err("failed loading fragment for ciphertext")?
+            .is_some()
+            || loose_res
+                .wrap_err("failed loading loose commit for ciphertext")?
+                .is_some()
         {
             return Ok(true);
         }
@@ -2090,8 +2094,9 @@ where
     }
     {
         let kh_proto = Arc::clone(&keyhive_protocol);
-        let peer_id = PeerId::new(*local_peer_id.as_bytes());
-        let keyhive_archive_id = subduction_keyhive::storage::StorageHash::new(*peer_id.as_bytes());
+        let keyhive_archive_id = subduction_keyhive::storage::StorageHash::new(
+            *keyhive.keyhive_peer_id().verifying_key(),
+        );
         stop_token.child_tasks.spawn({
             let timer = Arc::clone(&timer);
             Sendable::from_future(async move {

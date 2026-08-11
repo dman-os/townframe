@@ -328,8 +328,15 @@ async fn tier6_reopen_after_authority_grant_keeps_new_documents_writable() -> cr
         .await??;
 
     let snap = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
-    assert!(!snap.cgka_operation_hashes.is_empty(), "CGKA operations must be present for doc");
-    assert_eq!(read_text(&handle, "phase").await.as_deref(), Some("second"), "document must remain usable");
+    assert!(
+        !snap.cgka_operation_hashes.is_empty(),
+        "CGKA operations must be present for doc"
+    );
+    assert_eq!(
+        read_text(&handle, "phase").await.as_deref(),
+        Some("second"),
+        "document must remain usable"
+    );
 
     Ok(())
 }

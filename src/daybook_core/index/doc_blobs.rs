@@ -1074,7 +1074,10 @@ mod tests {
         .await?;
 
         let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-        let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
+        let blob_id = blobs_repo
+            .put(b"docs-scope-hash-bytes", crate::blobs::BlobUseHints::Docs)
+            .await?;
+        let hash = blob_id.to_string();
         let doc_id = drawer_repo
             .add(AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1082,7 +1085,7 @@ mod tests {
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
                         mime: "application/octet-stream".to_string(),
-                        length_octets: 13,
+                        length_octets: 21,
                         digest: "ignored-digest".to_string(),
                         inline: None,
                         urls: Some(vec![format!("{BLOB_SCHEME}:///{hash}")]),

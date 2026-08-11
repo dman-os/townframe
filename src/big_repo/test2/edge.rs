@@ -985,8 +985,16 @@ async fn tier9_put_doc_occupancy_check_prevents_overwrite() -> crate::Res<()> {
     let doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = doc.document_id();
 
-    let heads = pair.left().repo.doc_head_state(doc_id).await?.sedimentree_heads;
-    assert!(!heads.is_empty(), "created doc must have sedimentree heads in subduction");
+    let heads = pair
+        .left()
+        .repo
+        .doc_head_state(doc_id)
+        .await?
+        .sedimentree_heads;
+    assert!(
+        !heads.is_empty(),
+        "created doc must have sedimentree heads in subduction"
+    );
 
     // Retrieve doc to verify it is loaded & occupied
     let retrieved = pair.left().repo.get_doc(&doc_id).await?;
@@ -1016,7 +1024,11 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
         Some(signal_tx),
         &tasks,
     );
-    assert_eq!(tasks.len(), 1, "watch_connection_end must register task in AbortableJoinSet");
+    assert_eq!(
+        tasks.len(),
+        1,
+        "watch_connection_end must register task in AbortableJoinSet"
+    );
 
     drop(end_tx);
     tasks.abort();

@@ -155,7 +155,10 @@ impl FsKeyhiveStorage {
         {
             if parent_dir.ends_with(LOCAL_SECRETS_SUBDIR) || parent_dir == self.local_secret_dir() {
                 use std::os::unix::fs::PermissionsExt;
-                drop(std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)));
+                drop(std::fs::set_permissions(
+                    &tmp,
+                    std::fs::Permissions::from_mode(0o600),
+                ));
             }
         }
         let result = match tokio::fs::hard_link(&tmp, &dest).await {

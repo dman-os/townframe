@@ -579,7 +579,12 @@ async fn init_and_copy_repo_pair(
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
 
-        let ctx = RepoCtx::open(repo_b_path, RepoOpenOptions::default(), "test-device".into()).await?;
+        let ctx = RepoCtx::open(
+            repo_b_path,
+            RepoOpenOptions::default(),
+            "test-device".into(),
+        )
+        .await?;
         if ctx.repo_id != source_repo_id {
             eyre::bail!(
                 "init repo_id mismatch after clone (source={}, cloned={})",
