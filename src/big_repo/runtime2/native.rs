@@ -58,7 +58,7 @@ use subduction_ephemeral::{
     clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
     policy::OpenEphemeralPolicy,
 };
-use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
+use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId, message::EventHash};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 /// Single funnel for "the local Keyhive changed".
 ///
@@ -73,50 +73,47 @@ use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 pub(crate) struct KeyhiveChangeNotifier {
     /// Keyhive protocol handle — cache busting + syncpoint invalidation.
     keyhive_protocol: BigRepoKeyhiveProtocol,
-    /// Broadcast backing the `SubscribeKeyhiveChanges` RPC stream.
-    keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
+    /// Dispatcher handle — classification + debounced fan-out to subscribers.
+    dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
 }
 
 impl KeyhiveChangeNotifier {
     pub(crate) fn new(
         keyhive_protocol: BigRepoKeyhiveProtocol,
-        keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
+        dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
     ) -> Self {
         Self {
             keyhive_protocol,
-            keyhive_change_tx,
+            dispatcher,
         }
     }
 
-    /// Cache-bust the protocol cache, then broadcast the change hint to peers.
+    /// The dispatcher handle (subscription registration + local reports).
+    pub(crate) fn dispatcher(
+        &self,
+    ) -> &crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher {
+        &self.dispatcher
+    }
+
+    /// Cache-bust the protocol cache, then report the local change to the
+    /// dispatcher for classification and debounced fan-out.
     ///
     /// The cache bust is deliberately synchronous with the mutation: a peer
-    /// that pulls in response to the broadcast must be served fresh state, and
-    /// the protocol serves sync requests from its cache.
-    pub(crate) async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
+    /// that pulls in response to the notification must be served fresh state,
+    /// and the protocol serves sync requests from its cache. `hashes` are the
+    /// hashes of the events the mutation persisted (empty when unknown — the
+    /// dispatcher then falls back to a conservative wake-up).
+    pub(crate) async fn note_local_keyhive_changed(
+        &self,
+        hashes: &[EventHash],
+    ) -> eyre::Result<()> {
         if let Err(err) = self.keyhive_protocol.note_local_keyhive_changed().await {
             tracing::debug!(%err, "keyhive network local-change notification deferred/best-effort");
         }
-        // Broadcast delivery is intentionally best effort; the event is only
-        // a wake-up hint and is not the source of Keyhive state.
-        self.keyhive_change_tx
-            .send(None)
-            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
-            .ok();
+        // Delivery is intentionally best effort; the event is only a wake-up
+        // hint and is not the source of Keyhive state.
+        self.dispatcher.report(hashes.to_vec(), None);
         Ok(())
-    }
-
-    /// Forward a remotely applied change to our other connected peers.
-    ///
-    /// The protocol has already incorporated the remote events and updated
-    /// its sync state before invoking the sync-done observer, so invalidating
-    /// that state here would turn a finite gossip round into an echo loop.
-    /// Only the payload-free wake-up hint needs forwarding.
-    pub(crate) fn note_remote_keyhive_changed(&self, source_peer_id: PeerId) {
-        self.keyhive_change_tx
-            .send(Some(source_peer_id))
-            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
-            .ok();
     }
 }
 
@@ -373,6 +370,49 @@ fn kh_doc_id_from_sed_id(sed_id: SedimentreeId) -> eyre::Result<KhDocumentId> {
 // DocIo<Sendable> impl
 // ═══════════════════════════════════════════════════════════════════════════
 
+impl<S> NativeBigRepoIo<S>
+where
+    S: BigRepoSubductionStorage,
+{
+    /// Compute the sedimentree frontier from durable storage alone (ignoring
+    /// the resident cache and the incrementally-maintained heads table).
+    /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
+    /// cache-vs-durable detector. O(tree) — never call on a hot path.
+    async fn durable_sedimentree_heads_full(
+        storage: &S,
+        sed_id: SedimentreeId,
+    ) -> eyre::Result<Vec<CommitId>> {
+        let loose_commits =
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
+                storage, sed_id,
+            )
+            .await
+            .wrap_err("failed loading loose commits for heads")?;
+        let fragments = <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
+            storage, sed_id,
+        )
+        .await
+        .wrap_err("failed loading fragments for heads")?;
+        if loose_commits.is_empty() && fragments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tree = MinimizedSedimentree::new(Sedimentree::new(
+            fragments
+                .iter()
+                .map(|frag| frag.payload().clone())
+                .collect(),
+            loose_commits
+                .iter()
+                .map(|commit| commit.payload().clone())
+                .collect(),
+        ));
+        Ok(sedimentree_heads_payload(&tree)
+            .iter()
+            .map(|head| CommitId::new(head.0))
+            .collect())
+    }
+}
+
 impl<S> DocIo<Sendable> for NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
@@ -388,9 +428,11 @@ where
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
             let keyhive_changed = !cgka_ops.is_empty();
+            let mut hashes = Vec::new();
             if keyhive_changed {
-                persist_cgka_updates_durably(&self.keyhive_storage, cgka_ops, local_secrets)
-                    .await?;
+                hashes =
+                    persist_cgka_updates_durably(&self.keyhive_storage, cgka_ops, local_secrets)
+                        .await?;
             }
             self.subduction
                 .store_sedimentree(sed_id, sedimentree, blobs)
@@ -398,7 +440,9 @@ where
                 .wrap_err("failed storing initial sedimentree")?;
             if keyhive_changed {
                 // Cache-bust + notify peers in one call.
-                self.keyhive_notifier.note_local_keyhive_changed().await?;
+                self.keyhive_notifier
+                    .note_local_keyhive_changed(&hashes)
+                    .await?;
             }
             Ok(())
         })
@@ -412,6 +456,7 @@ where
         Sendable::from_future(async move {
             let mut fragment_requests = BTreeSet::new();
             let mut keyhive_changed = false;
+            let mut hashes = Vec::new();
             let mut batch_keys = HashMap::new();
             for (head, parents, blob) in commits {
                 let (encrypted_blob, app_key, update_op, local_secret) =
@@ -436,20 +481,22 @@ where
                     })?;
                 batch_keys.insert(head, app_key);
                 if let Some(update_op) = update_op {
-                    persist_cgka_updates_durably(
-                        &self.keyhive_storage,
-                        vec![update_op],
-                        local_secret.into_iter().collect(),
-                    )
-                    .await?;
+                    hashes.extend(
+                        persist_cgka_updates_durably(
+                            &self.keyhive_storage,
+                            vec![update_op],
+                            local_secret.into_iter().collect(),
+                        )
+                        .await?,
+                    );
                     keyhive_changed = true;
                 }
-                if let Some(request) = self
+                let (request, _heads) = self
                     .subduction
                     .store_commit(sed_id, head, parents, encrypted_blob)
                     .await
-                    .wrap_err("failed store_commit")?
-                {
+                    .wrap_err("failed store_commit")?;
+                if let Some(request) = request {
                     assert!(
                         fragment_requests.insert(request),
                         "duplicate fragment request"
@@ -458,7 +505,9 @@ where
             }
             if keyhive_changed {
                 // Cache-bust + notify peers in one call.
-                self.keyhive_notifier.note_local_keyhive_changed().await?;
+                self.keyhive_notifier
+                    .note_local_keyhive_changed(&hashes)
+                    .await?;
             }
             Ok(fragment_requests)
         })
@@ -470,7 +519,13 @@ where
         covered_frontier: BTreeSet<CommitId>,
     ) -> <Sendable as FutureForm>::Future<
         '_,
-        eyre::Result<Option<(CommitId, crate::runtime2::support::CausalCheckpoint)>>,
+        eyre::Result<
+            Option<(
+                CommitId,
+                crate::runtime2::support::CausalCheckpoint,
+                Vec<CommitId>,
+            )>,
+        >,
     > {
         Sendable::from_future(async move {
             use crate::runtime2::support::{CausalCheckpoint, causal_checkpoint_id};
@@ -505,13 +560,15 @@ where
                         return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
                     }
                 };
-                persist_cgka_updates_durably(
+                let hashes = persist_cgka_updates_durably(
                     &self.keyhive_storage,
                     vec![update],
                     vec![local_secret],
                 )
                 .await?;
-                self.keyhive_notifier.note_local_keyhive_changed().await?;
+                self.keyhive_notifier
+                    .note_local_keyhive_changed(&hashes)
+                    .await?;
             }
 
             let pcs_key_hash = keyhive
@@ -551,7 +608,7 @@ where
                 update_op.is_none() && local_secret.is_none(),
                 "checkpoint encryption unexpectedly rotated the prepared PCS root"
             );
-            let fragment_request = self
+            let (fragment_request, heads_observed) = self
                 .subduction
                 .store_commit(sed_id, head, covered_frontier, encrypted_blob)
                 .await
@@ -560,7 +617,7 @@ where
                 fragment_request.is_none(),
                 "depth-zero causal checkpoint requested Automerge fragmentation"
             );
-            Ok(Some((head, checkpoint)))
+            Ok(Some((head, checkpoint, heads_observed)))
         })
     }
 
@@ -678,7 +735,46 @@ where
                 if let Some(tree) = self.sedimentrees.get_cloned(&sed_id).await {
                     let heads = sedimentree_heads_payload(&tree);
                     if !heads.is_empty() {
-                        return Ok(heads.iter().map(|head| CommitId::new(head.0)).collect());
+                        let cached: Vec<CommitId> =
+                            heads.iter().map(|head| CommitId::new(head.0)).collect();
+                        // Cache-vs-durable divergence detector (debug-only):
+                        // the cache is the same map subduction writes into,
+                        // but an eviction/re-hydration or missed insert can
+                        // leave it behind durable storage. Cross-check so the
+                        // tier2 head-parity flake pins to "cache stale" vs
+                        // "durable missing" in one shot. The durable side is
+                        // recomputed from the authoritative SQLite rows
+                        // (metadata only); a full recompute cross-checks it.
+                        if tracing::enabled!(
+                            target: "big_repo::runtime2::native",
+                            tracing::Level::DEBUG
+                        ) {
+                            let table = self
+                                .causal_ciphertext_store
+                                .durable_sedimentree_heads(sed_id)
+                                .await
+                                .unwrap_or_default();
+                            if table != cached {
+                                tracing::warn!(
+                                    ?sed_id,
+                                    cached = ?cached,
+                                    durable = ?table,
+                                    "sedimentree cache diverges from durable heads table"
+                                );
+                            }
+                            let full = Self::durable_sedimentree_heads_full(&self.storage, sed_id)
+                                .await
+                                .unwrap_or_default();
+                            if full != table {
+                                tracing::warn!(
+                                    ?sed_id,
+                                    table = ?table,
+                                    full = ?full,
+                                    "heads table diverges from full recompute"
+                                );
+                            }
+                        }
+                        return Ok(cached);
                     }
                     Some((tree.loose_commits().count(), tree.fragments().count()))
                 } else {
@@ -740,6 +836,21 @@ where
                 return Ok(heads.iter().map(|head| CommitId::new(head.0)).collect());
             }
             Ok(heads.iter().map(|head| CommitId::new(head.0)).collect())
+        })
+    }
+
+    fn durable_sedimentree_heads(
+        &self,
+        sed_id: SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Vec<CommitId>>> {
+        Sendable::from_future(async move {
+            // Recompute the frontier from the authoritative SQLite rows
+            // (metadata only, no blobs). The store's projection cache is
+            // write-only and never consulted on read paths.
+            self.causal_ciphertext_store
+                .durable_sedimentree_heads(sed_id)
+                .await
+                .map_err(|err| ferr!("failed reading durable sedimentree heads: {err}"))
         })
     }
 
@@ -1110,12 +1221,14 @@ where
         Sendable::from_future(async move {
             let uuid = Uuid::new_v4();
             info!(%uuid, "creating doc");
-            let doc_id = self
+            let (doc_id, hashes) = self
                 .keyhive
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
             info!(%uuid, ?doc_id, "created doc");
-            self.keyhive_notifier.note_local_keyhive_changed().await?;
+            self.keyhive_notifier
+                .note_local_keyhive_changed(&hashes)
+                .await?;
             Ok(doc_id)
         })
     }
@@ -1399,7 +1512,7 @@ async fn spawn_keyhive_change_subscription(
                                 .evt_tx
                                 .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id })
                                 .await
-                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                                 .ok();
                         }
                         Ok(None) | Err(_) => break,
@@ -1818,7 +1931,6 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    keyhive_change_tx: tokio::sync::broadcast::Sender<Option<PeerId>>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -1881,6 +1993,13 @@ where
     ));
 
     // ── Keyhive protocol and handler ──────────────────────────────────────
+    // The change reporter feeds the notification dispatcher: every sync
+    // exchange that inserts new events reports (hashes, source) post
+    // ingestion. The dispatcher classifies and debounces the fan-out.
+    let (keyhive_events_tx, keyhive_events_rx) = tokio::sync::mpsc::channel(1024);
+    let keyhive_reporter_weak = keyhive_events_tx.downgrade();
+    let keyhive_overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reporter_overflow = Arc::clone(&keyhive_overflow);
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -1888,16 +2007,43 @@ where
             keyhive.keyhive_peer_id(),
             keyhive.contact_card().clone(),
         )
-        .with_storage_recovery(),
+        .with_storage_recovery()
+        .with_change_reporter(move |hashes, source| {
+            if let Some(tx) = keyhive_reporter_weak.upgrade()
+                && let Err(err) = tx.try_send(crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent { hashes, source })
+            {
+                match err {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        reporter_overflow.store(true, std::sync::atomic::Ordering::Release);
+                        warn_loc!("keyhive change hint dropped: dispatcher channel full");
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        panic!("{ERROR_CHANNEL}: keyhive change dispatcher channel closed while senders alive");
+                    }
+                }
+            }
+        }),
     );
-    // A pulled Keyhive change must be advertised to our other peers as well:
-    // connected topologies are not necessarily full meshes. The sync-done
-    // observer below forwards a broadcast after the protocol has applied
-    // remote events. Unlike a local mutation, that must not invalidate the
-    // protocol's freshly updated sync state.
+
+    // One dispatcher owns the debounced, classified fan-out of keyhive change
+    // hints to subscribed peers. It stops when the events channel closes
+    // (BigRepo drop).
+    let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
+        Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
+    let keyhive_dispatcher = crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
+        Arc::clone(&keyhive_protocol),
+        keyhive_events_tx,
+        keyhive_events_rx,
+        keyhive_dispatcher_subscriptions,
+        keyhive_overflow,
+        utils_rs::batching::DebouncePolicy {
+            quiet_window: std::time::Duration::from_millis(100),
+            max_latency: std::time::Duration::from_secs(1),
+        },
+    );
     let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
         Arc::clone(&keyhive_protocol),
-        keyhive_change_tx,
+        keyhive_dispatcher,
     );
 
     let mut keyhive_handler = BigRepoKeyhiveHandler::new(
@@ -1914,7 +2060,6 @@ where
         // keeps `KeyhiveSyncDone` from overtaking a preceding delegation event
         // (single FIFO channel).
         let evt_tx = evt_tx.clone();
-        let keyhive_notifier = keyhive_notifier.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
@@ -1930,9 +2075,6 @@ where
                         %peer_id,
                         "runtime2 stopped before keyhive sync-done event"
                     );
-                }
-                if changed {
-                    keyhive_notifier.note_remote_keyhive_changed(peer_id);
                 }
             },
         ));
@@ -2174,7 +2316,7 @@ mod tests {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([9; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
-        let doc_id = keyhive
+        let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
                 nonempty::NonEmpty {
@@ -2240,7 +2382,7 @@ mod tests {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([14; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
-        let doc_id = keyhive
+        let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
                 nonempty::NonEmpty {
@@ -2302,7 +2444,7 @@ mod tests {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([11; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
-        let doc_id = keyhive
+        let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
                 nonempty::NonEmpty {

@@ -50,7 +50,11 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     );
 
     let temp_root = tempfile::tempdir()?;
+    info!(path = %temp_root.path().display(), "initialized stress test cluster temp root");
     let repo_paths = init_and_copy_repo_cluster(temp_root.path()).await?;
+    for (idx, path) in repo_paths.iter().enumerate() {
+        info!(idx, path = %path.display(), "cluster node repo path");
+    }
     let mut nodes = open_cluster_nodes(&repo_paths).await?;
     let result = async {
         let topology_1 = generate_connected_edges(&mut rng);

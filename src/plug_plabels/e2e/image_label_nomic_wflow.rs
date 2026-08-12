@@ -3,7 +3,7 @@ use utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
+async fn long_test_image_label_fallback_nomic_pipeline() -> Res<()> {
     let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
         daybook_core::test_support::DaybookTestCxOptions {

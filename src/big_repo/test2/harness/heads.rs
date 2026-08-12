@@ -12,7 +12,7 @@
 
 use super::topo::Pair;
 use crate::{DocumentId, Res};
-
+use utils_rs::prelude::*;
 /// Sort heads into a canonical order for order-independent comparison.
 fn sorted(heads: &mut [automerge::ChangeHash]) {
     heads.sort_by_key(|h| h.0);
@@ -38,6 +38,30 @@ pub async fn assert_sedimentree_parity(pair: &Pair, doc_id: DocumentId) -> Res<(
         ));
     }
     Ok(())
+}
+
+/// Assert sedimentree-heads parity, polling until `deadline` for the frontier
+/// to converge.
+///
+/// The doc-sync and part pipelines can race: a worker may be fetching a
+/// newly published fragment while both runtime hubs are idle, so a one-shot
+/// parity check right after the network-rest fence can observe an
+/// intermediate Sedimentree frontier. Poll so a transiently-divergent
+/// frontier converges instead of failing the scenario.
+pub async fn assert_sedimentree_parity_with_deadline(
+    pair: &Pair,
+    doc_id: DocumentId,
+    deadline: tokio::time::Instant,
+) -> Res<()> {
+    loop {
+        match assert_sedimentree_parity(pair, doc_id).await {
+            Ok(()) => return Ok(()),
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Assert materialized-heads parity for the live handles held by the
@@ -85,7 +109,14 @@ pub async fn tier0_invariants(
     )
     .await?;
 
-    if let Err(error) = assert_sedimentree_parity(pair, doc_id).await {
+    // Poll parity past the rest fence: the fence waits on part cursors, but a
+    // fragment fetch already in flight can still advance a node's
+    // Sedimentree frontier just after rest is declared. Give the frontier a
+    // scaled window to converge before failing the scenario.
+    let parity_deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
+    if let Err(error) = assert_sedimentree_parity_with_deadline(pair, doc_id, parity_deadline).await
+    {
         let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
         return Err(crate::ferr!("{error}\n{diagnostics}"));
     }
@@ -98,6 +129,22 @@ pub async fn tier0_invariants(
     Ok(())
 }
 
+/// Log both nodes' head states — for before/after-fence comparison when a
+/// parity failure fires. The log line is emitted at debug level (enabled by
+/// the stress harness), and the same state shows up verbatim in the failure
+/// diagnostics via [`state_summary`].
+pub async fn log_head_state(pair: &Pair, doc_id: DocumentId) -> Res<()> {
+    let left = pair.left().repo.doc_head_state(doc_id).await?;
+    let right = pair.right().repo.doc_head_state(doc_id).await?;
+    debug!(
+        %doc_id,
+        "tier2 head state: {} | {}",
+        state_summary(pair.left().label, &left),
+        state_summary(pair.right().label, &right),
+    );
+    Ok(())
+}
+
 /// Render a one-line state summary for diagnostics.
 #[allow(dead_code)]
 pub fn state_summary(label: &str, state: &crate::runtime2::DocHeadState) -> String {
@@ -106,10 +153,34 @@ pub fn state_summary(label: &str, state: &crate::runtime2::DocHeadState) -> Stri
         .as_ref()
         .map(|h| format!("{} head(s)", h.len()))
         .unwrap_or_else(|| "unmaterialized".to_string());
+    let sed_heads = format_heads(&state.sedimentree_heads);
+    let mat_heads = state
+        .materialized_heads
+        .as_ref()
+        .map(|h| format_heads(h))
+        .unwrap_or_else(|| "-".to_string());
     format!(
-        "{label}: sedimentree={} materialized={} state={:?}",
+        "{label}: sedimentree={} [{sed_heads}] materialized={mat} [{mat_heads}] state={:?}",
         state.sedimentree_heads.len(),
-        mat,
         state.state,
     )
+}
+
+/// Format a head list, flagging causal-checkpoint commits (`TFCASL01` prefix)
+/// so a parity failure shows at a glance whether a node's frontier differs by
+/// key-only coverage markers vs real content commits.
+fn format_heads(heads: &[automerge::ChangeHash]) -> String {
+    heads
+        .iter()
+        .map(|h| {
+            let short: String = h.0.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            let id = sedimentree_core::loose_commit::id::CommitId::new(h.0);
+            if crate::runtime2::support::is_causal_checkpoint_id(id) {
+                format!("{short}(checkpoint)")
+            } else {
+                short
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

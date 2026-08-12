@@ -23,9 +23,7 @@ use sqlx_utils_rs::SqlCtx;
 #[cfg(test)]
 use uuid::Uuid;
 
-use super::sqlite_core::{
-    PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, encode_access,
-};
+use super::sqlite_core::{PendingSubscription, SUB_REPLAYING_CLEAN, encode_access};
 
 struct SqliteSubscription {
     sender: mpsc::Sender<SubEvent>,
@@ -71,6 +69,200 @@ pub struct SqlitePartStore {
     pub(crate) core: SqliteCore,
     bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
+    live_debouncer: Arc<LiveDebouncer>,
+}
+
+/// Semantic target for debouncing state events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum DebounceTarget {
+    Part(PartId, ObjId),
+    Object(ObjId),
+}
+
+impl DebounceTarget {
+    pub(crate) fn obj_id(&self) -> ObjId {
+        match self {
+            Self::Part(_, obj_id) | Self::Object(obj_id) => *obj_id,
+        }
+    }
+
+    pub(crate) fn part_id(&self) -> Option<PartId> {
+        match self {
+            Self::Part(part_id, _) => Some(*part_id),
+            Self::Object(_) => None,
+        }
+    }
+}
+
+fn reduce_sub_event(existing: &mut SubEvent, new: SubEvent) {
+    match (std::mem::replace(existing, SubEvent::ReplayComplete), new) {
+        (SubEvent::Added(mut existing_added), SubEvent::Added(new_added)) => {
+            existing_added.cursor = new_added.cursor;
+            existing_added.payload = new_added.payload;
+            *existing = SubEvent::Added(existing_added);
+        }
+        (SubEvent::Added(mut existing_added), SubEvent::Changed(new_changed)) => {
+            // Retain Added variant so receiver adds the object to the partition
+            existing_added.cursor = new_changed.cursor;
+            existing_added.payload = new_changed.payload;
+            *existing = SubEvent::Added(existing_added);
+        }
+        (SubEvent::Added(_), SubEvent::Removed(new_removed)) => {
+            *existing = SubEvent::Removed(new_removed);
+        }
+        (SubEvent::Changed(mut existing_changed), SubEvent::Changed(new_changed)) => {
+            existing_changed.cursor = new_changed.cursor;
+            existing_changed.payload = new_changed.payload;
+            *existing = SubEvent::Changed(existing_changed);
+        }
+        (SubEvent::Changed(_), SubEvent::Removed(new_removed)) => {
+            *existing = SubEvent::Removed(new_removed);
+        }
+        (SubEvent::Changed(_), SubEvent::Added(new_added)) => {
+            *existing = SubEvent::Added(new_added);
+        }
+        (SubEvent::Removed(mut existing_removed), SubEvent::Removed(new_removed)) => {
+            existing_removed.cursor = new_removed.cursor;
+            *existing = SubEvent::Removed(existing_removed);
+        }
+        (SubEvent::Removed(mut existing_removed), SubEvent::Changed(new_changed)) => {
+            // Stale Changed after Removed: retain Removed, advance cursor
+            existing_removed.cursor = existing_removed.cursor.max(new_changed.cursor);
+            *existing = SubEvent::Removed(existing_removed);
+        }
+        (SubEvent::Removed(_), SubEvent::Added(new_added)) => {
+            *existing = SubEvent::Added(new_added);
+        }
+        (SubEvent::ObjectChanged(mut existing_obj), SubEvent::ObjectChanged(new_obj)) => {
+            existing_obj.payload = new_obj.payload;
+            *existing = SubEvent::ObjectChanged(existing_obj);
+        }
+        (_old, new) => {
+            *existing = new;
+        }
+    }
+}
+
+/// Per-store debouncer for live-subscriber state events.
+///
+/// Collapses bursts of state changes to the same (subscriber, target) into a
+/// single delivery using semantic event accumulation.
+struct LiveDebouncer {
+    batcher: std::sync::Mutex<
+        utils_rs::batching::KeyedBatcher<
+            (Uuid, DebounceTarget),
+            SubEvent,
+            utils_rs::batching::DebouncePolicy,
+        >,
+    >,
+    /// Owned separately so the flush task can wait on it without keeping the
+    /// whole debouncer (and therefore the store's shutdown signal) alive.
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl LiveDebouncer {
+    fn new(policy: utils_rs::batching::DebouncePolicy) -> Arc<Self> {
+        Arc::new(Self {
+            batcher: std::sync::Mutex::new(utils_rs::batching::KeyedBatcher::new(
+                policy,
+                |_event: &SubEvent| 0,
+                reduce_sub_event,
+            )),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+}
+
+/// Flush loop for [`LiveDebouncer`]. Runs until the store (the debouncer's
+/// owner) is dropped; the store's own teardown never needs to wait on it.
+async fn flush_live_debouncer(
+    debouncer: std::sync::Weak<LiveDebouncer>,
+    notify: Arc<tokio::sync::Notify>,
+    bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
+    core: SqliteCore,
+) {
+    // When the batcher is empty there is no deadline to sleep for; poll the
+    // owner liveness at this interval so a dropped store stops the loop.
+    const EMPTY_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+    loop {
+        let deadline = {
+            let Some(debouncer) = debouncer.upgrade() else {
+                break;
+            };
+            debouncer.batcher.lock().expect(ERROR_MUTEX).next_deadline()
+        };
+        let sleep = match deadline {
+            Some(deadline) => {
+                futures::future::Either::Left(tokio::time::sleep_until(deadline.into()))
+            }
+            None => futures::future::Either::Right(tokio::time::sleep(EMPTY_RECHECK)),
+        };
+        tokio::select! {
+            // A push only moves the trailing-edge deadline; delivery happens
+            // when the (recomputed) deadline actually fires. This is what
+            // makes the debounce a true trailing-edge collapse: a burst that
+            // keeps pushing keeps pushing the deadline out, so the whole
+            // burst — however long it spans — merges into one delivery.
+            _ = notify.notified() => {}
+            _ = sleep => {
+                let due = {
+                    let Some(debouncer) = debouncer.upgrade() else {
+                        break;
+                    };
+                    debouncer
+                        .batcher
+                        .lock()
+                        .expect(ERROR_MUTEX)
+                        .take_due(std::time::Instant::now())
+                };
+                if !due.is_empty() {
+                    deliver_due(&bus, &core, due).await;
+                }
+            }
+        }
+    }
+}
+
+/// Deliver a batch of due state events. The subscriber is re-resolved at flush
+/// time (it may have disconnected), and the event is sent lossy (a full or
+/// closed stream drops the subscriber, matching the immediate path).
+async fn deliver_due(
+    bus: &std::sync::RwLock<SqliteSubscriptions>,
+    core: &SqliteCore,
+    due: Vec<((Uuid, DebounceTarget), SubEvent)>,
+) {
+    let mut drop_subs = HashSet::new();
+    for ((sub_id, target), event) in due {
+        let principal = {
+            let bus = bus.read().expect(ERROR_MUTEX);
+            let Some(sub) = bus.subs.get(&sub_id) else {
+                continue;
+            };
+            sub.principal
+        };
+        let permitted = event_permitted(core, target.part_id(), target.obj_id(), Some(principal))
+            .await
+            .expect(ERROR_IMPOSSIBLE);
+        if !permitted {
+            continue;
+        }
+        let sender = {
+            let bus = bus.read().expect(ERROR_MUTEX);
+            let Some(sub) = bus.subs.get(&sub_id) else {
+                continue;
+            };
+            sub.sender.clone()
+        };
+        if sender.try_send(event).is_err() {
+            drop_subs.insert(sub_id);
+        }
+    }
+    if !drop_subs.is_empty() {
+        let mut bus = bus.write().expect(ERROR_MUTEX);
+        for sub_id in drop_subs {
+            bus.remove(sub_id);
+        }
+    }
 }
 
 use super::sqlite_core::MemberState;
@@ -87,14 +279,6 @@ impl SqlitePartStore {
     }
     fn peer_blob(id: PeerId) -> Vec<u8> {
         SqliteCore::peer_blob(id)
-    }
-    fn event_part_id(event: &SubEvent) -> Option<PartId> {
-        match event {
-            SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => None,
-            SubEvent::Added(inner) => Some(inner.part_id),
-            SubEvent::Removed(inner) => Some(inner.part_id),
-            SubEvent::ReplayComplete => None,
-        }
     }
     fn buck_i64(id: BuckId) -> i64 {
         SqliteCore::buck_i64(id)
@@ -160,133 +344,125 @@ impl SqlitePartStore {
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
+        let bus: Arc<std::sync::RwLock<SqliteSubscriptions>> =
+            Arc::new(std::sync::RwLock::new(SqliteSubscriptions::default()));
+
+        // Store-owned debounced delivery for live subscribers. The flush task
+        // stops itself when the store (its owner) drops — no explicit stop
+        // token needed.
+        let live_debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
+            quiet_window: std::time::Duration::from_millis(50),
+            max_latency: std::time::Duration::from_millis(500),
+        });
+        tokio::spawn(flush_live_debouncer(
+            Arc::downgrade(&live_debouncer),
+            Arc::clone(&live_debouncer.notify),
+            Arc::clone(&bus),
+            core.clone(),
+        ));
 
         Ok(Self {
             core,
-            bus: default(),
+            bus,
             hidden_parts: Arc::new(config.hidden_parts),
+            live_debouncer,
         })
     }
     async fn publish(&self, events: Vec<SubEvent>) {
-        let mut promote = Vec::new();
         let mut dispatch = Vec::new();
         {
             let bus = self.bus.read().expect(ERROR_MUTEX);
+            let mut recipients: Vec<(Uuid, DebounceTarget, SubEvent)> = Vec::new();
             for event in events {
-                let (part_ids, obj_id, object_event) = match &event {
-                    SubEvent::Changed(inner) => (
-                        inner.part_ids.clone(),
-                        inner.obj_id,
-                        SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
-                            obj_id: inner.obj_id,
-                            payload: inner.payload.clone(),
-                        }),
-                    ),
-                    SubEvent::Added(inner) => (
-                        vec![inner.part_id],
-                        inner.obj_id,
-                        SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
-                            obj_id: inner.obj_id,
-                            payload: inner.payload.clone(),
-                        }),
-                    ),
-                    SubEvent::Removed(inner) => {
-                        (vec![inner.part_id], inner.obj_id, SubEvent::ReplayComplete)
-                    }
-                    SubEvent::ObjectChanged(inner) => (Vec::new(), inner.obj_id, event.clone()),
-                    SubEvent::ReplayComplete => continue,
-                };
-                let mut recipients = HashMap::new();
-                for part_id in part_ids {
-                    if let Some(subs) = bus.by_part.get(&part_id) {
-                        for &sub_id in subs {
-                            match recipients.get_mut(&sub_id) {
-                                Some(SubEvent::Changed(existing))
-                                    if matches!(event, SubEvent::Changed(_)) =>
-                                {
-                                    existing.part_ids.push(part_id);
-                                }
-                                _ => {
-                                    let mut projected = event.clone();
-                                    if let SubEvent::Changed(inner) = &mut projected {
-                                        inner.part_ids = vec![part_id];
-                                    }
-                                    recipients.insert(sub_id, projected);
+                match &event {
+                    SubEvent::Changed(inner) => {
+                        for &part_id in &inner.part_ids {
+                            let target = DebounceTarget::Part(part_id, inner.obj_id);
+                            let projected = SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                                cursor: inner.cursor,
+                                part_ids: vec![part_id],
+                                obj_id: inner.obj_id,
+                                payload: inner.payload.clone(),
+                            });
+                            if let Some(subs) = bus.by_part.get(&part_id) {
+                                for &sub_id in subs {
+                                    recipients.push((sub_id, target, projected.clone()));
                                 }
                             }
                         }
-                    }
-                }
-                if !matches!(object_event, SubEvent::ReplayComplete)
-                    && let Some(subs) = bus.by_obj.get(&obj_id)
-                {
-                    for &sub_id in subs {
-                        recipients
-                            .entry(sub_id)
-                            .or_insert_with(|| object_event.clone());
-                    }
-                }
-                for (sub_id, event) in recipients {
-                    let Some(sub) = bus.subs.get(&sub_id) else {
-                        continue;
-                    };
-                    if bus.pending.contains(&sub_id) {
-                        if sub.pending.mark_dirty() {
-                            promote.push((
-                                sub_id,
-                                event,
-                                obj_id,
-                                sub.principal,
-                                sub.sender.clone(),
-                            ));
+                        if let Some(subs) = bus.by_obj.get(&inner.obj_id) {
+                            let target = DebounceTarget::Object(inner.obj_id);
+                            let projected = SubEvent::ObjectChanged(
+                                big_sync_core::rpc::ObjChangedWithoutPart {
+                                    obj_id: inner.obj_id,
+                                    payload: inner.payload.clone(),
+                                },
+                            );
+                            for &sub_id in subs {
+                                recipients.push((sub_id, target, projected.clone()));
+                            }
                         }
-                        continue;
                     }
-                    if !bus.live.contains(&sub_id) {
-                        continue;
+                    SubEvent::Added(inner) => {
+                        let target = DebounceTarget::Part(inner.part_id, inner.obj_id);
+                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
+                            for &sub_id in subs {
+                                recipients.push((sub_id, target, event.clone()));
+                            }
+                        }
+                        if let Some(subs) = bus.by_obj.get(&inner.obj_id) {
+                            let target = DebounceTarget::Object(inner.obj_id);
+                            let projected = SubEvent::ObjectChanged(
+                                big_sync_core::rpc::ObjChangedWithoutPart {
+                                    obj_id: inner.obj_id,
+                                    payload: inner.payload.clone(),
+                                },
+                            );
+                            for &sub_id in subs {
+                                recipients.push((sub_id, target, projected.clone()));
+                            }
+                        }
                     }
-                    dispatch.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
+                    SubEvent::Removed(inner) => {
+                        let target = DebounceTarget::Part(inner.part_id, inner.obj_id);
+                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
+                            for &sub_id in subs {
+                                recipients.push((sub_id, target, event.clone()));
+                            }
+                        }
+                    }
+                    SubEvent::ObjectChanged(inner) => {
+                        let target = DebounceTarget::Object(inner.obj_id);
+                        if let Some(subs) = bus.by_obj.get(&inner.obj_id) {
+                            for &sub_id in subs {
+                                recipients.push((sub_id, target, event.clone()));
+                            }
+                        }
+                    }
+                    SubEvent::ReplayComplete => continue,
                 }
             }
-        }
-
-        let mut drop_subs = HashSet::new();
-        for (sub_id, event, obj_id, principal, sender) in dispatch {
-            let permitted = self
-                .is_event_permitted(Self::event_part_id(&event), obj_id, Some(principal))
-                .await
-                .unwrap_or(false);
-            if permitted && sender.try_send(event).is_err() {
-                drop_subs.insert(sub_id);
-            }
-        }
-
-        for (sub_id, event, obj_id, principal, sender) in promote {
-            let permitted = self
-                .is_event_permitted(Self::event_part_id(&event), obj_id, Some(principal))
-                .await
-                .unwrap_or(false);
-            let mut bus = self.bus.write().expect(ERROR_MUTEX);
-            let Some(sub) = bus.subs.get(&sub_id).cloned() else {
-                continue;
-            };
-            if bus.pending.remove(&sub_id) {
-                if sub.pending.state.load(std::sync::atomic::Ordering::Acquire) != SUB_REPLAY_DONE {
-                    bus.pending.insert(sub_id);
+            for (sub_id, target, event) in recipients {
+                let Some(sub) = bus.subs.get(&sub_id) else {
+                    continue;
+                };
+                if bus.pending.contains(&sub_id) {
+                    sub.pending.mark_dirty();
                     continue;
                 }
-                bus.live.insert(sub_id);
-            }
-            if permitted && sender.try_send(event).is_err() {
-                bus.remove(sub_id);
+                if bus.live.contains(&sub_id) {
+                    dispatch.push((sub_id, target, event));
+                }
             }
         }
 
-        if !drop_subs.is_empty() {
-            let mut bus = self.bus.write().expect(ERROR_MUTEX);
-            for sub_id in drop_subs {
-                bus.remove(sub_id);
+        if !dispatch.is_empty() {
+            let mut batcher = self.live_debouncer.batcher.lock().expect(ERROR_MUTEX);
+            let now = std::time::Instant::now();
+            for (sub_id, target, event) in dispatch {
+                batcher.push(now, (sub_id, target), event);
             }
+            self.live_debouncer.notify.notify_one();
         }
     }
 }
@@ -1420,10 +1596,18 @@ impl HostPartStore for SqlitePartStore {
                     }
                     marker_sent = true;
                     if sub.pending.become_ready() {
+                        let mut bus = store.bus.write().expect(ERROR_MUTEX);
+                        if bus.pending.remove(&sub_id) {
+                            bus.live.insert(sub_id);
+                        }
                         return;
                     }
                     object_replay_pending = true;
                 } else if sub.pending.become_ready() {
+                    let mut bus = store.bus.write().expect(ERROR_MUTEX);
+                    if bus.pending.remove(&sub_id) {
+                        bus.live.insert(sub_id);
+                    }
                     return;
                 } else {
                     object_replay_pending = true;
@@ -1534,34 +1718,46 @@ impl HostPartStore for SqlitePartStore {
         obj_id: ObjId,
         principal: Option<PeerId>,
     ) -> Res<bool> {
-        let Some(peer) = principal else {
-            return Ok(true);
-        };
-        let obj_blob = Self::obj_blob(obj_id);
-        let peer_blob = Self::peer_blob(peer);
-        let access_level: Option<i64> = sqlx::query_scalar(
-            "SELECT access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
-        )
-        .bind(self.core.scope_id)
-        .bind(&obj_blob)
-        .bind(&peer_blob)
-        .fetch_optional(&self.core.sql.read_pool)
-        .await?;
-        let permitted = access_level
-            .map(|lvl| u8::try_from(lvl).expect(ERROR_IMPOSSIBLE))
-            .map(super::sqlite_core::decode_access)
-            .is_some_and(|access| access.is_fetcher());
-        tracing::trace!(
-            ?part_id,
-            ?obj_id,
-            ?principal,
-            permitted,
-            "policy event permission",
-        );
-        Ok(permitted)
+        event_permitted(&self.core, part_id, obj_id, principal).await
     }
+}
+
+/// Policy check for delivering an event to a subscriber. Shared by the
+/// immediate publish path and the debounced flush task (which holds only the
+/// core, not the whole store).
+async fn event_permitted(
+    core: &SqliteCore,
+    part_id: Option<PartId>,
+    obj_id: ObjId,
+    principal: Option<PeerId>,
+) -> Res<bool> {
+    let Some(peer) = principal else {
+        return Ok(true);
+    };
+    let obj_blob = SqliteCore::obj_blob(obj_id);
+    let peer_blob = SqliteCore::peer_blob(peer);
+    let access_level: Option<i64> = sqlx::query_scalar(
+        "SELECT access_level
+         FROM big_sync_syncable
+         WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
+    )
+    .bind(core.scope_id)
+    .bind(&obj_blob)
+    .bind(&peer_blob)
+    .fetch_optional(&core.sql.read_pool)
+    .await?;
+    let permitted = access_level
+        .map(|lvl| u8::try_from(lvl).expect(ERROR_IMPOSSIBLE))
+        .map(super::sqlite_core::decode_access)
+        .is_some_and(|access| access.is_fetcher());
+    tracing::trace!(
+        ?part_id,
+        ?obj_id,
+        ?principal,
+        permitted,
+        "policy event permission",
+    );
+    Ok(permitted)
 }
 
 #[cfg(test)]
@@ -2040,6 +2236,530 @@ mod tests {
                 panic!("denied channel closed unexpectedly after restart");
             }
         }
+
+        Ok(())
+    }
+
+    /// A burst of state changes to the same (subscriber, target) collapses
+    /// into a single batcher entry carrying the newest payload.
+    #[test]
+    fn debounced_burst_merges_to_latest_wins() {
+        let debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
+            quiet_window: Duration::from_millis(50),
+            max_latency: Duration::from_millis(500),
+        });
+        let key = (
+            Uuid::new_v4(),
+            DebounceTarget::Part(test_part_id(205), test_obj_id(206)),
+        );
+        let mut batcher = debouncer.batcher.lock().expect(ERROR_MUTEX);
+        let now = std::time::Instant::now();
+        for ii in 1..=10u8 {
+            batcher.push(
+                now,
+                key,
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: ii as u64,
+                    part_ids: vec![test_part_id(205)],
+                    obj_id: test_obj_id(206),
+                    payload: serde_json::json!({"phase": ii}),
+                }),
+            );
+        }
+        assert_eq!(batcher.len(), 1, "burst must collapse to one entry");
+        let due = batcher.take_due(now + Duration::from_secs(1));
+        assert_eq!(due.len(), 1, "exactly one delivery");
+        let (due_key, event) = &due[0];
+        assert_eq!(due_key, &key);
+        match event {
+            SubEvent::Changed(inner) => {
+                assert_eq!(inner.payload["phase"], serde_json::json!(10), "latest wins");
+                assert_eq!(inner.cursor, 10);
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+        assert!(batcher.is_empty(), "delivery drains the batcher");
+    }
+
+    #[test]
+    fn reduce_sub_event_added_then_changed_retains_added() {
+        let part = test_part_id(205);
+        let obj = test_obj_id(206);
+        let mut evt = SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+            cursor: 1,
+            part_id: part,
+            obj_id: obj,
+            payload: serde_json::json!({"v": 1}),
+        });
+        reduce_sub_event(
+            &mut evt,
+            SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor: 2,
+                part_ids: vec![part],
+                obj_id: obj,
+                payload: serde_json::json!({"v": 2}),
+            }),
+        );
+        match evt {
+            SubEvent::Added(inner) => {
+                assert_eq!(inner.cursor, 2);
+                assert_eq!(inner.payload, serde_json::json!({"v": 2}));
+            }
+            other => panic!("expected Added to be retained, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reduce_sub_event_different_partitions_remain_separate() {
+        let debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
+            quiet_window: Duration::from_millis(50),
+            max_latency: Duration::from_millis(500),
+        });
+        let sub = Uuid::new_v4();
+        let part1 = test_part_id(1);
+        let part2 = test_part_id(2);
+        let obj = test_obj_id(10);
+        let mut batcher = debouncer.batcher.lock().expect(ERROR_MUTEX);
+        let now = std::time::Instant::now();
+        batcher.push(
+            now,
+            (sub, DebounceTarget::Part(part1, obj)),
+            SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                cursor: 1,
+                part_id: part1,
+                obj_id: obj,
+                payload: serde_json::json!({"v": 1}),
+            }),
+        );
+        batcher.push(
+            now,
+            (sub, DebounceTarget::Part(part2, obj)),
+            SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                cursor: 2,
+                part_id: part2,
+                obj_id: obj,
+                payload: serde_json::json!({"v": 2}),
+            }),
+        );
+        assert_eq!(batcher.len(), 2, "different partitions must not collapse");
+    }
+
+    /// End-to-end: a live subscriber receives exactly one debounced delivery
+    /// per object state change, and terminal events bypass the debouncer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_state_event_debounced_delivery_and_terminal_bypass() -> Res<()> {
+        use keyhive_core::access::Access;
+        use tokio::time::{Duration, timeout};
+
+        let store = test_store("big-sync-sqlite-test://debounce").await?;
+        let part = PartId(Byte32Id::new([205u8; 32]));
+        let obj = ObjId(Byte32Id::new([206u8; 32]));
+        let peer = PeerId::new([207u8; 32]);
+        store.ensure_part(part).await?;
+        store
+            .set_obj_payload(obj, serde_json::json!({"phase": 0}))
+            .await?;
+        store.add_obj_to_parts(obj, vec![part]).await?;
+        store
+            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        // Drain through ReplayComplete.
+        loop {
+            match timeout(Duration::from_secs(5), rx.recv()).await? {
+                Ok(SubEvent::ReplayComplete) => break,
+                Ok(_) => continue,
+                Err(_) => eyre::bail!("sub channel closed during replay"),
+            }
+        }
+
+        // A state change is delivered through the debouncer (flush task)
+        // within the max-latency bound.
+        store
+            .set_obj_payload(obj, serde_json::json!({"phase": 1}))
+            .await?;
+        let first = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("debounced delivery must arrive")
+            .expect("channel must stay open");
+        match first {
+            SubEvent::Changed(inner) => {
+                assert_eq!(inner.obj_id, obj);
+                assert_eq!(inner.payload["phase"], serde_json::json!(1));
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+
+        // Terminal events bypass the debouncer: a removal is delivered
+        // immediately, not after the debounce window.
+        store.remove_obj_from_part(obj, part).await?;
+        let removed = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("Removed must be delivered immediately")
+            .expect("channel must stay open");
+        assert!(matches!(removed, SubEvent::Removed(_)));
+
+        Ok(())
+    }
+
+    /// End-to-end: Added followed by Changed before flush merges into Added
+    /// with the latest payload and cursor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn e2e_debounce_added_then_changed_retains_added() -> Res<()> {
+        use keyhive_core::access::Access;
+        use tokio::time::{Duration, timeout};
+
+        let store = test_store("big-sync-sqlite-test://e2e-add-change").await?;
+        let part = PartId(Byte32Id::new([210u8; 32]));
+        let obj = ObjId(Byte32Id::new([211u8; 32]));
+        let peer = PeerId::new([212u8; 32]);
+        store.ensure_part(part).await?;
+        store
+            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        loop {
+            match timeout(Duration::from_secs(5), rx.recv()).await? {
+                Ok(SubEvent::ReplayComplete) => break,
+                Ok(_) => continue,
+                Err(_) => eyre::bail!("sub channel closed during replay"),
+            }
+        }
+
+        // Publish Added followed by Changed within the debounce window
+        store
+            .publish(vec![
+                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor: 1,
+                    part_id: part,
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 1}),
+                }),
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 2,
+                    part_ids: vec![part],
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 2}),
+                }),
+            ])
+            .await;
+
+        let evt = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel stay open");
+
+        match evt {
+            SubEvent::Added(inner) => {
+                assert_eq!(inner.part_id, part);
+                assert_eq!(inner.obj_id, obj);
+                assert_eq!(inner.payload, serde_json::json!({"v": 2}));
+                assert_eq!(inner.cursor, 2);
+            }
+            other => panic!("expected Added with latest payload, got {other:?}"),
+        }
+
+        // No stray Changed should follow
+        assert!(
+            timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
+            "Added must not be followed by duplicate Changed",
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end: Changed followed by Removed before flush delivers Removed
+    /// and subsumes/cancels the pending Changed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn e2e_debounce_changed_then_removed_delivers_removed() -> Res<()> {
+        use keyhive_core::access::Access;
+        use tokio::time::{Duration, timeout};
+
+        let store = test_store("big-sync-sqlite-test://e2e-change-remove").await?;
+        let part = PartId(Byte32Id::new([220u8; 32]));
+        let obj = ObjId(Byte32Id::new([221u8; 32]));
+        let peer = PeerId::new([222u8; 32]);
+        store.ensure_part(part).await?;
+        store
+            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        loop {
+            match timeout(Duration::from_secs(5), rx.recv()).await? {
+                Ok(SubEvent::ReplayComplete) => break,
+                Ok(_) => continue,
+                Err(_) => eyre::bail!("sub channel closed during replay"),
+            }
+        }
+
+        // Publish Changed followed by Removed within the debounce window
+        store
+            .publish(vec![
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 1,
+                    part_ids: vec![part],
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 2}),
+                }),
+                SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                    cursor: 2,
+                    part_id: part,
+                    obj_id: obj,
+                }),
+            ])
+            .await;
+
+        let evt = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel stay open");
+
+        match evt {
+            SubEvent::Removed(inner) => {
+                assert_eq!(inner.part_id, part);
+                assert_eq!(inner.obj_id, obj);
+                assert_eq!(inner.cursor, 2);
+            }
+            other => panic!("expected Removed, got {other:?}"),
+        }
+
+        // Ensure no stale Changed arrives after Removed
+        assert!(
+            timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
+            "no stale Changed must arrive after Removed",
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end: Removed followed by Changed retains Removed (stale Changed ignored).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn e2e_debounce_removed_then_changed_retains_removed() -> Res<()> {
+        use keyhive_core::access::Access;
+        use tokio::time::{Duration, timeout};
+
+        let store = test_store("big-sync-sqlite-test://e2e-remove-change").await?;
+        let part = PartId(Byte32Id::new([230u8; 32]));
+        let obj = ObjId(Byte32Id::new([231u8; 32]));
+        let peer = PeerId::new([232u8; 32]);
+        store.ensure_part(part).await?;
+        store
+            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        loop {
+            match timeout(Duration::from_secs(5), rx.recv()).await? {
+                Ok(SubEvent::ReplayComplete) => break,
+                Ok(_) => continue,
+                Err(_) => eyre::bail!("sub channel closed during replay"),
+            }
+        }
+
+        // Publish Removed followed by Changed within the debounce window
+        store
+            .publish(vec![
+                SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                    cursor: 1,
+                    part_id: part,
+                    obj_id: obj,
+                }),
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 2,
+                    part_ids: vec![part],
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 2}),
+                }),
+            ])
+            .await;
+
+        let evt = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel stay open");
+
+        match evt {
+            SubEvent::Removed(inner) => {
+                assert_eq!(inner.part_id, part);
+                assert_eq!(inner.obj_id, obj);
+                assert_eq!(inner.cursor, 2);
+            }
+            other => panic!("expected Removed, got {other:?}"),
+        }
+
+        assert!(
+            timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
+            "no stale Changed after Removed",
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end: One subscriber observing the same object through two partitions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn e2e_debounce_one_subscriber_two_partitions() -> Res<()> {
+        use keyhive_core::access::Access;
+        use tokio::time::{Duration, timeout};
+
+        let store = test_store("big-sync-sqlite-test://e2e-multi-part").await?;
+        let part1 = PartId(Byte32Id::new([240u8; 32]));
+        let part2 = PartId(Byte32Id::new([241u8; 32]));
+        let obj = ObjId(Byte32Id::new([242u8; 32]));
+        let peer = PeerId::new([243u8; 32]);
+        store.ensure_part(part1).await?;
+        store.ensure_part(part2).await?;
+        store
+            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    targets: HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: part1,
+                            cursor: 0,
+                        },
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: part2,
+                            cursor: 0,
+                        },
+                    ]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        loop {
+            match timeout(Duration::from_secs(5), rx.recv()).await? {
+                Ok(SubEvent::ReplayComplete) => break,
+                Ok(_) => continue,
+                Err(_) => eyre::bail!("sub channel closed during replay"),
+            }
+        }
+
+        // Publish Added for both partitions + Changed for both partitions before flush
+        store
+            .publish(vec![
+                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor: 1,
+                    part_id: part1,
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 1}),
+                }),
+                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor: 2,
+                    part_id: part2,
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 1}),
+                }),
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 3,
+                    part_ids: vec![part1, part2],
+                    obj_id: obj,
+                    payload: serde_json::json!({"v": 2}),
+                }),
+            ])
+            .await;
+
+        let mut seen_parts = HashSet::new();
+        for _ in 0..2 {
+            let evt = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("event must arrive")
+                .expect("channel stay open");
+            match evt {
+                SubEvent::Added(inner) => {
+                    assert_eq!(inner.obj_id, obj);
+                    assert_eq!(inner.payload, serde_json::json!({"v": 2}));
+                    assert_eq!(inner.cursor, 3);
+                    seen_parts.insert(inner.part_id);
+                }
+                other => panic!("expected Added for each partition, got {other:?}"),
+            }
+        }
+        assert_eq!(seen_parts, HashSet::from([part1, part2]));
+
+        // Now publish Changed for both partitions
+        store
+            .publish(vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor: 4,
+                part_ids: vec![part1, part2],
+                obj_id: obj,
+                payload: serde_json::json!({"v": 3}),
+            })])
+            .await;
+
+        let mut seen_changed_parts = HashSet::new();
+        for _ in 0..2 {
+            let evt = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("event must arrive")
+                .expect("channel stay open");
+            match evt {
+                SubEvent::Changed(inner) => {
+                    assert_eq!(inner.obj_id, obj);
+                    assert_eq!(inner.payload, serde_json::json!({"v": 3}));
+                    assert_eq!(inner.cursor, 4);
+                    seen_changed_parts.extend(inner.part_ids);
+                }
+                other => panic!("expected Changed for each partition, got {other:?}"),
+            }
+        }
+        assert_eq!(seen_changed_parts, HashSet::from([part1, part2]));
 
         Ok(())
     }

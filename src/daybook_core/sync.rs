@@ -208,11 +208,6 @@ impl IrohSyncRepo {
             .relay_mode(iroh::RelayMode::Disabled);
         let endpoint = endpoint_builder.bind().await?;
         let blobs = blobs_repo.iroh_store();
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let docs = iroh_docs::protocol::Docs::memory()
-            .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
-            .await
-            .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
         let blobs_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
             Arc::clone(&blobs_repo),
             Arc::clone(&rcx.blob_part_store),
@@ -300,8 +295,6 @@ impl IrohSyncRepo {
                 iroh_blobs::ALPN,
                 iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
-            .accept(iroh_docs::ALPN, docs.clone())
-            .accept(iroh_gossip::ALPN, gossip.clone())
             .spawn();
 
         config_repo
@@ -500,7 +493,7 @@ impl IrohSyncRepo {
                                 device_name: Some(self.rcx.local_device_name.clone()),
                                 }))
                                 .await
-                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                                 .ok();
                         }
                         bootstrap::CloneProvisionRpcMessage::RequestCloneProvision(req) => {
@@ -508,7 +501,7 @@ impl IrohSyncRepo {
                             let out = self.handle_request_clone_provision(inner.req).await;
                             tx.send(out.map_err(|err| format!("{err:#}")))
                                 .await
-                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                                 .ok();
                         }
                     }

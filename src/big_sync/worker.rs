@@ -523,7 +523,9 @@ impl BigSyncWorker {
                     && let Some(resp) = self.full_sync_waiters.remove(&waiter_id)
                 {
                     info!(worker = %self.label, waiter_id, "full sync waiter satisfied");
-                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                    resp.send(Ok(()))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                 }
                 self.stats_tx.send(event).ok();
             }
@@ -546,7 +548,7 @@ impl BigSyncWorker {
                             backend_id: Arc::clone(backend_id),
                             part_id,
                         }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
@@ -557,7 +559,7 @@ impl BigSyncWorker {
                             backend_id: Arc::clone(backend_id),
                             obj_id,
                         }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
@@ -581,7 +583,9 @@ impl BigSyncWorker {
                     objects: objects.into_keys().collect(),
                 });
                 self.machine.handle_evt(evt);
-                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                resp.send(Ok(()))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
@@ -589,7 +593,7 @@ impl BigSyncWorker {
                 self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
                 self.machine.handle_evt(evt);
-                resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
             }
             BigSyncWorkerMsg::WaitForFullSync {
@@ -601,7 +605,7 @@ impl BigSyncWorker {
                 for peer_id in &peer_ids {
                     let Some(peer_state) = self.peers.get(peer_id) else {
                         resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: *peer_id }))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
                     };
@@ -611,7 +615,7 @@ impl BigSyncWorker {
                                 peer_id: *peer_id,
                                 part_id: *part_id,
                             }))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                             return Ok(());
                         }
@@ -635,7 +639,7 @@ impl BigSyncWorker {
                     "drain zombie request"
                 );
                 self.reap_zombie_tasks(timeout).await?;
-                resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
@@ -653,7 +657,7 @@ impl BigSyncWorker {
                     zombie_tasks: self.zombie_tasks.len(),
                 };
                 resp.send(snapshot)
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
         }

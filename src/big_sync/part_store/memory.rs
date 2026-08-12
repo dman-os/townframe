@@ -252,11 +252,6 @@ impl MemoryPartStoreScopeState {
                 PartEvent::Added(inner) => inner.obj_id,
                 PartEvent::Removed(inner) => inner.obj_id,
             };
-            let evt_part_id = match &evt {
-                PartEvent::Changed(_) => None,
-                PartEvent::Added(inner) => Some(inner.part_id),
-                PartEvent::Removed(inner) => Some(inner.part_id),
-            };
             let object_evt = match &evt {
                 PartEvent::Changed(inner) => Some(SubEvent::ObjectChanged(
                     big_sync_core::rpc::ObjChangedWithoutPart {
@@ -274,24 +269,15 @@ impl MemoryPartStoreScopeState {
             };
             self.events.insert(cursor, evt);
 
-            let mut recipients = HashMap::new();
+            let mut recipients = Vec::new();
             for part_id in parts {
                 if let Some(subs) = self.bus.subs_by_part.get(&part_id) {
                     for &sub_id in subs {
-                        match recipients.get_mut(&sub_id) {
-                            Some(SubEvent::Changed(existing))
-                                if matches!(sub_evt, SubEvent::Changed(_)) =>
-                            {
-                                existing.part_ids.push(part_id);
-                            }
-                            _ => {
-                                let mut projected = sub_evt.clone();
-                                if let SubEvent::Changed(inner) = &mut projected {
-                                    inner.part_ids = vec![part_id];
-                                }
-                                recipients.insert(sub_id, projected);
-                            }
+                        let mut projected = sub_evt.clone();
+                        if let SubEvent::Changed(inner) = &mut projected {
+                            inner.part_ids = vec![part_id];
                         }
+                        recipients.push((sub_id, projected, Some(part_id)));
                     }
                 }
             }
@@ -299,13 +285,11 @@ impl MemoryPartStoreScopeState {
                 && let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id)
             {
                 for &sub_id in subs {
-                    recipients
-                        .entry(sub_id)
-                        .or_insert_with(|| object_evt.clone());
+                    recipients.push((sub_id, object_evt.clone(), None));
                 }
             }
 
-            for (sub_id, sub_evt) in recipients {
+            for (sub_id, sub_evt, part_id_opt) in recipients {
                 let Some(sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
                 };
@@ -319,7 +303,7 @@ impl MemoryPartStoreScopeState {
                         if state.mark_dirty() {
                             if is_permitted_members(
                                 &self.members,
-                                evt_part_id,
+                                part_id_opt,
                                 evt_obj_id,
                                 Some(principal),
                             ) && sender.try_send(sub_evt.clone()).is_err()
@@ -338,7 +322,7 @@ impl MemoryPartStoreScopeState {
                     MemorySubscription::Live { sender, principal } => {
                         if is_permitted_members(
                             &self.members,
-                            evt_part_id,
+                            part_id_opt,
                             evt_obj_id,
                             Some(principal),
                         ) && sender.try_send(sub_evt).is_err()

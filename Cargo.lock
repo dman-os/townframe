@@ -695,15 +695,16 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automerge"
-version = "0.9.0"
-source = "git+https://github.com/automerge/automerge?branch=fragments#a57688012b93c29d5ceb1d26735608955c40a4ca"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1b59cbd9e7685a1ac6bf6046ddcd8acb550fa5bf03c09f6c1056728a742b40d"
 dependencies = [
  "cfg-if 1.0.4",
  "flate2",
  "getrandom 0.4.1",
  "hex",
  "hexane",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "leb128",
  "rand 0.10.1",
  "rustc-hash 2.1.1",
@@ -718,26 +719,26 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon"
-version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=274285c6007cccf4e5eb21a96bd1152ee0c6576c#274285c6007cccf4e5eb21a96bd1152ee0c6576c"
+version = "0.13.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
  "pastey",
  "similar",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=274285c6007cccf4e5eb21a96bd1152ee0c6576c#274285c6007cccf4e5eb21a96bd1152ee0c6576c"
+version = "0.13.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -958,7 +959,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
-source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
+source = "git+https://github.com/dman-os/keyhive?rev=65ef136008e4b1a839b2f20bf59548bec858ddd8#65ef136008e4b1a839b2f20bf59548bec858ddd8"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2675,8 +2676,6 @@ dependencies = [
  "insta",
  "iroh",
  "iroh-blobs",
- "iroh-docs",
- "iroh-gossip",
  "iroh-tickets",
  "irpc",
  "irpc-iroh",
@@ -3566,6 +3565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11faaf5a5236997af9848be0bef4db95824b1d534ebc64d0f0c6cf3e67bd38dc"
 dependencies = [
  "crc32fast",
+ "libz-rs-sys",
  "miniz_oxide 0.8.5",
 ]
 
@@ -3755,19 +3755,6 @@ checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
  "futures-sink",
-]
-
-[[package]]
-name = "futures-concurrency"
-version = "7.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175cd8cca9e1d45b87f18ffa75088f2099e3c4fe5e2f83e42de112560bea8ea6"
-dependencies = [
- "fixedbitset 0.5.7",
- "futures-core",
- "futures-lite",
- "pin-project",
- "smallvec",
 ]
 
 [[package]]
@@ -4392,8 +4379,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexane"
-version = "0.2.1"
-source = "git+https://github.com/automerge/automerge?branch=fragments#a57688012b93c29d5ceb1d26735608955c40a4ca"
+version = "1.0.0-alpha.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81df830f11babb0eee9a082e09135ef0a7d8791f3fe9b279bb9485bf7eaf23e0"
 dependencies = [
  "leb128",
  "thiserror 2.0.18",
@@ -5212,7 +5200,7 @@ dependencies = [
  "postcard",
  "rand 0.10.1",
  "range-collections",
- "redb 4.1.0",
+ "redb",
  "ref-cast",
  "reflink-copy",
  "self_cell",
@@ -5244,73 +5232,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "iroh-docs"
-version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd1bd5e39d0321a3c4a2bcef9650476c076e2df41a0e84577eca23d6de6c8ab"
-dependencies = [
- "anyhow",
- "async-channel",
- "blake3",
- "bytes",
- "cfg_aliases",
- "derive_more 2.1.1",
- "futures-buffered",
- "hex",
- "iroh",
- "iroh-blobs",
- "iroh-gossip",
- "iroh-metrics",
- "iroh-tickets",
- "irpc",
- "n0-error",
- "n0-future",
- "noq",
- "num_enum",
- "postcard",
- "rand 0.10.1",
- "redb 3.1.3",
- "redb 4.1.0",
- "self_cell",
- "serde",
- "serde-error",
- "strum 0.28.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "iroh-gossip"
-version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e1dc4b05f73e7a1b9e83b531eb63c3fd671b0af3aeb13b59c546dd7ca747515"
-dependencies = [
- "blake3",
- "bytes",
- "data-encoding",
- "derive_more 2.1.1",
- "futures-concurrency",
- "hex",
- "indexmap 2.14.0",
- "iroh",
- "iroh-base",
- "iroh-metrics",
- "irpc",
- "n0-error",
- "n0-future",
- "postcard",
- "rand 0.10.1",
- "serde",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -5498,6 +5419,15 @@ name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
 dependencies = [
  "either",
 ]
@@ -5728,7 +5658,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
-source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
+source = "git+https://github.com/dman-os/keyhive?rev=65ef136008e4b1a839b2f20bf59548bec858ddd8#65ef136008e4b1a839b2f20bf59548bec858ddd8"
 dependencies = [
  "beekem",
  "bincode",
@@ -5754,7 +5684,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
-source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
+source = "git+https://github.com/dman-os/keyhive?rev=65ef136008e4b1a839b2f20bf59548bec858ddd8#65ef136008e4b1a839b2f20bf59548bec858ddd8"
 dependencies = [
  "bincode",
  "blake3",
@@ -5873,6 +5803,15 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "libz-rs-sys"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "902bc563b5d65ad9bba616b490842ef0651066a1a1dc3ce1087113ffcb873c8d"
+dependencies = [
+ "zlib-rs",
 ]
 
 [[package]]
@@ -6330,7 +6269,6 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c37e81176a83a77d2514528b91bdafc70ef88aab428f0e1b91aebb8d99888895"
 dependencies = [
- "anyhow",
  "n0-error-macros",
  "spez",
 ]
@@ -8684,15 +8622,6 @@ dependencies = [
 
 [[package]]
 name = "redb"
-version = "3.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ba239c1c1693315d3cc0e601db3b3965543afbf48c41730fdca2f069f510f4a"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "redb"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
@@ -9439,7 +9368,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-lock",
  "bijoux",
@@ -9497,15 +9426,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-error"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "342110fb7a5d801060c885da03bf91bfa7c7ca936deafcc64bb6706375605d47"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -10263,8 +10183,8 @@ dependencies = [
 
 [[package]]
 name = "subduction_core"
-version = "0.16.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+version = "0.17.0"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10285,7 +10205,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10299,7 +10219,7 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10317,7 +10237,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10336,7 +10256,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10366,11 +10286,11 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "future_form",
  "futures",
- "redb 4.1.0",
+ "redb",
  "sedimentree_core",
  "subduction_core",
  "subduction_crypto",
@@ -10382,7 +10302,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
+source = "git+https://github.com/dman-os/subduction?rev=824c4a03c724ba663e43c0e7ee53b588b8d73d02#824c4a03c724ba663e43c0e7ee53b588b8d73d02"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11644,6 +11564,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "structstruck",
+ "surelock",
  "thiserror 2.0.18",
  "time",
  "tokio",
@@ -12597,7 +12518,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
- "serde",
  "wasm-bindgen",
 ]
 
@@ -13986,6 +13906,12 @@ dependencies = [
  "quote",
  "syn 2.0.106",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b20717f0917c908dc63de2e44e97f1e6b126ca58d0e391cee86d504eb8fbd05"
 
 [[package]]
 name = "zstd"

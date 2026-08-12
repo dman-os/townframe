@@ -92,7 +92,12 @@ impl CausalCheckpointWorker {
                     bincode::deserialize(&row.bytes).expect("persisted Keyhive event must decode");
                 if let StaticEvent::CgkaOperation(operation) = event {
                     let doc_id = crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
-                    self.runtime.ensure_causal_coverage(doc_id).await?;
+                    if let Err(err) = self.runtime.ensure_causal_coverage(doc_id).await {
+                        if self.runtime.is_stopped() {
+                            return Ok(());
+                        }
+                        return Err(err);
+                    }
                 }
                 self.store.advance_causal_checkpoint_cursor(row.seq).await?;
             }

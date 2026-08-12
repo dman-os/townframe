@@ -241,6 +241,7 @@ mod tests {
         Arc<BlobsRepo>,
     )> {
         let temp_root = tempdir()?;
+        tracing::info!(path = %temp_root.path().display(), "booted test blob sync node");
         let blobs_repo = BlobsRepo::new(
             temp_root.path().to_path_buf(),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),

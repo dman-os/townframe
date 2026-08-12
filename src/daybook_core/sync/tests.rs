@@ -632,6 +632,7 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 }
 
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
+    info!(repo_root = %repo_root.display(), "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {

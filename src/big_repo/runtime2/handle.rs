@@ -92,8 +92,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     /// Get or spawn a live handle for an existing document.
@@ -116,8 +115,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     /// Commit a delta (sets of encrypted commits) to a document.
@@ -154,8 +152,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     /// Query walk-derived storage and materialization heads for a document.
@@ -168,8 +165,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::DocHeadState { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     pub(crate) async fn ensure_causal_coverage(&self, doc_id: DocumentId) -> eyre::Result<bool> {
@@ -194,8 +190,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::InspectDocHeadState { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     // ── connections (transport-agnostic) ──────────────────────────────────
@@ -227,8 +222,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::OpenConn { peer, addr, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     /// Accept an inbound connection from the transport layer.
@@ -257,8 +251,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::AcceptConn { incoming, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     /// Close one established connection to `peer_id`, identified by its end
@@ -278,8 +271,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     // ── sync ───────────────────────────────────────────────────────────────
@@ -325,8 +317,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             let duration = utils_rs::scale_timeout(duration);
             match self.race_timeout(rx, duration).await {
                 Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
-                    "caller dropped before response"
+                Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(ferr!(
+                    ERROR_CHANNEL
                 ))),
                 Err(()) => {
                     self.cmd_tx
@@ -351,11 +343,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 }
             }
         } else {
-            rx.await.map_err(|_| {
-                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
-                    "caller dropped before response"
-                ))
-            })?
+            rx.await
+                .map_err(|_| crate::runtime2::types::SyncDocError::IoError(ferr!(ERROR_CHANNEL)))?
         };
         match &result {
             Ok(receipt) => debug!(
@@ -404,7 +393,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                     Err(()) => Err(eyre::eyre!("keyhive post-sync reconciliation timed out")),
                 }
             }
-            Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
+            Ok(Err(_)) => Err(ferr!(ERROR_CHANNEL)),
             Err(()) => {
                 self.cmd_tx
                     .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
@@ -430,7 +419,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
         match self.race_timeout(rx, timeout).await {
             Ok(Ok(result)) => result.wrap_err("keyhive reconciliation failed"),
-            Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
+            Ok(Err(_)) => Err(ferr!(ERROR_CHANNEL)),
             Err(()) => Err(eyre::eyre!("keyhive reconciliation timed out")),
         }
     }
@@ -461,12 +450,11 @@ impl<F: FutureForm> Runtime2Handle<F> {
         if let Some(duration) = timeout {
             match self.race_timeout(rx, duration).await {
                 Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
+                Ok(Err(_)) => Err(ferr!(ERROR_CHANNEL)),
                 Err(()) => Err(eyre::eyre!("quiescence wait timed out")),
             }
         } else {
-            rx.await
-                .map_err(|_| eyre::eyre!("caller dropped before response"))?
+            rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
         }
     }
 
@@ -484,8 +472,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::ContainsSedimentree { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     #[cfg(test)]
@@ -499,8 +486,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     pub async fn has_local_doc_state(&self, doc_id: DocumentId) -> eyre::Result<bool> {
@@ -509,8 +495,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::HasLocalDocState { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     #[cfg(test)]
@@ -520,8 +505,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::HasDocWorker { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
     // ── private helpers ──────────────────────────────────────────────────────

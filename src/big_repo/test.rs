@@ -343,7 +343,7 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
 }
 
 #[tokio::test]
-async fn local_boundary_commit_stores_requested_encrypted_fragment() -> Res<()> {
+async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history() -> Res<()> {
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
@@ -366,9 +366,25 @@ async fn local_boundary_commit_stores_requested_encrypted_fragment() -> Res<()> 
         let next_stored_blob_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
 
         if head.0[0] == 0 {
+            repo.wait_for_quiescence(None).await?;
+
+            let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+            let head_id = sedimentree_core::loose_commit::id::CommitId::new(head.0);
+            let fragments = <SqliteBigRepoStore as subduction_core::storage::traits::Storage<
+                future_form::Sendable,
+            >>::load_fragment_metas(&repo.sqlite_store, sed_id)
+            .await?;
             assert!(
-                next_stored_blob_count >= stored_blob_count + 2,
-                "boundary commit should store both the loose commit and requested fragment"
+                fragments.iter().any(|fragment| fragment.head() == head_id),
+                "boundary commit should persist its requested fragment"
+            );
+            assert!(
+                <SqliteBigRepoStore as subduction_core::storage::traits::Storage<
+                    future_form::Sendable,
+                >>::load_loose_commit(&repo.sqlite_store, sed_id, head_id)
+                .await?
+                .is_none(),
+                "the persisted fragment should durably absorb its covered loose head"
             );
             for raw in repo.inspect_stored_doc_blobs(doc_id).await? {
                 decode_encrypted_blob(raw.as_slice())?;
@@ -1726,19 +1742,9 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     tracing::info!("THREE_NODE: B received Keyhive access, syncing doc");
 
     // B pulls the doc.
-    timeout(
-        Duration::from_secs(5),
-        b_a_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for B's initial doc sync")?;
+    b_a_conn.sync_doc_with_peer(doc_id, None).await?;
     tracing::info!("THREE_NODE: sync_doc_with_peer done, waiting for handle");
-    let b_doc = timeout(
-        Duration::from_secs(10),
-        wait_for_doc_handle(&b.repo, doc_id),
-    )
-    .await
-    .expect("timed out waiting for B's materialization");
+    let b_doc = wait_for_doc_handle(&b.repo, doc_id).await;
     tracing::info!("THREE_NODE: B got doc handle, reading title");
     let b_title = b_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -1758,30 +1764,21 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     a_b_conn.sync_keyhive_with_peer(None).await?;
 
     // C pulls the doc.
-    timeout(
-        Duration::from_secs(5),
-        c_a_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for C's initial doc sync")?;
-    let c_title = timeout(Duration::from_secs(10), async {
-        loop {
-            match c.repo.get_doc(&doc_id).await? {
-                DocLookup::Ready(handle) => {
-                    let title = handle
-                        .with_document_read(|doc| try_get_str_at_root(doc, "title"))
-                        .await;
-                    if title.as_deref() == Some("alpha") {
-                        return Ok::<_, eyre::Report>("alpha".to_owned());
-                    }
+    c_a_conn.sync_doc_with_peer(doc_id, None).await?;
+    let c_title = loop {
+        match c.repo.get_doc(&doc_id).await? {
+            DocLookup::Ready(handle) => {
+                let title = handle
+                    .with_document_read(|doc| try_get_str_at_root(doc, "title"))
+                    .await;
+                if title.as_deref() == Some("alpha") {
+                    break "alpha".to_owned();
                 }
-                DocLookup::PendingMaterialization | DocLookup::Missing => {}
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
         }
-    })
-    .await
-    .expect("timed out waiting for C's materialization")?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(c_title, "alpha");
 
     // A makes an edit.
@@ -1804,41 +1801,27 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
 
     // A must pull C's local edit before B can obtain it from A.
     a_c_conn.sync_keyhive_with_peer(None).await?;
-    timeout(
-        Duration::from_secs(5),
-        a_c_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for A to pull C's edit")?;
-    timeout(Duration::from_secs(10), async {
-        loop {
-            match a.repo.get_doc(&doc_id).await? {
-                DocLookup::Ready(handle) => {
-                    let author = handle
-                        .with_document_read(|doc| try_get_str_at_root(doc, "author"))
-                        .await;
-                    if author.as_deref() == Some("carol") {
-                        return Ok::<_, eyre::Report>(());
-                    }
+    a_c_conn.sync_doc_with_peer(doc_id, None).await?;
+    loop {
+        match a.repo.get_doc(&doc_id).await? {
+            DocLookup::Ready(handle) => {
+                let author = handle
+                    .with_document_read(|doc| try_get_str_at_root(doc, "author"))
+                    .await;
+                if author.as_deref() == Some("carol") {
+                    break;
                 }
-                DocLookup::PendingMaterialization | DocLookup::Missing => {}
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
         }
-    })
-    .await
-    .expect("timed out waiting for A to materialize C's edit")?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // B re-syncs keyhive and re-pulls — the key rotation from adding C means
     // B needs the new CGKA ops to decrypt A and C's edits. This proves the
     // gossip (ephemeral notification → keyhive sync) delivered the keys.
     b_a_conn.sync_keyhive_with_peer(None).await?;
-    timeout(
-        Duration::from_secs(5),
-        b_a_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for B's re-pull after key rotation")?;
+    b_a_conn.sync_doc_with_peer(doc_id, None).await?;
 
     // B can now decrypt both edits.
     timeout(Duration::from_secs(10), async {

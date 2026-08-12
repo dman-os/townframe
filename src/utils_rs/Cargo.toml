@@ -48,6 +48,7 @@ blake3 = { workspace = true, optional = true }
 # ds
 # ahash = { workspace = true, optional = true }
 dashmap = { version = "6.1", features = ["serde"] }
+surelock.workspace = true
 uuid = { version = "1", features = ["serde", "v4"] }
 indexmap = "2.14"
 regex = "1"

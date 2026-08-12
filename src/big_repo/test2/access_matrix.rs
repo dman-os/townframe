@@ -826,6 +826,7 @@ async fn run_public_case(
     }
     drop(owner_doc);
     let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
+    heads::log_head_state(&pair, doc_id).await?;
     assert_eq!(read_title(&public_doc).await, "public-matrix");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
     if access.is_editor() {
@@ -840,6 +841,7 @@ async fn run_public_case(
         drop(owner_doc);
         drop(public_doc);
         let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
+        heads::log_head_state(&pair, doc_id).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "public_note")
                 .await
@@ -1147,16 +1149,28 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
             .await?
     );
 
-    // 4. Add reader member, verify permitted, then remove via remove_obj_member and assert denial
-    store
-        .add_obj_member(obj_id, reader_peer, keyhive_core::access::Access::Read)
+    // 4. Grant reader access via keyhive, verify permitted, then revoke and assert denial.
+    //    The raw store tables are derived state: the group-part worker rebuilds
+    //    `big_sync_syncable` from keyhive membership, so grants must go through
+    //    the keyhive APIs (`grant_doc_access` waits for that rebuild).
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(
+            doc_id,
+            reader_agent.clone(),
+            keyhive_core::access::Access::Read,
+        )
         .await?;
     assert!(
         store
             .is_event_permitted(None, obj_id, Some(reader_peer))
             .await?
     );
-    store.remove_obj_member(obj_id, reader_peer).await?;
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id, reader_agent)
+        .await?;
     assert!(
         !store
             .is_event_permitted(None, obj_id, Some(reader_peer))

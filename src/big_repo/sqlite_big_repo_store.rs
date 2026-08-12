@@ -20,14 +20,184 @@ use sedimentree_core::{
     fragment::Fragment,
     id::SedimentreeId,
     loose_commit::{LooseCommit, id::CommitId},
-    sedimentree::Sedimentree,
+    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
 use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
 use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
+use utils_rs::lru::KeyedLruPool;
 
 const KEYHIVE_EVENT_LOG_MAX_ENTRIES: i64 = 200_000;
+
+/// Metadata-weighted capacity of the tree projection cache, in metadata
+/// items (one per loose commit or fragment). SQLite remains authoritative;
+/// eviction is always safe.
+const TREE_CACHE_METADATA_CAPACITY: usize = 4096;
+
+/// Bounded, metadata-only cache of the canonical durable sedimentree trees.
+///
+/// This synchronous mutex is intentional and SQLite-specific.
+///
+/// The tree projection cache is accessed only while holding a successfully
+/// acquired `BEGIN IMMEDIATE` write transaction. SQLite serializes writers
+/// before this mutex is reached, so lock acquisition is uncontended and never
+/// waits for async work performed by another task. The mutex protects ordinary
+/// in-memory access; it is not the write-serialization mechanism.
+///
+/// Do not reuse this design for a backend that permits concurrent write
+/// transactions. Such a backend needs per-tree coordination or another cache
+/// concurrency design.
+///
+/// This cache also assumes exactly one `SqliteBigRepoStore` instance per
+/// (database, scope): clones share the `Arc` and are safe, but two
+/// independently-constructed stores for the same scope would each hold an
+/// incoherent projection cache. The runtime constructs one store per scope.
+struct TreeCache {
+    lru: KeyedLruPool<SedimentreeId>,
+    entries: HashMap<SedimentreeId, MinimizedSedimentree>,
+}
+
+impl TreeCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            lru: KeyedLruPool::new(capacity),
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Look up an entry, marking it most-recently-used.
+    fn get(&mut self, id: &SedimentreeId) -> Option<&MinimizedSedimentree> {
+        self.lru.touch_key(id);
+        self.entries.get(id)
+    }
+
+    /// Insert an entry without touching the LRU. The caller derives heads
+    /// first, then calls [`update_cost`](Self::update_cost) so eviction can
+    /// never remove the entry before heads are captured.
+    fn insert_no_evict(&mut self, id: SedimentreeId, tree: MinimizedSedimentree) {
+        self.entries.insert(id, tree);
+    }
+
+    /// Recompute an entry's LRU cost from its (post-minimization) metadata
+    /// weight and evict as needed. The entry itself may be evicted when its
+    /// cost exceeds capacity — an oversized tree is used transiently for the
+    /// transaction and then left uncached. Callers must have captured heads
+    /// before calling this.
+    fn update_cost(&mut self, id: &SedimentreeId) {
+        let Some(tree) = self.entries.get(id) else {
+            return;
+        };
+        let cost = Self::cost(tree);
+        let pruned = self.lru.insert_key(id, cost);
+        for key in pruned {
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Remove an entry (whole-tree removal, delete-path rebuild, or
+    /// speculative invalidation).
+    fn remove(&mut self, id: &SedimentreeId) {
+        self.lru.remove_key(id);
+        self.entries.remove(id);
+    }
+
+    /// Apply a loose commit to the cached tree. No LRU update — the caller
+    /// derives heads and calls [`update_cost`](Self::update_cost) after.
+    fn apply_commit(&mut self, id: &SedimentreeId, commit: LooseCommit) {
+        if let Some(tree) = self.entries.get_mut(id) {
+            tree.add_commit(commit);
+        }
+    }
+
+    /// Apply a fragment to the cached tree. No LRU update — the caller
+    /// derives heads and calls [`update_cost`](Self::update_cost) after.
+    fn apply_fragment(&mut self, id: &SedimentreeId, fragment: Fragment) {
+        if let Some(tree) = self.entries.get_mut(id) {
+            tree.add_fragment(fragment);
+        }
+    }
+
+    /// Apply a whole batch to the cached tree. No LRU update — the caller
+    /// derives heads and calls [`update_cost`](Self::update_cost) after.
+    fn apply_batch(
+        &mut self,
+        id: &SedimentreeId,
+        commits: Vec<LooseCommit>,
+        fragments: Vec<Fragment>,
+    ) {
+        if let Some(tree) = self.entries.get_mut(id) {
+            for commit in commits {
+                tree.add_commit(commit);
+            }
+            for fragment in fragments {
+                tree.add_fragment(fragment);
+            }
+        }
+    }
+
+    /// Metadata weight of a tree: one per loose commit or fragment, plus one
+    /// for the tree itself.
+    fn cost(tree: &MinimizedSedimentree) -> usize {
+        1 + tree.loose_commits().count() + tree.fragments().count()
+    }
+}
+
+/// RAII invalidation guard for a speculative cache entry.
+///
+/// Armed after the entry is obtained or hydrated; the entry is evicted on
+/// drop unless [`disarm`](Self::disarm) is called after the transaction
+/// commits. This covers errors, commit failures, and dropped futures
+/// (cancellation) uniformly: a speculative entry must never survive a
+/// transaction that did not commit.
+struct TreeCacheGuard<'a> {
+    cache: &'a std::sync::Mutex<TreeCache>,
+    id: SedimentreeId,
+    armed: bool,
+}
+
+impl<'a> TreeCacheGuard<'a> {
+    fn arm(cache: &'a std::sync::Mutex<TreeCache>, id: SedimentreeId) -> Self {
+        Self {
+            cache,
+            id,
+            armed: true,
+        }
+    }
+
+    /// Mark the transaction as committed; the entry is retained.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TreeCacheGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // A poisoned mutex is an invariant break (a thread panicked
+            // while holding it) — never swallow it.
+            self.cache.lock().expect(ERROR_MUTEX).remove(&self.id);
+        }
+    }
+}
+
+/// A tree mutation applied inside one `BEGIN IMMEDIATE` write transaction.
+///
+/// Every durable operation that can change a tree funnels through
+/// [`SqliteBigRepoStore::mutate_tree_in_tx`] so the cached projection and the
+/// BigSync payload can never be forgotten by a future write path.
+enum TreeStorageMutation {
+    InsertCommit(VerifiedMeta<LooseCommit>),
+    InsertFragment(VerifiedMeta<Fragment>),
+    InsertBatch {
+        commits: Vec<VerifiedMeta<LooseCommit>>,
+        fragments: Vec<VerifiedMeta<Fragment>>,
+    },
+    DeleteCommit(CommitId),
+    DeleteFragment(CommitId),
+    DeleteAllCommits,
+    DeleteAllFragments,
+}
 
 struct BigRepoSubscription {
     sender: mpsc::Sender<SubEvent>,
@@ -74,6 +244,8 @@ pub struct SqliteBigRepoStore {
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
     keyhive_event_notify: Arc<tokio::sync::Notify>,
+    /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
+    tree_cache: Arc<std::sync::Mutex<TreeCache>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -280,6 +452,9 @@ impl SqliteBigRepoStore {
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
             keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
+            tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
+                TREE_CACHE_METADATA_CAPACITY,
+            ))),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -385,24 +560,17 @@ impl SqliteBigRepoStore {
                     SubEvent::ObjectChanged(inner) => (inner.obj_id, Some(event.clone())),
                     SubEvent::ReplayComplete => continue,
                 };
-                let mut recipients = HashMap::new();
+                let mut recipients = Vec::new();
                 match &event {
                     SubEvent::Changed(inner) => {
                         for part_id in &inner.part_ids {
                             if let Some(subs) = bus.by_part.get(part_id) {
                                 for &sub_id in subs {
-                                    match recipients.get_mut(&sub_id) {
-                                        Some(SubEvent::Changed(existing)) => {
-                                            existing.part_ids.push(*part_id);
-                                        }
-                                        _ => {
-                                            let mut projected = event.clone();
-                                            if let SubEvent::Changed(inner) = &mut projected {
-                                                inner.part_ids = vec![*part_id];
-                                            }
-                                            recipients.insert(sub_id, projected);
-                                        }
+                                    let mut projected = event.clone();
+                                    if let SubEvent::Changed(inner) = &mut projected {
+                                        inner.part_ids = vec![*part_id];
                                     }
+                                    recipients.push((sub_id, projected));
                                 }
                             }
                         }
@@ -410,14 +578,14 @@ impl SqliteBigRepoStore {
                     SubEvent::Added(inner) => {
                         if let Some(subs) = bus.by_part.get(&inner.part_id) {
                             for &sub_id in subs {
-                                recipients.insert(sub_id, event.clone());
+                                recipients.push((sub_id, event.clone()));
                             }
                         }
                     }
                     SubEvent::Removed(inner) => {
                         if let Some(subs) = bus.by_part.get(&inner.part_id) {
                             for &sub_id in subs {
-                                recipients.insert(sub_id, event.clone());
+                                recipients.push((sub_id, event.clone()));
                             }
                         }
                     }
@@ -428,9 +596,7 @@ impl SqliteBigRepoStore {
                     && let Some(subs) = bus.by_obj.get(&obj_id)
                 {
                     for &sub_id in subs {
-                        recipients
-                            .entry(sub_id)
-                            .or_insert_with(|| object_event.clone());
+                        recipients.push((sub_id, object_event.clone()));
                     }
                 }
                 for (sub_id, event) in recipients {
@@ -1936,6 +2102,19 @@ impl SqliteBigRepoStore {
 
     async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Migration: the derived heads machinery (incremental heads table,
+        // parent index, fragment-boundary index) was replaced by a
+        // transaction-scoped sedimentree projection cache. Drop the old tables
+        // if a released database still has them; the BigSync payload rows
+        // already hold the canonical heads, and the cache rehydrates from the
+        // authoritative commit/fragment rows.
+        for statement in [
+            "DROP TABLE IF EXISTS big_repo_subduction_tree_heads",
+            "DROP TABLE IF EXISTS big_repo_subduction_commit_parents",
+            "DROP TABLE IF EXISTS big_repo_subduction_fragment_boundaries",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
         sqlx::query(
             "INSERT OR IGNORE INTO big_repo_group_part_cursor(scope_id, cursor)
              VALUES (?1, 0)",
@@ -2289,6 +2468,7 @@ impl SqliteBigRepoStore {
         &self,
         hash: subduction_keyhive::storage::StorageHash,
         data: Vec<u8>,
+        source: Option<subduction_keyhive::KeyhivePeerId>,
     ) -> Result<bool, SqliteBigRepoStoreError> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let next_seq: i64 = sqlx::query_scalar(
@@ -2301,15 +2481,16 @@ impl SqliteBigRepoStore {
         .await?;
         let inserted = sqlx::query(
             "INSERT INTO big_repo_keyhive_event_log(
-                scope_id, seq, event_hash, event_bytes
+                scope_id, seq, event_hash, event_bytes, source_id
              )
-             VALUES (?1, ?2, ?3, ?4)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(scope_id, event_hash) DO NOTHING",
         )
         .bind(self.scope_id)
         .bind(next_seq)
         .bind(hash.as_bytes().as_slice())
         .bind(data)
+        .bind(source.map(|peer| peer.verifying_key().to_vec()))
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -2609,7 +2790,9 @@ impl SqliteBigRepoStore {
             .collect()
     }
 
-    async fn insert_commit(
+    /// Raw SQL row insert for a loose commit (plus its causal ciphertext
+    /// index). Graph semantics live in the cached projection, not here.
+    async fn insert_commit_rows(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
@@ -2636,7 +2819,8 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn insert_fragment(
+    /// Raw SQL row insert for a fragment (plus its causal ciphertext index).
+    async fn insert_fragment_rows(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
@@ -2665,12 +2849,201 @@ impl SqliteBigRepoStore {
 }
 
 impl SqliteBigRepoStore {
-    async fn sedimentree_payload_in_tx(
+    /// Apply a tree mutation inside an open `BEGIN IMMEDIATE` write
+    /// transaction.
+    ///
+    /// The cached tree is hydrated/adopted, mutated, durably minimized, and
+    /// used to derive the canonical heads via `sedimentree_core`. Raw SQL row
+    /// mutations, deletion of items covered by minimization, and the BigSync
+    /// payload write happen in the same transaction. Returns the events to
+    /// publish and a guard that evicts the speculative cache entry unless the
+    /// caller commits and disarms it.
+    async fn mutate_tree_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
-    ) -> Result<ObjPayload, SqliteBigRepoStoreError> {
-        let commit_rows = sqlx::query(
+        mutation: TreeStorageMutation,
+    ) -> Result<(Vec<SubEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
+        let guard = match &mutation {
+            TreeStorageMutation::DeleteCommit(_)
+            | TreeStorageMutation::DeleteFragment(_)
+            | TreeStorageMutation::DeleteAllCommits
+            | TreeStorageMutation::DeleteAllFragments => {
+                // Deletes: evict the existing entry — a minimized tree may
+                // have discarded metadata that becomes relevant after
+                // removal — and rebuild from the remaining durable rows.
+                self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
+                TreeCacheGuard::arm(&self.tree_cache, id)
+            }
+            _ => {
+                // Inserts: adopt the cached entry or hydrate it from the
+                // transaction's view of durable storage.
+                let present = self
+                    .tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .get(&id)
+                    .is_some();
+                if !present {
+                    let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                    self.tree_cache
+                        .lock()
+                        .expect(ERROR_MUTEX)
+                        .insert_no_evict(id, tree);
+                }
+                TreeCacheGuard::arm(&self.tree_cache, id)
+            }
+        };
+
+        match mutation {
+            TreeStorageMutation::InsertCommit(verified) => {
+                let payload = verified.payload().clone();
+                self.insert_commit_rows(tx, id, verified).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .apply_commit(&id, payload);
+            }
+            TreeStorageMutation::InsertFragment(verified) => {
+                let payload = verified.payload().clone();
+                self.insert_fragment_rows(tx, id, verified).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .apply_fragment(&id, payload);
+            }
+            TreeStorageMutation::InsertBatch { commits, fragments } => {
+                let commit_payloads: Vec<LooseCommit> = commits
+                    .iter()
+                    .map(|commit| commit.payload().clone())
+                    .collect();
+                let fragment_payloads: Vec<Fragment> = fragments
+                    .iter()
+                    .map(|fragment| fragment.payload().clone())
+                    .collect();
+                for commit in commits {
+                    self.insert_commit_rows(tx, id, commit).await?;
+                }
+                for fragment in fragments {
+                    self.insert_fragment_rows(tx, id, fragment).await?;
+                }
+                self.tree_cache.lock().expect(ERROR_MUTEX).apply_batch(
+                    &id,
+                    commit_payloads,
+                    fragment_payloads,
+                );
+            }
+            TreeStorageMutation::DeleteCommit(commit_id) => {
+                self.delete_commit_rows(tx, id, commit_id).await?;
+                let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .insert_no_evict(id, tree);
+            }
+            TreeStorageMutation::DeleteFragment(head_id) => {
+                self.delete_fragment_rows(tx, id, head_id).await?;
+                let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .insert_no_evict(id, tree);
+            }
+            TreeStorageMutation::DeleteAllCommits => {
+                self.delete_all_commit_rows(tx, id).await?;
+                let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .insert_no_evict(id, tree);
+            }
+            TreeStorageMutation::DeleteAllFragments => {
+                self.delete_all_fragment_rows(tx, id).await?;
+                let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                self.tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .insert_no_evict(id, tree);
+            }
+        }
+
+        // Durable state and the resident projection must be the same minimal
+        // tree. Keeping covered rows in SQLite while hiding them in the cache
+        // makes the sync representation depend on cache residency: hydration
+        // can rediscover a proof that a received loose commit is covered,
+        // while an already-minimal cache cannot. Compute the pruning plan via
+        // sedimentree_core (the sole owner of graph semantics), install its
+        // canonical tree speculatively, and remove every discarded row in
+        // this same transaction.
+        let (removed_commits, removed_fragments) = {
+            let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
+            let tree = cache
+                .entries
+                .get_mut(&id)
+                .expect("cached entry present after mutation");
+            tree.ensure_minimized_with_delta(&CountLeadingZeroBytes)
+        };
+        for commit_id in removed_commits {
+            self.delete_commit_rows(tx, id, commit_id).await?;
+        }
+        for head_id in removed_fragments {
+            self.delete_fragment_rows(tx, id, head_id).await?;
+        }
+
+        // Derive canonical heads from the cached projection — sedimentree_core
+        // is the sole implementation of graph semantics.
+        let heads = {
+            let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
+            let heads = {
+                let tree = cache
+                    .entries
+                    .get_mut(&id)
+                    .expect("cached entry present after mutation");
+                tree.heads(&CountLeadingZeroBytes)
+            };
+            // Update the LRU cost from the post-minimization metadata weight.
+            // This may evict the entry itself (an oversized tree is used
+            // transiently for this transaction and then left uncached) —
+            // heads are already captured, so that is safe.
+            cache.update_cost(&id);
+            heads
+        };
+        let payload = serde_json::json!({
+            "heads": am_utils_rs::serialize_commit_heads(
+                &heads
+                    .iter()
+                    .map(|head| automerge::ChangeHash(*head.as_bytes()))
+                    .collect::<Vec<_>>(),
+            ),
+        });
+        let events = self
+            .set_obj_payload_in_tx(tx, Self::obj_id(id), payload)
+            .await?;
+
+        Ok((events, guard))
+    }
+
+    /// Hydrate a metadata-only tree from the transaction's view of durable
+    /// storage (no blobs). Reads through `tx` so it sees the exact state being
+    /// mutated.
+    async fn hydrate_tree_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+    ) -> Result<MinimizedSedimentree, SqliteBigRepoStoreError> {
+        let commits = self.commit_meta_rows_in_tx(tx, id).await?;
+        let fragments = self.fragment_meta_rows_in_tx(tx, id).await?;
+        Ok(MinimizedSedimentree::new(Sedimentree::new(
+            fragments, commits,
+        )))
+    }
+
+    async fn commit_meta_rows_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+    ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
             "SELECT signed FROM big_repo_subduction_commits
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
         )
@@ -2678,15 +3051,20 @@ impl SqliteBigRepoStore {
         .bind(Self::tree_blob(id))
         .fetch_all(&mut **tx)
         .await?;
-        let commits = commit_rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let signed: Vec<u8> = row.try_get("signed")?;
                 Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
             })
-            .collect::<Result<Vec<_>, SqliteBigRepoStoreError>>()?;
+            .collect()
+    }
 
-        let fragment_rows = sqlx::query(
+    async fn fragment_meta_rows_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+    ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
             "SELECT signed FROM big_repo_subduction_fragments
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
         )
@@ -2694,24 +3072,99 @@ impl SqliteBigRepoStore {
         .bind(Self::tree_blob(id))
         .fetch_all(&mut **tx)
         .await?;
-        let fragments = fragment_rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let signed: Vec<u8> = row.try_get("signed")?;
                 Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
             })
-            .collect::<Result<Vec<_>, SqliteBigRepoStoreError>>()?;
+            .collect()
+    }
 
-        let tree = Sedimentree::new(fragments, commits);
-        let heads: Arc<[automerge::ChangeHash]> = Arc::from(
-            tree.heads(&CountLeadingZeroBytes)
-                .into_iter()
-                .map(|head| automerge::ChangeHash(*head.as_bytes()))
-                .collect::<Vec<_>>(),
-        );
-        Ok(serde_json::json!({
-            "heads": am_utils_rs::serialize_commit_heads(&heads),
-        }))
+    /// Raw SQL row delete for a loose commit (plus its causal ciphertext
+    /// index). The cached projection is rebuilt by the caller.
+    async fn delete_commit_rows(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+        commit_id: CommitId,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
+            .execute(&mut **tx).await?;
+        sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
+            .execute(&mut **tx).await?;
+        Ok(())
+    }
+
+    /// Raw SQL row delete for a fragment (plus its causal ciphertext index).
+    async fn delete_fragment_rows(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+        head_id: CommitId,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 1")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
+            .execute(&mut **tx).await?;
+        sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
+            .execute(&mut **tx).await?;
+        Ok(())
+    }
+
+    /// Raw SQL row delete for all loose commits of a tree.
+    async fn delete_all_commit_rows(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut **tx).await?;
+        sqlx::query(
+            "DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(id))
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    /// Raw SQL row delete for all fragments of a tree.
+    async fn delete_all_fragment_rows(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SedimentreeId,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 1")
+            .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut **tx).await?;
+        sqlx::query(
+            "DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(id))
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    /// Durable sedimentree frontier, recomputed from the authoritative SQLite
+    /// rows (metadata only, no blobs). The projection cache is write-only and
+    /// never consulted on read paths.
+    pub(crate) async fn durable_sedimentree_heads(
+        &self,
+        id: SedimentreeId,
+    ) -> Result<Vec<CommitId>, SqliteBigRepoStoreError> {
+        let commits = self.load_loose_commit_metas(id).await?;
+        let fragments = self.load_fragment_metas(id).await?;
+        if commits.is_empty() && fragments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tree = MinimizedSedimentree::new(Sedimentree::new(fragments, commits));
+        let mut heads = tree.heads(&CountLeadingZeroBytes);
+        heads.sort_unstable();
+        Ok(heads)
     }
 }
 
@@ -2729,7 +3182,16 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn delete_sedimentree_id(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
+            // Whole-tree removal: acquire the SQLite writer slot FIRST, then
+            // evict the projection cache entry. Evicting before BEGIN
+            // IMMEDIATE would race a concurrent writer that installs its
+            // entry after our eviction but before we delete the durable tree,
+            // leaving a stale entry for a deleted tree. Once we own the
+            // writer slot no other writer can be mid-transaction, so the
+            // eviction is safe; leaving the entry evicted on rollback is also
+            // safe (the next write rehydrates).
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
             let tree = Self::tree_blob(id);
             sqlx::query(
                 "DELETE FROM big_repo_subduction_commits
@@ -2804,12 +3266,11 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             self.save_tree(&mut tx, id).await?;
-            self.insert_commit(&mut tx, id, verified).await?;
-            let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
-            let events = self
-                .set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertCommit(verified))
                 .await?;
             tx.commit().await?;
+            guard.disarm();
             self.publish(events).await;
             Ok(())
         })
@@ -2882,13 +3343,12 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
-                .execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
-                .execute(&mut *tx).await?;
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteCommit(commit_id))
+                .await?;
             tx.commit().await?;
+            guard.disarm();
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -2896,11 +3356,12 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     fn delete_loose_commits(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllCommits)
+                .await?;
             tx.commit().await?;
+            guard.disarm();
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -2913,12 +3374,11 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             self.save_tree(&mut tx, id).await?;
-            self.insert_fragment(&mut tx, id, verified).await?;
-            let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
-            let events = self
-                .set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertFragment(verified))
                 .await?;
             tx.commit().await?;
+            guard.disarm();
             self.publish(events).await;
             Ok(())
         })
@@ -2985,13 +3445,12 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 1")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
-                .execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
-                .execute(&mut *tx).await?;
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteFragment(head_id))
+                .await?;
             tx.commit().await?;
+            guard.disarm();
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -2999,11 +3458,12 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     fn delete_fragments(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 1")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut *tx).await?;
+            let (events, guard) = self
+                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllFragments)
+                .await?;
             tx.commit().await?;
+            guard.disarm();
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -3018,20 +3478,18 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             let count = commits.len() + fragments.len();
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             self.save_tree(&mut tx, id).await?;
-            for commit in commits {
-                self.insert_commit(&mut tx, id, commit).await?;
-            }
-            for fragment in fragments {
-                self.insert_fragment(&mut tx, id, fragment).await?;
-            }
-            let events = if count == 0 {
-                Vec::new()
+            let (events, guard) = if count == 0 {
+                (Vec::new(), TreeCacheGuard::arm(&self.tree_cache, id))
             } else {
-                let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
-                self.set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
-                    .await?
+                self.mutate_tree_in_tx(
+                    &mut tx,
+                    id,
+                    TreeStorageMutation::InsertBatch { commits, fragments },
+                )
+                .await?
             };
             tx.commit().await?;
+            guard.disarm();
             self.publish(events).await;
             Ok(count)
         })
@@ -3229,6 +3687,928 @@ mod tests {
         .expect("fresh blob metadata")
     }
 
+    async fn make_commit_with_parents(
+        signer: &MemorySigner,
+        tree: SedimentreeId,
+        head_byte: u8,
+        parents: std::collections::BTreeSet<CommitId>,
+    ) -> VerifiedMeta<LooseCommit> {
+        let blob = Blob::new(vec![head_byte; 3]);
+        let mut head = [0; 32];
+        head[0] = head_byte;
+        let payload = LooseCommit::new(tree, CommitId::new(head), parents, BlobMeta::new(&blob));
+        let signed = Signed::seal::<Sendable, _>(signer, payload).await;
+        VerifiedMeta::new(
+            signed.into_signed().try_verify().expect("fresh signature"),
+            blob,
+        )
+        .expect("fresh blob metadata")
+    }
+
+    async fn make_fragment(
+        signer: &MemorySigner,
+        tree: SedimentreeId,
+        head_byte: u8,
+        boundary: std::collections::BTreeSet<CommitId>,
+    ) -> VerifiedMeta<Fragment> {
+        let blob = Blob::new(vec![head_byte; 3]);
+        let mut head = [0; 32];
+        head[0] = head_byte;
+        let payload = Fragment::new(
+            tree,
+            CommitId::new(head),
+            boundary,
+            &[],
+            BlobMeta::new(&blob),
+        );
+        let signed = Signed::seal::<Sendable, _>(signer, payload).await;
+        VerifiedMeta::new(
+            signed.into_signed().try_verify().expect("fresh signature"),
+            blob,
+        )
+        .expect("fresh blob metadata")
+    }
+
+    fn commit_id(head_byte: u8) -> CommitId {
+        let mut head = [0; 32];
+        head[0] = head_byte;
+        CommitId::new(head)
+    }
+
+    /// The persisted BigSync payload heads for a tree, sorted.
+    async fn payload_heads(store: &SqliteBigRepoStore, tree: SedimentreeId) -> Res<Vec<CommitId>> {
+        let obj_id = SqliteBigRepoStore::obj_id(tree);
+        let Some(payload) = HostPartStore::obj_payload(store, obj_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut heads = Vec::new();
+        if let Some(list) = payload.get("heads").and_then(|h| h.as_array()) {
+            for head in list {
+                let s = head
+                    .as_str()
+                    .ok_or_else(|| eyre::eyre!("non-string head in payload"))?;
+                let bytes = utils_rs::hash::decode_base58_multibase(s)?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| eyre::eyre!("head not 32 bytes"))?;
+                heads.push(CommitId::new(arr));
+            }
+        }
+        heads.sort_unstable();
+        Ok(heads)
+    }
+
+    /// Heads of a fresh tree hydrated from the raw durable rows — the
+    /// reference implementation every persisted payload must match.
+    async fn fresh_tree_heads(
+        store: &SqliteBigRepoStore,
+        tree: SedimentreeId,
+    ) -> Res<Vec<CommitId>> {
+        let commits = store.load_loose_commit_metas(tree).await?;
+        let fragments = store.load_fragment_metas(tree).await?;
+        if commits.is_empty() && fragments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tree = MinimizedSedimentree::new(Sedimentree::new(fragments, commits));
+        let mut heads = tree.heads(&CountLeadingZeroBytes);
+        heads.sort_unstable();
+        Ok(heads)
+    }
+
+    /// A parent inserted before its child produces only the child as the
+    /// final durable head — including the mid-arrival case where the child
+    /// lands first and the parent covers it later.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parent_before_child_produces_single_durable_head() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-parent-child", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[12; 32]);
+        let tree = SedimentreeId::new([13; 32]);
+
+        // A (root), then B (parent A) — B covers A.
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(2)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree).await?,
+            vec![commit_id(2)]
+        );
+
+        // Mid-arrival: G (parent F) lands before F. G is transiently a head;
+        // once F lands, G covers it and only G remains.
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 7, BTreeSet::from([commit_id(6)])).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 6, BTreeSet::from([commit_id(2)])).await,
+        )
+        .await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(7)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree).await?,
+            vec![commit_id(7)]
+        );
+        Ok(())
+    }
+
+    /// A complete batch produces one final BigSync projection with no
+    /// intermediate frontier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_produces_single_final_projection() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-batch", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[14; 32]);
+        let tree = SedimentreeId::new([15; 32]);
+
+        let commits = vec![
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+            make_commit_with_parents(&signer, tree, 3, BTreeSet::from([commit_id(2)])).await,
+        ];
+        Storage::<Sendable>::save_batch(&store, tree, commits, Vec::new()).await?;
+
+        // Only the final head is persisted — no intermediate frontier leaked.
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(3)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree).await?,
+            vec![commit_id(3)]
+        );
+        Ok(())
+    }
+
+    /// Multiple concurrent save calls converge to the same heads as
+    /// constructing a Sedimentree from all durable rows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_saves_converge_to_full_recompute() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-concurrent", BuckId::MAX_LEVEL).await?;
+        let tree = SedimentreeId::new([16; 32]);
+
+        let mut handles = Vec::new();
+        for byte in 1..=8u8 {
+            let store = store.clone();
+            let signer = MemorySigner::from_bytes(&[byte; 32]);
+            handles.push(tokio::spawn(async move {
+                let commit = make_commit(&signer, tree, byte).await;
+                Storage::<Sendable>::save_loose_commit(&store, tree, commit).await
+            }));
+        }
+        for handle in handles {
+            handle.await??;
+        }
+
+        let expected = fresh_tree_heads(&store, tree).await?;
+        assert_eq!(payload_heads(&store, tree).await?, expected);
+        assert_eq!(store.durable_sedimentree_heads(tree).await?, expected);
+        Ok(())
+    }
+
+    /// Fragment insertion changes heads identically to sedimentree_core.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fragment_insertion_matches_sedimentree_core() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-frag-insert", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[17; 32]);
+        let tree = SedimentreeId::new([18; 32]);
+
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        // Root fragment (head 0B, empty boundary) — a fresh frontier commit.
+        Storage::<Sendable>::save_fragment(
+            &store,
+            tree,
+            make_fragment(&signer, tree, 11, BTreeSet::new()).await,
+        )
+        .await?;
+        // Non-root fragment (head 02, boundary {01}) — covers 01; 02 is
+        // already a loose head, so the frontier is unchanged.
+        Storage::<Sendable>::save_fragment(
+            &store,
+            tree,
+            make_fragment(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+
+        let expected = fresh_tree_heads(&store, tree).await?;
+        assert_eq!(payload_heads(&store, tree).await?, expected);
+        assert_eq!(store.durable_sedimentree_heads(tree).await?, expected);
+        Ok(())
+    }
+
+    /// A fragment and the loose history recoverable from its blob must never
+    /// coexist durably after the write transaction commits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fragment_write_durably_prunes_covered_loose_history() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-durable-prune", BuckId::MAX_LEVEL)
+                .await?;
+        let signer = MemorySigner::from_bytes(&[41; 32]);
+        let tree = SedimentreeId::new([42; 32]);
+
+        let commits = vec![
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+            make_commit_with_parents(&signer, tree, 0, BTreeSet::from([commit_id(2)])).await,
+        ];
+        let fragments = vec![make_fragment(&signer, tree, 0, BTreeSet::new()).await];
+        Storage::<Sendable>::save_batch(&store, tree, commits, fragments).await?;
+
+        assert!(store.load_loose_commit_metas(tree).await?.is_empty());
+        assert_eq!(store.load_fragment_metas(tree).await?.len(), 1);
+        let loose_index_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM big_repo_causal_ciphertext_index
+             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0",
+        )
+        .bind(store.scope_id)
+        .bind(SqliteBigRepoStore::tree_blob(tree))
+        .fetch_one(&store.sql.read_pool)
+        .await?;
+        assert_eq!(loose_index_rows, 0);
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(0)]);
+        Ok(())
+    }
+
+    /// Once fragment-covered history is durably forgotten, a loose residue
+    /// learned from another schedule remains present across cache loss.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn post_fragment_residue_survives_cache_eviction() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-pruned-residue", BuckId::MAX_LEVEL)
+                .await?;
+        let signer = MemorySigner::from_bytes(&[43; 32]);
+        let tree = SedimentreeId::new([44; 32]);
+
+        Storage::<Sendable>::save_batch(
+            &store,
+            tree,
+            vec![
+                make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+                make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+                make_commit_with_parents(&signer, tree, 0, BTreeSet::from([commit_id(2)])).await,
+            ],
+            vec![make_fragment(&signer, tree, 0, BTreeSet::new()).await],
+        )
+        .await?;
+
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        assert_eq!(store.load_loose_commit_metas(tree).await?.len(), 1);
+
+        store.tree_cache.lock().expect(ERROR_MUTEX).remove(&tree);
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 4, BTreeSet::from([commit_id(0)])).await,
+        )
+        .await?;
+
+        let commits: Set<_> = store
+            .load_loose_commit_metas(tree)
+            .await?
+            .into_iter()
+            .map(|commit| commit.head())
+            .collect();
+        assert_eq!(commits, Set::from([commit_id(1), commit_id(4)]));
+        assert_eq!(
+            payload_heads(&store, tree).await?,
+            vec![commit_id(1), commit_id(4)]
+        );
+        Ok(())
+    }
+
+    /// Pruning is part of the same SQLite transaction as the fragment write;
+    /// rollback restores both the covered loose rows and the absent fragment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollback_restores_rows_speculatively_pruned_by_fragment() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-prune-rollback", BuckId::MAX_LEVEL)
+                .await?;
+        let signer = MemorySigner::from_bytes(&[45; 32]);
+        let tree = SedimentreeId::new([46; 32]);
+
+        Storage::<Sendable>::save_batch(
+            &store,
+            tree,
+            vec![
+                make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+                make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+                make_commit_with_parents(&signer, tree, 0, BTreeSet::from([commit_id(2)])).await,
+            ],
+            Vec::new(),
+        )
+        .await?;
+
+        let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let (_, guard) = store
+            .mutate_tree_in_tx(
+                &mut tx,
+                tree,
+                TreeStorageMutation::InsertFragment(
+                    make_fragment(&signer, tree, 0, BTreeSet::new()).await,
+                ),
+            )
+            .await?;
+        drop(tx);
+        drop(guard);
+
+        assert_eq!(store.load_loose_commit_metas(tree).await?.len(), 3);
+        assert!(store.load_fragment_metas(tree).await?.is_empty());
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+        Ok(())
+    }
+
+    /// Fragment deletion rebuilds the projection from the durable rows that
+    /// remain after canonical pruning.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fragment_deletion_rebuilds_and_reveals_covered_commits() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-frag-del", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[19; 32]);
+        let tree = SedimentreeId::new([20; 32]);
+
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_fragment(
+            &store,
+            tree,
+            make_fragment(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(2)]);
+
+        // Deleting the fragment rebuilds from the remaining rows; the loose
+        // DAG still yields the same frontier.
+        Storage::<Sendable>::delete_fragment(&store, tree, commit_id(2)).await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(2)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree).await?,
+            vec![commit_id(2)]
+        );
+
+        // Deleting the covering commit reveals the previously covered one.
+        Storage::<Sendable>::delete_loose_commit(&store, tree, commit_id(2)).await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(1)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree).await?,
+            vec![commit_id(1)]
+        );
+        Ok(())
+    }
+
+    /// Loose commit deletion produces canonical heads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loose_commit_deletion_produces_canonical_heads() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-commit-del", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[21; 32]);
+        let tree = SedimentreeId::new([22; 32]);
+
+        // A → B → C. Deleting B leaves A and C as unrelated roots (C's parent
+        // is absent) — the canonical sedimentree_core result.
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 3, BTreeSet::from([commit_id(2)])).await,
+        )
+        .await?;
+        Storage::<Sendable>::delete_loose_commit(&store, tree, commit_id(2)).await?;
+
+        let expected = fresh_tree_heads(&store, tree).await?;
+        assert_eq!(expected, vec![commit_id(1), commit_id(3)]);
+        assert_eq!(payload_heads(&store, tree).await?, expected);
+        assert_eq!(store.durable_sedimentree_heads(tree).await?, expected);
+        Ok(())
+    }
+
+    /// Whole-tree removal (the `remove_sedimentree` sequence) removes the
+    /// cache entry and the tree registration. The BigSync payload is managed
+    /// by the mutation paths, so the full sequence leaves `{"heads": []}` —
+    /// `delete_sedimentree_id` itself does not touch the payload row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whole_tree_deletion_removes_cache_entry_and_registration() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-tree-del", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[23; 32]);
+        let tree = SedimentreeId::new([24; 32]);
+
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        assert!(store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+
+        // The full removal sequence as `remove_sedimentree` performs it.
+        Storage::<Sendable>::delete_loose_commits(&store, tree).await?;
+        Storage::<Sendable>::delete_fragments(&store, tree).await?;
+        Storage::<Sendable>::delete_sedimentree_id(&store, tree).await?;
+
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+        assert!(store.durable_sedimentree_heads(tree).await?.is_empty());
+        // The payload reflects the last mutation (empty frontier), not the
+        // deleted tree's old heads.
+        let obj_id = SqliteBigRepoStore::obj_id(tree);
+        assert_eq!(
+            HostPartStore::obj_payload(&store, obj_id).await?,
+            Some(serde_json::json!({ "heads": [] }))
+        );
+        Ok(())
+    }
+
+    /// Cache eviction followed by another write rehydrates correctly.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_eviction_rehydrates_on_next_write() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let mut store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-evict", BuckId::MAX_LEVEL).await?;
+        // Tiny cache: 3 metadata items ≈ one single-commit tree (cost 2) plus
+        // room for one more before eviction.
+        store.tree_cache = Arc::new(std::sync::Mutex::new(TreeCache::new(3)));
+        let signer = MemorySigner::from_bytes(&[25; 32]);
+        let tree_a = SedimentreeId::new([26; 32]);
+        let tree_b = SedimentreeId::new([27; 32]);
+
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree_a,
+            make_commit(&signer, tree_a, 1).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree_b,
+            make_commit(&signer, tree_b, 2).await,
+        )
+        .await?;
+        // tree_a (cost 2) was evicted to fit tree_b (cost 2) in capacity 3.
+        assert!(
+            !store
+                .tree_cache
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&tree_a)
+        );
+
+        // A write to the evicted tree rehydrates from durable rows.
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree_a,
+            make_commit_with_parents(&signer, tree_a, 3, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        assert_eq!(payload_heads(&store, tree_a).await?, vec![commit_id(3)]);
+        assert_eq!(
+            store.durable_sedimentree_heads(tree_a).await?,
+            vec![commit_id(3)]
+        );
+        Ok(())
+    }
+
+    /// A tree or batch whose metadata weight exceeds the cache capacity must
+    /// be used transiently for the transaction and then left uncached — it
+    /// must never evict itself before heads are captured and panic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_tree_does_not_panic_and_is_left_uncached() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let mut store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-oversized", BuckId::MAX_LEVEL).await?;
+        // Capacity smaller than a single tree: a 3-commit batch has metadata
+        // weight 4 > 2.
+        store.tree_cache = Arc::new(std::sync::Mutex::new(TreeCache::new(2)));
+        let signer = MemorySigner::from_bytes(&[37; 32]);
+        let tree = SedimentreeId::new([38; 32]);
+
+        let commits = vec![
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+            make_commit_with_parents(&signer, tree, 3, BTreeSet::from([commit_id(2)])).await,
+        ];
+        Storage::<Sendable>::save_batch(&store, tree, commits, Vec::new()).await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(3)]);
+        // The oversized tree evicted itself after heads were captured.
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+
+        // A subsequent write rehydrates and works.
+        Storage::<Sendable>::save_loose_commit(
+            &store,
+            tree,
+            make_commit_with_parents(&signer, tree, 4, BTreeSet::from([commit_id(3)])).await,
+        )
+        .await?;
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(4)]);
+        Ok(())
+    }
+
+    /// Whole-tree deletion must acquire the SQLite writer slot before evicting
+    /// the cache entry: a concurrent writer that installs its entry after the
+    /// eviction but before the durable delete would otherwise leave a stale
+    /// entry for a deleted tree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whole_tree_deletion_waits_for_writer_and_evicts() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-del-race", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[39; 32]);
+        let tree = SedimentreeId::new([40; 32]);
+
+        // Writer A: acquires the tx, then pauses BEFORE installing its cache
+        // entry. The deleter's eviction (old code: before BEGIN IMMEDIATE)
+        // would race this install.
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let writer_store = store.clone();
+        let writer = tokio::spawn(async move {
+            let mut tx = writer_store
+                .sql
+                .write_pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await?;
+            writer_store.save_tree(&mut tx, tree).await?;
+            if paused_tx.send(()).is_err() {
+                warn_loc!(
+                    ERROR_CALLER,
+                    "deletion-race test pause signal receiver dropped"
+                );
+            }
+            resume_rx.await.map_err(eyre::Report::from)?;
+            let (_, guard) = writer_store
+                .mutate_tree_in_tx(
+                    &mut tx,
+                    tree,
+                    TreeStorageMutation::InsertCommit(make_commit(&signer, tree, 1).await),
+                )
+                .await?;
+            tx.commit().await?;
+            guard.disarm();
+            Ok::<(), SqliteBigRepoStoreError>(())
+        });
+        paused_rx.await.map_err(eyre::Report::from)?;
+
+        // The deleter is queued behind the writer's BEGIN IMMEDIATE.
+        let deleter_store = store.clone();
+        let deleter = tokio::spawn(async move {
+            Storage::<Sendable>::delete_sedimentree_id(&deleter_store, tree).await
+        });
+
+        // Let the writer install its entry and commit; then the deleter
+        // proceeds and must evict the committed entry.
+        if resume_tx.send(()).is_err() {
+            warn_loc!(
+                ERROR_CALLER,
+                "deletion-race test resume signal receiver dropped"
+            );
+        }
+        writer.await??;
+        deleter.await??;
+
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+        assert!(store.durable_sedimentree_heads(tree).await?.is_empty());
+        Ok(())
+    }
+
+    /// A forced SQL failure invalidates the speculative cache entry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forced_sql_failure_invalidates_speculative_entry() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-sql-fail", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[28; 32]);
+        let tree = SedimentreeId::new([29; 32]);
+
+        // No save_tree: the commit insert violates the FK to
+        // big_repo_subduction_trees, failing the transaction mid-mutation.
+        let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = store
+            .mutate_tree_in_tx(
+                &mut tx,
+                tree,
+                TreeStorageMutation::InsertCommit(make_commit(&signer, tree, 1).await),
+            )
+            .await;
+        assert!(result.is_err());
+        drop(tx); // rollback
+
+        // The speculative entry must not survive the failed transaction.
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+
+        // A subsequent write (with the tree registered) rehydrates cleanly.
+        let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        store.save_tree(&mut tx, tree).await?;
+        let (_, guard) = store
+            .mutate_tree_in_tx(
+                &mut tx,
+                tree,
+                TreeStorageMutation::InsertCommit(make_commit(&signer, tree, 1).await),
+            )
+            .await?;
+        tx.commit().await?;
+        guard.disarm();
+        assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(1)]);
+        Ok(())
+    }
+
+    /// A forced commit failure (rollback) invalidates the entry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forced_commit_failure_invalidates_entry() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-commit-fail", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[30; 32]);
+        let tree = SedimentreeId::new([31; 32]);
+
+        let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        store.save_tree(&mut tx, tree).await?;
+        let (_, guard) = store
+            .mutate_tree_in_tx(
+                &mut tx,
+                tree,
+                TreeStorageMutation::InsertCommit(make_commit(&signer, tree, 1).await),
+            )
+            .await?;
+        // Simulate a commit failure: roll back and drop the guard without
+        // disarming.
+        drop(tx);
+        drop(guard);
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+        Ok(())
+    }
+
+    /// Cancellation during a write cannot leave speculative cache state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_cannot_leave_speculative_state() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-cancel", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[32; 32]);
+        let tree = SedimentreeId::new([33; 32]);
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task_store = store.clone();
+        let handle = tokio::spawn(async move {
+            let mut tx = task_store
+                .sql
+                .write_pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await?;
+            task_store.save_tree(&mut tx, tree).await?;
+            let (_, _guard) = task_store
+                .mutate_tree_in_tx(
+                    &mut tx,
+                    tree,
+                    TreeStorageMutation::InsertCommit(make_commit(&signer, tree, 1).await),
+                )
+                .await?;
+            if done_tx.send(()).is_err() {
+                // The test's receiver was dropped before the signal landed —
+                // transient work cancellation (the test aborted), not an
+                // invariant break.
+                warn_loc!(ERROR_CALLER, "cancellation test signal receiver dropped");
+            }
+            // Park forever; the task is aborted below, dropping tx + guard
+            // mid-flight exactly like a cancelled future.
+            std::future::pending::<()>().await;
+            Ok::<(), SqliteBigRepoStoreError>(())
+        });
+        done_rx.await?;
+        handle.abort();
+        // Aborting always yields a cancelled JoinError — assert it rather
+        // than swallowing it.
+        assert!(
+            handle.await.is_err(),
+            "aborted task must not complete normally"
+        );
+
+        assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+        Ok(())
+    }
+
+    /// Reopening the store with an empty cache produces the same heads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reopen_with_empty_cache_produces_same_heads() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let signer = MemorySigner::from_bytes(&[34; 32]);
+        let tree = SedimentreeId::new([35; 32]);
+
+        let store1 =
+            SqliteBigRepoStore::new(sql.clone(), "big-repo-sqlite-reopen", BuckId::MAX_LEVEL)
+                .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store1,
+            tree,
+            make_commit_with_parents(&signer, tree, 1, BTreeSet::new()).await,
+        )
+        .await?;
+        Storage::<Sendable>::save_loose_commit(
+            &store1,
+            tree,
+            make_commit_with_parents(&signer, tree, 2, BTreeSet::from([commit_id(1)])).await,
+        )
+        .await?;
+        let expected = store1.durable_sedimentree_heads(tree).await?;
+        drop(store1);
+
+        // A fresh store on the same database starts with an empty cache.
+        let store2 =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-reopen", BuckId::MAX_LEVEL).await?;
+        assert!(store2.tree_cache.lock().unwrap().entries.is_empty());
+        assert_eq!(store2.durable_sedimentree_heads(tree).await?, expected);
+        assert_eq!(payload_heads(&store2, tree).await?, expected);
+        Ok(())
+    }
+
+    /// Deterministic xorshift64 — no external RNG dependency in tests.
+    struct XorShift64(u64);
+    impl XorShift64 {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+    }
+
+    /// Randomized operation sequences: the persisted BigSync heads must equal
+    /// the heads of a fresh tree hydrated from the raw rows after every
+    /// insert, batch, fragment, and delete.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn randomized_operation_sequences_match_sedimentree_core() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-random", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::from_bytes(&[36; 32]);
+        let tree = SedimentreeId::new([37; 32]);
+        let mut rng = XorShift64(0xDEAD_BEEF_CAFE_F00D);
+
+        // Random DAG: commit i references each earlier commit with 20%
+        // probability — a mix of chains, siblings, and merges.
+        const N_COMMITS: u8 = 40;
+        let commit_bytes: Vec<u8> = (1..=N_COMMITS).collect();
+        let mut parents_of: Vec<BTreeSet<CommitId>> = Vec::new();
+        for (i, _byte) in commit_bytes.iter().enumerate() {
+            let mut parents = BTreeSet::new();
+            for earlier in commit_bytes.iter().take(i) {
+                if rng.below(5) == 0 {
+                    parents.insert(commit_id(*earlier));
+                }
+            }
+            parents_of.push(parents);
+        }
+
+        // Random insertion order — exercises child-before-parent arrival.
+        let mut order: Vec<u8> = commit_bytes.clone();
+        for i in (1..order.len()).rev() {
+            let j = rng.below((i + 1) as u64) as usize;
+            order.swap(i, j);
+        }
+
+        // Insert commits one at a time, checking the payload after each.
+        for byte in &order {
+            Storage::<Sendable>::save_loose_commit(
+                &store,
+                tree,
+                make_commit_with_parents(
+                    &signer,
+                    tree,
+                    *byte,
+                    parents_of[*byte as usize - 1].clone(),
+                )
+                .await,
+            )
+            .await?;
+            let expected = fresh_tree_heads(&store, tree).await?;
+            assert_eq!(
+                payload_heads(&store, tree).await?,
+                expected,
+                "payload diverged after commit {byte}"
+            );
+        }
+
+        // Random fragments: heads drawn from present commits, random
+        // boundaries (including members that may not be present yet — the
+        // projection must tolerate that, matching sedimentree_core).
+        for _ in 0..16 {
+            let head_byte = 1 + rng.below(N_COMMITS as u64) as u8;
+            let mut boundary = BTreeSet::new();
+            for earlier in commit_bytes.iter() {
+                if rng.below(4) == 0 {
+                    boundary.insert(commit_id(*earlier));
+                }
+            }
+            Storage::<Sendable>::save_fragment(
+                &store,
+                tree,
+                make_fragment(&signer, tree, head_byte, boundary).await,
+            )
+            .await?;
+            let expected = fresh_tree_heads(&store, tree).await?;
+            assert_eq!(
+                payload_heads(&store, tree).await?,
+                expected,
+                "payload diverged after fragment {head_byte}"
+            );
+        }
+
+        // Random deletes (commits and fragments), checking after each.
+        for _ in 0..12 {
+            if rng.below(2) == 0 {
+                let byte = 1 + rng.below(N_COMMITS as u64) as u8;
+                Storage::<Sendable>::delete_loose_commit(&store, tree, commit_id(byte)).await?;
+            } else {
+                let byte = 1 + rng.below(N_COMMITS as u64) as u8;
+                Storage::<Sendable>::delete_fragment(&store, tree, commit_id(byte)).await?;
+            }
+            let expected = fresh_tree_heads(&store, tree).await?;
+            assert_eq!(
+                payload_heads(&store, tree).await?,
+                expected,
+                "payload diverged after delete"
+            );
+        }
+
+        // A batch write must also match.
+        let batch_commits = vec![
+            make_commit_with_parents(&signer, tree, 90, BTreeSet::new()).await,
+            make_commit_with_parents(&signer, tree, 91, BTreeSet::from([commit_id(90)])).await,
+        ];
+        Storage::<Sendable>::save_batch(&store, tree, batch_commits, Vec::new()).await?;
+        let expected = fresh_tree_heads(&store, tree).await?;
+        assert_eq!(
+            payload_heads(&store, tree).await?,
+            expected,
+            "payload diverged after batch"
+        );
+        assert_eq!(store.durable_sedimentree_heads(tree).await?, expected);
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_big_repo_subduction_roundtrip() -> Res<()> {
         let sql = SqlCtx::memory().await?;
@@ -3322,10 +4702,14 @@ mod tests {
         let store = SqliteBigRepoStore::new(sql, "keyhive-event-order", BuckId::MAX_LEVEL).await?;
         let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
         let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
-        store.save_keyhive_event(first, b"first".to_vec()).await?;
-        store.save_keyhive_event(second, b"second".to_vec()).await?;
         store
-            .save_keyhive_event(first, b"replacement".to_vec())
+            .save_keyhive_event(first, b"first".to_vec(), None)
+            .await?;
+        store
+            .save_keyhive_event(second, b"second".to_vec(), None)
+            .await?;
+        store
+            .save_keyhive_event(first, b"replacement".to_vec(), None)
             .await?;
 
         assert_eq!(
@@ -3333,6 +4717,33 @@ mod tests {
             vec![(first, b"first".to_vec()), (second, b"second".to_vec())]
         );
         assert_eq!(store.keyhive_event_log_cursor().await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store = SqliteBigRepoStore::new(sql, "keyhive-event-source", BuckId::MAX_LEVEL).await?;
+        let hash = subduction_keyhive::storage::StorageHash::new([7; 32]);
+        let source = subduction_keyhive::KeyhivePeerId::from_bytes([9; 32]);
+        store
+            .save_keyhive_event(hash, b"event".to_vec(), Some(source))
+            .await?;
+        store
+            .save_keyhive_event(hash, b"dup".to_vec(), None)
+            .await?;
+
+        let rows = sqlx::query(
+            "SELECT event_hash, source_id
+             FROM big_repo_keyhive_event_log
+             WHERE scope_id = ?1",
+        )
+        .bind(store.scope_id)
+        .fetch_all(&store.sql.read_pool)
+        .await?;
+        assert_eq!(rows.len(), 1, "duplicate hash must not add a row");
+        let source_id: Option<Vec<u8>> = rows[0].try_get("source_id")?;
+        assert_eq!(source_id, Some(vec![9; 32]), "source must be recorded");
         Ok(())
     }
 
@@ -3357,7 +4768,9 @@ mod tests {
         .execute(&store.sql.write_pool)
         .await?;
         let hash = subduction_keyhive::storage::StorageHash::new([9; 32]);
-        store.save_keyhive_event(hash, b"new".to_vec()).await?;
+        store
+            .save_keyhive_event(hash, b"new".to_vec(), None)
+            .await?;
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
         )
@@ -3374,7 +4787,9 @@ mod tests {
         let sql = SqlCtx::memory().await?;
         let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
-        store.save_keyhive_event(hash, b"event".to_vec()).await?;
+        store
+            .save_keyhive_event(hash, b"event".to_vec(), None)
+            .await?;
         store.delete_keyhive_event(hash).await?;
 
         assert!(store.load_keyhive_events().await?.is_empty());
@@ -3396,8 +4811,12 @@ mod tests {
         let second_store =
             SqliteBigRepoStore::new(sql, "keyhive-scope-b", BuckId::MAX_LEVEL).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([4; 32]);
-        first_store.save_keyhive_event(hash, b"a".to_vec()).await?;
-        second_store.save_keyhive_event(hash, b"b".to_vec()).await?;
+        first_store
+            .save_keyhive_event(hash, b"a".to_vec(), None)
+            .await?;
+        second_store
+            .save_keyhive_event(hash, b"b".to_vec(), None)
+            .await?;
 
         assert_eq!(
             first_store.load_keyhive_events().await?,
@@ -3418,7 +4837,7 @@ mod tests {
         let store = SqliteBigRepoStore::new(first, "keyhive-restart", BuckId::MAX_LEVEL).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([5; 32]);
         store
-            .save_keyhive_event(hash, b"persistent".to_vec())
+            .save_keyhive_event(hash, b"persistent".to_vec(), None)
             .await?;
         drop(store);
 
@@ -3459,8 +4878,8 @@ mod tests {
         let left = store.clone();
         let right = store.clone();
         let (left, right) = tokio::join!(
-            left.save_keyhive_event(hash, b"left".to_vec()),
-            right.save_keyhive_event(hash, b"right".to_vec()),
+            left.save_keyhive_event(hash, b"left".to_vec(), None),
+            right.save_keyhive_event(hash, b"right".to_vec(), None),
         );
         left?;
         right?;

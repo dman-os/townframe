@@ -806,7 +806,7 @@ impl BlobsRepo {
             Err(err) if Self::is_exists_error(&err) => {
                 tokio::fs::remove_file(&temp)
                     .await
-                    .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+                    .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
                     .ok();
             }
             Err(err) => return Err(err.into()),

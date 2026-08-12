@@ -217,7 +217,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 }
                 Err(err) => {
                     resp.send(Err(err))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -232,7 +232,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let stored = runtime_io.contains_sedimentree(sed_id).await;
-            resp.send(stored).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(stored)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -253,7 +255,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                     ))
                     .await
             };
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -265,7 +269,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = runtime_io.inspect_stored_doc_blobs(sed_id).await;
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -395,7 +401,7 @@ where
             // other waiters.
             waiter
                 .send(Ok(()))
-                .inspect_err(|_| warn!(ERROR_CALLER))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
         }
         Ok(())
@@ -498,7 +504,7 @@ where
                     }
                 } else {
                     resp.send(Ok(None))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -629,7 +635,7 @@ where
                 waiter
                     .resp
                     .send(Err(error))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
@@ -656,7 +662,9 @@ where
                     .keyhive_state_generation
                     .load(std::sync::atomic::Ordering::Relaxed);
                 if self.group_part_generation >= captured {
-                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                    resp.send(Ok(()))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                 } else {
                     self.keyhive_reconciliation_waiters.push((captured, resp));
                 }
@@ -678,7 +686,7 @@ where
                     entry.eviction_deadline = None;
                     registered
                         .send(())
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -710,7 +718,7 @@ where
             #[cfg(test)]
             Runtime2Cmd::HasDocWorker { doc_id, resp } => {
                 resp.send(Ok(self.doc_workers.contains_key(&doc_id)))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
@@ -962,13 +970,13 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            lease_rx.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            lease_rx.await.ok();
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
             cmd_tx
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
                 .await
-                .inspect_err(|_| warn!(ERROR_CHANNEL))
+                .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                 .ok();
             Ok(())
         })
@@ -983,7 +991,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             // The worker replies once its mailbox work has drained past the
             // fence. A dropped reply (worker evicted mid-fence) still acks:
             // `DocWorkerStopped` clears the doc from the probe anyway.
-            reply.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            reply.await.inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             evt_tx
                 .send(Runtime2Evt::DocWorkerFenced { doc_id, barrier_id })
                 .await
@@ -1033,7 +1041,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         resp.send(Err(ferr!(
                             "handshake peer mismatch: expected {peer}, got {handshake_peer}"
                         )))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
@@ -1059,7 +1067,6 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // ids can be reused across connections).
                         watcher_end_tx
                             .send((Arc::clone(&watcher_closed), result))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
@@ -1077,7 +1084,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     if let Err(error) = watcher {
                         connect.close(handshake_peer, closed).await?;
                         resp.send(Err(error))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
                     }
@@ -1094,12 +1101,12 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         return Ok(());
                     }
                     resp.send(Ok((handshake_peer, closed, end_rx)))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
                 Err(error) => {
                     resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -1148,7 +1155,6 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // ids can be reused across connections).
                         watcher_end_tx
                             .send((Arc::clone(&watcher_closed), result))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
@@ -1165,7 +1171,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     }));
                     if let Err(error) = watcher {
                         resp.send(Err(error))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
                     }
@@ -1182,12 +1188,12 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         return Ok(());
                     }
                     resp.send(Ok((handshake_peer, closed, end_rx)))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
                 Err(error) => {
                     resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -1217,7 +1223,9 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -1280,14 +1288,14 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         cmd_tx
                             .send(Runtime2Cmd::DocSyncRoundDone { request_id })
                             .await
-                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
                     }
                     Err(error) => {
                         cmd_tx
                             .send(Runtime2Cmd::DocSyncFailed { request_id, error })
                             .await
-                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
                     }
                 }
@@ -1472,7 +1480,7 @@ where
                     if self.group_part_generation >= captured {
                         waiter
                             .send(Ok(()))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                     } else {
                         pending.push((captured, waiter));
@@ -1878,7 +1886,7 @@ where
             for (_, sender) in waiters.waiters {
                 sender
                     .send(Err(ferr!("{error}")))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
         }
@@ -1964,7 +1972,7 @@ where
                     waiters.ids.remove(&id);
                     sender
                         .send(Ok(()))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                     resolved_waiters += 1;
                 } else {
@@ -2112,7 +2120,7 @@ where
                     .send(Err(eyre::Report::new(crate::KeyhiveSyncCancelled {
                         reason,
                     })))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
         }
@@ -2226,25 +2234,46 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     }
 
     /// Decrement `local_handles` for a doc-worker; schedule eviction if idle.
+    ///
+    /// Saturating on underflow: a doc worker can die with an error while
+    /// handles still hold leases (the mailbox loop errors out and
+    /// `DocWorkerStopped` drops the entry, losing the counts), and a later
+    /// re-spawn resets them to zero. A lost count only delays eviction —
+    /// the idle guard checks both counts before evicting, so it can never
+    /// evict early — whereas the old assert panicked the whole process
+    /// (panic hook exits) on a stale release. Log loudly so the desync is
+    /// visible even though it no longer takes the run down.
     fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            assert!(
-                entry.local_handles > 0,
-                "doc lease underflow for doc worker: {doc_id:?}"
-            );
-            entry.local_handles -= 1;
+            if entry.local_handles > 0 {
+                entry.local_handles -= 1;
+            } else {
+                warn_loc!(
+                    %doc_id,
+                    local_handles = entry.local_handles,
+                    internal_leases = entry.internal_leases,
+                    "doc lease release without a matching register (worker likely died and was re-created)"
+                );
+            }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
 
     /// Decrement `internal_leases` for a doc-worker; schedule eviction if idle.
+    ///
+    /// Saturating on underflow — see [`Self::handle_release_doc_lease`].
     fn handle_release_internal_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            assert!(
-                entry.internal_leases > 0,
-                "internal lease underflow for doc worker: {doc_id:?}"
-            );
-            entry.internal_leases -= 1;
+            if entry.internal_leases > 0 {
+                entry.internal_leases -= 1;
+            } else {
+                warn_loc!(
+                    %doc_id,
+                    local_handles = entry.local_handles,
+                    internal_leases = entry.internal_leases,
+                    "internal lease release without a matching register (worker likely died and was re-created)"
+                );
+            }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }

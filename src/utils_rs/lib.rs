@@ -1,5 +1,7 @@
+pub mod batching;
 #[cfg(feature = "downloader")]
 pub mod downloader;
+pub mod lru;
 mod macros;
 pub mod testing;
 
@@ -18,7 +20,7 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre, default};
+    pub use crate::{CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre, default, error_loc, warn_loc};
 
     pub use std::{
         collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -831,10 +833,15 @@ impl AbortableJoinSet {
         self.len() == 0
     }
 
+    #[track_caller]
     pub fn spawn<F>(&self, fut: F) -> Result<TaskHandle, AbortableJoinSetError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        let caller = std::panic::Location::caller();
+        let caller_file = caller.file();
+        let caller_line = caller.line();
+        let span = tracing::Span::current();
         let mut guard = self.inner.lock().expect(ERROR_MUTEX);
         let Some(join_set) = guard.as_mut() else {
             return Err(AbortableJoinSetError::Aborted);
@@ -851,10 +858,13 @@ impl AbortableJoinSet {
             }
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let abort = join_set.spawn(async move {
-            fut.await;
-            done_tx.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-        });
+        let abort = join_set.spawn(tracing_futures::Instrument::instrument(
+            async move {
+                fut.await;
+                done_tx.send(()).ok();
+            },
+            tracing::debug_span!(parent: &span, "task", file = caller_file, line = caller_line),
+        ));
         Ok(TaskHandle { abort, done_rx })
     }
 
