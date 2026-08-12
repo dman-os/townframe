@@ -917,6 +917,7 @@ impl SyncTaskWorker {
         )
     )]
     async fn run(self) {
+        let cancel_token = self.cancel_token.clone();
         let fut = async move {
             let SyncTask {
                 id: _task_id,
@@ -929,43 +930,35 @@ impl SyncTaskWorker {
                 remote_payload,
             } = deets;
             let res = self.backend.sync_obj(peer_id, obj_id, remote_payload).await;
-            match res {
+            let event = match res {
                 Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncCompleted(
-                            big_sync_core::SyncCompletedEvent {
-                                task_id: _task_id,
-                                peer_id,
-                                completion,
-                            },
-                        ))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                    BigSyncEvent::SyncCompleted(big_sync_core::SyncCompletedEvent {
+                        task_id: _task_id,
+                        peer_id,
+                        completion,
+                    })
                 }
                 Ok(SyncTaskRunOutcome::Stale) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
-                            task_id: _task_id,
-                            peer_id,
-                            obj_id,
-                        }))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                    BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
+                        task_id: _task_id,
+                        peer_id,
+                        obj_id,
+                    })
                 }
-                Err(err) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                            task_id: _task_id,
-                            peer_id,
-                            obj_id,
-                            err,
-                        }))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                Err(err) => BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                    task_id: _task_id,
+                    peer_id,
+                    obj_id,
+                    err,
+                }),
+            };
+            if let Err(err) = self.host_tx.send(event).await {
+                if !self.cancel_token.is_cancelled() {
+                    panic!("{}: {err:?}", ERROR_CHANNEL);
                 }
             }
         };
-        let _cancelled = self.cancel_token.run_until_cancelled(fut).await;
+        let _cancelled = cancel_token.run_until_cancelled(fut).await;
     }
 }
 

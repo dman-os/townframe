@@ -361,10 +361,6 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         .blobs_repo
         .put(&payload, crate::blobs::BlobUseHints::Docs)
         .await?;
-    eprintln!(
-        ">>> NODE A HAS HASH: {} <<<",
-        node_a.blobs_repo.has_hash(hash).await?
-    );
     let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     {
         let doc_id = node_a

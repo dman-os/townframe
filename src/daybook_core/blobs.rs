@@ -752,10 +752,6 @@ impl BlobsRepo {
             .map_err(|err| eyre::eyre!("error ingesting path into iroh store: {err:?}"))?;
         let iroh_hash = blob_id_to_iroh_hash(blob_id);
         let has_in_iroh = self.iroh_store.blobs().has(iroh_hash).await?;
-        eprintln!(
-            ">>> INGESTED BLOB {:?}, IROH HASH {:?}, HAS IN IROH STORE: {}, OUTCOME HASH: {:?} <<<",
-            blob_id, iroh_hash, has_in_iroh, outcome.hash
-        );
         Ok(())
     }
 
