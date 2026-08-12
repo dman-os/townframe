@@ -739,8 +739,7 @@ impl BlobsRepo {
     }
 
     async fn ingest_path_with_iroh(&self, path: &Path, blob_id: BlobId) -> Res<()> {
-        let outcome = self
-            .iroh_store
+        self.iroh_store
             .blobs()
             .add_path_with_opts(AddPathOptions {
                 path: path.to_path_buf(),
@@ -749,9 +748,7 @@ impl BlobsRepo {
             })
             .with_named_tag(blob_hash_from_id(blob_id).as_bytes())
             .await
-            .map_err(|err| eyre::eyre!("error ingesting path into iroh store: {err:?}"))?;
-        let iroh_hash = blob_id_to_iroh_hash(blob_id);
-        let has_in_iroh = self.iroh_store.blobs().has(iroh_hash).await?;
+            .map_err(|err| ferr!("error ingesting path into iroh store: {err:?}"))?;
         Ok(())
     }
 

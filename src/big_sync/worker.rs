@@ -952,11 +952,10 @@ impl SyncTaskWorker {
                     err,
                 }),
             };
-            if let Err(err) = self.host_tx.send(event).await {
-                if !self.cancel_token.is_cancelled() {
+            if let Err(err) = self.host_tx.send(event).await
+                && !self.cancel_token.is_cancelled() {
                     panic!("{}: {err:?}", ERROR_CHANNEL);
                 }
-            }
         };
         let _cancelled = cancel_token.run_until_cancelled(fut).await;
     }
