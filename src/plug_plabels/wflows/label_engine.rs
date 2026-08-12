@@ -719,7 +719,6 @@ fn insert_cache_embedding_row(
         }
         Err(err) => {
             tx.rollback()
-                .await
                 .inspect_err(|err| error!("error on rollback: {err}"))
                 .ok();
             Err(err)

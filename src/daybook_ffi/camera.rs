@@ -380,7 +380,7 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = listener;
+            drop(listener);
         }
     }
 
@@ -428,7 +428,7 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = enabled;
+            drop(enabled);
         }
     }
 
@@ -562,8 +562,8 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = device_id;
-            let _ = listener;
+            drop(device_id);
+            drop(listener);
             panic_unsupported();
         }
     }
