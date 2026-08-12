@@ -188,14 +188,14 @@ impl FfiCtx {
             let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
                 acx.open_repo(
                     &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {},
+                    daybook_core::repo::RepoOpenOptions::default(),
                     device_name.clone(),
                 )
                 .await?
             } else {
                 acx.init_repo(
                     &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {},
+                    daybook_core::repo::RepoOpenOptions::default(),
                     device_name.clone(),
                     device_name,
                 )
@@ -279,7 +279,7 @@ impl AppFfiCtx {
                 .inner
                 .open_repo(
                     &repo_root,
-                    daybook_core::repo::RepoOpenOptions {},
+                    daybook_core::repo::RepoOpenOptions::default(),
                     device_name,
                 )
                 .await?;
@@ -371,7 +371,7 @@ impl AppFfiCtx {
                 .inner
                 .open_repo(
                     &out.repo_path,
-                    daybook_core::repo::RepoOpenOptions {},
+                    daybook_core::repo::RepoOpenOptions::default(),
                     device_name,
                 )
                 .await?;

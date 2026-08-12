@@ -524,6 +524,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     config_repo
                         .upsert_known_sync_device(daybook_core::repo::globals::SyncDeviceEntry {
                             endpoint_id: bootstrap.endpoint_id,
+                            agent_peer_id: None,
                             name: device_name,
                             added_at: Timestamp::now(),
                             last_connected_at: None,
@@ -543,6 +544,7 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
         destination,
         daybook_core::sync::CloneRepoInitOptions {
             timeout: std::time::Duration::from_secs(30),
+            repo_options: daybook_core::repo::RepoOpenOptions::default(),
         },
     )
     .await?;
@@ -975,7 +977,7 @@ mod tests {
     }
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
-        let ctx = RepoCtx::open(repo_root, RepoOpenOptions {}, "cli-test-device".into()).await?;
+        let ctx = RepoCtx::open(repo_root, RepoOpenOptions::default(), "cli-test-device".into()).await?;
         let blobs_repo = BlobsRepo::new(
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),
@@ -1061,7 +1063,7 @@ mod tests {
         tokio::fs::create_dir_all(&repo_a_path).await?;
         let init = RepoCtx::init(
             &repo_a_path,
-            RepoOpenOptions {},
+            RepoOpenOptions::default(),
             "cli-test-repo".into(),
             "cli-test-device".into(),
         )
