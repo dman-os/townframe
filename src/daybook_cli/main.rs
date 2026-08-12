@@ -977,7 +977,12 @@ mod tests {
     }
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
-        let ctx = RepoCtx::open(repo_root, RepoOpenOptions::default(), "cli-test-device".into()).await?;
+        let ctx = RepoCtx::open(
+            repo_root,
+            RepoOpenOptions::default(),
+            "cli-test-device".into(),
+        )
+        .await?;
         let blobs_repo = BlobsRepo::new(
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),

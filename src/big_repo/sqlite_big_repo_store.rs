@@ -2209,13 +2209,12 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn keyhive_group_part_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT cursor FROM big_repo_group_part_cursor WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .unwrap_or_default();
+        let cursor: Option<i64> =
+            sqlx::query_scalar("SELECT cursor FROM big_repo_group_part_cursor WHERE scope_id = ?1")
+                .bind(self.scope_id)
+                .fetch_optional(&self.sql.read_pool)
+                .await
+                .unwrap_or_default();
         Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 

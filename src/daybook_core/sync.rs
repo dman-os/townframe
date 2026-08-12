@@ -1053,7 +1053,7 @@ impl IrohSyncRepo {
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
             .partition(|part| is_blob_part(**part));
-        let timeout_outcome = tokio::time::timeout(timeout, async {
+        tokio::time::timeout(timeout, async {
             let doc_wait = self
                 .big_sync_worker
                 .wait_for_full_sync(peer_ids.iter().copied(), doc_parts.iter().copied());
@@ -1063,19 +1063,9 @@ impl IrohSyncRepo {
             tokio::try_join!(doc_wait, blob_wait)?;
             eyre::Ok(())
         })
-        .await;
-
-        match timeout_outcome {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(err),
-            Err(_) => {
-                let doc_snapshot = self.big_sync_worker.snapshot().await;
-                let blob_snapshot = self.blob_sync_worker.snapshot().await;
-                eyre::bail!(
-                    "wait_for_full_sync timed out after {timeout:?}:\n  peers={peer_ids:?}\n  required_partitions={required_partitions:?}\n  doc_worker={doc_snapshot:?}\n  blob_worker={blob_snapshot:?}"
-                );
-            }
-        }
+        .await
+        .wrap_err("timeout waiting for full_sync")??;
+        Ok(())
     }
 
     /// Test-support fence for the fixed point of BigSync and BigRepo local
