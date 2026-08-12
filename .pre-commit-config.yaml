@@ -78,7 +78,7 @@ repos:
       - id: detekt-kotlin
         name: Detekt Kotlin
         language: system
-        entry: ./x/gradle.ts detektMainDesktop --auto-correct
+        entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
         pass_filenames: false
         files: \.kt$
   - repo: https://github.com/doublify/pre-commit-rust
