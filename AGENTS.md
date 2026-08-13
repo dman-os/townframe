@@ -146,3 +146,9 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
   - This also applies to GRADLE_HOME.
 - Always prefer cargo-nextest of cargo-test.
 - Always prefer cargo-clippy over cargo-check.
+
+## Subagents in pi (agent harness)
+
+- Launch subagents with `run_in_background: true`. A background subagent returns a resumable agent id immediately; a **foreground** subagent returns only its result and is then cleaned up — it is **not resumable** (`resume` returns `"Agent not found … may have been cleaned up"`). Confirmed empirically.
+- **Reuse one agent across tasks** via `resume: <id>`; do not spawn a fresh subagent per task — each fresh agent re-reads the codebase (cost).
+- If `resume` reports the agent cleaned up / evicted, that is the **only** sanctioned case to spawn a fresh subagent. First recover the prior agent's findings from its task transcript at `~/.pi/agent/sessions/<proj>/<session>/tasks/<id>.jsonl` and fold them into the new agent's prompt.

@@ -145,7 +145,7 @@ pub fn setup_tracing() -> Res<()> {
     let filter: Option<String> = None;
 
     let filter = filter.unwrap_or_else(||
-        "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn".into()
+        "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn".into()
     );
 
     use tracing_subscriber::prelude::*;
@@ -370,7 +370,7 @@ pub mod hash {
     }
 
     #[cfg(feature = "hash")]
-    pub fn blake3_hash_bytes(bytes: &[u8]) -> String {
+    pub fn blake3_hash_bytes_multibase(bytes: &[u8]) -> String {
         let hash = blake3::hash(bytes);
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, hash.as_bytes()).expect("error multihashing");
@@ -430,14 +430,14 @@ pub mod hash {
     }
 
     #[cfg(feature = "hash")]
-    pub fn encode_base58_multibase_blake3(hash_bytes: [u8; 32]) -> String {
+    pub fn encode_base58_multihash_blake3(hash_bytes: [u8; 32]) -> String {
         let hash =
             multihash::Multihash::<32>::wrap(BLAKE3, &hash_bytes).expect("error multihashing");
         encode_base58_multibase(hash.to_bytes())
     }
 
     #[cfg(feature = "hash")]
-    pub fn decode_base58_multibase_blake3(digest: &str) -> Res<[u8; 32]> {
+    pub fn decode_base58_multihash_blake3(digest: &str) -> Res<[u8; 32]> {
         if digest.len() != 47 {
             eyre::bail!("expected length 47 multibase blake3 digest");
         }
@@ -453,11 +453,7 @@ pub mod hash {
     }
 
     pub fn encode_base58_multibase<T: AsRef<[u8]>>(source: T) -> String {
-        let mut string = "z".into();
-        bs58::encode(source)
-            .onto(&mut string)
-            .expect("error encoding into string");
-        string
+        multibase::encode(multibase::Base::Base58Btc, source)
     }
 
     pub fn decode_base58_multibase(source: &str) -> eyre::Result<Vec<u8>> {

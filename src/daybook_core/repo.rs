@@ -638,11 +638,10 @@ async fn boot_big_repo(
     partition_store: SharedPartStore,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
     let am_config = big_repo::Config {
+        node_identity_seed: identity.iroh_secret_key.to_bytes(),
         storage: big_repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
         },
-        peer_id: PeerId::new(*identity.iroh_public_key.as_bytes()),
-        secret_key_bytes: identity.iroh_secret_key.to_bytes(),
     };
     let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(am_config, partition_store).await?;
     Ok((big_repo, big_repo_stop))
@@ -675,12 +674,12 @@ pub(crate) async fn finish_clone_init(
         .big_repo
         .get_doc(&doc_id_app)
         .await?
-        .ok_or_eyre("clone init: app doc missing from BigRepo")?;
+        .into_ready(doc_id_app)?;
     let doc_drawer = parts
         .big_repo
         .get_doc(&doc_id_drawer)
         .await?
-        .ok_or_eyre("clone init: drawer doc missing from BigRepo")?;
+        .into_ready(doc_id_drawer)?;
     ensure_expected_partitions_for_docs(&parts.part_store, doc_id_app, doc_id_drawer).await?;
     RepoCtx::run_repo_init_dance(
         &parts.big_repo,
@@ -780,16 +779,9 @@ async fn load_core_docs(
         big_repo.get_doc(&doc_id_app),
         big_repo.get_doc(&doc_id_drawer)
     )?;
-    if handle_app.is_none() || handle_drawer.is_none() {
-        eyre::bail!(
-            "required core docs missing in existing repository (app_present={}, drawer_present={})",
-            handle_app.is_some(),
-            handle_drawer.is_some()
-        );
-    }
     Ok((
-        handle_app.expect("checked handle_app"),
-        handle_drawer.expect("checked handle_drawer"),
+        handle_app.into_ready(doc_id_app)?,
+        handle_drawer.into_ready(doc_id_drawer)?,
     ))
 }
 
@@ -803,7 +795,10 @@ async fn init_core_docs(
         let bytes = version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for app doc")?;
-        big_repo.put_doc(DocumentId::random(), doc).await?
+        big_repo
+            .create_doc(doc)
+            .await
+            .map_err(|err| eyre::eyre!("{err}"))?
     };
     let drawer_doc = {
         let mut doc = automerge::AutoCommit::new();
@@ -811,7 +806,10 @@ async fn init_core_docs(
         let bytes = doc.save_nocompress();
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for drawer doc")?;
-        big_repo.put_doc(DocumentId::random(), doc).await?
+        big_repo
+            .create_doc(doc)
+            .await
+            .map_err(|err| eyre::eyre!("{err}"))?
     };
     globals::set_init_state(
         repo_sql,

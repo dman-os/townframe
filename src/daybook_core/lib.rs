@@ -28,10 +28,12 @@ mod interlude {
 
 pub mod blobs;
 pub mod config;
+pub mod crypto;
 pub mod drawer;
 pub mod event_origin;
 pub mod imgtools;
 pub mod index;
+pub mod keyhive;
 pub mod local_state;
 pub mod plugs;
 pub mod progress;

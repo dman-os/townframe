@@ -8,6 +8,7 @@ mod interlude {
 }
 
 mod gen;
+mod keyhive_demo;
 
 use clap::builder::styling::AnsiColor;
 
@@ -33,6 +34,9 @@ async fn main_main() -> Res<()> {
     match args.command {
         Commands::Gen {} => {
             gen::cli()?;
+        }
+        Commands::KeyhiveDemo {} => {
+            keyhive_demo::cli().await?;
         }
         Commands::BuildPlugOci {
             plug_root,
@@ -454,6 +458,7 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
+    KeyhiveDemo {},
     Play {},
     Gen {},
     BuildPlugOci {

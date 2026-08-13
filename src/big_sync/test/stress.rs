@@ -89,12 +89,13 @@ impl StressFixture for LwwStressFixture {
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        self.seed_obj(node, obj, payload).await
+        self.seed_obj(node, _nodes, obj, payload).await
     }
 
     async fn seed_obj(
         &self,
         node: &Self::Node,
+        _nodes: &[Option<Self::Node>],
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {

@@ -725,7 +725,7 @@ impl PlugsRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .ok_or_eyre("unable to find app doc in am")?;
+            .into_ready(app_doc_id)?;
 
         let store_val = PlugsStore::load(&app_doc_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
@@ -2546,7 +2546,7 @@ mod tests {
         let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         let doc_id = handle.document_id();
 
         let temp_dir = tempfile::tempdir()?;

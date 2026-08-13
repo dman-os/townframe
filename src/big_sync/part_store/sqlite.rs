@@ -27,7 +27,10 @@ pub struct SqlitePartStore {
     scope_id: i64,
     bucket_depth: u8,
     _scope_key: Arc<str>,
-    bus: Arc<std::sync::Mutex<HashMap<PartId, Vec<mpsc::Sender<SubEvent>>>>>,
+    bus: Arc<std::sync::Mutex<HashMap<PartId, Vec<(mpsc::Sender<SubEvent>, PeerId)>>>>,
+    /// In-memory doc-members cache, written alongside the SQL table.
+    doc_members_cache:
+        Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -115,6 +118,7 @@ impl SqlitePartStore {
             bucket_depth,
             _scope_key: scope_key,
             bus: default(),
+            doc_members_cache: default(),
         })
     }
 
@@ -320,20 +324,42 @@ impl SqlitePartStore {
         Ok(scope_id)
     }
 
-    fn publish(&self, events: Vec<SubEvent>) {
+    async fn publish(&self, events: Vec<SubEvent>) {
+        // Extract references before locking bus to avoid self-borrow conflict.
+        let cache = self.doc_members_cache.read().expect(ERROR_MUTEX);
         let mut bus = self.bus.lock().expect(ERROR_MUTEX);
-        for event in events {
-            let part_ids: Vec<PartId> = match &event {
-                SubEvent::Changed(transition) => transition.part_ids.clone(),
-                SubEvent::Added(transition) => vec![transition.part_id],
-                SubEvent::Removed(transition) => vec![transition.part_id],
+        for event in &events {
+            let (part_ids, evt_obj_id): (Vec<PartId>, Option<ObjId>) = match event {
+                SubEvent::Changed(transition) => {
+                    (transition.part_ids.clone(), Some(transition.obj_id))
+                }
+                SubEvent::Added(transition) => (vec![transition.part_id], Some(transition.obj_id)),
+                SubEvent::Removed(transition) => {
+                    (vec![transition.part_id], Some(transition.obj_id))
+                }
                 SubEvent::ReplayComplete => continue,
             };
+            let evt = event.clone();
             for part_id in part_ids {
                 let Some(subs) = bus.get_mut(&part_id) else {
                     continue;
                 };
-                subs.retain(|sub| sub.try_send(event.clone()).is_ok());
+                subs.retain(|(sub, principal)| {
+                    if let Some(obj_id) = evt_obj_id {
+                        // Only filter when doc_members is explicitly configured.
+                        // No entry → allow all (backward compatible).
+                        if let Some(members) = cache.get(&obj_id) {
+                            if !members
+                                .get(principal)
+                                .map(|a| a.is_reader())
+                                .unwrap_or(false)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    sub.try_send(evt.clone()).is_ok()
+                });
             }
         }
     }
@@ -499,6 +525,17 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             cursor INTEGER NOT NULL,
             PRIMARY KEY(scope_id, peer_id, part_id),
             FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
+        ) STRICT",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS big_sync_syncable (
+            scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
+            obj_id BLOB NOT NULL,
+            principal_id BLOB NOT NULL,
+            access_level INTEGER NOT NULL,
+            PRIMARY KEY(scope_id, obj_id, principal_id)
         ) STRICT",
     )
     .execute(&mut *tx)
@@ -692,7 +729,8 @@ impl HostPartStore for SqlitePartStore {
             part_ids: live_part_ids,
             obj_id,
             payload,
-        })]);
+        })])
+        .await;
         Ok(())
     }
 
@@ -710,6 +748,19 @@ impl HostPartStore for SqlitePartStore {
             .into_iter()
             .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
             .collect())
+    }
+
+    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1
+             FROM big_sync_objs
+             WHERE scope_id = ?1 AND obj_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::obj_blob(obj_id))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(exists.is_some())
     }
 
     async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
@@ -1053,7 +1104,7 @@ impl HostPartStore for SqlitePartStore {
             }));
         }
         tx.commit().await?;
-        self.publish(events);
+        self.publish(events).await;
         Ok(())
     }
 
@@ -1136,7 +1187,8 @@ impl HostPartStore for SqlitePartStore {
                 part_id,
                 obj_id,
             },
-        )]);
+        )])
+        .await;
         Ok(())
     }
 
@@ -1294,6 +1346,7 @@ impl HostPartStore for SqlitePartStore {
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
+        subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
         let summaries = self.summarize_parts(parts.clone()).await?;
@@ -1330,7 +1383,9 @@ impl HostPartStore for SqlitePartStore {
 
         let mut bus = self.bus.lock().expect(ERROR_MUTEX);
         for part_id in parts {
-            bus.entry(part_id).or_default().push(tx.clone());
+            bus.entry(part_id)
+                .or_default()
+                .push((tx.clone(), subscriber));
         }
         Ok(Ok(rx))
     }
@@ -1346,6 +1401,105 @@ impl HostPartStore for SqlitePartStore {
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())
+    }
+
+    async fn set_doc_members(
+        &self,
+        doc: ObjId,
+        agents: HashMap<PeerId, keyhive_core::access::Access>,
+    ) {
+        let doc_blob = Self::obj_blob(doc);
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
+            .bind(self.scope_id)
+            .bind(&doc_blob)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        for (principal, access) in &agents {
+            sqlx::query(
+                "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(self.scope_id)
+            .bind(&doc_blob)
+            .bind(Self::peer_blob(*principal))
+            .bind(i64::from(*access as u8))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        self.doc_members_cache
+            .write()
+            .expect(ERROR_MUTEX)
+            .insert(doc, agents);
+    }
+
+    async fn add_doc_member(
+        &self,
+        doc: ObjId,
+        member: PeerId,
+        access: keyhive_core::access::Access,
+    ) {
+        let doc_blob = Self::obj_blob(doc);
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
+            .bind(self.scope_id)
+            .bind(&doc_blob)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(self.scope_id)
+        .bind(&doc_blob)
+        .bind(Self::peer_blob(member))
+        .bind(i64::from(access as u8))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        self.doc_members_cache
+            .write()
+            .expect(ERROR_MUTEX)
+            .entry(doc)
+            .or_default()
+            .insert(member, access);
+    }
+
+    async fn remove_doc_member(&self, doc: ObjId, member: PeerId) {
+        let doc_blob = Self::obj_blob(doc);
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
+            .bind(self.scope_id)
+            .bind(&doc_blob)
+            .bind(Self::peer_blob(member))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        self.doc_members_cache
+            .write()
+            .expect(ERROR_MUTEX)
+            .entry(doc)
+            .or_default()
+            .remove(&member);
     }
 }
 

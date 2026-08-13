@@ -13,6 +13,14 @@ mod interlude {
     pub use crate::ids::{BuckId, ObjId, PartId, PeerId};
 }
 
+/// Per-part sync mode: `CursorOnly` skips the bucket-diff path entirely;
+/// `Bucket` uses the full bucket-diff strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    CursorOnly,
+    Bucket,
+}
+
 use std::collections::VecDeque;
 
 use crate::interlude::*;
@@ -695,6 +703,7 @@ impl BigSyncMachine {
         let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
             peer_id,
             parts: parts.iter().copied().collect(),
+            sync_modes: default(),
         });
         let decide_task = self.tasks.spawn_task(TaskSeed::Machine(deets));
         self.stat_machine.set_peer(peer_id, parts.iter().copied());
@@ -801,6 +810,20 @@ impl BigSyncMachine {
             unknown_count,
             "set peer strategy result"
         );
+        let stale_result = part_strats.keys().any(|part_id| {
+            !matches!(
+                peer_state.parts.get(part_id).map(|state| &state.strat),
+                Some(PeerPartStrategy::Pending(old_task_id)) if *old_task_id == task_id
+            )
+        });
+        if stale_result {
+            tracing::debug!(
+                peer_id = %peer_id,
+                task_id = %task_id,
+                "ignoring stale set peer strategy result"
+            );
+            return;
+        }
         let mut parts_retry = Set::new();
 
         for (part_id, decision) in part_strats {
@@ -867,6 +890,7 @@ impl BigSyncMachine {
                 DecidePeerStrategyTask {
                     peer_id,
                     parts: parts_retry.clone(),
+                    sync_modes: default(),
                 },
             ));
             let decide_task = if parts_retry.len() == response_len {
@@ -944,6 +968,7 @@ impl BigSyncMachine {
             let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
                 peer_id,
                 parts: parts_retry.clone(),
+                sync_modes: default(),
             });
             let decide_task = self.tasks.spawn_delayed_task(
                 TaskSeed::Machine(deets),

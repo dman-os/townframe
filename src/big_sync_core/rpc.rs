@@ -246,6 +246,8 @@ structstruck::strike! {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct SubPartsRequest {
+        /// The subscriber's identity (ed25519 verifying key bytes — same as PeerId).
+        pub peer_id: PeerId,
         pub parts: Vec<
             pub struct PartStreamCursorRequest {
                 pub part_id: PartId,
