@@ -3,10 +3,14 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
+import org.gradle.api.DefaultTask
+import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.testing.Test
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
@@ -378,19 +382,31 @@ fun resolveAndroidReleaseSigningConfig(): AndroidReleaseSigningConfig? {
 
 val androidReleaseSigningConfig = resolveAndroidReleaseSigningConfig()
 
+abstract class ValidateAndroidReleaseSigningConfigTask : DefaultTask() {
+    @get:Input
+    abstract val releaseProfile: Property<Boolean>
+
+    @get:Input
+    abstract val releaseSigningConfigured: Property<Boolean>
+
+    @TaskAction
+    fun validate() {
+        if (releaseProfile.get() && !releaseSigningConfigured.get()) {
+            throw GradleException(
+                "Android release builds require signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
+                    "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
+                    "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
+            )
+        }
+    }
+}
+
 val validateAndroidReleaseSigningConfig =
-    tasks.register("validateAndroidReleaseSigningConfig") {
+    tasks.register<ValidateAndroidReleaseSigningConfigTask>("validateAndroidReleaseSigningConfig") {
         group = "build"
         description = "Validate Android release signing configuration for Android release builds"
-        doLast {
-            if (daybookComposeIsReleaseProfile && androidReleaseSigningConfig == null) {
-                throw GradleException(
-                    "Android release builds require signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
-                        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
-                        "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
-                )
-            }
-        }
+        releaseProfile.set(daybookComposeIsReleaseProfile)
+        releaseSigningConfigured.set(androidReleaseSigningConfig != null)
     }
 
 // Desktop Rust builds
