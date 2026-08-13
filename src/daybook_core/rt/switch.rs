@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
-use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
-use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
+use crate::rt::dispatch::DispatchEvent;
+use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
@@ -343,16 +343,14 @@ pub async fn spawn_switch_worker(
                 .rt
                 .rcx
                 .part_store
-                .subscribe(
-                    SubPartsRequest {
-                        peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                        parts: vec![PartStreamCursorRequest {
+                .subscribe_local(SubPartsRequest {
+                    targets: std::collections::HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: docs_partition_id,
                             cursor,
-                        }],
-                    },
-                    [0u8; 32],
-                )
+                        },
+                    ]),
+                })
                 .await??;
 
             loop {
@@ -427,7 +425,7 @@ pub async fn spawn_switch_worker(
                             SubEvent::Added(inner) => inner.cursor,
                             SubEvent::Changed(inner) => inner.cursor,
                             SubEvent::Removed(inner) => inner.cursor,
-                            SubEvent::ReplayComplete => cursor,
+                            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => cursor,
                         };
                         worker
                             .store
@@ -551,7 +549,7 @@ impl SwitchWorker {
             SubEvent::Added(inner) => inner.obj_id.to_string().into(),
             SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
             SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
         };
         let stored_state = self
             .store
@@ -592,7 +590,7 @@ impl SwitchWorker {
                 if next_state.present && prev_heads.as_ref() == Some(&new_heads) {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
-                let (diff, origin, deleted_facet_keys) = self
+                let (diff, origin, _deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
                         &BranchPathBuf::from("main"),
@@ -629,13 +627,12 @@ impl SwitchWorker {
                     .await?;
                 next_state.present = true;
                 next_state.last_heads = Some(new_heads);
-                let _ = deleted_facet_keys;
             }
             SubEvent::Removed(_) => {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
-                let (diff, origin, deleted_facet_keys) = self
+                let (_diff, origin, deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
                         &BranchPathBuf::from("main"),
@@ -654,11 +651,10 @@ impl SwitchWorker {
                     .await?;
                 self.dispatch_to_listeners(&SwitchEvent::Drawer(evt))
                     .await?;
-                let _ = diff;
                 next_state.present = false;
                 next_state.last_heads = None;
             }
-            SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
         }
         Ok(Some((branch_doc_id, next_state)))
     }
@@ -976,7 +972,7 @@ impl SwitchWorker {
     }
 
     async fn track_event_heads(&self, event: &SwitchEvent) -> Res<()> {
-        let _ = event;
+        let _event = event;
         Ok(())
     }
 }

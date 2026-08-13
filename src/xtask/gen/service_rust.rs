@@ -316,55 +316,55 @@ pub struct {id};"#,
         writeln!(buf)?;
         error_type(cx, buf, &exp, &epoint.error)?;
         /*
-                // http_impl(&epoint, reg, buf)?;
-                writeln!(
-                    buf,
-                    r#"impl HttpEndpoint for {id} {{
+        // http_impl(&epoint, reg, buf)?;
+        writeln!(
+            buf,
+            r#"impl HttpEndpoint for {id} {{
             const SUCCESS_CODE: StatusCode = StatusCode::{success_code};
             const METHOD: Method = Method::{method};
             const PATH: &'static str = "{path}";
 
             type SharedCx = SharedContext;"#,
-                    id = AsPascalCase(&epoint.id[..]),
-                    success_code = http_status_code_name(epoint.success),
-                    method = AsPascalCase(epoint.method.as_str()),
-                    path = epoint.path
-                )?;
-                fn http_input_source_type(source: &InputFieldSource) -> &str {
-                    match source {
-                        InputFieldSource::JsonBody => "Json",
-                        InputFieldSource::Query => "Query",
-                    }
-                }
-                let mut discard_body = epoint.input.main_source != InputFieldSource::JsonBody;
-                let mut http_input_types = vec![format!(
-                    "{wrapper}<Request>",
-                    wrapper = http_input_source_type(&epoint.input.main_source)
-                )];
-                let mut http_input_destructure = vec![
-                    (format!(
-                        "{wrapper}(req)",
-                        wrapper = http_input_source_type(&epoint.input.main_source)
-                    )),
-                ];
-                for (name, field) in &epoint.input.fields {
-                    if field.source == epoint.input.main_source {
-                        continue;
-                    }
-                    discard_body = discard_body && field.source != InputFieldSource::JsonBody;
-                    let wrapper = http_input_source_type(&field.source);
-                    http_input_types.push(format!("{wrapper}<{inner}>"));
-                    http_input_destructure.push(format!("{wrapper}({name})"));
-                }
-                if discard_body {
-                    http_input_types.push("DiscardBody");
-                    http_input_destructure.push("_");
-                }
-                let body_type = http_input_types.join(", ");
-                let desctructure_type = http_input_destructure.join(", ");
-                writeln!(
-                    buf,
-                    r#"type HttpRequest = ({body_type},);
+            id = AsPascalCase(&epoint.id[..]),
+            success_code = http_status_code_name(epoint.success),
+            method = AsPascalCase(epoint.method.as_str()),
+            path = epoint.path
+        )?;
+        fn http_input_source_type(source: &InputFieldSource) -> &str {
+            match source {
+                InputFieldSource::JsonBody => "Json",
+                InputFieldSource::Query => "Query",
+            }
+        }
+        let mut discard_body = epoint.input.main_source != InputFieldSource::JsonBody;
+        let mut http_input_types = vec![format!(
+            "{wrapper}<Request>",
+            wrapper = http_input_source_type(&epoint.input.main_source)
+        )];
+        let mut http_input_destructure = vec![
+            (format!(
+                "{wrapper}(req)",
+                wrapper = http_input_source_type(&epoint.input.main_source)
+            )),
+        ];
+        for (name, field) in &epoint.input.fields {
+            if field.source == epoint.input.main_source {
+                continue;
+            }
+            discard_body = discard_body && field.source != InputFieldSource::JsonBody;
+            let wrapper = http_input_source_type(&field.source);
+            http_input_types.push(format!("{wrapper}<{inner}>"));
+            http_input_destructure.push(format!("{wrapper}({name})"));
+        }
+        if discard_body {
+            http_input_types.push("DiscardBody");
+            http_input_destructure.push("_");
+        }
+        let body_type = http_input_types.join(", ");
+        let desctructure_type = http_input_destructure.join(", ");
+        writeln!(
+            buf,
+            r#"type HttpRequest = ({body_type},);
 
             fn request({http_input_destructure},): Self::HttpRequest) -> Result<Self::Request, Self::Error> {{
                 Ok(req)
@@ -374,7 +374,7 @@ pub struct {id};"#,
                 Json(resp).into_response()
             }}
         }}"#,
-                )?; */
+        )?; */
     }
     writeln!(buf, "}}")?;
     Ok(())
@@ -741,16 +741,16 @@ fn input_type(
                         FieldValidations::MinLength(len) => {
                             if length_validations.0.is_some() {
                                 eyre::bail!(
-                                "duplicate min length validations: {len} && {length_validations:?}"
-                            )
+                                    "duplicate min length validations: {len} && {length_validations:?}"
+                                )
                             }
                             length_validations.0 = Some(len);
                         }
                         FieldValidations::MaxLength(len) => {
                             if length_validations.1.is_some() {
                                 eyre::bail!(
-                                "duplicate max length validations: {len} && {length_validations:?}"
-                            )
+                                    "duplicate max length validations: {len} && {length_validations:?}"
+                                )
                             }
                             length_validations.1 = Some(len);
                         }

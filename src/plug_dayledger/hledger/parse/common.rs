@@ -206,8 +206,8 @@ pub fn amountp<'a>() -> impl Parser<'a, &'a str, Amount, extra::Err<Rich<'a, cha
     left_symbol.or(right_or_no_symbol).labelled("amount")
 }
 
-pub fn balance_assertionp<'a>(
-) -> impl Parser<'a, &'a str, BalanceAssertion, extra::Err<Rich<'a, char>>> {
+pub fn balance_assertionp<'a>()
+-> impl Parser<'a, &'a str, BalanceAssertion, extra::Err<Rich<'a, char>>> {
     let double_eq = just("==").to(true);
     let single_eq = just('=').to(false);
 

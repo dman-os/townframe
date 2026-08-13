@@ -22,13 +22,31 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CARGO_TERM_COLOR: always
+  NEXTEST_COLOR: always
   OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
-  checks:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - name: pre-commit hooks
+        run: |
+          nix develop .#ci-desktop --command prek --color=always run --all-files
+
+  tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -65,10 +83,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: pre-commit hooks
-        run: |
-          nix develop .#ci-desktop --command prek --color=always run --all-files
-
       - name: builds
         run: |
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows --target wasm32-wasip2
@@ -91,9 +105,9 @@ jobs:
 
       - name: rust tests
         run: |
-          nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 2
+          nix develop .#ci-rust --command cargo nextest run --color=always --workspace --all-features --no-fail-fast --retries 2
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
-          OLLAMA_MODEL: gemma3 
+          OLLAMA_MODEL: gemma3

@@ -2,12 +2,12 @@ use crate::interlude::*;
 
 use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tracing::{info, warn};
 
-pub const STRESS_NODE_COUNT: usize = 3;
+pub const STRESS_NODE_COUNT: usize = 4;
 pub const PHASE1_MUTATIONS: usize = 48;
 pub const PHASE2_MUTATIONS: usize = 24;
 pub const PHASE3_MUTATIONS: usize = 32;
@@ -57,9 +57,9 @@ pub fn test_parts() -> Vec<PartId> {
 #[async_trait]
 pub trait StressFixture: Sync {
     type World: Send + Sync + 'static;
-    type Node: Send + 'static;
+    type Node: Send + Sync + 'static;
     type StressObj: Clone + Send + Sync + std::fmt::Debug + 'static;
-    type Observation: PartialEq + std::fmt::Debug;
+    type Observation: PartialEq + std::fmt::Debug + Send;
 
     fn label(&self) -> &'static str;
 
@@ -80,14 +80,12 @@ pub trait StressFixture: Sync {
     async fn seed_new_obj(
         &self,
         node: &Self::Node,
-        nodes: &[Option<Self::Node>],
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()>;
     async fn seed_obj(
         &self,
         node: &Self::Node,
-        nodes: &[Option<Self::Node>],
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()>;
@@ -108,6 +106,33 @@ pub trait StressFixture: Sync {
         stress_payload(phase, step, node_idx, obj, nonce, written_at, writer_id)
     }
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()>;
+
+    /// One-time cluster setup after boot, before any topology or mutation phases.
+    async fn prepare_cluster(&self, _nodes: &[Option<Self::Node>]) -> Res<()> {
+        Ok(())
+    }
+
+    /// Whether `node` is eligible to create fresh objects.
+    fn can_create(&self, _node: &Self::Node) -> bool {
+        true
+    }
+
+    /// Whether `node` is eligible to mutate `obj`.
+    async fn can_mutate(&self, _node: &Self::Node, _obj: &Self::StressObj) -> Res<bool> {
+        Ok(true)
+    }
+
+    /// Wait for all `nodes` to reach a locally-stable observation within `timeout`.
+    /// Default polls per-node [`observed_state`] until stable for
+    /// [`STRESS_SETTLE_STABLE_ROUNDS`] consecutive rounds.
+    async fn wait_for_settled(
+        &self,
+        nodes: &[&Self::Node],
+        timeout: Duration,
+        label: &str,
+    ) -> Res<()> {
+        wait_for_cluster_settled(self, nodes, timeout, label).await
+    }
 }
 
 #[derive(Default)]
@@ -212,6 +237,22 @@ pub fn choose_active_topology<T>(rng: &mut StdRng, nodes: &[Option<T>]) -> Vec<u
     live
 }
 
+pub async fn boot_cluster<F: StressFixture>(
+    fixture: &F,
+    world: Arc<F::World>,
+    node_count: usize,
+) -> Res<Vec<Option<F::Node>>> {
+    let node_count_u8 =
+        u8::try_from(node_count).expect("stress node_count must fit in a u8 peer seed");
+    assert!(node_count_u8 > 0, "stress node_count must be non-zero");
+    let mut nodes = Vec::with_capacity(node_count);
+    for peer_seed in 1..=node_count_u8 {
+        let node = fixture.boot_node(Arc::clone(&world), peer_seed).await?;
+        nodes.push(Some(node));
+    }
+    Ok(nodes)
+}
+
 pub async fn boot_cluster_for_fixture<F: StressFixture>(
     fixture: &F,
     world: Arc<F::World>,
@@ -273,21 +314,16 @@ pub async fn connect_active_topology<F: StressFixture>(
     Ok(())
 }
 
-pub async fn connect_full_mesh<F: StressFixture>(
+/// Connect every live node through a randomized spanning topology. Unlike a
+/// repair mesh, this only establishes routes; normal BigSync propagation must
+/// bring the nodes to parity before alignment is checked.
+pub async fn connect_final_topology<F: StressFixture>(
     fixture: &F,
+    rng: &mut StdRng,
     nodes: &[Option<F::Node>],
 ) -> Res<()> {
-    let started_at = std::time::Instant::now();
     let live = live_indices(nodes);
-    for left_idx in 0..live.len() {
-        let left = nodes[live[left_idx]].as_ref().expect(ERROR_IMPOSSIBLE);
-        for right_idx in (left_idx + 1)..live.len() {
-            let right = nodes[live[right_idx]].as_ref().expect(ERROR_IMPOSSIBLE);
-            fixture.connect_pair(left, right).await?;
-        }
-    }
-    log_if_slow("connect_full_mesh", started_at);
-    Ok(())
+    connect_active_topology(fixture, rng, nodes, &live).await
 }
 
 pub async fn apply_random_mutation<F: StressFixture>(
@@ -305,47 +341,108 @@ pub async fn apply_random_mutation<F: StressFixture>(
         return Ok(());
     }
 
-    let node_idx = live[rng.random_range(0..live.len())];
-    let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
-    let fresh_obj = state.live_objs.is_empty() || rng.random_bool(0.30);
-    let obj = if fresh_obj {
-        let obj = fixture.make_stress_obj(rng);
-        let obj = state.publish_new_obj(obj);
-        journal.record(format!(
-            "{phase}:step={step}:create node={node_idx} obj={obj:?}"
-        ));
-        obj
-    } else {
-        state.choose_live_obj(rng).expect(ERROR_IMPOSSIBLE)
-    };
-
-    let nonce = rng.random::<u64>();
-    let written_at = state.next_written_at();
-    let value = fixture.make_doc_content(
-        phase,
-        step,
-        node_idx,
-        &obj,
-        nonce,
-        written_at,
-        fixture.peer_id(node),
-    );
-    journal.record(format!(
-        "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
-    ));
-    if fresh_obj {
-        fixture.seed_new_obj(node, nodes, &obj, value).await?;
-    } else {
-        fixture.seed_obj(node, nodes, &obj, value).await?;
+    // Collect eligible creators for fresh-object creation.
+    let mut creators: Vec<usize> = Vec::new();
+    for &idx in &live {
+        let node = nodes[idx].as_ref().expect(ERROR_IMPOSSIBLE);
+        if fixture.can_create(node) {
+            creators.push(idx);
+        }
     }
 
-    if rng.random_bool(0.25) {
-        let sleep_ms = rng.random_range(1..15);
-        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+    let try_fresh = state.live_objs.is_empty() || rng.random_bool(0.30);
+
+    if try_fresh && !creators.is_empty() {
+        let node_idx = creators[rng.random_range(0..creators.len())];
+        let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
+        let obj = fixture.make_stress_obj(rng);
+        let obj = state.publish_new_obj(obj);
+        let nonce = rng.random::<u64>();
+        let written_at = state.next_written_at();
+        let value = fixture.make_doc_content(
+            phase,
+            step,
+            node_idx,
+            &obj,
+            nonce,
+            written_at,
+            fixture.peer_id(node),
+        );
+        journal.record(format!(
+            "{phase}:step={step}:create node={node_idx} obj={obj:?} value={value:?}"
+        ));
+        fixture.seed_new_obj(node, &obj, value).await?;
+        log_if_slow("apply_random_mutation", started_at);
+        return Ok(());
+    }
+
+    // Try mutation on an existing object.
+    if let Some(obj) = state.choose_live_obj(rng) {
+        let mut mutators: Vec<usize> = Vec::new();
+        for &idx in &live {
+            let node = nodes[idx].as_ref().expect(ERROR_IMPOSSIBLE);
+            if fixture.can_mutate(node, &obj).await? {
+                mutators.push(idx);
+            }
+        }
+
+        if !mutators.is_empty() {
+            let node_idx = mutators[rng.random_range(0..mutators.len())];
+            let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
+            let nonce = rng.random::<u64>();
+            let written_at = state.next_written_at();
+            let value = fixture.make_doc_content(
+                phase,
+                step,
+                node_idx,
+                &obj,
+                nonce,
+                written_at,
+                fixture.peer_id(node),
+            );
+            journal.record(format!(
+                "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
+            ));
+            fixture.seed_obj(node, &obj, value).await?;
+            if rng.random_bool(0.25) {
+                let sleep_ms = rng.random_range(1..15);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+            log_if_slow("apply_random_mutation", started_at);
+            return Ok(());
+        }
+
+        // No eligible mutator: fall back to creating a fresh object.
+        if !creators.is_empty() {
+            let node_idx = creators[rng.random_range(0..creators.len())];
+            let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
+
+            let obj = fixture.make_stress_obj(rng);
+            let obj = state.publish_new_obj(obj);
+            let nonce = rng.random::<u64>();
+            let written_at = state.next_written_at();
+            let value = fixture.make_doc_content(
+                phase,
+                step,
+                node_idx,
+                &obj,
+                nonce,
+                written_at,
+                fixture.peer_id(node),
+            );
+            journal.record(format!(
+                "{phase}:step={step}:create(no-mutator) node={node_idx} obj={obj:?} value={value:?}"
+            ));
+            fixture.seed_new_obj(node, &obj, value).await?;
+            log_if_slow("apply_random_mutation", started_at);
+            return Ok(());
+        }
     }
 
     log_if_slow("apply_random_mutation", started_at);
-    Ok(())
+    Err(ferr!(
+        "{phase}:step={step}: no eligible node for creation or mutation"
+    ))
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -422,7 +519,7 @@ pub async fn maybe_restart_node<F: StressFixture>(
     Ok(())
 }
 
-pub async fn wait_for_cluster_settled<F: StressFixture>(
+pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
     fixture: &F,
     nodes: &[&F::Node],
     timeout: Duration,
@@ -461,6 +558,204 @@ pub async fn wait_for_cluster_settled<F: StressFixture>(
     }
 }
 
+/// Run a randomized stress test with the given fixture, seed, and node count.
+///
+/// After booting `node_count` nodes, calls [`prepare_cluster`] once, then runs
+/// three phases of topology churn + random mutations plus a final full-mesh
+/// converge-and-assert cycle.
+#[expect(clippy::too_many_arguments)]
+pub async fn run_randomized_stress<F: StressFixture>(
+    fixture: F,
+    world: Arc<F::World>,
+    seed: u64,
+    node_count: usize,
+    phase1_mutations: usize,
+    phase2_mutations: usize,
+    phase3_mutations: usize,
+    settle_timeout: Duration,
+) -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let journal = StressJournal::default();
+    let mut state: StressState<F::StressObj> = StressState::default();
+    journal.record(format!("seed={seed}"));
+    journal.record(format!("backend={}", fixture.label()));
+    let res = async {
+        let boot_started_at = std::time::Instant::now();
+        let mut nodes = boot_cluster(&fixture, Arc::clone(&world), node_count).await?;
+        info!(elapsed = ?boot_started_at.elapsed(), "booted stress cluster");
+
+        // One-time cluster preparation (e.g. shared edit groups, agent discovery).
+        let prepare_started_at = std::time::Instant::now();
+        fixture.prepare_cluster(&nodes).await?;
+        disconnect_all(&fixture, &nodes).await?;
+        info!(elapsed = ?prepare_started_at.elapsed(), "stress cluster prepare complete");
+
+        journal.record("phase1:start");
+        info!("stress phase1 connect start");
+        let phase1_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase1:topology active={phase1_topology:?}"));
+        let phase1_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase1_topology).await?;
+        info!(
+            elapsed = ?phase1_connect_started_at.elapsed(),
+            "stress phase1 connect complete"
+        );
+        let phase1_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase1_settle_started_at.elapsed(),
+            "stress phase1 post-connect settled"
+        );
+        let phase1_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase1",
+            phase1_mutations,
+            &journal,
+        )
+        .await?;
+        info!(elapsed = ?phase1_mutate_started_at.elapsed(), "stress phase1 mutations complete");
+        let phase1_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase1_post_settle_started_at.elapsed(),
+            "stress phase1 post-mutations settled"
+        );
+
+        journal.record("phase2:start");
+        info!("stress phase2 connect start");
+        let phase2_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase2:topology active={phase2_topology:?}"));
+        let phase2_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase2_topology).await?;
+        info!(
+            elapsed = ?phase2_connect_started_at.elapsed(),
+            "stress phase2 connect complete"
+        );
+        let phase2_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase2_settle_started_at.elapsed(),
+            "stress phase2 post-connect settled"
+        );
+        let phase2_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase2",
+            phase2_mutations,
+            &journal,
+        )
+        .await?;
+        info!(elapsed = ?phase2_mutate_started_at.elapsed(), "stress phase2 mutations complete");
+        let phase2_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase2_post_settle_started_at.elapsed(),
+            "stress phase2 post-mutations settled"
+        );
+
+        journal.record("phase3:start");
+        info!("stress phase3 connect start");
+        let phase3_topology = choose_active_topology(&mut rng, &nodes);
+        journal.record(format!("phase3:topology active={phase3_topology:?}"));
+        let phase3_connect_started_at = std::time::Instant::now();
+        connect_active_topology(&fixture, &mut rng, &nodes, &phase3_topology).await?;
+        info!(
+            elapsed = ?phase3_connect_started_at.elapsed(),
+            "stress phase3 connect complete"
+        );
+        let phase3_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-connect")
+            .await?;
+        info!(
+            elapsed = ?phase3_settle_started_at.elapsed(),
+            "stress phase3 post-connect settled"
+        );
+        let phase3_mutate_started_at = std::time::Instant::now();
+        run_phase(
+            &fixture,
+            Arc::clone(&world),
+            &mut rng,
+            &mut state,
+            &mut nodes,
+            "phase3",
+            phase3_mutations,
+            &journal,
+        )
+        .await?;
+        info!(elapsed = ?phase3_mutate_started_at.elapsed(), "stress phase3 mutations complete");
+        let phase3_post_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-mutations")
+            .await?;
+        info!(
+            elapsed = ?phase3_post_settle_started_at.elapsed(),
+            "stress phase3 post-mutations settled"
+        );
+
+        journal.record("final:reconnect_spanning_topology");
+        let final_connect_started_at = std::time::Instant::now();
+        connect_final_topology(&fixture, &mut rng, &nodes).await?;
+        info!(
+            elapsed = ?final_connect_started_at.elapsed(),
+            "stress final spanning-topology connect complete"
+        );
+        let final_settle_started_at = std::time::Instant::now();
+        fixture
+            .wait_for_settled(&live_refs(&nodes), settle_timeout, "final:post-connect")
+            .await?;
+        info!(
+            elapsed = ?final_settle_started_at.elapsed(),
+            "stress final cluster settle complete"
+        );
+
+        let refs = live_refs(&nodes);
+        let align_started_at = std::time::Instant::now();
+        fixture.assert_cluster_alignment(&refs).await?;
+        info!(elapsed = ?align_started_at.elapsed(), "stress cluster alignment complete");
+        journal.record(format!(
+            "final_journal_entries={}",
+            journal.snapshot().len()
+        ));
+
+        for node in nodes.into_iter().flatten() {
+            fixture.stop_node(node).await?;
+        }
+
+        Ok::<_, eyre::Report>(())
+    }
+    .await;
+
+    if let Err(ref _err) = res {
+        eprintln!("\n=== STRESS TEST JOURNAL AT ABORT (seed={seed}) ===");
+        for entry in journal.snapshot() {
+            eprintln!("  {entry}");
+        }
+        eprintln!("=== END STRESS JOURNAL ===\n");
+    }
+    res
+}
+
+/// Backward-compatible wrapper using the old default seed and `STRESS_NODE_COUNT`.
 pub async fn run_randomized_four_node_stress<F: StressFixture>(
     fixture: F,
     world: Arc<F::World>,
@@ -479,6 +774,7 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
     .await
 }
 
+/// Backward-compatible wrapper extracting seed from env and using `STRESS_NODE_COUNT`.
 pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixture>(
     fixture: F,
     world: Arc<F::World>,
@@ -487,198 +783,19 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     phase3_mutations: usize,
     settle_timeout: Duration,
 ) -> Res<()> {
-    utils_rs::testing::setup_tracing_once();
-
     let seed = std::env::var("BIG_SYNC_STRESS_SEED")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STRESS_SEED);
-    let mut rng = StdRng::seed_from_u64(seed);
-    let journal = StressJournal::default();
-    let mut state: StressState<F::StressObj> = StressState::default();
-    journal.record(format!("seed={seed}"));
-    journal.record(format!("backend={}", fixture.label()));
-
-    let boot_started_at = std::time::Instant::now();
-    let mut nodes = boot_cluster_for_fixture(&fixture, Arc::clone(&world)).await?;
-    info!(elapsed = ?boot_started_at.elapsed(), "booted stress cluster");
-
-    journal.record("phase1:start");
-    info!("stress phase1 connect start");
-    let phase1_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase1:topology active={phase1_topology:?}"));
-    let phase1_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase1_topology).await?;
-    info!(
-        elapsed = ?phase1_connect_started_at.elapsed(),
-        "stress phase1 connect complete"
-    );
-    let phase1_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase1:post-connect",
-    )
-    .await?;
-    info!(
-        elapsed = ?phase1_settle_started_at.elapsed(),
-        "stress phase1 post-connect settled"
-    );
-    let phase1_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase1",
+    run_randomized_stress(
+        fixture,
+        world,
+        seed,
+        STRESS_NODE_COUNT,
         phase1_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase1_mutate_started_at.elapsed(), "stress phase1 mutations complete");
-    let phase1_post_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase1:post-mutations",
-    )
-    .await?;
-    info!(
-        elapsed = ?phase1_post_settle_started_at.elapsed(),
-        "stress phase1 post-mutations settled"
-    );
-
-    journal.record("phase2:start");
-    info!("stress phase2 connect start");
-    let phase2_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase2:topology active={phase2_topology:?}"));
-    let phase2_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase2_topology).await?;
-    info!(
-        elapsed = ?phase2_connect_started_at.elapsed(),
-        "stress phase2 connect complete"
-    );
-    let phase2_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase2:post-connect",
-    )
-    .await?;
-    info!(
-        elapsed = ?phase2_settle_started_at.elapsed(),
-        "stress phase2 post-connect settled"
-    );
-    let phase2_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase2",
         phase2_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase2_mutate_started_at.elapsed(), "stress phase2 mutations complete");
-    let phase2_post_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase2:post-mutations",
-    )
-    .await?;
-    info!(
-        elapsed = ?phase2_post_settle_started_at.elapsed(),
-        "stress phase2 post-mutations settled"
-    );
-
-    journal.record("phase3:start");
-    info!("stress phase3 connect start");
-    let phase3_topology = choose_active_topology(&mut rng, &nodes);
-    journal.record(format!("phase3:topology active={phase3_topology:?}"));
-    let phase3_connect_started_at = std::time::Instant::now();
-    connect_active_topology(&fixture, &mut rng, &nodes, &phase3_topology).await?;
-    info!(
-        elapsed = ?phase3_connect_started_at.elapsed(),
-        "stress phase3 connect complete"
-    );
-    let phase3_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase3:post-connect",
-    )
-    .await?;
-    info!(
-        elapsed = ?phase3_settle_started_at.elapsed(),
-        "stress phase3 post-connect settled"
-    );
-    let phase3_mutate_started_at = std::time::Instant::now();
-    run_phase(
-        &fixture,
-        Arc::clone(&world),
-        &mut rng,
-        &mut state,
-        &mut nodes,
-        "phase3",
         phase3_mutations,
-        &journal,
-    )
-    .await?;
-    info!(elapsed = ?phase3_mutate_started_at.elapsed(), "stress phase3 mutations complete");
-    let phase3_post_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
         settle_timeout,
-        "phase3:post-mutations",
     )
-    .await?;
-    info!(
-        elapsed = ?phase3_post_settle_started_at.elapsed(),
-        "stress phase3 post-mutations settled"
-    );
-
-    journal.record("final:reconnect_full_mesh");
-    let final_connect_started_at = std::time::Instant::now();
-    connect_full_mesh(&fixture, &nodes).await?;
-    info!(
-        elapsed = ?final_connect_started_at.elapsed(),
-        "stress final full-mesh reconnect complete"
-    );
-    let final_settle_started_at = std::time::Instant::now();
-    wait_for_cluster_settled(
-        &fixture,
-        &live_refs(&nodes),
-        Duration::from_secs(60),
-        "final:post-connect",
-    )
-    .await?;
-    info!(
-        elapsed = ?final_settle_started_at.elapsed(),
-        "stress final cluster settle complete"
-    );
-
-    let refs = live_refs(&nodes);
-    let align_started_at = std::time::Instant::now();
-    fixture.assert_cluster_alignment(&refs).await?;
-    info!(elapsed = ?align_started_at.elapsed(), "stress cluster alignment complete");
-    journal.record(format!(
-        "final_journal_entries={}",
-        journal.snapshot().len()
-    ));
-
-    for node in nodes.into_iter().flatten() {
-        fixture.stop_node(node).await?;
-    }
-
-    Ok(())
+    .await
 }

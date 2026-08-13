@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use futures::{stream::BoxStream, StreamExt};
+use futures::{StreamExt, stream::BoxStream};
 
 use crate::kvstore::KvStore;
 use crate::log::{LogStore, TailLogEntry};
@@ -103,7 +103,7 @@ impl LogStore for KvStoreLog {
                                     val: Some(value),
                                 }),
                                 offset + 1,
-                            ))
+                            ));
                         }
                         // error, we just give out an error. the can try again
                         Err(err) => return Some((Err(err), offset)),

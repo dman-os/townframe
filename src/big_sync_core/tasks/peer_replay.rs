@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::{
     mpsc,
-    part_store::{CursorIndex, PartStoreReadOnly},
+    part_store::PartStoreReadOnly,
     rpc,
     rpc::BigSyncRpcClient,
     tasks::{MachineTaskMsg, TaskCtx, TaskId, TaskResultDeets},
@@ -11,7 +11,7 @@ use crate::{
 #[derive(Debug)]
 pub struct PeerReplayTask {
     pub peer_id: PeerId,
-    pub parts: Map<PartId, CursorIndex>,
+    pub targets: Set<rpc::SubscriptionTarget>,
 }
 
 #[derive(Debug)]
@@ -69,33 +69,26 @@ impl PeerReplayTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
-        let rx = peer_rpc
+        let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_id) else {
+            return Err(PeerReplayWorkerErrorDeets::StreamClosed);
+        };
+        let receiver = peer_rpc
             .sub_parts(rpc::SubPartsRequest {
-                peer_id: self.peer_id,
-                parts: self
-                    .parts
-                    .into_iter()
-                    .map(|(part_id, cursor)| rpc::PartStreamCursorRequest { part_id, cursor })
-                    .collect(),
+                targets: self.targets,
             })
             .await??;
         loop {
-            let evt = rx.recv().await;
-            match evt {
-                Err(_) => {
-                    return Err(PeerReplayWorkerErrorDeets::StreamClosed);
-                }
-                Ok(evt) => {
-                    cx.main_tx
-                        .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
-                            peer_id: self.peer_id,
-                            task_id: cx.task_id,
-                            evt,
-                        }))
-                        .await?;
-                }
-            }
+            let evt = receiver
+                .recv()
+                .await
+                .map_err(|_| PeerReplayWorkerErrorDeets::StreamClosed)?;
+            cx.main_tx
+                .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
+                    peer_id: self.peer_id,
+                    task_id: cx.task_id,
+                    evt,
+                }))
+                .await?;
         }
     }
 }

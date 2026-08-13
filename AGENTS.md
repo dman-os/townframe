@@ -102,7 +102,7 @@
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
 - Currently doing compaction? Always indicate whoever reads your summary that they should refresh on AGENTS.md and any .md docs linked from it.
-
+- When operating inside pi, truncation limit is 50KB or 2000 lines which is wasteful. Use your own limits/heads/tail on outputs to avoid flooding the context. Don't do broad, speculative searches that are going to flood the context with garbage.
 ## Cheating
 
 Avoid cheating through hacks that violate common sensibilities just to get a task done.
@@ -152,3 +152,4 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 - Launch subagents with `run_in_background: true`. A background subagent returns a resumable agent id immediately; a **foreground** subagent returns only its result and is then cleaned up — it is **not resumable** (`resume` returns `"Agent not found … may have been cleaned up"`). Confirmed empirically.
 - **Reuse one agent across tasks** via `resume: <id>`; do not spawn a fresh subagent per task — each fresh agent re-reads the codebase (cost).
 - If `resume` reports the agent cleaned up / evicted, that is the **only** sanctioned case to spawn a fresh subagent. First recover the prior agent's findings from its task transcript at `~/.pi/agent/sessions/<proj>/<session>/tasks/<id>.jsonl` and fold them into the new agent's prompt.
+- Ask before ever using subagents.

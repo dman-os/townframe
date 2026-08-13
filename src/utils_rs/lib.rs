@@ -18,10 +18,10 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{default, CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre};
+    pub use crate::{CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre, default};
 
     pub use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
@@ -32,9 +32,9 @@ mod interlude {
     pub use crate::hash::UuidExt;
     pub use async_trait::async_trait;
     pub use color_eyre::eyre::{
-        self as eyre, format_err as ferr, OptionExt as EyreOptExt, Result as Res, WrapErr,
+        self as eyre, OptionExt as EyreOptExt, Result as Res, WrapErr, format_err as ferr,
     };
-    pub use indexmap::{indexmap, IndexMap};
+    pub use indexmap::{IndexMap, indexmap};
     pub use jiff::{self, Timestamp};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::json;
@@ -80,6 +80,7 @@ pub mod expect_tags {
     pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
     pub const ERROR_UNRECONIZED: &str = "unrecognized identifier";
+    // pub const ERROR_SHUTDOWN: &str = "something went wrong during shutdown";
 }
 
 #[inline]
@@ -192,7 +193,7 @@ pub fn setup_tracing_once() {
 static APP_STARTUP_INSTANT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 pub fn init_app_startup_clock() {
-    let _ = APP_STARTUP_INSTANT.get_or_init(std::time::Instant::now);
+    APP_STARTUP_INSTANT.get_or_init(std::time::Instant::now);
 }
 
 pub fn app_startup_elapsed() -> std::time::Duration {
@@ -677,7 +678,9 @@ pub fn dotenv_hierarchical() -> Res<Vec<PathBuf>> {
         }
     }
     for (key, val) in found_vars {
-        std::env::set_var(key, val);
+        unsafe {
+            std::env::set_var(key, val);
+        }
     }
 
     Ok(path_bufs)
@@ -819,6 +822,15 @@ impl AbortableJoinSet {
         }
     }
 
+    pub fn len(&self) -> usize {
+        let guard = self.inner.lock().expect(ERROR_MUTEX);
+        guard.as_ref().map_or(0, |set| set.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn spawn<F>(&self, fut: F) -> Result<TaskHandle, AbortableJoinSetError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -827,16 +839,34 @@ impl AbortableJoinSet {
         let Some(join_set) = guard.as_mut() else {
             return Err(AbortableJoinSetError::Aborted);
         };
+        // A long-lived runtime may spawn many short jobs before shutdown.
+        // Reap completed tasks opportunistically so JoinSet does not retain
+        // every result until `stop()`. A failed task is an invariant break and
+        // must surface immediately rather than remain hidden until shutdown.
+        while let Some(result) = join_set.try_join_next() {
+            if let Err(err) = result
+                && !err.is_cancelled()
+            {
+                std::panic::resume_unwind(err.into_panic());
+            }
+        }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let abort = join_set.spawn(async move {
             fut.await;
-            let _ = done_tx.send(());
+            done_tx.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         });
         Ok(TaskHandle { abort, done_rx })
     }
 
+    /// Abort every task currently owned by the set.
+    ///
+    /// The set remains available to [`stop`](Self::stop), which can then join
+    /// the aborted tasks and surface any unexpected join failures. Keeping
+    /// abort and join as separate operations lets owners enforce reverse-order
+    /// shutdown without abandoning task cleanup.
     pub fn abort(&self) {
-        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+        let mut guard = self.inner.lock().expect(ERROR_MUTEX);
+        let Some(join_set) = guard.as_mut() else {
             return;
         };
         join_set.abort_all();
@@ -847,8 +877,12 @@ impl AbortableJoinSet {
             return Err(AbortableJoinSetStopError::Aborted);
         };
         match tokio::time::timeout(timeout, async {
-            while let Some(out) = join_set.join_next().await {
-                out?;
+            while let Some(res) = join_set.join_next().await {
+                match res {
+                    Ok(_) => {}
+                    Err(err) if err.is_cancelled() => {}
+                    Err(err) => return Err(err),
+                }
             }
             Ok::<(), tokio::task::JoinError>(())
         })

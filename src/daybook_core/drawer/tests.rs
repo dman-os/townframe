@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::{
-    cache::FacetCacheState, facet_recovery, lru::KeyedLruPool, types::*, DrawerRepo,
+    DrawerRepo, cache::FacetCacheState, facet_recovery, lru::KeyedLruPool, types::*,
 };
 use crate::repos::Repo;
 use crate::test_support::{boot_disk_repo, boot_repo};
@@ -876,8 +876,8 @@ fn test_raw_automerge_fork_at_stale_heads_after_merges() -> Res<()> {
 }
 
 #[test]
-fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_forkability(
-) -> Res<()> {
+fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_forkability()
+-> Res<()> {
     let mut main = automerge::Automerge::new();
     {
         let mut tx = main.transaction();
@@ -1051,10 +1051,11 @@ async fn test_v2_additional_apis() -> Res<()> {
     );
 
     let wrong_heads = ChangeHashSet(Arc::from([automerge::ChangeHash([0u8; 32])]));
-    assert!(repo
-        .get_if_latest(&doc_id, BranchPath::new("main"), &wrong_heads, None)
-        .await?
-        .is_none());
+    assert!(
+        repo.get_if_latest(&doc_id, BranchPath::new("main"), &wrong_heads, None)
+            .await?
+            .is_none()
+    );
 
     // 5. Test update_batch
     repo.update_batch(vec![UpdateDocArgsV2 {
@@ -1138,9 +1139,11 @@ async fn test_v2_additional_apis() -> Res<()> {
             .await?
     );
     let branches_after_del = repo.get_doc_branches(&doc_id).await?.unwrap();
-    assert!(!branches_after_del
-        .branches
-        .contains_key(&*local_branch("branch-a").to_string()));
+    assert!(
+        !branches_after_del
+            .branches
+            .contains_key(&*local_branch("branch-a").to_string())
+    );
     let entry_after_del = repo
         .get_entry(&doc_id)
         .await?
@@ -1727,12 +1730,16 @@ fn test_facet_cache_miss_on_heads_change() {
         heads_a.clone(),
         Arc::clone(&value),
     );
-    assert!(cache
-        .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_a)
-        .is_some());
-    assert!(cache
-        .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_b)
-        .is_none());
+    assert!(
+        cache
+            .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_a)
+            .is_some()
+    );
+    assert!(
+        cache
+            .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_b)
+            .is_none()
+    );
 }
 
 #[test]
@@ -2397,10 +2404,12 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         })
         .await;
     assert!(add_result.is_err());
-    assert!(add_result
-        .unwrap_err()
-        .to_string()
-        .contains("no registered manifest"));
+    assert!(
+        add_result
+            .unwrap_err()
+            .to_string()
+            .contains("no registered manifest")
+    );
 
     stop_token.stop().await?;
     acx_stop().await?;
@@ -2453,10 +2462,12 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         })
         .await;
     assert!(add_result.is_err());
-    assert!(add_result
-        .unwrap_err()
-        .to_string()
-        .contains("self-reference target"));
+    assert!(
+        add_result
+            .unwrap_err()
+            .to_string()
+            .contains("self-reference target")
+    );
 
     stop_token.stop().await?;
     acx_stop().await?;
@@ -2553,6 +2564,15 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     for ii in 0..total_docs {
         let mut content_doc = automerge::Automerge::new();
         content_doc.set_actor(automerge::ActorId::random());
+        // `create_doc` requires at least one head (the keyhive content
+        // frontier), mirroring the real drawer add flow which seeds a
+        // transaction before creating the doc.
+        {
+            let mut tx = content_doc.transaction();
+            tx.put(automerge::ROOT, "__seed", true)
+                .expect("seed write failed");
+            tx.commit();
+        }
         let content_handle = big_repo.create_doc(content_doc).await?;
         let content_doc_id = content_handle.document_id();
 
@@ -2702,6 +2722,8 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     assert!(docs_per_sec > 0.0);
     stop_token.stop().await?;
     acx_stop().await?;
-    let _ = std::fs::remove_dir_all(&storage_path);
+    std::fs::remove_dir_all(&storage_path)
+        .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
+        .ok();
     Ok(())
 }

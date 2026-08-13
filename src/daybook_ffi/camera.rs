@@ -380,7 +380,7 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = listener;
+            drop(listener);
         }
     }
 
@@ -428,7 +428,7 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = enabled;
+            drop(enabled);
         }
     }
 
@@ -533,17 +533,17 @@ impl CameraPreviewFfi {
                         listener_guard.as_ref().map(std::sync::Arc::clone)
                     };
 
-                    if let Some(listener_for_qr) = listener_for_qr {
-                        if let Err(error) = publish_qr_for_frame(
+                    if let Some(listener_for_qr) = listener_for_qr
+                        && let Err(error) = publish_qr_for_frame(
                             &listener_for_qr,
                             &frame.encoding,
                             frame.width_px,
                             frame.height_px,
                             &frame.frame_bytes,
-                        ) {
-                            listener_for_qr
-                                .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
-                        }
+                        )
+                    {
+                        listener_for_qr
+                            .on_camera_qr_error(format!("failed preparing qr frame: {error}"));
                     }
                 },
             )
@@ -562,8 +562,8 @@ impl CameraPreviewFfi {
             any(target_os = "linux", target_os = "macos", target_os = "windows")
         )))]
         {
-            let _ = device_id;
-            let _ = listener;
+            drop(device_id);
+            drop(listener);
             panic_unsupported();
         }
     }

@@ -19,8 +19,9 @@ mod tests;
 pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use meta::version_updates;
 
-use big_repo::{SharedBigRepo, SharedPartStore};
+use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
 use cache::FacetCacheKey;
 use cache::*;
 use lru::SharedKeyedLruPool;
@@ -28,11 +29,9 @@ use types::{BranchSnapshot, DocDeleteTombstone};
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
-use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
+use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 
 use tokio_util::sync::CancellationToken;
-
-const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchKind {
@@ -43,6 +42,8 @@ pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
+    content_docs_group: BigKeyhiveGroup,
+    drawer_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
     local_peer_id: PeerId,
     local_user_path: daybook_types::doc::UserPathBuf,
@@ -108,6 +109,7 @@ impl DrawerRepo {
         #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
         #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let authority = crate::authority::ensure(&big_repo, &meta_db_pool, None).await?;
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
@@ -135,6 +137,8 @@ impl DrawerRepo {
             big_repo,
             partition_store,
             drawer_doc_id,
+            content_docs_group: authority.content_docs.clone(),
+            drawer_group: authority.default_drawer.clone(),
             local_actor_id,
             local_user_path,
             entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
@@ -155,6 +159,8 @@ impl DrawerRepo {
             plugs_repo,
         });
         repo.ensure_local_branch_schema().await?;
+        repo.migrate_content_doc_authority().await?;
+        repo.ensure_replicated_branch_partitions().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -175,6 +181,31 @@ impl DrawerRepo {
         ))
     }
 
+    async fn migrate_content_doc_authority(&self) -> Res<()> {
+        const MIGRATION_KEY: &str = "global.authority.content_docs_and_drawer_migrated";
+        if crate::repo::globals::get_string_global(&self.meta_store_sql, MIGRATION_KEY)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        for item in self.list().await? {
+            let Some(entry) = self.get_entry(&item.doc_id).await? else {
+                continue;
+            };
+            for branch in entry.branches.values() {
+                self.big_repo
+                    .add_admin_member_to_doc(branch.branch_doc_id, self.content_docs_group.clone())
+                    .await?;
+                self.big_repo
+                    .add_admin_member_to_doc(branch.branch_doc_id, self.drawer_group.clone())
+                    .await?;
+            }
+        }
+        crate::repo::globals::upsert_string_global(&self.meta_store_sql, MIGRATION_KEY, "1")
+            .await?;
+        Ok(())
+    }
     fn branch_kind_for_path(
         &self,
         branch_path: &daybook_types::doc::BranchPath,
@@ -191,12 +222,8 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path)
     }
 
-    pub(crate) fn replicated_partition_id_for_drawer(_drawer_doc_id: &DocumentId) -> PartId {
-        crate::part_id_from_label(DRAWER_REPLICATED_PARTITION_PREFIX)
-    }
-
     pub(crate) fn replicated_partition_id(&self) -> PartId {
-        Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
+        big_repo::group_part_id(self.drawer_group.id().to_bytes())
     }
 
     async fn add_branch_to_partitions_if_needed(
@@ -206,6 +233,7 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
+            let part_id = self.replicated_partition_id();
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
                 .set_obj_payload(
@@ -216,8 +244,24 @@ impl DrawerRepo {
                 )
                 .await?;
             self.partition_store
-                .add_obj_to_parts(branch_doc_id, vec![self.replicated_partition_id()])
+                .add_obj_to_parts(branch_doc_id, vec![part_id])
                 .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_replicated_branch_partitions(&self) -> Res<()> {
+        let (_, entries) = self.current_drawer_entries().await?;
+        let part_id = self.replicated_partition_id();
+        for (_doc_id, entry) in entries {
+            for (branch_name, branch_ref) in &entry.branches {
+                let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
+                if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
+                    self.partition_store
+                        .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -228,8 +272,16 @@ impl DrawerRepo {
         branch_doc_id: DocumentId,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
+            let part_id = self.replicated_partition_id();
+            let obj_id = big_sync_core::ObjId::new(*branch_doc_id.as_bytes());
             self.partition_store
-                .remove_obj_from_part(branch_doc_id, self.replicated_partition_id())
+                .remove_obj_from_part(obj_id, part_id)
+                .await?;
+            self.big_repo
+                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
+                .await?;
+            self.big_repo
+                .revoke_doc_access(branch_doc_id, self.content_docs_group.clone())
                 .await?;
         }
         Ok(())
@@ -266,10 +318,17 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<ChangeHashSet>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            debug!(%doc_id, %branch_path, op = "get_branch_heads_for_path", "no branch ref");
             return Ok(None);
         };
-        self.get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
-            .await
+        let Some(heads) = self
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .await?
+        else {
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "get_branch_heads_for_path", "branch doc heads unavailable");
+            return Ok(None);
+        };
+        Ok(Some(heads))
     }
 
     async fn get_handle_by_branch_doc_id(
@@ -290,7 +349,10 @@ impl DrawerRepo {
                 });
                 Ok(Some(handle))
             }
-            _ => Ok(None),
+            other => {
+                debug!(%document_id, lookup = ?other, op = "get_handle_by_branch_doc_id", "branch doc not ready");
+                Ok(None)
+            }
         }
     }
 
@@ -301,15 +363,17 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<Option<big_repo::BigDocHandle>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            debug!(%doc_id, %branch_path, op = "resolve_handle_for_branch_heads", "no branch ref");
             return Ok(None);
         };
         let Some(handle) = self
             .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "resolve_handle_for_branch_heads", "no handle");
             return Ok(None);
         };
-        let (contains_all_heads, _missing_heads) = handle
+        let (contains_all_heads, missing_heads) = handle
             .with_document_read(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {
@@ -321,8 +385,10 @@ impl DrawerRepo {
             })
             .await?;
         if !contains_all_heads {
+            debug!(%doc_id, %branch_path, ?heads, ?missing_heads, "presence probe: resolve: heads missing from doc");
             return Ok(None);
         }
+        debug!(%doc_id, %branch_path, "presence probe: resolve: handle ok");
         Ok(Some(handle))
     }
 
@@ -353,13 +419,11 @@ impl DrawerRepo {
         &self,
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
-    ) -> Res<HashSet<FacetKey>> {
+    ) -> Res<Option<HashSet<FacetKey>>> {
         let branch_doc_id = snapshot.branch_doc_id;
-        let handle = self
-            .big_repo
-            .get_doc(&branch_doc_id)
-            .await?
-            .into_ready(branch_doc_id)?;
+        let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
+            return Ok(None);
+        };
         let keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj = match automerge::ReadDoc::get_at(
@@ -383,7 +447,7 @@ impl DrawerRepo {
                 Ok(out)
             })
             .await?;
-        Ok(keys)
+        Ok(Some(keys))
     }
 
     async fn non_tmp_branch_snapshots_for_entry(
@@ -598,8 +662,8 @@ impl DrawerRepo {
                         for value in values {
                             let serde_json::Value::String(commit_head) = value else {
                                 eyre::bail!(
-                                        "facet '{origin_facet_key}' at_commit path '{at_commit_json_path}' must be an array of commit-hash strings",
-                                    );
+                                    "facet '{origin_facet_key}' at_commit path '{at_commit_json_path}' must be an array of commit-hash strings",
+                                );
                             };
                             commit_head_strings.push(commit_head.clone());
                         }

@@ -66,11 +66,11 @@ impl LruPool {
 
     /// Marks an ID as recently used without changing its cost.
     pub fn touch(&mut self, id: LruItemId) {
-        if self.items.contains_key(&id) {
-            if let Some(pos) = self.order.iter().position(|oid| *oid == id) {
-                let id = self.order.remove(pos).unwrap();
-                self.order.push_back(id);
-            }
+        if self.items.contains_key(&id)
+            && let Some(pos) = self.order.iter().position(|oid| *oid == id)
+        {
+            let id = self.order.remove(pos).unwrap();
+            self.order.push_back(id);
         }
     }
 
@@ -123,10 +123,10 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
     }
 
     pub fn touch_key(&mut self, key: &K) {
-        if let Some(slot) = self.key_to_slot.get(key).copied() {
-            if let Some(id) = self.slot_to_id.get(&slot).copied() {
-                self.policy.touch(id);
-            }
+        if let Some(slot) = self.key_to_slot.get(key).copied()
+            && let Some(id) = self.slot_to_id.get(&slot).copied()
+        {
+            self.policy.touch(id);
         }
     }
 
@@ -179,10 +179,10 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
     fn prune_ids(&mut self, pruned_ids: Vec<LruItemId>) -> Vec<K> {
         let mut pruned_keys = Vec::new();
         for id in pruned_ids {
-            if let Some(slot) = self.id_to_slot.get(&id).copied() {
-                if let Some(key) = self.remove_slot(slot) {
-                    pruned_keys.push(key);
-                }
+            if let Some(slot) = self.id_to_slot.get(&id).copied()
+                && let Some(key) = self.remove_slot(slot)
+            {
+                pruned_keys.push(key);
             }
         }
         pruned_keys

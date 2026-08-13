@@ -1,36 +1,15 @@
 use future_form::Local;
 use keyhive_core::{
-    access::Access,
-    keyhive::Keyhive,
-    listener::no_listener::NoListener,
-    principal::{membered::Membered, peer::Peer},
-    store::ciphertext::memory::MemoryCiphertextStore,
+    access::Access, keyhive::Keyhive, listener::no_listener::NoListener,
+    principal::membered::Membered, store::ciphertext::memory::MemoryCiphertextStore,
 };
 use keyhive_crypto::signer::memory::MemorySigner as KeyhiveMemorySigner;
 use nonempty::nonempty;
-use sedimentree_core::{
-    codec::{
-        decode::{self, DecodeFields},
-        encode::{self, EncodeFields},
-        error::DecodeError,
-        schema::{self, Schema},
-    },
-    id::SedimentreeId,
-};
-use subduction_core::peer::id::PeerId;
-use subduction_crypto::{
-    signed::Signed, signer::memory::MemorySigner as SubductionMemorySigner,
-    verified_author::VerifiedAuthor,
-};
-use subduction_keyhive::{
-    policy::{authorize_fetch_with, authorize_put_with},
-    test_utils::{
-        create_channel_pair, keyhive_peer_id, make_protocol_with_shared_keyhive, run_sync_round,
-    },
+use subduction_keyhive::test_utils::{
+    create_channel_pair, keyhive_peer_id, make_protocol_with_shared_keyhive, run_sync_round,
 };
 
 use crate::interlude::*;
-
 type DemoKeyhive = Keyhive<
     Local,
     KeyhiveMemorySigner,
@@ -40,40 +19,6 @@ type DemoKeyhive = Keyhive<
     NoListener,
     rand08::rngs::OsRng,
 >;
-
-#[derive(Debug, Clone, Copy)]
-struct DemoWrite {
-    nonce: u64,
-}
-
-impl Schema for DemoWrite {
-    const PREFIX: [u8; 2] = schema::SUBDUCTION_PREFIX;
-    const TYPE_BYTE: u8 = b'D';
-    const VERSION: u8 = 0;
-}
-
-impl EncodeFields for DemoWrite {
-    fn encode_fields(&self, buf: &mut Vec<u8>) {
-        encode::u64(self.nonce, buf);
-    }
-
-    fn fields_size(&self) -> usize {
-        8
-    }
-}
-
-impl DecodeFields for DemoWrite {
-    const MIN_SIGNED_SIZE: usize = 4 + 32 + 8 + 64;
-
-    fn try_decode_fields(buf: &[u8]) -> Result<(Self, usize), DecodeError> {
-        Ok((
-            Self {
-                nonce: decode::u64(buf, 0)?,
-            },
-            8,
-        ))
-    }
-}
 
 pub async fn cli() -> Res<()> {
     let alice = keyhive_from_seed(0xA1).await?;
@@ -94,15 +39,14 @@ pub async fn cli() -> Res<()> {
 
     println!("=== Testing application-secret predecessor key chain ===");
 
-    // Store encrypted content and keys for the chain demo
-    let mut pre_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
-    let mut post_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
-    let mut sealed_pred_key: Option<Vec<u8>> = None;
-    let pre_grant_pcs: Option<Vec<u8>> = None;
-    let post_grant_pcs: Option<Vec<u8>> = None;
+    // Store encrypted content and keys for the chain demo (assigned inside
+    // the doc_id block below, before first read).
+    let pre_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>>;
+    let post_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>>;
+    let sealed_pred_key: Option<Vec<u8>>;
 
     let doc_id = {
-        let kh = alice_kh.lock().await;
+        let kh = alice_kh;
         let doc = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;
         let doc_id = doc.lock().await.doc_id();
         let doc_id_bytes = doc_id.to_bytes();
@@ -111,7 +55,7 @@ pub async fn cli() -> Res<()> {
         let pre_ref = [0x01u8; 32];
         let pre_content = b"pre-grant";
         let (enc_pre, key_pre) = kh
-            .try_encrypt_content_keyed(doc.clone(), &pre_ref, &vec![], pre_content)
+            .try_encrypt_content_keyed(Arc::clone(&doc), &pre_ref, &vec![], pre_content)
             .await?;
         let pre_ec = enc_pre.encrypted_content().clone();
         println!(
@@ -128,7 +72,7 @@ pub async fn cli() -> Res<()> {
         let update = kh
             .add_member(
                 bob_agent,
-                &Membered::Document(doc_id, doc.clone()),
+                &Membered::Document(doc_id, Arc::clone(&doc)),
                 Access::Edit,
                 &[],
             )
@@ -141,7 +85,7 @@ pub async fn cli() -> Res<()> {
         let post_ref = [0x02u8; 32];
         let post_content = b"post-grant";
         let (enc_post, key_post) = kh
-            .try_encrypt_content_keyed(doc.clone(), &post_ref, &vec![], post_content)
+            .try_encrypt_content_keyed(Arc::clone(&doc), &post_ref, &vec![], post_content)
             .await?;
         let post_ec = enc_post.encrypted_content().clone();
         println!(
@@ -155,7 +99,7 @@ pub async fn cli() -> Res<()> {
         // From key_post, he can unwrap the sealed predecessor to get key_pre.
         let sealed = key_post
             .try_seal(key_pre.as_slice(), &doc_id_bytes)
-            .map_err(|e| eyre::eyre!("try_seal failed: {e}"))?;
+            .map_err(|err| eyre::eyre!("try_seal failed: {err}"))?;
         println!(
             "Sealed pred key: {} bytes (key_post sealed key_pre)",
             sealed.len()
@@ -198,7 +142,7 @@ pub async fn cli() -> Res<()> {
 
     // Bob: try to decrypt
     {
-        let kh = bob_kh.lock().await;
+        let kh = bob_kh;
         if let Some(doc) = kh.get_document(doc_id).await {
             let mut locked = doc.lock().await;
             println!("Bob's doc cgka: {}", locked.cgka().is_ok());
@@ -215,8 +159,10 @@ pub async fn cli() -> Res<()> {
                         if let Some(ref pre_ec) = pre_grant_enc {
                             match locked.try_decrypt_content(pre_ec) {
                                 Ok(_) => println!("PRE-GRANT decrypt OK (unexpected!)"),
-                                Err(e) => {
-                                    println!("PRE-GRANT decrypt via CGKA: FAILED ({e}) — expected forward-secrecy");
+                                Err(err) => {
+                                    println!(
+                                        "PRE-GRANT decrypt via CGKA: FAILED ({err}) — expected forward-secrecy"
+                                    );
 
                                     // Now try the application-level chain:
                                     // Use the post-grant key to unwrap the sealed predecessor key
@@ -235,15 +181,15 @@ pub async fn cli() -> Res<()> {
                                                             "PRE-GRANT decrypt via CHAIN: OK! → \"{text}\""
                                                         );
                                                     }
-                                                    Err(e) => {
+                                                    Err(err) => {
                                                         println!(
-                                                            "PRE-GRANT decrypt via chain: FAILED ({e})"
+                                                            "PRE-GRANT decrypt via chain: FAILED ({err})"
                                                         );
                                                     }
                                                 }
                                             }
-                                            Err(e) => {
-                                                println!("try_open sealed pred key failed: {e}");
+                                            Err(err) => {
+                                                println!("try_open sealed pred key failed: {err}");
                                             }
                                         }
                                     } else {
@@ -253,7 +199,7 @@ pub async fn cli() -> Res<()> {
                             }
                         }
                     }
-                    Err(e) => println!("POST-GRANT decrypt FAILED: {e}"),
+                    Err(err) => println!("POST-GRANT decrypt FAILED: {err}"),
                 }
             }
         }
@@ -280,10 +226,4 @@ async fn exchange_contact_cards(left: &DemoKeyhive, right: &DemoKeyhive) -> Res<
     left.receive_contact_card(&right_card).await?;
     right.receive_contact_card(&left_card).await?;
     Ok(())
-}
-
-async fn verified_author_from_seed(seed: u8) -> VerifiedAuthor {
-    let signer = SubductionMemorySigner::from_bytes(&[seed; 32]);
-    let verified = Signed::seal::<future_form::Sendable, _>(&signer, DemoWrite { nonce: 1 }).await;
-    verified.verified_author()
 }

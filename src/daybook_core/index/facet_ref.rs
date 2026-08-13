@@ -7,7 +7,7 @@ use crate::repos::Repo;
 use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
-use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
+use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 use tokio_util::sync::CancellationToken;
 
 const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/wip/doc-facet-ref-index";

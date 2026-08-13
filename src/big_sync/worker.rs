@@ -2,14 +2,14 @@ use std::collections::VecDeque;
 
 use crate::interlude::*;
 
-use crate::trap;
 use crate::SyncBackend;
+use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, PartId,
-    PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId, mpsc,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[cfg(any(test, feature = "test-support"))]
 use big_sync_core::TaskCounts;
@@ -26,10 +26,15 @@ type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
 pub enum BigSyncWorkerError {
-    /// Unkown backend {backend_id} set for part {part_id}
+    /// Unknown backend {backend_id} set for part {part_id}
     UnknownBackend {
         backend_id: BackendId,
         part_id: PartId,
+    },
+    /// Unknown backend {backend_id} set for object {obj_id:?}
+    UnknownObjectBackend {
+        backend_id: BackendId,
+        obj_id: ObjId,
     },
     /// Unknown peer {peer_id} in full sync waiter request
     UnknownPeer { peer_id: PeerId },
@@ -47,6 +52,8 @@ structstruck::strike! {
             client: SharedPeerRpcClient,
             /// Partitions to sync from the peer
             parts: HashMap<PartId, BackendId>,
+            /// Objects to follow directly from the peer
+            objects: HashMap<ObjId, BackendId>,
             resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>
         },
         RemovePeer {
@@ -131,20 +138,23 @@ impl BigSyncWorkerHandle {
         peer_id: PeerId,
         client: Arc<dyn crate::rpc::HostBigRpcClient>,
         parts: HashMap<PartId, BackendId>,
+        objects: HashMap<ObjId, BackendId>,
     ) -> Res<()> {
         let part_count = parts.len();
+        let object_count = objects.len();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::SetPeer {
                 peer_id,
                 client,
                 parts,
+                objects,
                 resp: resp_tx,
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
-        tracing::debug!(peer_id = %peer_id, part_count, "queue set peer");
         resp_rx.await.wrap_err(ERROR_CHANNEL)??;
+        tracing::debug!(peer_id = %peer_id, part_count, object_count, "queue set peer");
         Ok(())
     }
 
@@ -236,12 +246,25 @@ const ABORT_DURATION_SECS: u64 = 2;
 pub fn spawn_big_sync_worker(
     part_store: SharedPartitionStore,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
+    label: &'static str,
+) -> Res<(BigSyncWorkerHandle, StopToken)> {
+    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None)
+}
+
+pub fn spawn_big_sync_worker_with_options(
+    part_store: SharedPartitionStore,
+    sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
+    label: &'static str,
+    max_task_backoff: Option<Duration>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
     let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
 
-    let machine = big_sync_core::BigSyncMachine::default();
+    let mut machine = big_sync_core::BigSyncMachine::default();
+    if let Some(backoff) = max_task_backoff {
+        machine.set_max_task_backoff(backoff);
+    }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());
@@ -251,6 +274,7 @@ pub fn spawn_big_sync_worker(
         part_store,
         sync_backends,
         machine,
+        label,
 
         machine_spawn_queue: default(),
         sync_spawn_queue: default(),
@@ -313,10 +337,10 @@ pub fn spawn_big_sync_worker(
             if let Some(Err(err)) = maybe_res {
                 return Err(err);
             }
-            if let Some(shutdown) = Arc::into_inner(shutdown) {
-                if let Some(res) = shutdown.err.into_inner() {
-                    return Err(res);
-                }
+            if let Some(shutdown) = Arc::into_inner(shutdown)
+                && let Some(res) = shutdown.err.into_inner()
+            {
+                return Err(res);
             }
             Ok(())
         }
@@ -343,13 +367,21 @@ struct BigRedToken {
 
 impl BigRedToken {
     fn set_err(&self, err: eyre::Report) {
-        let _ = self.err.set(err);
+        self.err
+            .set(err)
+            .inspect_err(|err| warn!("dropping double error: {err}"))
+            .ok();
         self.master_cancel.cancel();
     }
 }
 
 struct BigSyncWorker {
     cancel_token: CancellationToken,
+
+    /// Node-scoped label recorded on the machine loop's spans, so task-level
+    /// logs can be attributed to a specific worker (the machine itself is
+    /// otherwise anonymous — it only knows remote peer ids).
+    label: &'static str,
 
     task_set: utils_rs::AbortableJoinSet,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
@@ -377,6 +409,7 @@ struct BigSyncWorker {
 
 struct PeerState {
     parts: HashMap<PartId, BackendId>,
+    objects: HashMap<ObjId, BackendId>,
 }
 
 struct TaskDeets {
@@ -404,44 +437,43 @@ struct ZombieTaskDeets {
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
 impl BigSyncWorker {
-    #[tracing::instrument(skip(self, shutdown))]
+    #[tracing::instrument(skip(self, shutdown), fields(worker = %self.label))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
-                    debug!("XXX cancelled");
+                    trace!("machine loop cancelled");
                     break;
                 }
                 msg = self.task_rx.recv() => {
                     let Ok(msg) = msg else {
                         break;
                     };
-                    debug!(?msg, "XXX task msg");
+                    trace!(?msg, "received task msg");
                     self.machine.handle_task_msg(msg);
                 }
                 evt = self.sync_rx.recv() => {
                     let Ok(evt) = evt else {
                         break;
                     };
-                    debug!(?evt, "XXX sync msg");
+                    debug!(worker = %self.label, ?evt, "big_sync worker received sync event");
                     self.machine.handle_evt(evt);
                 }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
-                    debug!(?msg, "XXX host msg");
+                    debug!(worker = %self.label, ?msg, "big_sync worker received host msg");
                     self.handle_msg(msg).await?;
                 }
                 _ = janitor_tick.tick() => {
-                    // info!("XXX jainator tick");
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
             while let Some((id, cmd)) = self.machine.get_cmd() {
-                debug!(?cmd, "XXX cmd");
+                trace!(?cmd, "executing machine cmd");
                 match cmd {
                     BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
                         self.part_store
@@ -470,7 +502,7 @@ impl BigSyncWorker {
             self.machine_spawn_queue
                 .extend(self.machine.drain_machine_spawn_queue());
             while let Some(task) = self.machine_spawn_queue.pop_front() {
-                debug!(?task, "XXX machine task");
+                trace!(?task, "spawning machine task");
                 self.spawn_machine_task(task, Arc::clone(&shutdown)).await?;
             }
 
@@ -481,18 +513,19 @@ impl BigSyncWorker {
                 let Some(task) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
-                debug!(?task, "XXX sync task");
+                debug!(worker = %self.label, task_id = task.id, peer_id = %task.deets.peer_id, obj_id = %task.deets.obj_id, "spawning sync task");
                 self.spawn_sync_task(task).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
-                debug!(?event, "XXX stat event");
-                if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event {
-                    if let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
-                        let _ = resp.send(Ok(()));
-                    }
+                debug!(worker = %self.label, ?event, "dispatching stat event");
+                if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event
+                    && let Some(resp) = self.full_sync_waiters.remove(&waiter_id)
+                {
+                    info!(worker = %self.label, waiter_id, "full sync waiter satisfied");
+                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 }
-                let _ = self.stats_tx.send(event);
+                self.stats_tx.send(event).ok();
             }
         }
         Ok(())
@@ -504,6 +537,7 @@ impl BigSyncWorker {
                 peer_id,
                 client,
                 parts,
+                objects,
                 resp,
             } => {
                 for (&part_id, backend_id) in &parts {
@@ -511,6 +545,17 @@ impl BigSyncWorker {
                         resp.send(Err(BigSyncWorkerError::UnknownBackend {
                             backend_id: Arc::clone(backend_id),
                             part_id,
+                        }))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                        return Ok(());
+                    }
+                }
+                for (&obj_id, backend_id) in &objects {
+                    if !self.sync_backends.contains_key(backend_id) {
+                        resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
+                            backend_id: Arc::clone(backend_id),
+                            obj_id,
                         }))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
@@ -525,23 +570,27 @@ impl BigSyncWorker {
                     peer_id,
                     PeerState {
                         parts: parts.clone(),
+                        objects: objects.clone(),
                     },
                 );
                 let part_count = parts.len();
+                let object_count = objects.len();
                 let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
                     peer_id,
                     parts: parts.into_keys().collect(),
+                    objects: objects.into_keys().collect(),
                 });
-                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                tracing::debug!(peer_id = %peer_id, part_count, "accept set peer");
                 self.machine.handle_evt(evt);
+                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
+                self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
+                self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
-                self.machine.handle_evt(evt);
             }
             BigSyncWorkerMsg::WaitForFullSync {
                 waiter_id,
@@ -615,7 +664,7 @@ impl BigSyncWorker {
         let task_ids: Vec<_> = self.machine.drain_stop_queue().collect();
         let stop_count = task_ids.len();
         if stop_count > 0 {
-            tracing::debug!(stop_count, "draining stop queue");
+            tracing::trace!(stop_count, "draining stop queue");
         }
         for task_id in task_ids {
             if let Some(task) = self.tasks.remove(&task_id) {
@@ -660,7 +709,7 @@ impl BigSyncWorker {
             .zombie_tasks
             .extract_if(|_task_id, task| task.handle.is_finished())
         {
-            tracing::debug!(task_id, kind = ?task.kind, "sweeping finished zombie task");
+            tracing::trace!(task_id, kind = ?task.kind, "sweeping finished zombie task");
         }
     }
 
@@ -718,23 +767,29 @@ impl BigSyncWorker {
     }
 
     async fn spawn_sync_task(&mut self, task: SyncTask) -> Res<()> {
-        let peer_state = self
-            .peers
-            .get(&task.deets.peer_id)
-            .expect(ERROR_UNRECONIZED);
-        let mut part_ids: Vec<PartId> = if task.part_hints.is_empty() {
+        let Some(peer_state) = self.peers.get(&task.deets.peer_id) else {
+            tracing::debug!(
+                peer_id = %task.deets.peer_id,
+                obj_id = %task.deets.obj_id,
+                "skipping sync task for removed peer"
+            );
+            return Ok(());
+        };
+        let object_backend_id = if task.part_hints.is_empty() {
+            peer_state.objects.get(&task.deets.obj_id).cloned()
+        } else {
+            None
+        };
+        let mut part_ids: Vec<PartId> = if object_backend_id.is_some() {
+            Vec::new()
+        } else if task.part_hints.is_empty() {
             self.part_store.obj_parts(task.deets.obj_id).await?
         } else {
             task.part_hints.iter().copied().collect()
         };
         part_ids.sort_unstable();
         part_ids.dedup();
-        assert!(
-            !part_ids.is_empty(),
-            "sync task for obj {:?} had no parts to resolve a backend",
-            task.deets.obj_id
-        );
-        let mut backend_id = None;
+        let mut backend_id = object_backend_id;
         for part_id in &part_ids {
             let Some(part_backend_id) = peer_state.parts.get(part_id) else {
                 panic!(
@@ -759,7 +814,7 @@ impl BigSyncWorker {
         );
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
-        tracing::debug!(
+        tracing::trace!(
             task_id,
             peer_id = %task.deets.peer_id,
             obj_id = %task.deets.obj_id,
@@ -802,7 +857,7 @@ struct MachineTaskWorker {
 impl MachineTaskWorker {
     #[tracing::instrument(skip(self))]
     async fn run(self) {
-        let _ = self
+        let _cancelled = self
             .cancel_token
             .run_until_cancelled(async move {
                 let (trap, mut err_rx) = trap::TaskTrap::new();
@@ -862,6 +917,7 @@ impl SyncTaskWorker {
         )
     )]
     async fn run(self) {
+        let cancel_token = self.cancel_token.clone();
         let fut = async move {
             let SyncTask {
                 id: _task_id,
@@ -874,43 +930,35 @@ impl SyncTaskWorker {
                 remote_payload,
             } = deets;
             let res = self.backend.sync_obj(peer_id, obj_id, remote_payload).await;
-            match res {
+            let event = match res {
                 Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncCompleted(
-                            big_sync_core::SyncCompletedEvent {
-                                task_id: _task_id,
-                                peer_id,
-                                completion,
-                            },
-                        ))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                    BigSyncEvent::SyncCompleted(big_sync_core::SyncCompletedEvent {
+                        task_id: _task_id,
+                        peer_id,
+                        completion,
+                    })
                 }
                 Ok(SyncTaskRunOutcome::Stale) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
-                            task_id: _task_id,
-                            peer_id,
-                            obj_id,
-                        }))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                    BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
+                        task_id: _task_id,
+                        peer_id,
+                        obj_id,
+                    })
                 }
-                Err(err) => {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                            task_id: _task_id,
-                            peer_id,
-                            obj_id,
-                            err,
-                        }))
-                        .await
-                        .expect(ERROR_CHANNEL);
-                }
+                Err(err) => BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                    task_id: _task_id,
+                    peer_id,
+                    obj_id,
+                    err,
+                }),
+            };
+            if let Err(err) = self.host_tx.send(event).await
+                && !self.cancel_token.is_cancelled()
+            {
+                panic!("{}: {err:?}", ERROR_CHANNEL);
             }
         };
-        let _ = self.cancel_token.run_until_cancelled(fut).await;
+        let _cancelled = cancel_token.run_until_cancelled(fut).await;
     }
 }
 

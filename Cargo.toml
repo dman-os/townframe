@@ -49,7 +49,7 @@ exclude = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.91"
 authors = []
 license = ""
@@ -169,17 +169,19 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-keyhive_crypto = "0.2.1"
-keyhive_core = "0.5.0"
-beekem = "0.3.0"
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
+
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
 nonempty = "0.10.0"
@@ -243,20 +245,22 @@ irpc-iroh = "0.17.0"
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-keyhive_core = { path = "../keyhive/keyhive_core" }
-beekem = { path = "../keyhive/beekem" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
+# #
+# [patch."https://github.com/dman-os/subduction"]
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 #
-[patch."https://github.com/dman-os/subduction"]
-subduction_core = { path = "../subduction/subduction_core" }
-subduction_iroh = { path = "../subduction/subduction_iroh" }
-subduction_websocket = { path = "../subduction/subduction_websocket" }
-sedimentree_core = { path = "../subduction/sedimentree_core" }
-subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-subduction_crypto = { path = "../subduction/subduction_crypto" }
-subduction_keyhive = { path = "../subduction/subduction_keyhive" }
-
+# [patch."https://github.com/dman-os/keyhive"]
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# beekem = { path = "../keyhive/beekem" }
 
 # The default profile is optimized for Wasm builds because
 # that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).
@@ -282,6 +286,10 @@ panic = "abort"
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"
+clippy.let_underscore_must_use = "warn"
+clippy.let_underscore_untyped = "deny"
+rust.let_underscore_drop = "deny"
+# clippy.used_underscore_binding = "warn"
 
 [[workspace.metadata.leptos]]
 name = "wflow_webui"

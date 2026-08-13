@@ -189,13 +189,12 @@ async fn wait_for_proposal_set(
                 None,
             )
             .await?
+            && let Some(raw) = doc.facets.get(&proposal_set_key)
         {
-            if let Some(raw) = doc.facets.get(&proposal_set_key) {
-                let value: crate::types::PseudoLabelCandidatesFacet =
-                    serde_json::from_value(raw.clone())?;
-                if !value.labels.is_empty() {
-                    return Ok(value);
-                }
+            let value: crate::types::PseudoLabelCandidatesFacet =
+                serde_json::from_value(raw.clone())?;
+            if !value.labels.is_empty() {
+                return Ok(value);
             }
         }
 

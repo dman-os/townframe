@@ -6,12 +6,13 @@
 // FIXME: KeyhiveStorage requires loading all archives at once instead of
 // by id which is wasteful
 
+use crate::sqlite_big_repo_store::SqliteBigRepoStore;
 use std::convert::Infallible;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use futures::{future::BoxFuture, FutureExt};
+use futures::{FutureExt, future::BoxFuture};
 use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
 
 /// Subdirectory of the repo data dir holding keyhive state.
@@ -19,6 +20,7 @@ pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
 
 const ARCHIVES_SUBDIR: &str = "archives";
 const OPS_SUBDIR: &str = "ops";
+const LOCAL_SECRETS_SUBDIR: &str = "local-secrets";
 const PREKEY_SECRETS_FILE: &str = "prekey-secrets.bin";
 const TMP_SUBDIR: &str = "tmp";
 
@@ -44,6 +46,13 @@ impl FsKeyhiveStorage {
     pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
         std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
         std::fs::create_dir_all(root.join(OPS_SUBDIR))?;
+        let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
+        std::fs::create_dir_all(&secrets_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
         Ok(Self { root })
     }
@@ -54,6 +63,10 @@ impl FsKeyhiveStorage {
 
     fn event_dir(&self) -> PathBuf {
         self.root.join(OPS_SUBDIR)
+    }
+
+    fn local_secret_dir(&self) -> PathBuf {
+        self.root.join(LOCAL_SECRETS_SUBDIR)
     }
 
     fn tmp_dir(&self) -> PathBuf {
@@ -67,7 +80,11 @@ impl FsKeyhiveStorage {
             std::process::id()
         ));
         let dest = self.root.join(PREKEY_SECRETS_FILE);
-        tokio::fs::write(&tmp, bytes).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&bytes).await?;
+        file.sync_all().await?;
+        drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -102,18 +119,55 @@ impl FsKeyhiveStorage {
             std::process::id()
         ));
 
-        tokio::fs::write(&tmp, data).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
             Ok(()) => Ok(()),
-            Err(e) => {
+            Err(err) => {
                 drop(tokio::fs::remove_file(&tmp).await);
                 if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
                     Ok(())
                 } else {
-                    Err(e)
+                    Err(err)
                 }
             }
         }
+    }
+
+    async fn save_file_if_absent(
+        &self,
+        parent_dir: PathBuf,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> io::Result<bool> {
+        let dest = parent_dir.join(format!("{}.bin", hash.to_hex()));
+        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.tmp_dir().join(format!(
+            "{}.{}.{tmp_id}.tmp",
+            hash.to_hex(),
+            std::process::id()
+        ));
+        tokio::fs::write(&tmp, data).await?;
+        #[cfg(unix)]
+        {
+            if parent_dir.ends_with(LOCAL_SECRETS_SUBDIR) || parent_dir == self.local_secret_dir() {
+                use std::os::unix::fs::PermissionsExt;
+                drop(std::fs::set_permissions(
+                    &tmp,
+                    std::fs::Permissions::from_mode(0o600),
+                ));
+            }
+        }
+        let result = match tokio::fs::hard_link(&tmp, &dest).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        };
+        drop(tokio::fs::remove_file(&tmp).await);
+        result
     }
 
     async fn load_dir(dir: PathBuf) -> io::Result<Vec<(StorageHash, Vec<u8>)>> {
@@ -122,7 +176,7 @@ impl FsKeyhiveStorage {
         let mut rd = fs::read_dir(&dir).await?;
         while let Some(entry) = rd.next_entry().await? {
             let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
             let Some(hash) = StorageHash::from_hex(stem) else {
@@ -138,8 +192,8 @@ impl FsKeyhiveStorage {
         let path = parent_dir.join(format!("{}.bin", hash.to_hex()));
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 }
@@ -175,10 +229,10 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         &self,
         hash: StorageHash,
         data: Vec<u8>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         let parent_dir = self.event_dir();
         async move {
-            self.save_file(parent_dir, hash, data)
+            self.save_file_if_absent(parent_dir, hash, data)
                 .await
                 .map_err(Into::into)
         }
@@ -194,13 +248,48 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         let dir = self.event_dir();
         async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
     }
+
+    fn save_local_secret(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        let parent_dir = self.local_secret_dir();
+        async move {
+            self.save_file_if_absent(parent_dir, hash, data)
+                .await
+                .map_err(Into::into)
+        }
+        .boxed()
+    }
+
+    fn load_local_secrets(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        let dir = self.local_secret_dir();
+        async move { Self::load_dir(dir).await.map_err(Into::into) }.boxed()
+    }
+
+    fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        let dir = self.local_secret_dir();
+        async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
+    }
 }
 
 /// Keyhive storage backend selected by the BigRepo storage mode.
 #[derive(Debug, Clone)]
 pub(crate) enum BigRepoKeyhiveStorage {
-    Memory(MemoryKeyhiveStorage),
-    Fs(FsKeyhiveStorage),
+    Memory {
+        events: SqliteBigRepoStore,
+        archives: MemoryKeyhiveStorage,
+    },
+    /// Test-only in-memory backend for legacy runtime unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    MemoryLegacy(MemoryKeyhiveStorage),
+    Fs {
+        events: SqliteBigRepoStore,
+        archives: FsKeyhiveStorage,
+    },
 }
 
 /// Error type returned by [`BigRepoKeyhiveStorage`] operations.
@@ -210,28 +299,38 @@ pub(crate) enum BigRepoKeyhiveStorageError {
     Memory(#[from] Infallible),
     #[error(transparent)]
     Fs(#[from] FsKeyhiveStorageError),
+    #[error(transparent)]
+    Sqlite(#[from] crate::sqlite_big_repo_store::SqliteBigRepoStoreError),
 }
 
 impl BigRepoKeyhiveStorage {
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn memory() -> Self {
-        Self::Memory(MemoryKeyhiveStorage::new())
+        Self::MemoryLegacy(MemoryKeyhiveStorage::new())
     }
 
-    pub(crate) fn fs(root: PathBuf) -> io::Result<Self> {
-        FsKeyhiveStorage::new(root).map(Self::Fs)
+    pub(crate) fn memory_sqlite(events: SqliteBigRepoStore) -> Self {
+        Self::Memory {
+            events,
+            archives: MemoryKeyhiveStorage::new(),
+        }
+    }
+
+    pub(crate) fn fs(events: SqliteBigRepoStore, root: PathBuf) -> io::Result<Self> {
+        FsKeyhiveStorage::new(root).map(|archives| Self::Fs { events, archives })
     }
 
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
         match self {
-            Self::Memory(_) => Ok(()),
-            Self::Fs(storage) => storage.save_prekey_secrets(bytes).await,
+            Self::Memory { .. } | Self::MemoryLegacy(_) => Ok(()),
+            Self::Fs { archives, .. } => archives.save_prekey_secrets(bytes).await,
         }
     }
 
     pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
         match self {
-            Self::Memory(_) => Ok(None),
-            Self::Fs(storage) => storage.load_prekey_secrets().await,
+            Self::Memory { .. } | Self::MemoryLegacy(_) => Ok(None),
+            Self::Fs { archives, .. } => archives.load_prekey_secrets().await,
         }
     }
 }
@@ -246,12 +345,21 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { archives, .. } => {
+                    <MemoryKeyhiveStorage as KeyhiveStorage<future_form::Sendable>>::save_archive(
+                        archives, hash, data,
+                    )
+                    .await
+                    .map_err(Into::into)
+                }
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::save_archive(storage, hash, data)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.save_archive(hash, data).await.map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.save_archive(hash, data).await.map_err(Into::into)
+                }
             }
         }
         .boxed()
@@ -260,12 +368,17 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     fn load_archives(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_archives(archives)
+                .await
+                .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::load_archives(storage)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.load_archives().await.map_err(Into::into),
+                Self::Fs { archives, .. } => archives.load_archives().await.map_err(Into::into),
             }
         }
         .boxed()
@@ -274,12 +387,19 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     fn delete_archive(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::delete_archive(archives, hash)
+                .await
+                .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::delete_archive(storage, hash)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.delete_archive(hash).await.map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.delete_archive(hash).await.map_err(Into::into)
+                }
             }
         }
         .boxed()
@@ -289,15 +409,18 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
         &self,
         hash: StorageHash,
         data: Vec<u8>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { events, .. } | Self::Fs { events, .. } => events
+                    .save_keyhive_event(hash, data)
+                    .await
+                    .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::save_event(storage, hash, data)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.save_event(hash, data).await.map_err(Into::into),
             }
         }
         .boxed()
@@ -306,12 +429,14 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     fn load_events(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { events, .. } | Self::Fs { events, .. } => {
+                    events.load_keyhive_events().await.map_err(Into::into)
+                }
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::load_events(storage)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.load_events().await.map_err(Into::into),
             }
         }
         .boxed()
@@ -320,12 +445,92 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
-                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                Self::Memory { events, .. } | Self::Fs { events, .. } => {
+                    events.delete_keyhive_event(hash).await.map_err(Into::into)
+                }
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::delete_event(storage, hash)
                 .await
                 .map_err(Into::into),
-                Self::Fs(storage) => storage.delete_event(hash).await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn save_local_secret(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        async move {
+            match self {
+                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::save_local_secret(
+                    archives, hash, data
+                )
+                .await
+                .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::save_local_secret(
+                    storage, hash, data
+                )
+                .await
+                .map_err(Into::into),
+                Self::Fs { archives, .. } => archives
+                    .save_local_secret(hash, data)
+                    .await
+                    .map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn load_local_secrets(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        async move {
+            match self {
+                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_local_secrets(archives)
+                .await
+                .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_local_secrets(storage)
+                .await
+                .map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.load_local_secrets().await.map_err(Into::into)
+                }
+            }
+        }
+        .boxed()
+    }
+
+    fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        async move {
+            match self {
+                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::delete_local_secret(
+                    archives, hash
+                )
+                .await
+                .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::delete_local_secret(
+                    storage, hash
+                )
+                .await
+                .map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.delete_local_secret(hash).await.map_err(Into::into)
+                }
             }
         }
         .boxed()

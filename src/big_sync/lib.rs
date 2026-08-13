@@ -13,21 +13,26 @@ pub mod rpc;
 pub mod stress_support;
 #[cfg(test)]
 mod test;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod trap;
 mod worker;
 
 pub use backend::SyncBackend;
 pub use big_sync_core::part_store::ObjPayload;
+#[cfg(feature = "test-support")]
+pub use part_store::host_contract as host_part_store_contract;
+#[cfg(feature = "test-support")]
+pub use part_store::host_contract::HostPartStoreContractHarness;
 pub use part_store::memory::MemoryPartStore;
 pub use part_store::sqlite::SqlitePartStore;
-pub use part_store::HostPartStore;
+pub use part_store::sqlite_core;
+pub use part_store::{HostPartStore, HostPartStoreConfig};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{
-    spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,
-    SyncTaskRunOutcome,
+    BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken, SyncTaskRunOutcome,
+    spawn_big_sync_worker, spawn_big_sync_worker_with_options,
 };
 
 #[derive(Clone)]

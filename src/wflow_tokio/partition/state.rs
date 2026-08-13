@@ -69,7 +69,10 @@ impl PartitionWorkingState {
     /// FIXME: probably best to ensure this gets called using type system
     pub fn notify_counts_changed(&self, counts: JobCounts) {
         // Ignore errors - receivers may have been dropped
-        let _ = self.change_tx.send(counts);
+        self.change_tx
+            .send(counts)
+            .inspect_err(|err| tracing::warn!(ERROR_CHANNEL, ?err))
+            .ok();
     }
 
     /// Get a receiver for count change notifications

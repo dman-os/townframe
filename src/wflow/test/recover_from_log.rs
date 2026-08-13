@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use std::collections::HashMap;
 
-use crate::test::{test_wflows_wasm_path, InitialWorkload, WflowTestContext};
+use crate::test::{InitialWorkload, WflowTestContext, test_wflows_wasm_path};
 
 fn source_effect_counts(
     log_snapshot: &[(u64, wflow_core::partition::log::PartitionLogEntry)],

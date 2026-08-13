@@ -1033,16 +1033,16 @@ fn compare_json_values(lhs: &serde_json::Value, op: CompareOp, rhs: &serde_json:
                     _ => unreachable!(),
                 };
             }
-            if let (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) = (lhs, rhs) {
-                if let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64()) {
-                    return match op {
-                        CompareOp::Gt => lhs > rhs,
-                        CompareOp::Gte => lhs >= rhs,
-                        CompareOp::Lt => lhs < rhs,
-                        CompareOp::Lte => lhs <= rhs,
-                        _ => unreachable!(),
-                    };
-                }
+            if let (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) = (lhs, rhs)
+                && let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64())
+            {
+                return match op {
+                    CompareOp::Gt => lhs > rhs,
+                    CompareOp::Gte => lhs >= rhs,
+                    CompareOp::Lt => lhs < rhs,
+                    CompareOp::Lte => lhs <= rhs,
+                    _ => unreachable!(),
+                };
             }
             if let (Some(lhs), Some(rhs)) = (lhs.as_str(), rhs.as_str()) {
                 return match op {

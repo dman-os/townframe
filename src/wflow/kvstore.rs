@@ -463,13 +463,19 @@ impl SqliteKvWorker {
                     tx.commit().await?;
                     Ok(Ok(()))
                 } else {
-                    let _ = tx.rollback().await;
+                    tx.rollback()
+                        .await
+                        .inspect_err(|err| error!("error on rollback: {err}"))
+                        .ok();
                     let (new_val, new_ver) = self.handle_new_cas(table, &key).await?;
                     Ok(Err((new_val, new_ver)))
                 }
             }
             Err(err) => {
-                let _ = tx.rollback().await;
+                tx.rollback()
+                    .await
+                    .inspect_err(|err| error!("error on rollback: {err}"))
+                    .ok();
                 Err(err.into())
             }
         }

@@ -235,10 +235,9 @@ pub fn schema_allows_reference_object(schema_node: &serde_json::Value) -> bool {
         if let Some(branches) = schema_node
             .get(branch_key)
             .and_then(|value| value.as_array())
+            && branches.iter().any(schema_allows_reference_object)
         {
-            if branches.iter().any(schema_allows_reference_object) {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -254,10 +253,9 @@ fn schema_supports_string(schema_node: &serde_json::Value) -> bool {
         if let Some(branches) = schema_node
             .get(branch_key)
             .and_then(|value| value.as_array())
+            && branches.iter().any(schema_supports_string)
         {
-            if branches.iter().any(schema_supports_string) {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -278,10 +276,9 @@ fn schema_supports_array_of_strings(schema_node: &serde_json::Value) -> bool {
         if let Some(branches) = schema_node
             .get(branch_key)
             .and_then(|value| value.as_array())
+            && branches.iter().any(schema_supports_array_of_strings)
         {
-            if branches.iter().any(schema_supports_array_of_strings) {
-                return true;
-            }
+            return true;
         }
     }
 

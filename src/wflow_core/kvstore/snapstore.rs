@@ -87,12 +87,11 @@ impl crate::snapstore::SnapStore for KvSnapStore {
         let mut cas = self.kv_store.new_cas(&meta_key).await?;
 
         // 1. Initial check: is there already a newer snapshot?
-        if let Some(current_bytes) = cas.current() {
-            if let Ok(meta) = serde_json::from_slice::<SnapshotMetadata>(&current_bytes) {
-                if meta.entry_id >= entry_id {
-                    return Ok(());
-                }
-            }
+        if let Some(current_bytes) = cas.current()
+            && let Ok(meta) = serde_json::from_slice::<SnapshotMetadata>(&current_bytes)
+            && meta.entry_id >= entry_id
+        {
+            return Ok(());
         }
 
         // 2. Generate new blob ID and write it ONCE
@@ -147,14 +146,18 @@ impl crate::snapstore::SnapStore for KvSnapStore {
                 }
                 Err(CasError::StoreError(err)) => {
                     // Fatal store error, clean up our blob.
-                    let _ = self.kv_store.del(&new_blob_key).await;
+                    if let Err(err) = self.kv_store.del(&new_blob_key).await {
+                        warn!("error cleaning up kv entry on {new_blob_key:?}: {err:?}");
+                    }
                     return Err(err);
                 }
             }
         }
 
         // Exhausted retries
-        let _ = self.kv_store.del(&new_blob_key).await;
+        if let Err(err) = self.kv_store.del(&new_blob_key).await {
+            warn!("error cleaning up kv entry on {new_blob_key:?}: {err:?}");
+        }
         Err(ferr!(
             "failed to save snapshot after {MAX_CAS_RETRIES} CAS retries: concurrent modifications"
         ))

@@ -49,10 +49,10 @@ fn apply_kotlin_modifications(out_dir: &str) {
             let path = file.path();
             let file_ty = file.file_type().expect("error reading file type");
             if file_ty.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext == "kt" {
-                        kotlin_files.push(path)
-                    }
+                if let Some(ext) = path.extension()
+                    && ext == "kt"
+                {
+                    kotlin_files.push(path)
                 }
             } else if file_ty.is_dir() {
                 dirs.push(path)

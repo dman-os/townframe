@@ -108,7 +108,26 @@ impl DrawerRepo {
             let (heads, _key) = key.lock(&self.current_heads);
             heads.clone()
         });
-        let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
+        debug!(%doc_id, "presence probe: entry cache miss, hydrating from drawer doc");
+        let mut entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
+        if entry.is_none() {
+            let live_heads = self
+                .drawer_doc_handle
+                .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+                .await;
+            if live_heads != heads {
+                entry = self.hydrate_entry_at_heads(doc_id, &live_heads).await?;
+                if entry.is_some() {
+                    surelock::key::lock_scope(|key| {
+                        let (mut current_heads, _key) = key.lock(&self.current_heads);
+                        if *current_heads == heads {
+                            *current_heads = live_heads;
+                        }
+                    });
+                }
+            }
+        }
+        debug!(%doc_id, found = entry.is_some(), "presence probe: hydrated entry");
 
         if let Some(entry) = entry {
             surelock::key::lock_scope(|key| {
@@ -152,16 +171,22 @@ impl DrawerRepo {
             return Ok(None);
         };
 
-        let (facets, facet_heads_by_key, to_cache) = handle
+        // Facet hydration must happen under the doc lock, but the facet cache
+        // lives in separate surelock mutexes -- surelock forbids nesting a
+        // second scope on the same thread, so cache probes cannot run while
+        // the doc scope is active. Plan: pass 1 under the doc lock resolves
+        // uuids/heads and hydrates the facets that aren't cache-eligible;
+        // cache probes run unlocked; a second doc pass hydrates the misses.
+        let (mut facets, facet_heads_by_key, to_probe) = handle
             .with_document_read(|am_doc| {
                 let mut facets = HashMap::new();
                 let mut facet_heads_by_key = HashMap::new();
-                let mut to_cache = Vec::new();
+                let mut to_probe = Vec::new();
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                         _ if facet_keys.is_none() => {
-                            return eyre::Ok((facets, facet_heads_by_key, to_cache));
+                            return eyre::Ok((facets, facet_heads_by_key, to_probe));
                         }
                         _ => eyre::bail!("facets object not found in content doc"),
                     };
@@ -187,27 +212,62 @@ impl DrawerRepo {
                         facet_heads_by_key.insert(key.clone(), meta_heads.clone());
                     }
 
-                    if let (Some(uuid), Some(heads)) = (facet_uuid, &facet_heads) {
-                        if let Some(cached) = self.facet_cache_get(doc_id, &uuid, heads) {
-                            facets.insert(key.clone(), cached);
-                            continue;
-                        }
+                    if let (Some(uuid), Some(meta_heads)) = (facet_uuid, facet_heads) {
+                        // Cache-eligible: probe the cache outside the doc scope.
+                        to_probe.push((key, uuid, meta_heads));
+                        continue;
                     }
 
                     let key_str = key.to_string();
                     let value: Option<ThroughJson<FacetRaw>> =
                         autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
                     if let Some(facet_value) = value {
-                        let facet_value = Arc::new(facet_value.0);
-                        facets.insert(key.clone(), Arc::clone(&facet_value));
-                        if let (Some(uuid), Some(heads)) = (facet_uuid, facet_heads) {
-                            to_cache.push((uuid, heads, facet_value));
-                        }
+                        facets.insert(key, Arc::new(facet_value.0));
                     }
                 }
-                eyre::Ok((facets, facet_heads_by_key, to_cache))
+                eyre::Ok((facets, facet_heads_by_key, to_probe))
             })
             .await?;
+
+        // Cache probes (no doc scope active).
+        let mut misses: Vec<(FacetKey, Uuid, ChangeHashSet)> = Vec::new();
+        for (key, uuid, meta_heads) in to_probe {
+            if let Some(cached) = self.facet_cache_get(doc_id, &uuid, &meta_heads) {
+                facets.insert(key, cached);
+            } else {
+                misses.push((key, uuid, meta_heads));
+            }
+        }
+
+        // Second doc pass: hydrate only the cache misses.
+        let mut to_cache = Vec::new();
+        if !misses.is_empty() {
+            let (hydrated, hydrated_to_cache) = handle
+                .with_document_read(|am_doc| {
+                    let facets_obj =
+                        match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
+                        {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("facets object not found in content doc"),
+                        };
+                    let mut hydrated = HashMap::new();
+                    let mut hydrated_to_cache = Vec::new();
+                    for (key, uuid, meta_heads) in &misses {
+                        let key_str = key.to_string();
+                        let value: Option<ThroughJson<FacetRaw>> =
+                            autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
+                        if let Some(facet_value) = value {
+                            let facet_value = Arc::new(facet_value.0);
+                            hydrated.insert(key.clone(), Arc::clone(&facet_value));
+                            hydrated_to_cache.push((*uuid, meta_heads.clone(), facet_value));
+                        }
+                    }
+                    eyre::Ok((hydrated, hydrated_to_cache))
+                })
+                .await?;
+            facets.extend(hydrated);
+            to_cache.extend(hydrated_to_cache);
+        }
 
         for (uuid, heads, value) in to_cache {
             self.facet_cache_put(doc_id, uuid, heads, value);
@@ -215,7 +275,6 @@ impl DrawerRepo {
 
         Ok(Some((facets, facet_heads_by_key)))
     }
-
     /// Get a doc at specific branch.
     #[tracing::instrument(level = "trace", skip_all, fields(%doc_id, %branch_path))]
     pub async fn get_doc_with_facets_at_branch(
@@ -228,10 +287,8 @@ impl DrawerRepo {
             return Ok(None);
         };
 
-        let out = self
-            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
-            .await;
-        out
+        self.get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
+            .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
@@ -480,33 +537,29 @@ impl DrawerRepo {
                 )]),
             )
             .await?
-        {
-            if let Some(raw) = doc.facets.get(&FacetKey::from(
+            && let Some(raw) = doc.facets.get(&FacetKey::from(
                 daybook_types::doc::WellKnownFacetTag::Dmeta,
-            )) {
-                if let Ok(WellKnownFacet::Dmeta(dmeta)) =
-                    serde_json::from_value::<WellKnownFacet>(raw.clone())
+            ))
+            && let Ok(WellKnownFacet::Dmeta(dmeta)) =
+                serde_json::from_value::<WellKnownFacet>(raw.clone())
+        {
+            let local_segments: Vec<&str> = local_user_path
+                .as_str()
+                .trim_start_matches('/')
+                .split('/')
+                .collect();
+            for user_meta in dmeta.actors.values() {
+                let user_segments: Vec<&str> = user_meta
+                    .user_path
+                    .as_str()
+                    .trim_start_matches('/')
+                    .split('/')
+                    .collect();
+                if local_segments.first() == user_segments.first()
+                    && local_segments.get(1) == user_segments.get(1)
                 {
-                    let local_segments: Vec<&str> = local_user_path
-                        .as_str()
-                        .trim_start_matches('/')
-                        .split('/')
-                        .collect();
-                    for user_meta in dmeta.actors.values() {
-                        let user_segments: Vec<&str> = user_meta
-                            .user_path
-                            .as_str()
-                            .trim_start_matches('/')
-                            .split('/')
-                            .collect();
-                        if local_segments.first() == user_segments.first()
-                            && local_segments.get(1) == user_segments.get(1)
-                        {
-                            local_actor_ids.insert(
-                                self.content_actor_id(Some(&user_meta.user_path), branch_doc_id),
-                            );
-                        }
-                    }
+                    local_actor_ids
+                        .insert(self.content_actor_id(Some(&user_meta.user_path), branch_doc_id));
                 }
             }
         }
@@ -519,10 +572,10 @@ impl DrawerRepo {
             let is_local = handle
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
-                        if let Some(change) = am_doc.get_change_by_hash(head) {
-                            if local_actor_ids.contains(change.actor_id()) {
-                                return true;
-                            }
+                        if let Some(change) = am_doc.get_change_by_hash(head)
+                            && local_actor_ids.contains(change.actor_id())
+                        {
+                            return true;
                         }
                     }
                     false

@@ -92,13 +92,23 @@ pub struct CursorSyncMachine {
 }
 
 impl CursorSyncMachine {
+    pub(crate) fn remove_part(&mut self, part_id: PartId) {
+        self.cursor_state.remove(&part_id);
+        self.active_obj_jobs.retain(|_, job| {
+            job.waiters.retain(|_, waiter| {
+                waiter.parts.retain(|candidate| *candidate != part_id);
+                !waiter.parts.is_empty()
+            });
+            !job.waiters.is_empty()
+        });
+    }
     fn mark_pending_cursor(&mut self, part_id: PartId, cursor: CursorIndex) -> bool {
         let state = self.cursor_state.entry(part_id).or_default();
         if cursor <= state.last_emitted_cursor.unwrap_or_default() {
-            panic!(
-                "cursority trap: cursor ({cursor}) seen below floor ({:?})",
-                state.last_emitted_cursor
-            );
+            // Replay/live handoff is at-least-once. A replacement immutable
+            // subscription can repeat an event whose cursor was already
+            // durably advanced by the previous generation.
+            return false;
         }
         if let Some(_old) = state.slots.get_mut(&cursor) {
             // duplicate cursor
@@ -116,6 +126,13 @@ impl CursorSyncMachine {
 
         match evt {
             SubEvent::Changed(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    part_count = evt.part_ids.len(),
+                    payload = !evt.payload.is_null(),
+                    "subscription Changed event",
+                );
                 let mut parts = vec![];
                 for &part_id in &evt.part_ids {
                     if !self.mark_pending_cursor(part_id, evt.cursor) {
@@ -138,36 +155,40 @@ impl CursorSyncMachine {
                 });
             }
             SubEvent::Added(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    ?evt.part_id,
+                    payload = !evt.payload.is_null(),
+                    "subscription Added event",
+                );
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
                     return;
                 }
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
                 let waiter = job.waiters.entry(evt.cursor).or_default();
                 waiter.parts.push(evt.part_id);
-                if let Some(payload) = evt.payload {
-                    waiter.pending_membership = true;
-                    waiter.pending_sync = true;
-                    out.push(CursorMachineCommand::AddObjToPart {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        part_id: evt.part_id,
-                    });
-                    out.push(CursorMachineCommand::SyncObj {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        remote_payload: payload,
-                        parts: vec![evt.part_id],
-                    });
-                } else {
-                    waiter.pending_membership = true;
-                    out.push(CursorMachineCommand::AddObjToPart {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        part_id: evt.part_id,
-                    });
-                }
+                waiter.pending_membership = true;
+                waiter.pending_sync = true;
+                out.push(CursorMachineCommand::AddObjToPart {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    part_id: evt.part_id,
+                });
+                out.push(CursorMachineCommand::SyncObj {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    remote_payload: evt.payload,
+                    parts: vec![evt.part_id],
+                });
             }
             SubEvent::Removed(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    ?evt.part_id,
+                    "subscription Removed event",
+                );
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
                     return;
                 }
@@ -179,6 +200,19 @@ impl CursorSyncMachine {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
                     part_id: evt.part_id,
+                });
+            }
+            SubEvent::ObjectChanged(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    payload = !evt.payload.is_null(),
+                    "subscription ObjectChanged event",
+                );
+                out.push(CursorMachineCommand::SyncObj {
+                    obj_id: evt.obj_id,
+                    remote_payload: evt.payload,
+                    cursor: 0,
+                    parts: Vec::new(),
                 });
             }
             SubEvent::ReplayComplete => unreachable!(),

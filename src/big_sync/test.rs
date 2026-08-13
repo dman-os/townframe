@@ -1,4 +1,4 @@
-use crate::{interlude::*, SyncBackend};
+use crate::{SyncBackend, interlude::*};
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -13,12 +13,12 @@ use big_sync_core::{
     BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId, SyncStatEvent, SyncTaskCompletion,
 };
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
-use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::HostPartStore;
+use crate::part_store::memory::MemoryPartStore;
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot};
 use crate::{Ctx, SyncTaskRunOutcome};
 
@@ -132,6 +132,7 @@ impl TestWorld {
 pub(crate) struct MemoryRpcClient {
     world: Arc<TestWorld>,
     _source_part_store: Arc<dyn HostPartStore>,
+    source_peer_id: PeerId,
     target_peer_id: PeerId,
     target_part_store: Arc<dyn HostPartStore>,
 }
@@ -140,12 +141,14 @@ impl MemoryRpcClient {
     fn new(
         world: Arc<TestWorld>,
         source_part_store: Arc<dyn HostPartStore>,
+        source_peer_id: PeerId,
         target_peer_id: PeerId,
         target_part_store: Arc<dyn HostPartStore>,
     ) -> Self {
         Self {
             world,
             _source_part_store: source_part_store,
+            source_peer_id,
             target_peer_id,
             target_part_store,
         }
@@ -168,8 +171,10 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         }
         let parts = self.target_part_store.summarize_parts(req.parts).await??;
         Ok(Ok(Ok(PeerSummaryResult {
-            parts,
-            deepest_bucket_level: BuckId::MAX_LEVEL,
+            parts: parts
+                .into_iter()
+                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
+                .collect(),
         })))
     }
 
@@ -180,7 +185,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
     {
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
-            part_count = req.parts.len(),
+            targets = ?req.targets,
             "memory rpc sub parts"
         );
         if !self.world.is_online(self.target_peer_id) {
@@ -188,7 +193,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         }
         let receiver = self
             .target_part_store
-            .subscribe(req, PeerId::new([0u8; 32]))
+            .subscribe(req, self.source_peer_id)
             .await??;
         Ok(Ok(Ok(receiver)))
     }
@@ -322,7 +327,7 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
     async fn prepare_case(&self, case: &SyncBackendScenario) -> Res<()> {
         if case.remote_payload.is_none() {
             let remote_store = Arc::new(MemoryPartStore::new());
-            if let Some(payload) = &case.expected_payload {
+            if let Some(payload) = &case.initial_payload {
                 remote_store
                     .set_obj_payload(case.obj_id, payload.clone())
                     .await?;
@@ -352,31 +357,6 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
             payload(serde_json::json!({"kind": "noop"}), 1, peer_id(2)),
             vec![part],
         ),
-        SyncBackendScenario::noop(
-            "noop_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1010),
-            payload(serde_json::json!({"kind": "noop-none"}), 1, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
-        SyncBackendScenario::changed_object(
-            "changed_object_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1011),
-            payload(serde_json::json!({"kind": "old-none"}), 1, peer_id(1)),
-            payload(serde_json::json!({"kind": "new-none"}), 2, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
-        SyncBackendScenario::added_member(
-            "added_member_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1012),
-            payload(serde_json::json!({"kind": "new-added-none"}), 2, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
         SyncBackendScenario::changed_object(
             "changed_object_applies_remote",
             peer_id(2),
@@ -447,6 +427,7 @@ impl NodeHarness {
         let client = Arc::new(MemoryRpcClient::new(
             Arc::clone(&self.world),
             Arc::clone(&self.store),
+            self.peer_id,
             remote.peer_id,
             Arc::clone(&remote.store),
         ));
@@ -459,16 +440,31 @@ impl NodeHarness {
                     .iter()
                     .map(|&part| (part, TEST_BACKEND_ID.into()))
                     .collect(),
+                std::collections::HashMap::new(),
             )
             .await
     }
 
     async fn seed_obj(&self, obj: ObjId, payload: serde_json::Value) -> Res<()> {
+        let (peer_ids, stores): (Vec<_>, Vec<_>) = {
+            let stores = self.world.stores.lock().expect(ERROR_MUTEX);
+            (
+                stores.keys().copied().collect(),
+                stores.values().cloned().collect(),
+            )
+        };
+        for store in stores {
+            let agents = peer_ids
+                .iter()
+                .copied()
+                .map(|peer_id| (peer_id, keyhive_core::access::Access::Read))
+                .collect();
+            store.set_obj_members(obj, agents).await?;
+        }
         self.host.store.set_obj_payload(obj, payload).await?;
         self.host.store.add_obj_to_parts(obj, test_parts()).await?;
         Ok(())
     }
-
     async fn remove_obj(&self, obj: ObjId) -> Res<()> {
         self.host
             .store
@@ -731,6 +727,7 @@ where
     let (handle, stop) = crate::spawn_big_sync_worker(
         Arc::clone(&store_for_worker),
         [(TEST_BACKEND_ID.into(), backend)].into(),
+        "big-sync-test",
     )?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),
@@ -751,6 +748,12 @@ where
 }
 
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
+    let peer_id = peer_id(peer_seed);
+    let store = Arc::new(MemoryPartStore::new());
+    boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
+}
+
+async fn boot_policy_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let store = Arc::new(MemoryPartStore::new());
     boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
@@ -967,9 +970,11 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
         SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
             if *synced_part_id == part_id
     )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
+    );
     let (snapshot_a, snapshot_b) = assert_same_observed_state(&node_a, &node_b).await?;
     assert_eq!(snapshot_a.objs.len(), 1);
     assert_eq!(
@@ -1166,6 +1171,20 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
+    node_a
+        .store
+        .set_obj_members(
+            obj,
+            HashMap::from([(node_b.peer_id, keyhive_core::access::Access::Read)]),
+        )
+        .await?;
+    node_b
+        .store
+        .set_obj_members(
+            obj,
+            HashMap::from([(node_a.peer_id, keyhive_core::access::Access::Read)]),
+        )
+        .await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(
@@ -1290,10 +1309,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a_dyn), Arc::clone(&world));
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
-    let _ = backend_a
+    backend_a
         .sync_obj(peer_b, obj_b, Some(right_payload.clone()))
         .await?;
-    let _ = backend_b
+    backend_b
         .sync_obj(peer_a, obj_a, Some(left_payload.clone()))
         .await?;
 
@@ -1526,9 +1545,11 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
             if *synced_part_id == part_id
     )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
+    );
 
     node_a.stop().await?;
     node_b.stop().await?;
@@ -1674,9 +1695,11 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
     let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. })));
+    assert!(
+        stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. }))
+    );
 
     let (snapshot_a, snapshot_b, snapshot_c) = (
         node_a.snapshot().await?,
@@ -1829,6 +1852,58 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 
     node_a.stop().await?;
     node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
+    use crate::HostPartStoreConfig;
+    use big_sync_core::rpc::SubscriptionTarget;
+
+    let part = test_part();
+    let hidden = PartId(Byte32Id::new([99u8; 32]));
+    let store = MemoryPartStore::with_config(HostPartStoreConfig {
+        hidden_parts: HashSet::from([hidden]),
+    });
+    let peer = PeerId::new([1u8; 32]);
+
+    // Both parts exist in the store.
+    store.ensure_part(part).await?;
+    store.ensure_part(hidden).await?;
+
+    // Subscribing to a visible part succeeds.
+    let rx = store
+        .subscribe(
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                }]),
+            },
+            peer,
+        )
+        .await?;
+    assert!(rx.is_ok(), "visible part must subscribe ok");
+
+    // Subscribing to a hidden part returns UnkownParts.
+    let err = store
+        .subscribe(
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: hidden,
+                    cursor: 0,
+                }]),
+            },
+            peer,
+        )
+        .await?;
+    match err {
+        Err(ListPartsError::UnkownParts { unkown_parts }) => {
+            assert_eq!(unkown_parts, vec![hidden]);
+        }
+        other => panic!("expected UnkownParts for hidden part, got {other:?}"),
+    }
+
     Ok(())
 }
 

@@ -83,8 +83,8 @@ fn get<'a, P: Into<automerge::Prop>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use automerge::transaction::Transactable;
     use automerge::Automerge;
+    use automerge::transaction::Transactable;
     use daybook_types::doc::{FacetKey, WellKnownFacetTag};
 
     #[test]

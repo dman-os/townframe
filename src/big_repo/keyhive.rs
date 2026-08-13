@@ -1,18 +1,26 @@
 use crate::interlude::*;
 
-use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
+use crate::{DocumentId, keyhive_listener::BigRepoKeyhiveListener};
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::principal::identifier::Identifier;
+use keyhive_core::principal::membered::Membered;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    BigRepoKeyhiveListener,
+>;
+
+type BigKeyhiveMembered = keyhive_core::principal::membered::Membered<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
@@ -95,6 +103,10 @@ impl BigKeyhiveAuthority {
         }
     }
 
+    fn into_identifier(self) -> Identifier {
+        self.into_agent().id()
+    }
+
     fn into_peer(self) -> Res<BigKeyhivePeer> {
         Ok(match self {
             Self::Agent(agent) => BigKeyhivePeer::try_from(agent)
@@ -139,7 +151,6 @@ type BigKeyhiveKeyhive = keyhive_core::keyhive::Keyhive<
 #[derive(Clone)]
 pub struct BigKeyhiveHandle {
     keyhive: Arc<BigKeyhiveKeyhive>,
-    signer: MemorySigner,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
@@ -153,7 +164,6 @@ impl BigKeyhiveHandle {
                 .map_err(|err| ferr!("error on keyhive init: {err:?}"))?;
         Ok(Self {
             keyhive: Arc::new(keyhive),
-            signer,
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
         })
@@ -192,7 +202,6 @@ impl BigKeyhiveHandle {
             subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
         Ok(Some(Self {
             keyhive: Arc::new(restored),
-            signer,
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
         }))
@@ -246,6 +255,24 @@ impl BigKeyhiveHandle {
         Arc::clone(&self.keyhive)
     }
 
+    pub async fn get_group(
+        &self,
+        id: keyhive_core::principal::group::id::GroupId,
+    ) -> Option<BigKeyhiveGroup> {
+        self.keyhive
+            .get_group(id)
+            .await
+            .map(|inner| BigKeyhiveGroup { id, inner })
+    }
+    /// Every group visible to the local principal. Keyhive restricts group
+    /// visibility by definition, so this is the authoritative source for
+    /// group-part pre-creation: a group part row must exist (cursor 0) the
+    /// moment a group is visible, even before any of its docs exist —
+    /// membership precedes document payloads.
+    pub(crate) async fn visible_group_ids(&self) -> Vec<KhGroupId> {
+        self.keyhive.groups().lock().await.keys().copied().collect()
+    }
+
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
@@ -257,8 +284,9 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let locked = doc.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members =
+                    transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(DocumentId::new(kh_doc_id.to_bytes()), *access);
                 }
             }
@@ -272,18 +300,17 @@ impl BigKeyhiveHandle {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
-            let locked = doc.lock().await;
-            return locked
-                .transitive_members()
-                .await
-                .into_iter()
-                .map(|(id, (_, access))| (id.to_bytes(), access))
-                .collect();
+            return transitive_members_short_locked(Membered::Document(
+                KhDocumentId::from(id),
+                doc,
+            ))
+            .await
+            .into_iter()
+            .map(|(id, (_, access))| (id.to_bytes(), access))
+            .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
-            let locked = group.lock().await;
-            return locked
-                .transitive_members()
+            return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
                 .await
                 .into_iter()
                 .map(|(id, (_, access))| (id.to_bytes(), access))
@@ -300,20 +327,22 @@ impl BigKeyhiveHandle {
     ) -> Option<Access> {
         let keyhive = self.keyhive.as_ref();
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
-            let locked = doc.lock().await;
-            return locked
-                .transitive_members()
-                .await
-                .get(agent)
-                .map(|(_, access)| *access);
+            return transitive_members_short_locked(Membered::Document(
+                KhDocumentId::from(membered_id),
+                doc,
+            ))
+            .await
+            .get(agent)
+            .map(|(_, access)| *access);
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(membered_id)).await {
-            let locked = group.lock().await;
-            return locked
-                .transitive_members()
-                .await
-                .get(agent)
-                .map(|(_, access)| *access);
+            return transitive_members_short_locked(Membered::Group(
+                KhGroupId::from(membered_id),
+                group,
+            ))
+            .await
+            .get(agent)
+            .map(|(_, access)| *access);
         }
         None
     }
@@ -329,22 +358,23 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let locked = doc.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members =
+                    transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_doc_id.to_bytes(), *access);
                 }
             }
         }
         // Enumerate groups
-        #[allow(unused_mut)]
-        let mut group_ids: Vec<KhGroupId> = {
+        let group_ids: Vec<KhGroupId> = {
             let groups = keyhive.groups().lock().await;
             groups.keys().copied().collect()
         };
         for kh_group_id in group_ids {
             if let Some(group) = keyhive.get_group(kh_group_id).await {
-                let locked = group.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members =
+                    transitive_members_short_locked(Membered::Group(kh_group_id, group)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_group_id.to_bytes(), *access);
                 }
             }
@@ -352,8 +382,52 @@ impl BigKeyhiveHandle {
         caps
     }
 
+    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjId> {
+        self.keyhive
+            .documents()
+            .lock()
+            .await
+            .keys()
+            .map(|id| big_sync_core::ObjId::new(id.to_bytes()))
+            .collect()
+    }
+
+    pub(crate) async fn group_document_ids_by_id(&self) -> HashMap<[u8; 32], BTreeSet<DocumentId>> {
+        let group_ids: Vec<KhGroupId> =
+            self.keyhive.groups().lock().await.keys().copied().collect();
+        let mut out = HashMap::new();
+        for group_id in group_ids {
+            let docs = self
+                .keyhive
+                .document_ids_containing_group(group_id)
+                .await
+                .into_iter()
+                .map(|id| DocumentId::new(id.to_bytes()))
+                .collect();
+            out.insert(group_id.to_bytes(), docs);
+        }
+        out
+    }
+
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
         &self.contact_card
+    }
+
+    pub(crate) async fn receive_contact_card(
+        &self,
+        contact_card: &keyhive_core::contact_card::ContactCard,
+    ) -> Res<BigKeyhiveAgent> {
+        self.keyhive
+            .receive_contact_card(contact_card)
+            .await
+            .map_err(|error| ferr!("failed receiving Keyhive contact card: {error}"))?;
+        // `receive_contact_card` invokes our Keyhive listener, which persists
+        // the prekey event before this await completes.
+        self.get_agent_by_peer_id(&subduction_keyhive::KeyhivePeerId::from_bytes(
+            contact_card.id().to_bytes(),
+        ))
+        .await?
+        .ok_or_eyre("received contact card did not create a Keyhive agent")
     }
 
     pub(crate) fn keyhive_peer_id(&self) -> subduction_keyhive::KeyhivePeerId {
@@ -438,30 +512,49 @@ impl BigKeyhiveHandle {
         Ok(BigKeyhiveGroup { id, inner: group })
     }
 
+    pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
+        self.keyhive
+            .document_ids_containing_group(group.id())
+            .await
+            .into_iter()
+            .map(|doc_id| DocumentId::new(*doc_id.as_bytes()))
+            .collect()
+    }
+
     pub(crate) async fn add_member_to_group(
         &self,
         member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
+        after_content: BTreeMap<DocumentId, Vec<Vec<u8>>>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<()> {
+    ) -> Res<BTreeSet<DocumentId>> {
         use keyhive_core::principal::membered::Membered;
 
         let member = member.into().into_agent();
         let group_id = group.id();
         let kh = self.keyhive.as_ref();
+        let after_content = after_content
+            .into_iter()
+            .map(|(doc_id, refs)| Ok((keyhive_doc_id(doc_id)?, refs)))
+            .collect::<Res<BTreeMap<_, _>>>()?;
         let update = kh
-            .add_member(
+            .add_member_with_manual_content(
                 member,
                 &Membered::Group(group_id, group.shared()),
                 access,
-                &[],
+                after_content,
             )
             .await
             .map_err(|err| ferr!("group member add failed: {err}"))?;
+        let affected_docs = update
+            .cgka_ops
+            .iter()
+            .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
+            .collect();
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
         persist_delegation(storage, update.delegation).await?;
-        Ok(())
+        Ok(affected_docs)
     }
 
     /// Grant an agent access to a document.
@@ -470,26 +563,64 @@ impl BigKeyhiveHandle {
         principal: impl Into<BigKeyhiveAuthority>,
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
+        after_content: Vec<Vec<u8>>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
-        let doc_id_bytes = doc_id.into_bytes();
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
-            .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
-        let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
-            keyhive_core::principal::identifier::Identifier::from(vk),
-        );
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
         let kh = self.keyhive.as_ref();
-        let doc = kh.get_document(kh_doc_id).await.ok_or_else(|| {
-            ferr!("document not found in keyhive: {doc_id} (bytes={doc_id_bytes:?})",)
-        })?;
+        let doc = kh
+            .get_document(kh_doc_id)
+            .await
+            .ok_or_else(|| ferr!("document not found in keyhive: {doc_id}"))?;
         let update = kh
-            .add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
+            .add_member_with_manual_content(
+                agent,
+                &Membered::Document(kh_doc_id, doc),
+                access,
+                BTreeMap::from([(kh_doc_id, after_content)]),
+            )
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
         persist_delegation(storage, update.delegation).await?;
+        Ok(())
+    }
+
+    /// Revoke an authority's access to a document with an explicit content frontier.
+    pub(crate) async fn revoke_doc_access(
+        &self,
+        principal: impl Into<BigKeyhiveAuthority>,
+        doc_id: DocumentId,
+        retain_all_other_members: bool,
+        after_content: Vec<Vec<u8>>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        use keyhive_core::principal::membered::Membered;
+
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh = self.keyhive.as_ref();
+        let doc = kh
+            .get_document(kh_doc_id)
+            .await
+            .ok_or_else(|| ferr!("document not found in keyhive: {doc_id}"))?;
+        let update = kh
+            .revoke_member_with_manual_content(
+                principal.into().into_identifier(),
+                retain_all_other_members,
+                &Membered::Document(kh_doc_id, doc),
+                BTreeMap::from([(kh_doc_id, after_content)]),
+            )
+            .await
+            .map_err(|err| ferr!("revoke failed: {err}"))?;
+        persist_cgka_update_ops(storage, update.cgka_ops().to_vec()).await?;
+        for revocation in update.revocations() {
+            persist_revocation(storage, Arc::clone(revocation)).await?;
+        }
+        for redelegation in update.redelegations() {
+            persist_delegation(storage, Arc::clone(redelegation)).await?;
+        }
         Ok(())
     }
 
@@ -505,6 +636,14 @@ impl BigKeyhiveHandle {
         let kh = self.keyhive.as_ref();
         Ok(kh.get_agent(identifier).await)
     }
+}
+
+fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
+    Ok(keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    ))
 }
 
 async fn persist_delegation(
@@ -524,6 +663,23 @@ async fn persist_delegation(
     Ok(())
 }
 
+async fn persist_revocation(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    revocation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveRevocation>>,
+) -> Res<()> {
+    let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
+        future_form::Sendable,
+        MemorySigner,
+        Vec<u8>,
+        BigRepoKeyhiveListener,
+    >::Revoked(revocation)
+    .into();
+    subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
+        .await
+        .map_err(|err| ferr!("failed saving keyhive revocation event: {err}"))?;
+    Ok(())
+}
+
 async fn persist_cgka_update_ops(
     storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     cgka_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
@@ -536,3 +692,109 @@ async fn persist_cgka_update_ops(
     }
     Ok(())
 }
+
+struct ExploreNode {
+    membered: BigKeyhiveMembered,
+    access: Access,
+}
+
+/// Transitive-membership walk with short per-node locks.
+/// Replicates `Group::transitive_members` semantics (explore/expanded/access-min
+/// with the root excluded) but never holds a doc/group lock across an await that
+/// acquires another lock: every node is locked only long enough to clone its
+/// direct members + capabilities, then the lock is dropped before the next node
+/// is visited. A walk therefore holds at most one lock at a time, so concurrent
+/// walks rooted at different docs/groups cannot ABBA-deadlock with each other
+/// (or with materialization decrypts that briefly lock a single document).
+async fn transitive_members_short_locked(
+    root: BigKeyhiveMembered,
+) -> HashMap<Identifier, (BigKeyhiveAgent, Access)> {
+    let root_id: Identifier = root.agent_id().into();
+    let mut caps: HashMap<Identifier, (BigKeyhiveAgent, Access)> = HashMap::new();
+    let mut expanded: HashMap<Identifier, Access> = HashMap::new();
+    let mut explore: Vec<ExploreNode> = Vec::new();
+
+    // Capture the root's direct members under a short lock, then walk.
+    let root_members = root.members().await;
+    for member_id in root_members.keys() {
+        let Some(dlg) = root.get_capability(member_id).await else {
+            // Revoked concurrently between the members() snapshot and this
+            // capability lookup: the member is no longer part of the group.
+            // Skip rather than panic — keyhive's own walk never sees this
+            // because it holds the group lock for the whole traversal, but
+            // our short-locked walk deliberately drops it between awaits.
+            continue;
+        };
+        enqueue_member(
+            dlg.payload.delegate().clone(),
+            dlg.payload.can(),
+            &root_id,
+            &mut caps,
+            &mut expanded,
+            &mut explore,
+        );
+    }
+
+    while let Some(explored) = explore.pop() {
+        let membered = explored.membered;
+        let access = explored.access;
+        let members = membered.members().await;
+        for (mem_id, dlgs) in members.iter() {
+            let Some(dlg) = membered.get_capability(mem_id).await else {
+                // Same concurrent-revocation race as the root loop above.
+                continue;
+            };
+            let member_access = access.min(dlg.payload.can());
+            if mem_id != &root_id
+                && caps
+                    .get(mem_id)
+                    .is_none_or(|(_, existing_access)| *existing_access < member_access)
+            {
+                caps.insert(*mem_id, (dlg.payload.delegate().clone(), member_access));
+            }
+            for sub_dlg in dlgs.iter() {
+                enqueue_member(
+                    sub_dlg.payload.delegate().clone(),
+                    access.min(sub_dlg.payload.can()),
+                    &root_id,
+                    &mut caps,
+                    &mut expanded,
+                    &mut explore,
+                );
+            }
+        }
+    }
+
+    caps
+}
+
+fn enqueue_member(
+    agent: BigKeyhiveAgent,
+    access: Access,
+    root_id: &Identifier,
+    caps: &mut HashMap<Identifier, (BigKeyhiveAgent, Access)>,
+    expanded: &mut HashMap<Identifier, Access>,
+    explore: &mut Vec<ExploreNode>,
+) {
+    let id = agent.id();
+    if &id == root_id {
+        return;
+    }
+    if caps
+        .get(&id)
+        .is_none_or(|(_, existing_access)| *existing_access < access)
+    {
+        caps.insert(id, (agent.clone(), access));
+    }
+    if let Some(membered) = agent.as_membered()
+        && expanded
+            .get(&id)
+            .is_none_or(|existing_access| *existing_access < access)
+    {
+        expanded.insert(id, access);
+        explore.push(ExploreNode { membered, access });
+    }
+}
+
+#[cfg(test)]
+mod tests;

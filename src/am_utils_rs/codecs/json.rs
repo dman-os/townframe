@@ -53,10 +53,9 @@ fn timestamp_seconds_from_string(raw: &str) -> Option<i64> {
     if let Some(with_utc_offset) = raw
         .strip_suffix('Z')
         .map(|prefix| format!("{prefix}+00:00"))
+        && let Ok(ts) = with_utc_offset.parse::<Timestamp>()
     {
-        if let Ok(ts) = with_utc_offset.parse::<Timestamp>() {
-            return Some(ts.as_second());
-        }
+        return Some(ts.as_second());
     }
     let parsed_int = raw.parse::<i64>().ok()?;
     Some(epoch_int_to_seconds(parsed_int))
@@ -331,14 +330,14 @@ pub fn reconcile_value<R: Reconciler>(
             }
             // Put or update entries
             for (key, value) in val {
-                if is_base64_field(key) {
-                    if let serde_json::Value::String(encoded) = value {
-                        if let Some(bytes) = decode_base64_field(encoded) {
-                            map_reconciler.put(key, autosurgeon::bytes::ByteVec::from(bytes))?;
-                            continue;
-                        }
-                        warn!(key, "invalid base64 payload, storing as string");
+                if is_base64_field(key)
+                    && let serde_json::Value::String(encoded) = value
+                {
+                    if let Some(bytes) = decode_base64_field(encoded) {
+                        map_reconciler.put(key, autosurgeon::bytes::ByteVec::from(bytes))?;
+                        continue;
                     }
+                    warn!(key, "invalid base64 payload, storing as string");
                 }
                 if is_timestamp_field(key) {
                     if let Some(seconds) = timestamp_seconds_from_json(value) {
@@ -1043,7 +1042,7 @@ mod tests {
             "arr": [10, 99]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let (commit, _heads, patches) =
             reconcile_json_prop_with_delta(&mut doc, "facet", modified)?;
 
@@ -1135,7 +1134,7 @@ mod tests {
             ]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let ids_before = object_ids_by_scalar_field_in_array_prop(&doc, "facet", "items", "id")?;
 
         let (_commit, _heads, patches) =
@@ -1174,7 +1173,7 @@ mod tests {
             ]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let ids_before = object_ids_by_scalar_field_in_array_prop(&doc, "facet", "items", "key")?;
 
         let (_commit, _heads, patches) =
@@ -1210,7 +1209,7 @@ mod tests {
             ]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let ids_before = object_ids_by_scalar_field_in_array_prop(&doc, "facet", "items", "id")?;
 
         let (_commit, _heads, patches) =
@@ -1246,7 +1245,7 @@ mod tests {
             ]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let (_commit, _heads, patches) =
             reconcile_json_prop_with_delta(&mut doc, "facet", modified)?;
 
@@ -1283,7 +1282,7 @@ mod tests {
             ]
         });
 
-        let _ = reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
+        reconcile_json_prop_with_delta(&mut doc, "facet", initial)?;
         let (_commit, _heads, patches) =
             reconcile_json_prop_with_delta(&mut doc, "facet", modified)?;
 

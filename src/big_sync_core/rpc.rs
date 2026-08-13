@@ -31,7 +31,8 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     ) -> K::Future<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>>;
 
     /// WARN: this doesn't limit the number of returned results
-    /// It thus only accepts buckets that are of the level [`PeerSummaryResult::deepest_bucket_level`]
+    /// It only accepts buckets at the level the requesting part advertises in
+    /// its per-part [`PartStratSummary::Bucket`] summary.
     fn leaf_buckets<'a>(
         &'a self,
         req: LeafBucketsRequest,
@@ -160,6 +161,35 @@ pub struct GetChangedBucketsRequest {
     pub limit_hint: u32,
 }
 
+/// Store-level part summary: the raw per-part facts a part store can report.
+/// The RPC layer expands this into the per-strat [`PartStratSummary`] vec so
+/// the decision side can pick a strat per part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartSummary {
+    pub latest_cursor: CursorIndex,
+    pub member_count: u64,
+    /// The deepest bucket level this store has materialized for the part.
+    pub deepest_bucket_level: BuckLevel,
+}
+
+impl PartSummary {
+    /// Expand the raw store summary into the per-strat wire summaries the
+    /// decision side consumes: cursor strat (latest cursor) + bucket strat
+    /// (that part's deepest bucket level and member count).
+    pub fn into_strat_summaries(self) -> Vec<PartStratSummary> {
+        let mut summaries = vec![PartStratSummary::Cursor(CursorPartSummary {
+            latest_cursor: self.latest_cursor,
+        })];
+        if self.deepest_bucket_level > 0 {
+            summaries.push(PartStratSummary::Bucket(BucketPartSummary {
+                deepest_bucket_level: self.deepest_bucket_level,
+                member_count: self.member_count,
+            }));
+        }
+        summaries
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSummary {
     pub id: BuckId,
@@ -226,35 +256,48 @@ structstruck::strike! {
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
-    pub struct PeerSummaryResult {
-        /// Only known partitions where the requestor has
-        /// accessed are returned here. If an expected partition
-        /// is missing, either access is denied or the peer doesn't
-        /// know of the partitions yet. Request again with backoff
-        /// in case peer learns of partitions from the current node
-        pub parts: Map<
-            PartId,
-            pub struct PartSummary {
-                pub latest_cursor: CursorIndex,
-                pub member_count: u64,
-            }
-        >,
-        pub deepest_bucket_level: BuckLevel
+    pub enum PartStratSummary {
+        /// The peer can serve this part with the cursor strat; reports the
+        /// latest cursor of the part.
+        Cursor(pub struct CursorPartSummary {
+            pub latest_cursor: CursorIndex,
+        }),
+        /// The peer can serve this part with the bucket strat; reports that
+        /// part's deepest materialized bucket level and member count.
+        Bucket(pub struct BucketPartSummary {
+            pub deepest_bucket_level: BuckLevel,
+            pub member_count: u64,
+        }),
     }
 }
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
-    pub struct SubPartsRequest {
-        /// The subscriber's identity (ed25519 verifying key bytes — same as PeerId).
-        pub peer_id: PeerId,
-        pub parts: Vec<
-            pub struct PartStreamCursorRequest {
-                pub part_id: PartId,
-                pub cursor: CursorIndex,
-            }
-        >,
+    pub struct PeerSummaryResult {
+        /// Only known partitions where the requestor has accessed are returned here.
+        /// Each part reports the sync strats it supports; the decision side
+        /// picks a strat per part (cursor diff or bucket working level), so
+        /// different parts can be served by different strats.
+        pub parts: Map<PartId, Vec<PartStratSummary>>,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubscriptionTarget {
+    Part {
+        part_id: PartId,
+        cursor: CursorIndex,
+    },
+    Object {
+        obj_id: ObjId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubPartsRequest {
+    /// An immutable snapshot of the peer's complete subscription set.
+    /// Reconfiguration establishes a replacement stream with a new replay barrier.
+    pub targets: Set<SubscriptionTarget>,
 }
 
 structstruck::strike! {
@@ -280,10 +323,10 @@ structstruck::strike! {
                 pub part_id: PartId,
                 pub obj_id: ObjId,
                 #[serde(
-                    serialize_with = "option_value_as_string",
-                    deserialize_with = "option_value_from_string"
+                    serialize_with = "value_as_string",
+                    deserialize_with = "value_from_string"
                 )]
-                pub payload: Option<ObjPayload>,
+                pub payload: ObjPayload,
             }),
             Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
@@ -309,36 +352,21 @@ where
     serde_json::from_str(&str).map_err(serde::de::Error::custom)
 }
 
-fn option_value_as_string<S>(
-    val: &Option<serde_json::Value>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match val {
-        Some(val) => serializer
-            .serialize_some(&serde_json::to_string(val).map_err(serde::ser::Error::custom)?),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn option_value_from_string<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let str = Option::<String>::deserialize(deserializer)?;
-    str.map(|str| serde_json::from_str(&str).map_err(serde::de::Error::custom))
-        .transpose()
-}
-
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {
         Changed(ObjChanged),
         Added(ObjAddedToPart),
         Removed(ObjRemovedFromPart),
-        ReplayComplete ,
+        ObjectChanged(pub struct ObjChangedWithoutPart {
+            pub obj_id: ObjId,
+            #[serde(
+                serialize_with = "value_as_string",
+                deserialize_with = "value_from_string"
+            )]
+            pub payload: ObjPayload,
+        }),
+        ReplayComplete,
     }
 }
 

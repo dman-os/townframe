@@ -109,7 +109,7 @@ impl WflowTestContextBuilder {
             None => {
                 let meta = KvStoreMetadtaStore::new(
                     new_in_memory_kv_store(),
-                    wflow_core::gen::metastore::PartitionsMeta {
+                    wflow_core::r#gen::metastore::PartitionsMeta {
                         version: "0".into(),
                         partition_count: 1,
                     },

@@ -1,3 +1,1 @@
-use crate::interlude::*;
-
-pub struct KeyhiveRepo {}
+//! Keyhive integration types for daybook core.

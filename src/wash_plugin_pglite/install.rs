@@ -9,8 +9,8 @@ use tar::Archive;
 use tokio::fs;
 use wasmtime::{Engine, Module, Store};
 
-use crate::wire::WasiState;
 use crate::Config;
+use crate::wire::WasiState;
 
 /// Embedded pglite runtime archive (compressed with zstd)
 /// Generated at build time by build.rs

@@ -1,7 +1,7 @@
 use crate::interlude::*;
 use crate::types::{
-    pseudo_label_candidates_key, PseudoLabel, PseudoLabelCandidate, PseudoLabelCandidatesFacet,
-    PseudoLabelEntry, PseudoLabelError,
+    PseudoLabel, PseudoLabelCandidate, PseudoLabelCandidatesFacet, PseudoLabelEntry,
+    PseudoLabelError, pseudo_label_candidates_key,
 };
 use crate::{row_i64, row_text};
 use wflow_sdk::JobErrorX;
@@ -670,21 +670,29 @@ fn insert_cache_embedding_row(
     use crate::wit::townframe::sql::types::SqlValue;
     let embedding_json = embedding_vec_to_json(row.vector)
         .map_err(|err| JobErrorX::Terminal(err.wrap_err("error serializing cached embedding")))?;
-    sqlite_connection
-        .query(
+
+    let tx = sqlite_connection.begin_transaction().map_err(|err| {
+        JobErrorX::Terminal(ferr!(
+            "error beginning sqlite transaction for cache: {err:?}"
+        ))
+    })?;
+
+    let tx_result: Result<i64, JobErrorX> = (|| {
+        tx.query(
             "INSERT INTO image_label_prompt_vec (embedding) VALUES (?1)",
             &[SqlValue::Text(embedding_json)],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec cache row: {err:?}")))?;
-    let rowid_rows = sqlite_connection
-        .query("SELECT last_insert_rowid() AS rowid", &[])
-        .map_err(|err| JobErrorX::Terminal(ferr!("error reading cache vec rowid: {err:?}")))?;
-    let rowid = rowid_rows
-        .first()
-        .and_then(|row| row_i64(row, "rowid"))
-        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing cache vec rowid")))?;
-    sqlite_connection
-        .query(
+
+        let rowid_rows = tx
+            .query("SELECT last_insert_rowid() AS rowid", &[])
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading cache vec rowid: {err:?}")))?;
+        let rowid = rowid_rows
+            .first()
+            .and_then(|r| row_i64(r, "rowid"))
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing cache vec rowid")))?;
+
+        tx.query(
             "INSERT INTO image_label_prompt_meta (rowid, label_set_version_id, row_kind, label, description, query_text, model_tag, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
             &[
                 SqlValue::Integer(rowid),
@@ -698,7 +706,24 @@ fn insert_cache_embedding_row(
             ],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error inserting cache meta row: {err:?}")))?;
-    Ok(rowid)
+
+        Ok(rowid)
+    })();
+
+    match tx_result {
+        Ok(rowid) => {
+            tx.commit().map_err(|err| {
+                JobErrorX::Terminal(ferr!("error committing cache transaction: {err:?}"))
+            })?;
+            Ok(rowid)
+        }
+        Err(err) => {
+            tx.rollback()
+                .inspect_err(|err| error!("error on rollback: {err}"))
+                .ok();
+            Err(err)
+        }
+    }
 }
 
 fn sqlite_vec_rowid_cosine_similarity(

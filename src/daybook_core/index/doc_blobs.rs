@@ -249,7 +249,7 @@ impl DocBlobsIndexRepo {
         if selected_blob_keys.is_empty() {
             return self.delete_doc_branch(doc_id, branch_path).await;
         }
-        let facets = self
+        let Some((facets, _)) = self
             .drawer_repo
             .get_at_branch_heads_with_facets_arc(
                 doc_id,
@@ -258,8 +258,10 @@ impl DocBlobsIndexRepo {
                 Some(selected_blob_keys),
             )
             .await?
-            .map(|(facets, _)| facets)
-            .ok_or_eyre("doc didn't match expectation")?;
+        else {
+            tracing::debug!(%doc_id, %branch_path, "doc heads changed during index update");
+            return self.doc_presence_outcome(doc_id).await;
+        };
 
         let mut blobs = HashMap::<Arc<str>, u64>::new();
         for (_facet_key, facet_raw) in facets {
@@ -464,6 +466,7 @@ impl DocBlobsIndexRepo {
             let blob_id = hash
                 .parse::<crate::blobs::BlobId>()
                 .wrap_err("invalid blob id in doc blob delta")?;
+            self.blobs_repo.ensure_hash_materialized(blob_id).await.ok();
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
@@ -977,14 +980,18 @@ mod tests {
         assert!(hashes.contains(&hash_b));
         let blob_refs = repo.list_blob_refs_for_doc(&doc_id).await?;
         assert_eq!(blob_refs.len(), 2);
-        assert!(blob_refs
-            .iter()
-            .all(|blob_ref| blob_ref.length_octets == 42));
+        assert!(
+            blob_refs
+                .iter()
+                .all(|blob_ref| blob_ref.length_octets == 42)
+        );
 
         let memberships = repo.list_docs_for_hash(&hash_a).await?;
-        assert!(memberships
-            .iter()
-            .any(|value| value.doc_id == doc_id && value.length_octets == 42));
+        assert!(
+            memberships
+                .iter()
+                .any(|value| value.doc_id == doc_id && value.length_octets == 42)
+        );
 
         test_context.stop().await?;
         Ok(())
@@ -1067,7 +1074,10 @@ mod tests {
         .await?;
 
         let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-        let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
+        let blob_id = blobs_repo
+            .put(b"docs-scope-hash-bytes", crate::blobs::BlobUseHints::Docs)
+            .await?;
+        let hash = blob_id.to_string();
         let doc_id = drawer_repo
             .add(AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1075,7 +1085,7 @@ mod tests {
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
                         mime: "application/octet-stream".to_string(),
-                        length_octets: 13,
+                        length_octets: 21,
                         digest: "ignored-digest".to_string(),
                         inline: None,
                         urls: Some(vec![format!("{BLOB_SCHEME}:///{hash}")]),

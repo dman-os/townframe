@@ -140,7 +140,8 @@ impl ConfigRepo {
                     peer_id: peer_id.to_string(),
                 }
             }
-            Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
+            Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+            | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
                 crate::event_origin::SwitchEventOrigin::Bootstrap
             }
             None => crate::event_origin::SwitchEventOrigin::Remote {
@@ -197,24 +198,6 @@ impl ConfigRepo {
             app_doc_handle.clone(),
             local_actor_id.clone(),
         );
-
-        store
-            .mutate_sync(|store| {
-                store
-                    .users
-                    .entry(local_actor_id.to_string())
-                    .or_insert_with(|| {
-                        Versioned::mint(
-                            local_actor_id.clone(),
-                            UserMeta {
-                                user_path: local_user_path.clone(),
-                                seen_at: Timestamp::now(),
-                            }
-                            .into(),
-                        )
-                    });
-            })
-            .await?;
 
         let cancel_token = CancellationToken::new();
         // Register change listener to automatically notify repo listeners
@@ -702,6 +685,7 @@ impl ConfigRepo {
             .known_devices
             .push(crate::repo::globals::SyncDeviceEntry {
                 endpoint_id,
+                agent_peer_id: None,
                 name: device_name.to_string(),
                 added_at: jiff::Timestamp::now(),
                 last_connected_at: None,
@@ -785,20 +769,24 @@ mod tests {
 pub mod version_updates {
     use crate::interlude::*;
 
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
+    use automerge::{ROOT, transaction::Transactable};
     use autosurgeon::reconcile_prop;
 
     pub fn version_latest() -> Res<Vec<u8>> {
-        let mut doc = AutoCommit::new().with_actor(ActorId::random());
-        doc.put(ROOT, "version", "0")?;
-        // indicate schema type for this document
-        doc.put(ROOT, "$schema", "daybook.config")?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            super::ConfigStore::prop().as_ref(),
-            super::ConfigStore::default(),
-        )?;
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.config")?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                super::ConfigStore::prop().as_ref(),
+                super::ConfigStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
         Ok(doc.save_nocompress())
     }
 }

@@ -53,8 +53,8 @@ pub mod wit {
         pub use crate::wit::townframe::api_utils::utils::*;
         pub type Json = String;
     }
-    use crate::interlude::utoipa;
     use crate::interlude::Timestamp;
+    use crate::interlude::utoipa;
     use crate::interlude::*;
 
     use townframe::api_utils::utils::Datetime;

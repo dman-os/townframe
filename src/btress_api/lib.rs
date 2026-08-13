@@ -31,7 +31,7 @@ pub struct SharedServiceContext(pub ServiceContext);
 #[derive(Debug)]
 pub struct Config {}
 
-mod gen;
+mod r#gen;
 mod user;
 use user::USERNAME_REGEX;
 // mod utils;
@@ -77,13 +77,13 @@ mod wit {
 
             "townframe:api-utils/utils": api_utils_rs::wit::utils,
 
-            // "townframe:btress-api/user": crate::gen::user,
-            "townframe:btress-api/user-create": crate::gen::user::user_create,
-            "townframe:btress-api/user-create/error-email-occupied": crate::gen::user::user_create::ErrorEmailOccupied,
-            "townframe:btress-api/user-create/error-username-occupied": crate::gen::user::user_create::ErrorUsernameOccupied,
-            "townframe:btress-api/user-create/input": crate::gen::user::user_create::Input,
-            "townframe:btress-api/user/user": crate::gen::user::User,
-            "townframe:btress-api/user-create/error": crate::gen::user::user_create::Error,
+            // "townframe:btress-api/user": crate::r#gen::user,
+            "townframe:btress-api/user-create": crate::r#gen::user::user_create,
+            "townframe:btress-api/user-create/error-email-occupied": crate::r#gen::user::user_create::ErrorEmailOccupied,
+            "townframe:btress-api/user-create/error-username-occupied": crate::r#gen::user::user_create::ErrorUsernameOccupied,
+            "townframe:btress-api/user-create/input": crate::r#gen::user::user_create::Input,
+            "townframe:btress-api/user/user": crate::r#gen::user::User,
+            "townframe:btress-api/user-create/error": crate::r#gen::user::user_create::Error,
         }
     });
 }

@@ -1,5 +1,22 @@
 use crate::interlude::*;
 
+pub mod version_updates {
+    use crate::interlude::*;
+    use automerge::ROOT;
+    use automerge::transaction::Transactable;
+
+    pub fn version_latest() -> Res<Vec<u8>> {
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.drawer")?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
+        Ok(doc.save_nocompress())
+    }
+}
+
 #[cfg(test)]
 use super::BranchStateRow;
 use super::{BranchKind, BranchRefRow, DrawerRepo};
@@ -250,10 +267,11 @@ impl DrawerRepo {
                 .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
-                tracing::warn!(
-                    branch_name = %branch_name,
-                    branch_doc_id = %branch_ref.branch_doc_id,
-                    "missing branch heads for drawer branch ref"
+                debug!(
+                    %doc_id,
+                    %branch_name,
+                    bdoc_id = %branch_ref.branch_doc_id,
+                    "branch doc not ready yet during current_doc_branches_from_entry"
                 );
                 continue;
             };
@@ -261,10 +279,11 @@ impl DrawerRepo {
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
             let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
-                tracing::warn!(
-                    branch_path = %branch_path,
-                    branch_doc_id = %branch_doc_id,
-                    "missing branch heads for local branch ref"
+                debug!(
+                    %doc_id,
+                    %branch_path,
+                    %branch_doc_id,
+                    "local branch doc not ready yet during current_doc_branches_from_entry"
                 );
                 continue;
             };

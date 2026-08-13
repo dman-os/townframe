@@ -5,9 +5,9 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use wflow_core::{
+    r#gen::types::PartitionId,
     log, metastore,
     partition::{effects, log::PartitionLogEntry},
-    r#gen::types::PartitionId,
 };
 
 use wflow_core::snapstore::SnapStore;

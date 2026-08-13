@@ -365,7 +365,7 @@ pub fn plug_manifest() -> PlugManifest {
                 deets: ProcessorDeets::DocProcessor {
                     event_predicate: ProcessorEventPredicate {
                         doc_change_predicate: DocChangePredicate::ChangedFacetTags(vec![
-                            note_tag.clone()
+                            note_tag.clone(),
                         ]),
                         ..Default::default()
                     },

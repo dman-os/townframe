@@ -797,7 +797,7 @@ mod tests {
             },
         );
 
-        let _ = match_claims(&original, &existing, &src_ref());
+        drop(match_claims(&original, &existing, &src_ref()));
     }
 
     #[test]

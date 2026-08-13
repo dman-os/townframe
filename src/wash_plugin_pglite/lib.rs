@@ -1036,10 +1036,14 @@ mod tests {
                     );
                 }
                 match (&e.offset, &a.offset) {
-                    (types::Offset::EasternHemisphereSecs(e_secs), types::Offset::EasternHemisphereSecs(a_secs))
-                        if e_secs == a_secs => {}
-                    (types::Offset::WesternHemisphereSecs(e_secs), types::Offset::WesternHemisphereSecs(a_secs))
-                        if e_secs == a_secs => {}
+                    (
+                        types::Offset::EasternHemisphereSecs(e_secs),
+                        types::Offset::EasternHemisphereSecs(a_secs),
+                    ) if e_secs == a_secs => {}
+                    (
+                        types::Offset::WesternHemisphereSecs(e_secs),
+                        types::Offset::WesternHemisphereSecs(a_secs),
+                    ) if e_secs == a_secs => {}
                     _ => panic!(
                         "query '{}', row {}, col {}: expected TimestampTz({:?}), got TimestampTz({:?})",
                         sql, row_idx, col_idx, e, a
@@ -1057,12 +1061,12 @@ mod tests {
                 }
             }
             (types::PgValue::Point(e), types::PgValue::Point(a)) => {
-                if e.0 .0 != a.0 .0
-                    || e.0 .1 != a.0 .1
-                    || e.0 .2 != a.0 .2
-                    || e.1 .0 != a.1 .0
-                    || e.1 .1 != a.1 .1
-                    || e.1 .2 != a.1 .2
+                if e.0.0 != a.0.0
+                    || e.0.1 != a.0.1
+                    || e.0.2 != a.0.2
+                    || e.1.0 != a.1.0
+                    || e.1.1 != a.1.1
+                    || e.1.2 != a.1.2
                 {
                     panic!(
                         "query '{}', row {}, col {}: expected Point({:?}), got Point({:?})",
@@ -1078,18 +1082,18 @@ mod tests {
             (types::PgValue::Varbit(e), types::PgValue::Varbit(a)) if e == a => {}
             (types::PgValue::Hstore(e), types::PgValue::Hstore(a)) if e == a => {}
             (types::PgValue::Box(e), types::PgValue::Box(a)) => {
-                if e.0 .0 .0 != a.0 .0 .0
-                    || e.0 .0 .1 != a.0 .0 .1
-                    || e.0 .0 .2 != a.0 .0 .2
-                    || e.0 .1 .0 != a.0 .1 .0
-                    || e.0 .1 .1 != a.0 .1 .1
-                    || e.0 .1 .2 != a.0 .1 .2
-                    || e.1 .0 .0 != a.1 .0 .0
-                    || e.1 .0 .1 != a.1 .0 .1
-                    || e.1 .0 .2 != a.1 .0 .2
-                    || e.1 .1 .0 != a.1 .1 .0
-                    || e.1 .1 .1 != a.1 .1 .1
-                    || e.1 .1 .2 != a.1 .1 .2
+                if e.0.0.0 != a.0.0.0
+                    || e.0.0.1 != a.0.0.1
+                    || e.0.0.2 != a.0.0.2
+                    || e.0.1.0 != a.0.1.0
+                    || e.0.1.1 != a.0.1.1
+                    || e.0.1.2 != a.0.1.2
+                    || e.1.0.0 != a.1.0.0
+                    || e.1.0.1 != a.1.0.1
+                    || e.1.0.2 != a.1.0.2
+                    || e.1.1.0 != a.1.1.0
+                    || e.1.1.1 != a.1.1.1
+                    || e.1.1.2 != a.1.1.2
                 {
                     panic!(
                         "query '{}', row {}, col {}: expected Box({:?}), got Box({:?})",
@@ -1098,15 +1102,15 @@ mod tests {
                 }
             }
             (types::PgValue::Circle(e), types::PgValue::Circle(a)) => {
-                if e.0 .0 .0 != a.0 .0 .0
-                    || e.0 .0 .1 != a.0 .0 .1
-                    || e.0 .0 .2 != a.0 .0 .2
-                    || e.0 .1 .0 != a.0 .1 .0
-                    || e.0 .1 .1 != a.0 .1 .1
-                    || e.0 .1 .2 != a.0 .1 .2
-                    || e.1 .0 != a.1 .0
-                    || e.1 .1 != a.1 .1
-                    || e.1 .2 != a.1 .2
+                if e.0.0.0 != a.0.0.0
+                    || e.0.0.1 != a.0.0.1
+                    || e.0.0.2 != a.0.0.2
+                    || e.0.1.0 != a.0.1.0
+                    || e.0.1.1 != a.0.1.1
+                    || e.0.1.2 != a.0.1.2
+                    || e.1.0 != a.1.0
+                    || e.1.1 != a.1.1
+                    || e.1.2 != a.1.2
                 {
                     panic!(
                         "query '{}', row {}, col {}: expected Circle({:?}), got Circle({:?})",
@@ -1122,12 +1126,12 @@ mod tests {
                     );
                 }
                 for (ep, ap) in e.iter().zip(a.iter()) {
-                    if ep.0 .0 != ap.0 .0
-                        || ep.0 .1 != ap.0 .1
-                        || ep.0 .2 != ap.0 .2
-                        || ep.1 .0 != ap.1 .0
-                        || ep.1 .1 != ap.1 .1
-                        || ep.1 .2 != ap.1 .2
+                    if ep.0.0 != ap.0.0
+                        || ep.0.1 != ap.0.1
+                        || ep.0.2 != ap.0.2
+                        || ep.1.0 != ap.1.0
+                        || ep.1.1 != ap.1.1
+                        || ep.1.2 != ap.1.2
                     {
                         panic!(
                             "query '{}', row {}, col {}: expected Path({:?}), got Path({:?})",
@@ -1142,18 +1146,18 @@ mod tests {
             (types::PgValue::Money(e), types::PgValue::Money(a)) if e == a => {}
             (types::PgValue::Char(e), types::PgValue::Char(a)) if e == a => {}
             (types::PgValue::Line(e), types::PgValue::Line(a)) => {
-                if e.0 .0 .0 != a.0 .0 .0
-                    || e.0 .0 .1 != a.0 .0 .1
-                    || e.0 .0 .2 != a.0 .0 .2
-                    || e.0 .1 .0 != a.0 .1 .0
-                    || e.0 .1 .1 != a.0 .1 .1
-                    || e.0 .1 .2 != a.0 .1 .2
-                    || e.1 .0 .0 != a.1 .0 .0
-                    || e.1 .0 .1 != a.1 .0 .1
-                    || e.1 .0 .2 != a.1 .0 .2
-                    || e.1 .1 .0 != a.1 .1 .0
-                    || e.1 .1 .1 != a.1 .1 .1
-                    || e.1 .1 .2 != a.1 .1 .2
+                if e.0.0.0 != a.0.0.0
+                    || e.0.0.1 != a.0.0.1
+                    || e.0.0.2 != a.0.0.2
+                    || e.0.1.0 != a.0.1.0
+                    || e.0.1.1 != a.0.1.1
+                    || e.0.1.2 != a.0.1.2
+                    || e.1.0.0 != a.1.0.0
+                    || e.1.0.1 != a.1.0.1
+                    || e.1.0.2 != a.1.0.2
+                    || e.1.1.0 != a.1.1.0
+                    || e.1.1.1 != a.1.1.1
+                    || e.1.1.2 != a.1.1.2
                 {
                     panic!(
                         "query '{}', row {}, col {}: expected Line({:?}), got Line({:?})",
@@ -1162,18 +1166,18 @@ mod tests {
                 }
             }
             (types::PgValue::Lseg(e), types::PgValue::Lseg(a)) => {
-                if e.0 .0 .0 != a.0 .0 .0
-                    || e.0 .0 .1 != a.0 .0 .1
-                    || e.0 .0 .2 != a.0 .0 .2
-                    || e.0 .1 .0 != a.0 .1 .0
-                    || e.0 .1 .1 != a.0 .1 .1
-                    || e.0 .1 .2 != a.0 .1 .2
-                    || e.1 .0 .0 != a.1 .0 .0
-                    || e.1 .0 .1 != a.1 .0 .1
-                    || e.1 .0 .2 != a.1 .0 .2
-                    || e.1 .1 .0 != a.1 .1 .0
-                    || e.1 .1 .1 != a.1 .1 .1
-                    || e.1 .1 .2 != a.1 .1 .2
+                if e.0.0.0 != a.0.0.0
+                    || e.0.0.1 != a.0.0.1
+                    || e.0.0.2 != a.0.0.2
+                    || e.0.1.0 != a.0.1.0
+                    || e.0.1.1 != a.0.1.1
+                    || e.0.1.2 != a.0.1.2
+                    || e.1.0.0 != a.1.0.0
+                    || e.1.0.1 != a.1.0.1
+                    || e.1.0.2 != a.1.0.2
+                    || e.1.1.0 != a.1.1.0
+                    || e.1.1.1 != a.1.1.1
+                    || e.1.1.2 != a.1.1.2
                 {
                     panic!(
                         "query '{}', row {}, col {}: expected Lseg({:?}), got Lseg({:?})",
@@ -1189,12 +1193,12 @@ mod tests {
                     );
                 }
                 for (ep, ap) in e.iter().zip(a.iter()) {
-                    if ep.0 .0 != ap.0 .0
-                        || ep.0 .1 != ap.0 .1
-                        || ep.0 .2 != ap.0 .2
-                        || ep.1 .0 != ap.1 .0
-                        || ep.1 .1 != ap.1 .1
-                        || ep.1 .2 != ap.1 .2
+                    if ep.0.0 != ap.0.0
+                        || ep.0.1 != ap.0.1
+                        || ep.0.2 != ap.0.2
+                        || ep.1.0 != ap.1.0
+                        || ep.1.1 != ap.1.1
+                        || ep.1.2 != ap.1.2
                     {
                         panic!(
                             "query '{}', row {}, col {}: expected Polygon({:?}), got Polygon({:?})",

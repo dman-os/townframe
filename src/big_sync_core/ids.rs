@@ -4,7 +4,6 @@
 use crate::interlude::*;
 use crate::rpc::BuckLevel;
 
-#[macro_export]
 macro_rules! alias_byte32id {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -54,7 +53,7 @@ macro_rules! alias_byte32id {
                 &self,
                 mut reconciler: R,
             ) -> Result<(), R::Error> {
-                reconciler.bytes(self.0 .0)
+                reconciler.bytes(self.0.0)
             }
         }
 
@@ -280,7 +279,7 @@ impl BuckId {
     #[inline]
     pub fn from_obj_id(level: BuckLevel, obj_id: &ObjId) -> Self {
         debug_assert!(level <= Self::MAX_LEVEL);
-        let l4_index = u16::from_be_bytes([obj_id.0 .0[0], obj_id.0 .0[1]]);
+        let l4_index = u16::from_be_bytes([obj_id.0.0[0], obj_id.0.0[1]]);
         Self::new(4, l4_index).to_level(level)
     }
 

@@ -590,7 +590,9 @@ mod local {
                 .embed(vec![image_path_for_embed], None)
                 .map_err(|err| eyre::eyre!("failed to embed image: {err}"));
             if let Some(path) = temp_image_path.as_ref() {
-                let _ = std::fs::remove_file(path);
+                std::fs::remove_file(path)
+                    .inspect_err(|err| warn!("error removing temp file: {err}"))
+                    .ok();
             }
             let mut vectors = embed_result?;
             let Some(vector) = vectors.pop() else {
@@ -1317,26 +1319,34 @@ mod tests {
             assert!(onnx_path.exists());
             assert!(preprocessor_config_path.exists());
 
-            assert!(config
-                .embed
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, EmbedBackendConfig::CloudOllama { .. })));
-            assert!(config
-                .embed
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, EmbedBackendConfig::CloudGemini { .. })));
-            assert!(config
-                .llm
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, LlmBackendConfig::CloudOllama { .. })));
-            assert!(config
-                .llm
-                .backends
-                .iter()
-                .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. })));
+            assert!(
+                config
+                    .embed
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, EmbedBackendConfig::CloudOllama { .. }))
+            );
+            assert!(
+                config
+                    .embed
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, EmbedBackendConfig::CloudGemini { .. }))
+            );
+            assert!(
+                config
+                    .llm
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, LlmBackendConfig::CloudOllama { .. }))
+            );
+            assert!(
+                config
+                    .llm
+                    .backends
+                    .iter()
+                    .any(|backend| matches!(backend, LlmBackendConfig::CloudGemini { .. }))
+            );
 
             if std::env::var("GEMINI_API_KEY").is_ok() {
                 assert!(matches!(

@@ -199,8 +199,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 }
             }
 
-            use comfy_table::presets::NOTHING;
             use comfy_table::Table;
+            use comfy_table::presets::NOTHING;
             use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
             let mut table = Table::new();
@@ -350,8 +350,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let sync_repo = lazy::sync_repo().await?;
             let local_ticket_url = sync_repo.get_clone_ticket_url().await?;
             {
-                use qrcode::render::unicode;
                 use qrcode::QrCode;
+                use qrcode::render::unicode;
                 let code = QrCode::new(&local_ticket_url[..]).unwrap();
                 let image = code
                     .render::<unicode::Dense1x2>()
@@ -473,8 +473,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             let config_repo = lazy::config_repo().await?;
             match command {
                 DevicesCommands::Ls => {
-                    use comfy_table::presets::NOTHING;
                     use comfy_table::Table;
+                    use comfy_table::presets::NOTHING;
 
                     let mut devices = config_repo.list_known_sync_devices().await?;
                     devices.sort_by_key(|device| device.added_at);
@@ -501,6 +501,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                         daybook_core::sync::RequestCloneProvisionReq {
                             requested_device_name: None,
                             requester_endpoint_id: ctx.iroh_public_key.clone(),
+                            requester_contact_card: ctx.big_repo.local_keyhive_contact_card(),
                         },
                     )
                     .await?;
@@ -523,6 +524,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     config_repo
                         .upsert_known_sync_device(daybook_core::repo::globals::SyncDeviceEntry {
                             endpoint_id: bootstrap.endpoint_id,
+                            agent_peer_id: None,
                             name: device_name,
                             added_at: Timestamp::now(),
                             last_connected_at: None,
@@ -542,6 +544,7 @@ async fn clone_repo_from_url(source_url: &str, destination: &std::path::Path) ->
         destination,
         daybook_core::sync::CloneRepoInitOptions {
             timeout: std::time::Duration::from_secs(30),
+            repo_options: daybook_core::repo::RepoOpenOptions::default(),
         },
     )
     .await?;
@@ -974,7 +977,12 @@ mod tests {
     }
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
-        let ctx = RepoCtx::open(repo_root, RepoOpenOptions {}, "cli-test-device".into()).await?;
+        let ctx = RepoCtx::open(
+            repo_root,
+            RepoOpenOptions::default(),
+            "cli-test-device".into(),
+        )
+        .await?;
         let blobs_repo = BlobsRepo::new(
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),
@@ -1060,7 +1068,7 @@ mod tests {
         tokio::fs::create_dir_all(&repo_a_path).await?;
         let init = RepoCtx::init(
             &repo_a_path,
-            RepoOpenOptions {},
+            RepoOpenOptions::default(),
             "cli-test-repo".into(),
             "cli-test-device".into(),
         )

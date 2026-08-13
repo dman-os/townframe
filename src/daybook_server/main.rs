@@ -8,7 +8,7 @@ mod interlude {
     pub use generational_box::{GenerationalBox, Storage};
 }
 
-mod gen;
+mod r#gen;
 
 use std::collections::HashSet;
 

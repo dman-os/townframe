@@ -674,7 +674,7 @@ mod ser_de {
 
     use std::{borrow::Cow, fmt};
 
-    use serde::{de::Visitor, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer, de::Visitor};
 
     // impl FromStr for FacetTag {
     //     type Err = FacetTagParseError;
@@ -1034,9 +1034,9 @@ mod ser_de {
             S: serde::Serializer,
         {
             if serializer.is_human_readable() {
-                utils_rs::hash::encode_base58_multibase(self.0 .0).serialize(serializer)
+                utils_rs::hash::encode_base58_multibase(self.0.0).serialize(serializer)
             } else {
-                serializer.serialize_bytes(&self.0 .0)
+                serializer.serialize_bytes(&self.0.0)
             }
         }
     }

@@ -594,19 +594,24 @@ impl crate::stores::AmStore for PlugsStore {
 
 pub mod version_updates {
     use super::*;
-    use automerge::{transaction::Transactable, ActorId, AutoCommit, ROOT};
+    use automerge::{ROOT, transaction::Transactable};
     use autosurgeon::reconcile_prop;
 
     pub fn version_latest() -> Res<Vec<u8>> {
-        let mut doc = AutoCommit::new().with_actor(ActorId::random());
-        doc.put(ROOT, "version", "0")?;
-        doc.put(ROOT, "$schema", "daybook.plugs")?;
-        reconcile_prop(
-            &mut doc,
-            ROOT,
-            super::PlugsStore::prop().as_ref(),
-            super::PlugsStore::default(),
-        )?;
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.plugs")?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                super::PlugsStore::prop().as_ref(),
+                super::PlugsStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
         Ok(doc.save_nocompress())
     }
 }
@@ -937,18 +942,19 @@ impl PlugsRepo {
                             })
                             .await;
                         if let Some(removed) = removed_manifest {
-                            let removed_hashes =
-                                match Self::blob_hashes_for_manifest(removed.as_ref()) {
-                                    Ok(value) => value,
-                                    Err(err) => {
-                                        warn!(
+                            let removed_hashes = match Self::blob_hashes_for_manifest(
+                                removed.as_ref(),
+                            ) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    warn!(
                                         plug_id = id,
                                         ?err,
                                         "failed reading removed plug blob hashes; skipping event"
                                     );
-                                        continue;
-                                    }
-                                };
+                                    continue;
+                                }
+                            };
                             if let Err(err) = self
                                 .publish_plug_scope_diff_for_manifest_change(
                                     &id,
@@ -1909,13 +1915,12 @@ impl PlugsRepo {
                     .facets
                     .iter()
                     .find(|prop| prop.key_tag == old_prop.key_tag)
+                    && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema)
                 {
-                    if !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema) {
-                        eyre::bail!(
-                            "Incompatible schema for property tag '{}'",
-                            old_prop.key_tag
-                        );
-                    }
+                    eyre::bail!(
+                        "Incompatible schema for property tag '{}'",
+                        old_prop.key_tag
+                    );
                 }
             }
         }
@@ -1927,14 +1932,14 @@ impl PlugsRepo {
         self.store
             .query_sync(|store| {
                 for prop in &manifest.facets {
-                    if let Some(owner) = store.tag_to_plug.get(&prop.key_tag.to_string()) {
-                        if owner != &plug_id {
-                            return Err(eyre::eyre!(
-                                "Tag clash: tag '{}' is already owned by plug '{}'",
-                                prop.key_tag,
-                                owner
-                            ));
-                        }
+                    if let Some(owner) = store.tag_to_plug.get(&prop.key_tag.to_string())
+                        && owner != &plug_id
+                    {
+                        return Err(eyre::eyre!(
+                            "Tag clash: tag '{}' is already owned by plug '{}'",
+                            prop.key_tag,
+                            owner
+                        ));
                     }
                 }
                 Ok(())
@@ -2535,15 +2540,21 @@ mod tests {
     use super::*;
     use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
+    /// Boot a repo + plugs registry for tests.
+    ///
+    /// The first tuple element is the stop callback for the booted repository:
+    /// calling it invokes shutdown, while cancellation occurs through any
+    /// captured owning guard rather than by dropping the closure itself unless
+    /// `boot_repo` confirms that ownership. Tests bind it as `_acx`.
     async fn setup_repo() -> Res<(
-        SharedBigRepo,
+        Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
         SharedPartStore,
         Arc<PlugsRepo>,
         DocumentId,
         tempfile::TempDir,
     )> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, big_sync_host, acx_stop) = crate::test_support::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
         let handle = big_repo.create_doc(doc).await?;
@@ -2561,12 +2572,12 @@ mod tests {
 
         let (repo, _repo_stop) =
             PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
-        Ok((big_repo, big_sync_host.store, repo, doc_id, temp_dir))
+        Ok((acx_stop, big_sync_host.store, repo, doc_id, temp_dir))
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn inspect_test_plug_oci_layout() -> Res<()> {
-        let (_big_repo, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/oci")
             .join("@daybook/test");
@@ -2733,10 +2744,11 @@ mod tests {
 
         let res = repo.add(consumer).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Dependency not found"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Dependency not found")
+        );
         Ok(())
     }
 
@@ -2819,20 +2831,22 @@ mod tests {
         p1_same.version = "0.1.0".parse().unwrap();
         let res = repo.add(p1_same).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Version must be greater"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Version must be greater")
+        );
 
         // Try to add lower version -> should fail
         let mut p1_lower = mock_plug("plug1");
         p1_lower.version = "0.0.9".parse().unwrap();
         let res = repo.add(p1_lower).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Version must be greater"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Version must be greater")
+        );
 
         // Add higher version -> should succeed
         let mut p1_v2 = mock_plug("plug1");
@@ -2876,10 +2890,11 @@ mod tests {
 
         let res = repo.add(plug).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("wflow bundle 'missing_bundle' not found"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("wflow bundle 'missing_bundle' not found")
+        );
 
         // Create plug with routine referencing non-existent key in bundle
         let mut plug2 = mock_plug("plug2");
@@ -2909,10 +2924,11 @@ mod tests {
 
         let res = repo.add(plug2).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("key 'missing_key' not found"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("key 'missing_key' not found")
+        );
 
         Ok(())
     }
@@ -2936,10 +2952,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("wflow bundle 'missing-bundle' not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("wflow bundle 'missing-bundle' not found")
+        );
 
         Ok(())
     }
@@ -2988,10 +3006,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("view 'missing-view' not found in this plug"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("view 'missing-view' not found in this plug")
+        );
 
         Ok(())
     }
@@ -3020,10 +3040,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("neither this plug nor a declared dependency"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("neither this plug nor a declared dependency")
+        );
 
         Ok(())
     }
@@ -3083,10 +3105,12 @@ mod tests {
 
         let result = repo.add(caller).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not found in view provider plug '@test/provider'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in view provider plug '@test/provider'")
+        );
 
         Ok(())
     }
@@ -3108,10 +3132,11 @@ mod tests {
 
         let res = repo.add(plug).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Component file not found"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Component file not found")
+        );
 
         // Test with non-existent blob URL
         let mut plug2 = mock_plug("plug2");
@@ -3119,9 +3144,11 @@ mod tests {
             "bundle1".into(),
             manifest::WflowBundleManifest {
                 keys: vec![],
-                component_urls: vec![format!("{}:///nonexistent_hash", crate::blobs::BLOB_SCHEME)
-                    .parse()
-                    .unwrap()],
+                component_urls: vec![
+                    format!("{}:///nonexistent_hash", crate::blobs::BLOB_SCHEME)
+                        .parse()
+                        .unwrap(),
+                ],
             }
             .into(),
         );
@@ -3143,10 +3170,11 @@ mod tests {
 
         let res = repo.add(plug3).await;
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported URL scheme"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Unsupported URL scheme")
+        );
 
         Ok(())
     }
@@ -3168,10 +3196,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("path does not exist in schema"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("path does not exist in schema")
+        );
 
         Ok(())
     }
@@ -3193,10 +3223,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must allow an array of commit hashes"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must allow an array of commit hashes")
+        );
 
         Ok(())
     }
@@ -3221,10 +3253,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid processor deets"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid processor deets")
+        );
 
         Ok(())
     }
@@ -3277,10 +3311,12 @@ mod tests {
 
         let result = repo.add(plug).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid processor predicate"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid processor predicate")
+        );
 
         Ok(())
     }
@@ -3357,10 +3393,12 @@ mod tests {
 
         let result = repo.add(caller).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("declared dependency"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("declared dependency")
+        );
         Ok(())
     }
 
@@ -3484,7 +3522,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_blob_scope_partition_tracks_add_and_remove() -> Res<()> {
-        let (_big_repo, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
 
         let temp_dir = tempfile::tempdir()?;

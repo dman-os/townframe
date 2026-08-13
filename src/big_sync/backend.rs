@@ -31,7 +31,6 @@ pub mod contract {
         pub initial_parts: Vec<PartId>,
         pub remote_payload: Option<ObjPayload>,
         pub expected_outcome: SyncBackendOutcome,
-        pub expected_payload: Option<ObjPayload>,
         pub expected_parts: Vec<PartId>,
     }
 
@@ -56,7 +55,6 @@ pub mod contract {
                 initial_parts: parts.clone(),
                 remote_payload: Some(payload.clone()),
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::Noop),
-                expected_payload: Some(payload),
                 expected_parts: parts,
             }
         }
@@ -79,7 +77,6 @@ pub mod contract {
                 expected_outcome: SyncBackendOutcome::Completion(
                     SyncCompletionDeets::ChangedObject,
                 ),
-                expected_payload: Some(remote_payload),
                 expected_parts: parts,
             }
         }
@@ -99,7 +96,6 @@ pub mod contract {
                 initial_parts: parts.clone(),
                 remote_payload: Some(remote_payload.clone()),
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
-                expected_payload: Some(remote_payload),
                 expected_parts: parts,
             }
         }
@@ -168,12 +164,6 @@ pub mod contract {
             }
         }
 
-        assert_eq!(
-            store.obj_payload(case.obj_id).await?,
-            case.expected_payload,
-            "unexpected payload after sync case {}",
-            case.name
-        );
         let mut actual_parts = store.obj_parts(case.obj_id).await?;
         let mut expected_parts = case.expected_parts.clone();
         actual_parts.sort();

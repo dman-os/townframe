@@ -10,8 +10,8 @@ use crate::drawer::{
     },
 };
 
-use automerge::transaction::Transactable;
 use automerge::ReadDoc;
+use automerge::transaction::Transactable;
 use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey};
 
 struct PreparedAddDoc {
@@ -35,10 +35,20 @@ impl DrawerRepo {
                 .expect("seed write failed");
             tx.commit();
         }
-        let handle = match self.big_repo.create_doc(doc_am).await {
+        let handle = match self
+            .big_repo
+            .create_doc_with_parents(
+                doc_am,
+                vec![
+                    self.content_docs_group.clone().into(),
+                    self.drawer_group.clone().into(),
+                ],
+            )
+            .await
+        {
             Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
-                panic!("keyhive doc id conflict lol")
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
+                panic!("keyhive document ID conflict")
             }
             Err(err) => {
                 return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
@@ -239,7 +249,7 @@ impl DrawerRepo {
             (None, None) => {
                 return Err(DrawerError::BranchNotFound {
                     name: branch_path.to_string(),
-                })
+                });
             }
         };
 
@@ -451,21 +461,29 @@ impl DrawerRepo {
             })
             .await?;
         let heads = ChangeHashSet(branch_doc.get_heads().into());
-        let handle = match self.big_repo.create_doc(branch_doc).await {
+        let branch_kind = self.branch_kind_for_path(to_branch)?;
+        let mut parents = vec![self.content_docs_group.clone().into()];
+        if branch_kind == BranchKind::Replicated {
+            parents.push(self.drawer_group.clone().into());
+        }
+        let handle = match self
+            .big_repo
+            .create_doc_with_parents(branch_doc, parents)
+            .await
+        {
             Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
-                panic!("keyhive doc id conflict lol")
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
+                panic!("keyhive document ID conflict")
             }
             Err(err) => {
                 return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
             }
         };
         let branch_doc_id = handle.document_id();
-        let branch_kind = self.branch_kind_for_path(to_branch)?;
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &heads)
             .await?;
 
-        let _ = user_path;
+        let _user_path = user_path;
         let drawer_heads = if branch_kind == BranchKind::Local {
             let vtag = VersionTag::update(self.local_actor_id.clone());
             self.upsert_local_branch_ref(id, to_branch, branch_doc_id, &vtag)
@@ -701,16 +719,13 @@ impl DrawerRepo {
                 // Identify modified facets from patches
                 let mut modified_facets = HashSet::new();
                 for patch in patches {
-                    if patch.path.len() >= 2 {
-                        if let (_, automerge::Prop::Map(ref p0)) = &patch.path[0] {
-                            if p0 == "facets" {
-                                if let (_, automerge::Prop::Map(ref facet_key_str)) = &patch.path[1]
+                    if patch.path.len() >= 2
+                        && let (_, automerge::Prop::Map(p0)) = &patch.path[0]
+                            && p0 == "facets"
+                                && let (_, automerge::Prop::Map(facet_key_str)) = &patch.path[1]
                                 {
                                     modified_facets.insert(facet_key_str.to_string());
                                 }
-                            }
-                        }
-                    }
                 }
 
                 let invalidated_uuids = if modified_facets.is_empty() {
@@ -794,7 +809,9 @@ impl DrawerRepo {
             .await?;
         let mut deleted_facet_keys_set = HashSet::new();
         for snapshot in deleted_branch_snapshots.values() {
-            deleted_facet_keys_set.extend(self.facet_keys_at_branch_snapshot(id, snapshot).await?);
+            if let Some(keys) = self.facet_keys_at_branch_snapshot(id, snapshot).await? {
+                deleted_facet_keys_set.extend(keys);
+            }
         }
         let mut deleted_facet_keys: Vec<FacetKey> = deleted_facet_keys_set.into_iter().collect();
         deleted_facet_keys.sort();

@@ -56,7 +56,7 @@ impl SyncTestNode {
         drop(sync_repo);
         sync_stop.cancel_token.cancel();
         tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(30)),
+            utils_rs::scale_timeout(Duration::from_secs(60)),
             sync_stop.stop(),
         )
         .await
@@ -230,7 +230,7 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -314,7 +314,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -338,7 +338,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     node_a.stop().await?;
 
     let node_b = open_sync_node(&repo_b_path).await?;
-    let core_partition_id = crate::part_id_from_label(CORE_DOCS_PARTITION_ID);
+    let core_partition_id = node_b.sync_repo.authority.core_docs_part_id();
     let partitions = node_b
         .ctx
         .part_store
@@ -369,7 +369,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -394,6 +394,9 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
 
     let node_a = open_sync_node(&repo_a_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
 
     let mut args_batch = Vec::new();
     for idx in 0..100usize {
@@ -424,9 +427,8 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let created = node_a.drawer.batch_add(args_batch).await?;
     assert_eq!(created.len(), 100);
 
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30)).await?;
+
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
     assert_eq!(
@@ -449,6 +451,9 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
 
     let node_a = open_sync_node(&repo_a_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
 
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
@@ -479,10 +484,6 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     }
     node_a.drawer.batch_add(args_batch).await?;
 
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
-
     for (hash, expected) in &blob_payloads {
         let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, Duration::from_secs(60)).await?;
         assert_eq!(
@@ -507,7 +508,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         &repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -563,7 +564,7 @@ async fn init_and_copy_repo_pair(
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
         repo_a_path,
-        RepoOpenOptions {},
+        RepoOpenOptions::default(),
         device_name.clone(),
         device_name,
     )
@@ -578,7 +579,12 @@ async fn init_and_copy_repo_pair(
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
 
-        let ctx = RepoCtx::open(repo_b_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let ctx = RepoCtx::open(
+            repo_b_path,
+            RepoOpenOptions::default(),
+            "test-device".into(),
+        )
+        .await?;
         if ctx.repo_id != source_repo_id {
             eyre::bail!(
                 "init repo_id mismatch after clone (source={}, cloned={})",
@@ -616,6 +622,9 @@ async fn bootstrap_clone_repo_from_url_for_tests(
         destination,
         crate::sync::CloneRepoInitOptions {
             timeout: Duration::from_secs(30),
+            repo_options: RepoOpenOptions {
+                sync_max_task_backoff: Some(Duration::from_millis(500)),
+            },
         },
     )
     .await?;
@@ -623,12 +632,19 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 }
 
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    let rtx = RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?;
+    let rtx = RepoCtx::open(
+        repo_root,
+        RepoOpenOptions {
+            sync_max_task_backoff: Some(Duration::from_millis(500)),
+        },
+        "test-device".into(),
+    )
+    .await?;
     let blobs_repo = BlobsRepo::new(
         rtx.layout.blobs_root.clone(),
         rtx.local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&rtx.part_store),
+            Arc::clone(&rtx.blob_part_store),
         )),
     )
     .await?;
@@ -794,11 +810,13 @@ async fn wait_for_doc_presence_with_activity(
     tokio::time::timeout(absolute_timeout, async {
         loop {
             loop_count += 1;
+            debug!(%doc_id, loop_count, "presence loop: before drawer read");
             let found = node
                 .drawer
                 .get_doc_with_facets_at_branch(doc_id, daybook_types::doc::BranchPath::new("main"), None)
                 .await?
                 .is_some();
+            debug!(%doc_id, loop_count, found, "presence loop: after drawer read");
             if found {
                 break;
             }
@@ -866,10 +884,21 @@ async fn wait_for_sync_convergence(
 ) -> Res<()> {
     let required_partitions = source
         .sync_repo
-        .peer_partition_ids("")
+        .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerId::new(*endpoint_id.as_bytes());
+    // Keyhive convergence is driven by the production notification
+    // subscription. The test waits for the observable BigSync and drawer
+    // results instead of reaching through the daybook API into BigRepo to
+    // force an internal sync round.
+    info!(
+        source = %source.sync_repo.router.endpoint().id(),
+        target = %target.sync_repo.router.endpoint().id(),
+        peer_id = %peer_id,
+        partition_count = required_partitions.len(),
+        "waiting for notification-driven sync convergence"
+    );
     tokio::try_join!(
         target.sync_repo.wait_for_full_sync(
             std::slice::from_ref(&peer_id),
@@ -878,9 +907,14 @@ async fn wait_for_sync_convergence(
         ),
         wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
     )?;
+    info!(
+        source = %source.sync_repo.router.endpoint().id(),
+        target = %target.sync_repo.router.endpoint().id(),
+        peer_id = %peer_id,
+        "notification-driven sync convergence reached"
+    );
     Ok(())
 }
-
 #[tokio::test(flavor = "multi_thread")]
 async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -908,7 +942,7 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
 
     let required_partitions = node_b
         .sync_repo
-        .peer_partition_ids("")
+        .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
@@ -985,6 +1019,17 @@ async fn wait_for_doc_set_parity(
     Ok(())
 }
 
+async fn wait_for_drawer_doc_parity(
+    left: &SyncTestNode,
+    right: &SyncTestNode,
+    doc_id: &DocId,
+    branch: &daybook_types::doc::BranchPath,
+    timeout: Duration,
+) -> Res<()> {
+    wait_for_doc_presence_with_activity(right, doc_id, timeout).await?;
+    wait_for_doc_head_parity(left, right, doc_id, branch, timeout).await
+}
+
 async fn wait_for_doc_head_parity(
     left: &SyncTestNode,
     right: &SyncTestNode,
@@ -994,32 +1039,83 @@ async fn wait_for_doc_head_parity(
 ) -> Res<()> {
     let mut last_left = None::<Vec<String>>;
     let mut last_right = None::<Vec<String>>;
+    let mut last_left_facet_keys = None::<Vec<String>>;
+    let mut last_right_facet_keys = None::<Vec<String>>;
+    let mut last_left_facet_values = None::<String>;
+    let mut last_right_facet_values = None::<String>;
+    let mut last_runtime = None::<String>;
+    let mut last_sync_diagnostics = None::<String>;
     tokio::time::timeout(timeout, async {
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
-            let left_heads = left
+            let (_left_facets, left_facet_keys, left_facet_values, left_heads) = left
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
-                .map(|(_, heads)| {
-                    let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
-                    out.sort_unstable();
-                    out
+                .map(|(doc, heads)| {
+                    let mut keys = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    keys.sort_unstable();
+                    let debug_val = format!("{doc:?}");
+                    (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
-            let right_heads = right
+            let (_right_facets, right_facet_keys, right_facet_values, right_heads) = right
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
-                .map(|(_, heads)| {
-                    let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
-                    out.sort_unstable();
-                    out
+                .map(|(doc, heads)| {
+                    let mut keys = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    keys.sort_unstable();
+                    let debug_val = format!("{doc:?}");
+                    (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("right missing doc heads for {doc_id}"))?;
+            last_left_facet_keys = Some(left_facet_keys.clone());
+            last_right_facet_keys = Some(right_facet_keys.clone());
+            last_left_facet_values = Some(left_facet_values.clone());
+            last_right_facet_values = Some(right_facet_values.clone());
+            let mut left_heads = left_heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+            left_heads.sort_unstable();
+            let mut right_heads = right_heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+            right_heads.sort_unstable();
             last_left = Some(left_heads);
             last_right = Some(right_heads);
-            if last_left == last_right {
+            if last_left == last_right && left_facet_keys == right_facet_keys && left_facet_values == right_facet_values {
                 break eyre::Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
+                last_heartbeat = now;
+                let runtime_doc_id = doc_id.parse::<big_repo::DocumentId>().ok();
+                let left_state = match runtime_doc_id {
+                    Some(id) => left.ctx.big_repo.doc_head_state(id).await.ok(),
+                    None => None,
+                };
+                let right_state = match runtime_doc_id {
+                    Some(id) => right.ctx.big_repo.doc_head_state(id).await.ok(),
+                    None => None,
+                };
+                let left_diagnostics = match runtime_doc_id {
+                    Some(id) => left.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
+                    None => None,
+                };
+                let right_diagnostics = match runtime_doc_id {
+                    Some(id) => right.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
+                    None => None,
+                };
+                last_runtime = Some(format!("left={left_state:?} right={right_state:?}"));
+                last_sync_diagnostics = Some(format!(
+                    "left={left_diagnostics:?} right={right_diagnostics:?}"
+                ));
+                tracing::debug!(
+                    doc_id,
+                    branch = %branch,
+                    left_heads = ?last_left,
+                    right_heads = ?last_right,
+                    runtime = ?last_runtime,
+                    sync_diagnostics = ?last_sync_diagnostics,
+                    "waiting for document head parity"
+                );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1027,11 +1123,17 @@ async fn wait_for_doc_head_parity(
     .await
     .map_err(|_| {
         eyre::eyre!(
-            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?}",
+            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?} left_facet_keys={:?} right_facet_keys={:?} left_doc={:?} right_doc={:?} runtime={:?} sync_diagnostics={:?}",
             doc_id,
             branch,
             last_left,
-            last_right
+            last_right,
+            last_left_facet_keys,
+            last_right_facet_keys,
+            last_left_facet_values,
+            last_right_facet_values,
+            last_runtime,
+            last_sync_diagnostics
         )
     })??;
     Ok(())

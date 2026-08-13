@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use subduction_core::peer::id::PeerId;
 use subduction_crypto::{signed::Signed, signer::memory::MemorySigner};
 use subduction_ephemeral::{
-    clock::{std_clock::StdClock, Clock},
+    clock::{Clock, std_clock::StdClock},
     config::EphemeralEvent,
     handler::EphemeralHandler,
     message::{EphemeralMessage, EphemeralPayload},
@@ -21,7 +21,7 @@ use subduction_ephemeral::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{interlude::*, runtime::BigRepoIrohTransport};
+use crate::{interlude::*, runtime2::support::BigRepoIrohTransport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BigEphemeralTopic([u8; 32]);
@@ -30,11 +30,6 @@ impl BigEphemeralTopic {
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn keyhive_changed() -> Self {
-        Self(*b"\0\0\0\0townframe.bigrepo.keyhive.v1")
     }
 
     #[must_use]
@@ -161,7 +156,10 @@ impl BigEphemeralSwitchboard {
                                 ack_tx,
                             }) => {
                                 state.register_listener(&backend, subscription_id, filter, event_tx).await?;
-                                ack_tx.send(()).ok();
+                                ack_tx
+                                    .send(())
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                             Some(BigEphemeralSwitchboardCmd::Unregister { subscription_id }) => {
                                 state.unregister_listener(&backend, subscription_id).await?;
@@ -232,9 +230,12 @@ impl BigEphemeralSubscription {
 
 impl Drop for BigEphemeralSubscription {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(BigEphemeralSwitchboardCmd::Unregister {
-            subscription_id: self.subscription_id,
-        });
+        self.cmd_tx
+            .send(BigEphemeralSwitchboardCmd::Unregister {
+                subscription_id: self.subscription_id,
+            })
+            .inspect_err(|_| trace!(ERROR_CHANNEL))
+            .ok();
     }
 }
 
@@ -246,35 +247,37 @@ pub(crate) trait BigEphemeralBackend: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(crate) struct BigRepoEphemeralBackend {
+pub(crate) struct BigRepoEphemeralBackend<
+    C = BigRepoIrohTransport,
+    Sp = subduction_websocket::tokio::TokioSpawn,
+> where
+    C: Clone + 'static,
+{
     signer: MemorySigner,
-    handler: Arc<
-        EphemeralHandler<
-            future_form::Sendable,
-            BigRepoIrohTransport,
-            OpenEphemeralPolicy,
-            StdClock,
-        >,
-    >,
+    handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock, Sp>>,
 }
 
-impl BigRepoEphemeralBackend {
+impl<C, Sp> BigRepoEphemeralBackend<C, Sp>
+where
+    C: Clone,
+{
     pub(crate) fn new(
         signer: MemorySigner,
-        handler: Arc<
-            EphemeralHandler<
-                future_form::Sendable,
-                BigRepoIrohTransport,
-                OpenEphemeralPolicy,
-                StdClock,
-            >,
-        >,
+        handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock, Sp>>,
     ) -> Self {
         Self { signer, handler }
     }
 }
 
-impl BigEphemeralBackend for BigRepoEphemeralBackend {
+impl<C, Sp> BigEphemeralBackend for BigRepoEphemeralBackend<C, Sp>
+where
+    C: subduction_core::connection::Connection<future_form::Sendable, EphemeralMessage>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Sp: subduction_core::spawn::Spawn<future_form::Sendable> + Send + Sync + 'static,
+{
     fn publish(&self, topic: BigEphemeralTopic, payload: Vec<u8>) -> BoxFuture<'_, Res<()>> {
         Box::pin(async move {
             let timestamp = StdClock.now();

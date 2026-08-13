@@ -971,6 +971,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
+source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1000,6 +1001,7 @@ dependencies = [
  "big_sync",
  "big_sync_core",
  "bincode",
+ "blake3",
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
@@ -1104,10 +1106,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bijou64"
-version = "0.2.1"
+name = "bijoux"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d50212f5f294273afafebfb0e5b5feca77a03beaca06a9209396db7df69e6766"
+checksum = "01f5eadb0ba4626106dcf5b84ac1009074b0aa90f06e4351846e58e9787337be"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -3080,7 +3082,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5553,7 +5555,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5741,6 +5743,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
+source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
 dependencies = [
  "beekem",
  "bincode",
@@ -5766,6 +5769,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
+source = "git+https://github.com/dman-os/keyhive?rev=143c0ac4cbc7972c7b438c326b0b3530895c9ca3#143c0ac4cbc7972c7b438c326b0b3530895c9ca3"
 dependencies = [
  "bincode",
  "blake3",
@@ -6879,7 +6883,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8497,7 +8501,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9173,7 +9177,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9242,7 +9246,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9263,7 +9267,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9487,9 +9491,10 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-lock",
- "bijou64",
+ "bijoux",
  "blake3",
  "future_form",
  "futures",
@@ -9511,7 +9516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10194,6 +10199,7 @@ version = "0.1.0"
 dependencies = [
  "color-eyre",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -10320,10 +10326,11 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.16.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-channel",
  "async-lock",
- "bijou64",
+ "bijoux",
  "blake3",
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10340,6 +10347,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10353,11 +10361,11 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-channel",
  "async-lock",
- "bijou64",
+ "bijoux",
  "future_form",
  "futures",
  "nonempty 0.12.0",
@@ -10371,6 +10379,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10389,6 +10398,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10418,6 +10428,7 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "future_form",
  "futures",
@@ -10433,6 +10444,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
+source = "git+https://github.com/dman-os/subduction?rev=b2d05c6df38e78fa22d6903be237248862f47c05#b2d05c6df38e78fa22d6903be237248862f47c05"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10583,7 +10595,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12869,7 +12881,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

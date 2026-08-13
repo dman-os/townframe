@@ -1,10 +1,10 @@
 //! Composite keyhive listener that forwards every event into the runtime's
-//! event channel as a typed [`RuntimeEvt`] message.
+//! event channel as a typed [`Runtime2Evt`] message.
 //!
-//! Constructed with **only** a sender — no keyhive/storage handle
-//! (avoids the reference cycle the playbook warns about). Pure forwarder.
-
-use crate::runtime::RuntimeEvt;
+//! Local private prekey material is persisted before the corresponding public
+//! event is forwarded, so a crash cannot leave a durable rotation without its
+//! decryption key.
+use crate::interlude::*;
 use beekem::operation::CgkaOperation;
 use future_form::{FutureForm, Sendable};
 use keyhive_core::listener::{
@@ -18,39 +18,67 @@ use keyhive_core::principal::{
 use keyhive_crypto::signed::Signed;
 use keyhive_crypto::signer::memory::MemorySigner;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// Listens for keyhive events and forwards them to the big_repo runtime.
 ///
 /// Implements every keyhive listener trait. Each `on_*` packs the event into
-/// the matching [`RuntimeEvt`] variant and sends it over the unbounded channel.
-/// No async work beyond the send.
+/// the matching [`Runtime2Evt`] variant and sends it over the unbounded event
+/// channel.
 ///
 /// Cloning is cheap (the sender is `Clone`).
 #[derive(Clone, Debug)]
 pub struct BigRepoKeyhiveListener {
-    pub(crate) evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
+    pub(crate) evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    pub(crate) storage: crate::keyhive_storage::BigRepoKeyhiveStorage,
+}
+
+impl BigRepoKeyhiveListener {
+    fn send_evt(&self, evt: crate::runtime2::Runtime2Evt) {
+        match self.evt_tx.try_send(evt) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Closed(_)) => {
+                debug!("runtime event channel closed during shutdown; event dropped");
+            }
+            Err(async_channel::TrySendError::Full(_)) => {
+                panic!("unbounded runtime event channel was full; invariant violation");
+            }
+        }
+    }
 }
 
 impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
     fn on_prekeys_expanded<'a>(
         &'a self,
         new_prekey: &'a Arc<Signed<AddKeyOp>>,
+        local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::PrekeyExpanded {
-            new_prekey: new_prekey.clone(),
-        });
-        Sendable::ready(())
+        Sendable::from_future(async move {
+            if let Some(local_secret) = local_secret {
+                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                    .await
+                    .expect("local prekey secret must be durable before its public operation");
+            }
+            self.send_evt(crate::runtime2::Runtime2Evt::PrekeyExpanded {
+                new_prekey: Arc::clone(new_prekey),
+            });
+        })
     }
 
     fn on_prekey_rotated<'a>(
         &'a self,
         rotate_key: &'a Arc<Signed<RotateKeyOp>>,
+        local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::PrekeyRotated {
-            rotate_key: rotate_key.clone(),
-        });
-        Sendable::ready(())
+        Sendable::from_future(async move {
+            if let Some(local_secret) = local_secret {
+                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                    .await
+                    .expect("local prekey secret must be durable before its public operation");
+            }
+            self.send_evt(crate::runtime2::Runtime2Evt::PrekeyRotated {
+                rotate_key: Arc::clone(rotate_key),
+            });
+        })
     }
 }
 
@@ -59,7 +87,9 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
         &'a self,
         data: &'a Arc<Signed<CgkaOperation>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::CgkaOp { data: data.clone() });
+        self.send_evt(crate::runtime2::Runtime2Evt::CgkaOp {
+            data: Arc::clone(data),
+        });
         Sendable::ready(())
     }
 }
@@ -67,16 +97,16 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
 /// Concrete impl for `Sendable` runtime with `MemorySigner` / `Vec<u8>`.
 /// The [`MembershipListener`] trait's delegation/revocation types carry the
 /// signer and content-ref generics, so the impl must be concrete to match
-/// [`RuntimeEvt`]'s payload types.
+/// [`Runtime2Evt`]'s payload types.
 impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListener {
     fn on_delegation<'a>(
         &'a self,
         target: Identifier,
         data: &'a Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::DelegationReceived {
+        self.send_evt(crate::runtime2::Runtime2Evt::DelegationReceived {
             target,
-            data: data.clone(),
+            data: Arc::clone(data),
         });
         Sendable::ready(())
     }
@@ -86,9 +116,9 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
         target: Identifier,
         data: &'a Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::RevocationReceived {
+        self.send_evt(crate::runtime2::Runtime2Evt::RevocationReceived {
             target,
-            data: data.clone(),
+            data: Arc::clone(data),
         });
         Sendable::ready(())
     }

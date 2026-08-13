@@ -1,7 +1,7 @@
 use color_eyre::eyre::{Result as Res, WrapErr};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::ConnectOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
 
 #[derive(Clone, Debug)]
@@ -13,8 +13,12 @@ pub struct SqlCtx {
 impl SqlCtx {
     pub async fn memory() -> Res<Self> {
         let connect_options = SqliteConnectOptions::from_str("sqlite::memory:")?;
+        // Keep a second connection alive so cancellation of an in-flight SQLite
+        // query cannot destroy the entire in-memory database before the pool
+        // replaces the cancelled connection.
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .min_connections(2)
+            .max_connections(2)
             .connect_with(connect_options)
             .await
             .wrap_err("failed opening sqlite memory context")?;
@@ -57,4 +61,30 @@ impl SqlCtx {
 
 fn is_memory_url(url: &str) -> bool {
     url.contains(":memory:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn memory_schema_survives_one_connection_closing() -> Res<()> {
+        let ctx = SqlCtx::memory().await?;
+        sqlx::query("CREATE TABLE durable_schema (value INTEGER)")
+            .execute(&ctx.write_pool)
+            .await?;
+
+        let connection = ctx.read_pool.acquire().await?;
+        connection.detach().close().await?;
+
+        sqlx::query("INSERT INTO durable_schema VALUES (1)")
+            .execute(&ctx.write_pool)
+            .await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_schema")
+            .fetch_one(&ctx.read_pool)
+            .await?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
 }

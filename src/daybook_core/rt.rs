@@ -19,12 +19,12 @@ use wash_runtime::{
 };
 use wflow::{
     wflow_core::partition::{
+        RetryPolicy,
         job_events::{JobError, JobRunResult},
         log::PartitionLogEntry,
-        RetryPolicy,
     },
     wflow_tokio::partition::{
-        state::PartitionWorkingState, PartitionLogRef, TokioPartitionWorkerHandle,
+        PartitionLogRef, TokioPartitionWorkerHandle, state::PartitionWorkingState,
     },
 };
 
@@ -35,8 +35,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
-    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
+    FacetRoutineArgs, facet_routine_args_fingerprint,
 };
 use init::InitRepo;
 use wash_plugin::stateless_view;
@@ -274,12 +274,8 @@ impl Rt {
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let total_started = std::time::Instant::now();
         let startup_progress_task_id = config.startup_progress_task_id.clone();
-        crate::repo::ensure_expected_partitions_for_docs(
-            &rcx.part_store,
-            rcx.doc_app.document_id(),
-            rcx.doc_drawer.document_id(),
-        )
-        .await?;
+        let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
+        crate::repo::ensure_authority_partitions(&rcx.part_store, &authority).await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -491,13 +487,12 @@ impl Rt {
         plug_ids.sort();
         let stage_started = std::time::Instant::now();
         for plug_id in plug_ids {
-            let _ = rt
-                .ensure_plug_init_dispatches(
-                    &plug_id,
-                    startup_progress_task_id.as_deref(),
-                    Some(total_started),
-                )
-                .await?;
+            rt.ensure_plug_init_dispatches(
+                &plug_id,
+                startup_progress_task_id.as_deref(),
+                Some(total_started),
+            )
+            .await?;
         }
         Self::emit_startup_progress_status(
             &rt.progress_repo,
@@ -916,14 +911,14 @@ impl Rt {
                 break;
             };
             let (idx, entry) = entry?;
-            if let Some(entry) = entry {
-                if let Err(err) = self.handle_wflow_entry(idx, entry).await {
-                    if self.cancel_token.is_cancelled() {
-                        debug!(error = %err, "ignoring wflow entry error during shutdown");
-                        break;
-                    }
-                    return Err(err);
+            if let Some(entry) = entry
+                && let Err(err) = self.handle_wflow_entry(idx, entry).await
+            {
+                if self.cancel_token.is_cancelled() {
+                    debug!(error = %err, "ignoring wflow entry error during shutdown");
+                    break;
                 }
+                return Err(err);
             };
             if let Err(err) = self
                 .dispatch_repo
@@ -1666,13 +1661,14 @@ impl Rt {
             .update_active_deets(&dispatch_id, deets)
             .await
         {
-            let _ = self
-                .wflow_ingress
+            self.wflow_ingress
                 .cancel_job(
                     Arc::from(job_id.as_ref()),
                     format!("rollback scheduling for dispatch {dispatch_id}"),
                 )
-                .await;
+                .await
+                .inspect_err(|err| warn!("error cancelling job: {err}"))
+                .ok();
             return Err(err);
         }
         self.progress_repo
@@ -2160,9 +2156,9 @@ impl Rt {
                 entry_id,
                 ..
             } = &active_dispatch.deets;
-            if entry_id.is_some() {
-                if let Some(wflow_job_id) = wflow_job_id.as_ref() {
-                    if let Err(cancel_err) = self
+            if entry_id.is_some()
+                && let Some(wflow_job_id) = wflow_job_id.as_ref()
+                    && let Err(cancel_err) = self
                         .wflow_ingress
                         .cancel_job(
                             Arc::from(wflow_job_id.as_ref()),
@@ -2179,8 +2175,6 @@ impl Rt {
                             "failed to rollback queued wflow job after dispatch add failure"
                         );
                     }
-                }
-            }
             return Err(add_err);
         }
 
@@ -2817,8 +2811,8 @@ mod tests {
     use super::*;
     use big_sync::HostPartStore;
 
-    async fn make_partition_store(
-    ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    async fn make_partition_store()
+    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =

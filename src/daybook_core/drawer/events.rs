@@ -130,23 +130,16 @@ impl DrawerRepo {
 
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
 
-        for (doc_id, entry) in &entries {
+        for (_doc_id, entry) in &entries {
             for (branch_path, branch_ref) in &entry.branches {
                 let branch_path = BranchPathBuf::from(branch_path.as_str());
                 if self.branch_kind_for_path(&branch_path)? != BranchKind::Replicated {
                     continue;
                 }
-                let Some((_, branch_heads)) =
-                    self.get_with_heads(doc_id, &branch_path, None).await?
-                else {
-                    continue;
-                };
-                self.add_branch_to_partitions_if_needed(
-                    BranchKind::Replicated,
-                    branch_ref.branch_doc_id,
-                    &branch_heads,
-                )
-                .await?;
+                let part_id = self.replicated_partition_id();
+                self.partition_store
+                    .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                    .await?;
             }
         }
 
@@ -260,6 +253,16 @@ impl DrawerRepo {
                     })?;
                 let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
 
+                for (branch_name, branch_ref) in &new_entry.branches {
+                    let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
+                    if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
+                        let part_id = self.replicated_partition_id();
+                        self.partition_store
+                            .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                            .await?;
+                    }
+                }
+
                 if new_entry.previous_version_heads.is_none() {
                     let entry = self
                         .current_doc_branches(&doc_id)
@@ -279,9 +282,12 @@ impl DrawerRepo {
                     let old_entry = self
                         .get_entry_at_heads(&doc_id, previous_heads)
                         .await?
-                        .ok_or_eyre(
-                            "doc update previous entry not found at previous_version_heads",
-                        )?;
+                        .unwrap_or_else(|| DocEntry {
+                            branches: HashMap::new(),
+                            branches_deleted: HashMap::new(),
+                            vtag: crate::stores::VersionTag::update(self.local_actor_id.clone()),
+                            previous_version_heads: None,
+                        });
                     if old_entry.branches != new_entry.branches {
                         let entry = self
                             .current_doc_branches(&doc_id)
@@ -313,10 +319,12 @@ impl DrawerRepo {
                 let mut deleted_facet_keys_set = HashSet::new();
                 if let Some(tombstone) = &tombstone {
                     for snapshot in tombstone.branches.values() {
-                        deleted_facet_keys_set.extend(
-                            self.facet_keys_at_branch_snapshot(&doc_id, snapshot)
-                                .await?,
-                        );
+                        if let Some(keys) = self
+                            .facet_keys_at_branch_snapshot(&doc_id, snapshot)
+                            .await?
+                        {
+                            deleted_facet_keys_set.extend(keys);
+                        }
                     }
                 }
                 let mut deleted_facet_keys: Vec<FacetKey> =

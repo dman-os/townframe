@@ -21,7 +21,9 @@ pub struct RepoLayout {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RepoOpenOptions {}
+pub struct RepoOpenOptions {
+    pub sync_max_task_backoff: Option<std::time::Duration>,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct RepoLockInfo {
@@ -85,9 +87,12 @@ impl RepoLockGuard {
 pub struct RepoCtx {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
 
     pub sql: SqlCtx,
     pub part_store: SharedPartStore,
+    /// Standalone, policy-free store backing the blob partitions.
+    pub blob_part_store: SharedPartStore,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -111,8 +116,11 @@ pub struct RepoCtx {
 pub(crate) struct RepoCtxParts {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
     pub sql: SqlCtx,
     pub part_store: SharedPartStore,
+    /// Standalone, policy-free store backing the blob partitions.
+    pub blob_part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
     pub local_peer_key: PeerKey,
@@ -127,6 +135,19 @@ pub(crate) struct RepoCtxParts {
     pub secret_repo: crate::secrets::SecretRepo,
 }
 
+/// Opens the standalone, policy-free part store backing the blob partitions.
+/// Blob data is content-addressed (possession of the hash is authorization);
+/// the keyhive membership policy lives on the doc store and is deliberately
+/// absent here.
+pub(crate) async fn open_blob_part_store(repo_root: &std::path::Path) -> Res<SharedPartStore> {
+    let sql =
+        crate::app::open_sql_ctx(SqlConfig::file(repo_root.join("blob_part_store.sqlite"))).await?;
+    let store =
+        big_sync::SqlitePartStore::new(sql, "daybook-blobs", big_sync_core::BuckId::MAX_LEVEL)
+            .await?;
+    Ok(Arc::new(store))
+}
+
 impl RepoCtx {
     pub(crate) fn from_parts(
         parts: RepoCtxParts,
@@ -139,8 +160,10 @@ impl RepoCtx {
             repo_name: parts.repo_name,
             layout: parts.layout,
             lock_guard: parts.lock_guard,
+            options: parts.options,
             sql: parts.sql,
             part_store: parts.part_store,
+            blob_part_store: parts.blob_part_store,
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -242,7 +265,7 @@ impl RepoCtx {
     async fn open_inner(
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
-        _options: RepoOpenOptions,
+        options: RepoOpenOptions,
         local_device_name: String,
         initialize_repo: bool,
         repo_name: Option<String>,
@@ -325,21 +348,14 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let part_store = big_sync::SqlitePartStore::new(
-            sql.clone(),
-            repo_id.clone(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?;
-        let part_store: SharedPartStore = Arc::new(part_store) as _;
-        info!(repo_root = %layout.repo_root.display(), "repo open_inner: partition store ready");
-
-        let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
-        info!(repo_root = %layout.repo_root.display(), "repo open_inner: big repo booted");
+        let (big_repo, big_repo_stop) = boot_big_repo(&layout, &identity).await?;
+        let part_store = big_repo.shared_part_store();
+        let blob_part_store = open_blob_part_store(&layout.repo_root).await?;
+        let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
         let (doc_app, doc_drawer) = if initialize_repo {
-            init_core_docs(&big_repo, &sql).await?
+            init_core_docs(&big_repo, &sql, &authority).await?
         } else {
             load_core_docs(&big_repo, &sql).await?
         };
@@ -349,13 +365,17 @@ impl RepoCtx {
             doc_drawer_id = %doc_drawer.document_id(),
             "repo open_inner: core docs ready"
         );
+        if !initialize_repo {
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.core_docs,
+                [doc_app.document_id(), doc_drawer.document_id()],
+            )
+            .await?;
+        }
 
-        ensure_expected_partitions_for_docs(
-            &part_store,
-            doc_app.document_id(),
-            doc_drawer.document_id(),
-        )
-        .await?;
+        ensure_authority_partitions(&part_store, &authority).await?;
+        ensure_blob_partitions(&blob_part_store).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: core partitions ensured");
 
         if initialize_repo {
@@ -363,6 +383,7 @@ impl RepoCtx {
             Self::run_repo_init_dance(
                 &big_repo,
                 &part_store,
+                &blob_part_store,
                 &doc_app,
                 &doc_drawer,
                 &local_user_path,
@@ -378,8 +399,10 @@ impl RepoCtx {
         let parts = RepoCtxParts {
             layout,
             lock_guard,
+            options,
             sql,
             part_store,
+            blob_part_store,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
@@ -396,9 +419,11 @@ impl RepoCtx {
         Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
         partition_store: &SharedPartStore,
+        blob_part_store: &SharedPartStore,
         doc_app: &BigDocHandle,
         doc_drawer: &BigDocHandle,
         local_user_path: &UserPath,
@@ -421,7 +446,7 @@ impl RepoCtx {
             blobs_root.clone(),
             local_user_path.to_owned(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(partition_store),
+                Arc::clone(blob_part_store),
             )),
         )
         .await?;
@@ -554,22 +579,40 @@ impl RepoCtx {
         if let Err(err) = init_result {
             info!(?err, "repo init dance: failed, starting cleanup");
             if let Some(stop) = drawer_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = plugs_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = config_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = tables_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = dispatch_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Some(stop) = init_stop.take() {
-                let _ = stop.stop().await;
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
             }
             if let Err(shutdown_err) = blobs_repo.shutdown().await {
                 return Err(err.wrap_err(format!(
@@ -635,16 +678,16 @@ fn compute_user_info(
 async fn boot_big_repo(
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
-    partition_store: SharedPartStore,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
-    let am_config = big_repo::Config {
+    let config = big_repo::Config {
         node_identity_seed: identity.iroh_secret_key.to_bytes(),
         storage: big_repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
         },
+        scope_key: Arc::from("daybook-core"),
+        hidden_parts: Default::default(),
     };
-    let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(am_config, partition_store).await?;
-    Ok((big_repo, big_repo_stop))
+    big_repo::BigRepo::boot(config).await
 }
 
 async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
@@ -656,12 +699,8 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
     Ok(())
 }
 
-pub(crate) async fn finish_clone_init(
-    parts: RepoCtxParts,
-    blobs_root: PathBuf,
-) -> Res<Arc<RepoCtx>> {
+pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
-    let local_user_path = &parts.local_user_path;
     let init_state = globals::get_init_state(sql).await?;
     let (doc_id_app, doc_id_drawer) = match init_state {
         globals::InitState::Created {
@@ -680,41 +719,37 @@ pub(crate) async fn finish_clone_init(
         .get_doc(&doc_id_drawer)
         .await?
         .into_ready(doc_id_drawer)?;
-    ensure_expected_partitions_for_docs(&parts.part_store, doc_id_app, doc_id_drawer).await?;
-    RepoCtx::run_repo_init_dance(
-        &parts.big_repo,
-        &parts.part_store,
-        &doc_app,
-        &doc_drawer,
-        local_user_path,
-        sql,
-        blobs_root,
-    )
-    .await?;
+    let authority = crate::authority::ensure(&parts.big_repo, sql, None).await?;
+    ensure_authority_partitions(&parts.part_store, &authority).await?;
+    ensure_blob_partitions(&parts.blob_part_store).await?;
     Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
 }
 
-pub(crate) async fn ensure_expected_partitions_for_docs(
+pub(crate) async fn ensure_authority_partitions(
     partition_store: &SharedPartStore,
-    doc_app_id: DocumentId,
-    doc_drawer_id: DocumentId,
+    authority: &crate::authority::RepoAuthority,
 ) -> Res<()> {
-    let core_docs_partition_id = crate::part_id_from_label(crate::sync::CORE_DOCS_PARTITION_ID);
     for part_id in [
-        core_docs_partition_id,
-        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(&doc_drawer_id),
+        authority.core_docs_part_id(),
+        authority.content_docs_part_id(),
+        authority.default_drawer_part_id(),
         crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
+    ] {
+        partition_store.ensure_part(part_id).await?;
+    }
+    Ok(())
+}
+
+/// Ensure the blob-scope partitions exist in the standalone blob part store.
+/// These are the partitions the blob sync worker serves; they must be known
+/// to the store so peer summaries succeed even before any blob is put.
+pub(crate) async fn ensure_blob_partitions(partition_store: &SharedPartStore) -> Res<()> {
+    for part_id in [
         crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
         crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
     ] {
         partition_store.ensure_part(part_id).await?;
     }
-    partition_store
-        .add_obj_to_parts(doc_drawer_id, vec![core_docs_partition_id])
-        .await?;
-    partition_store
-        .add_obj_to_parts(doc_app_id, vec![core_docs_partition_id])
-        .await?;
     Ok(())
 }
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
@@ -763,6 +798,26 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }
 
+async fn get_ready_doc(
+    big_repo: &SharedBigRepo,
+    doc_id: big_repo::DocumentId,
+) -> Res<BigDocHandle> {
+    let timeout = utils_rs::scale_timeout(Duration::from_secs(45));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match big_repo.get_doc(&doc_id).await? {
+            big_repo::DocLookup::Ready(handle) => return Ok(handle),
+            big_repo::DocLookup::PendingMaterialization => {
+                if tokio::time::Instant::now() >= deadline {
+                    eyre::bail!("document {doc_id} is pending materialization");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            big_repo::DocLookup::Missing => eyre::bail!("document {doc_id} is missing"),
+        }
+    }
+}
+
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
@@ -776,40 +831,34 @@ async fn load_core_docs(
         eyre::bail!("repo init_state missing for existing repository");
     };
     let (handle_app, handle_drawer) = tokio::try_join!(
-        big_repo.get_doc(&doc_id_app),
-        big_repo.get_doc(&doc_id_drawer)
+        get_ready_doc(big_repo, doc_id_app),
+        get_ready_doc(big_repo, doc_id_drawer)
     )?;
-    Ok((
-        handle_app.into_ready(doc_id_app)?,
-        handle_drawer.into_ready(doc_id_drawer)?,
-    ))
+    Ok((handle_app, handle_drawer))
 }
 
 async fn init_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
+    authority: &crate::authority::RepoAuthority,
 ) -> Res<(BigDocHandle, BigDocHandle)> {
-    use automerge::transaction::Transactable;
-
     let app_doc = {
         let bytes = version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for app doc")?;
         big_repo
-            .create_doc(doc)
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
-            .map_err(|err| eyre::eyre!("{err}"))?
+            .map_err(|err| ferr!("{err}"))?
     };
     let drawer_doc = {
-        let mut doc = automerge::AutoCommit::new();
-        doc.put(automerge::ROOT, "version", "0")?;
-        let bytes = doc.save_nocompress();
+        let bytes = crate::drawer::version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for drawer doc")?;
         big_repo
-            .create_doc(doc)
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
-            .map_err(|err| eyre::eyre!("{err}"))?
+            .map_err(|err| ferr!("{err}"))?
     };
     globals::set_init_state(
         repo_sql,
@@ -905,6 +954,8 @@ pub mod globals {
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct SyncDeviceEntry {
         pub endpoint_id: iroh::EndpointId,
+        #[serde(default)]
+        pub agent_peer_id: Option<big_sync_core::PeerId>,
         pub name: String,
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,

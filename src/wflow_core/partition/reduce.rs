@@ -173,7 +173,7 @@ pub fn reduce_job_run_event(
     // };
     let worker_id_for_hint = event.worker_id.clone();
     let job_id = Arc::clone(&event.job_id);
-    let Some(state::JobState {
+    let Some(&mut state::JobState {
         ref mut runs,
         ref mut steps,
         ref override_wflow_retry_policy,
