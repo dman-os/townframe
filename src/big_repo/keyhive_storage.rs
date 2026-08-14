@@ -410,20 +410,7 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
         hash: StorageHash,
         data: Vec<u8>,
     ) -> BoxFuture<'_, Result<bool, Self::Error>> {
-        async move {
-            match self {
-                Self::Memory { events, .. } | Self::Fs { events, .. } => events
-                    .save_keyhive_event(hash, data, None)
-                    .await
-                    .map_err(Into::into),
-                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
-                    future_form::Sendable,
-                >>::save_event(storage, hash, data)
-                .await
-                .map_err(Into::into),
-            }
-        }
-        .boxed()
+        self.save_event_with_source(hash, data, None)
     }
 
     fn save_event_with_source(

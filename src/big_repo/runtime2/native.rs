@@ -378,6 +378,7 @@ where
     /// the resident cache and the incrementally-maintained heads table).
     /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
     /// cache-vs-durable detector. O(tree) — never call on a hot path.
+    #[allow(dead_code)]
     async fn durable_sedimentree_heads_full(
         storage: &S,
         sed_id: SedimentreeId,
@@ -737,43 +738,6 @@ where
                     if !heads.is_empty() {
                         let cached: Vec<CommitId> =
                             heads.iter().map(|head| CommitId::new(head.0)).collect();
-                        // Cache-vs-durable divergence detector (debug-only):
-                        // the cache is the same map subduction writes into,
-                        // but an eviction/re-hydration or missed insert can
-                        // leave it behind durable storage. Cross-check so the
-                        // tier2 head-parity flake pins to "cache stale" vs
-                        // "durable missing" in one shot. The durable side is
-                        // recomputed from the authoritative SQLite rows
-                        // (metadata only); a full recompute cross-checks it.
-                        if tracing::enabled!(
-                            target: "big_repo::runtime2::native",
-                            tracing::Level::DEBUG
-                        ) {
-                            let table = self
-                                .causal_ciphertext_store
-                                .durable_sedimentree_heads(sed_id)
-                                .await
-                                .unwrap_or_default();
-                            if table != cached {
-                                tracing::warn!(
-                                    ?sed_id,
-                                    cached = ?cached,
-                                    durable = ?table,
-                                    "sedimentree cache diverges from durable heads table"
-                                );
-                            }
-                            let full = Self::durable_sedimentree_heads_full(&self.storage, sed_id)
-                                .await
-                                .unwrap_or_default();
-                            if full != table {
-                                tracing::warn!(
-                                    ?sed_id,
-                                    table = ?table,
-                                    full = ?full,
-                                    "heads table diverges from full recompute"
-                                );
-                            }
-                        }
                         return Ok(cached);
                     }
                     Some((tree.loose_commits().count(), tree.fragments().count()))
@@ -2009,18 +1973,13 @@ where
         )
         .with_storage_recovery()
         .with_change_reporter(move |hashes, source| {
-            if let Some(tx) = keyhive_reporter_weak.upgrade()
-                && let Err(err) = tx.try_send(crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent { hashes, source })
-            {
-                match err {
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                        reporter_overflow.store(true, std::sync::atomic::Ordering::Release);
-                        warn_loc!("keyhive change hint dropped: dispatcher channel full");
-                    }
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                        panic!("{ERROR_CHANNEL}: keyhive change dispatcher channel closed while senders alive");
-                    }
-                }
+            if let Some(tx) = keyhive_reporter_weak.upgrade() {
+                crate::runtime2::keyhive_dispatcher::try_send_change_event(
+                    &tx,
+                    &reporter_overflow,
+                    hashes,
+                    source,
+                );
             }
         }),
     );
@@ -2030,17 +1989,18 @@ where
     // (BigRepo drop).
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
-    let keyhive_dispatcher = crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
-        Arc::clone(&keyhive_protocol),
-        keyhive_events_tx,
-        keyhive_events_rx,
-        keyhive_dispatcher_subscriptions,
-        keyhive_overflow,
-        utils_rs::batching::DebouncePolicy {
-            quiet_window: std::time::Duration::from_millis(100),
-            max_latency: std::time::Duration::from_secs(1),
-        },
-    );
+    let (keyhive_dispatcher, _keyhive_dispatcher_task) =
+        crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
+            Arc::clone(&keyhive_protocol),
+            keyhive_events_tx,
+            keyhive_events_rx,
+            keyhive_dispatcher_subscriptions,
+            keyhive_overflow,
+            utils_rs::batching::DebouncePolicy {
+                quiet_window: std::time::Duration::from_millis(100),
+                max_latency: std::time::Duration::from_secs(1),
+            },
+        );
     let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
         Arc::clone(&keyhive_protocol),
         keyhive_dispatcher,

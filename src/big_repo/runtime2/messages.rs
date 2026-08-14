@@ -187,9 +187,11 @@ pub enum Runtime2Cmd {
     },
     ReleaseDocLease {
         doc_id: DocumentId,
+        generation: u64,
     },
     ReleaseInternalLease {
         doc_id: DocumentId,
+        generation: u64,
     },
     ContainsSedimentree {
         doc_id: DocumentId,

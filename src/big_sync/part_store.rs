@@ -11,10 +11,22 @@ pub mod memory;
 pub mod sqlite;
 pub mod sqlite_core;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HostPartStoreConfig {
     /// Parts that remain physically present but are invisible to remote part access.
     pub hidden_parts: HashSet<PartId>,
+    pub debounce_quiet_window: std::time::Duration,
+    pub debounce_max_latency: std::time::Duration,
+}
+
+impl Default for HostPartStoreConfig {
+    fn default() -> Self {
+        Self {
+            hidden_parts: HashSet::new(),
+            debounce_quiet_window: std::time::Duration::from_millis(50),
+            debounce_max_latency: std::time::Duration::from_millis(500),
+        }
+    }
 }
 
 // pub type ObjStoreLease = u64;

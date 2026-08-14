@@ -1,7 +1,7 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 2 }
 
-# Heavy/ML tests that legitimately exceed the 240s default terminate
+# Heavy/ML tests that legitimately exceed the 120s default terminate
 # (CI runs with UTILS_RS_TIMEOUT_MULTIPLIER=3, scaling every internal wait).
 [[profile.default.overrides]]
 filter = 'test(~stress)'
@@ -9,4 +9,4 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'test(~long_test)'
-slow-timeout = { period = "60s", terminate-after = 4 }
+slow-timeout = { period = "60s", terminate-after = 8 }

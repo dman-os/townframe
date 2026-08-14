@@ -2875,7 +2875,9 @@ impl SqliteBigRepoStore {
                 self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
                 TreeCacheGuard::arm(&self.tree_cache, id)
             }
-            _ => {
+            TreeStorageMutation::InsertCommit(_)
+            | TreeStorageMutation::InsertFragment(_)
+            | TreeStorageMutation::InsertBatch { .. } => {
                 // Inserts: adopt the cached entry or hydrate it from the
                 // transaction's view of durable storage.
                 let present = self
@@ -3535,6 +3537,7 @@ mod tests {
             BuckId::MAX_LEVEL,
             big_sync::HostPartStoreConfig {
                 hidden_parts: HashSet::from([part]),
+                ..Default::default()
             },
         )
         .await?;

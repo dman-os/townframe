@@ -41,10 +41,13 @@ async fn create_doc_emits_observable_keyhive_change_notification() -> Res<()> {
     let client =
         crate::rpc::IrohBigRepoRpcClient::new(client_endpoint.clone(), pair.left().endpoint.addr());
     let mut changes = client.subscribe_keyhive_changes(8).await?;
-    let ready = timeout(Duration::from_secs(5), changes.recv())
-        .await
-        .map_err(|_| crate::ferr!("timed out waiting for RPC subscription readiness"))??
-        .ok_or_eyre("RPC stream closed before readiness")?;
+    let ready = timeout(
+        utils_rs::scale_timeout(Duration::from_secs(5)),
+        changes.recv(),
+    )
+    .await
+    .map_err(|_| crate::ferr!("timed out waiting for RPC subscription readiness"))??
+    .ok_or_eyre("RPC stream closed before readiness")?;
     assert!(ready.initial);
 
     let mut initial = automerge::Automerge::new();
@@ -60,15 +63,18 @@ async fn create_doc_emits_observable_keyhive_change_notification() -> Res<()> {
     // `create_doc` must produce a notification: a cluster peer only learns to
     // pull the new document through this RPC → sync chain. The event is
     // payload-free; arrival is the assertion.
-    timeout(Duration::from_secs(5), changes.recv())
-        .await
-        .map_err(|_| {
-            crate::ferr!(
-                "no observable Keyhive change notification after create_doc — \
+    timeout(
+        utils_rs::scale_timeout(Duration::from_secs(5)),
+        changes.recv(),
+    )
+    .await
+    .map_err(|_| {
+        crate::ferr!(
+            "no observable Keyhive change notification after create_doc — \
                  the cluster cannot learn about the new document"
-            )
-        })??
-        .ok_or_eyre("RPC stream closed before Keyhive change")?;
+        )
+    })??
+    .ok_or_eyre("RPC stream closed before Keyhive change")?;
 
     drop(owner_doc);
     client_endpoint.close().await;

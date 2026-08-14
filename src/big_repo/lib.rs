@@ -172,6 +172,7 @@ impl BigRepo {
             big_sync_core::BuckId::MAX_LEVEL,
             big_sync::HostPartStoreConfig {
                 hidden_parts: hidden_parts.clone(),
+                ..Default::default()
             },
         )
         .await?;

@@ -477,7 +477,7 @@ impl BigKeyhiveHandle {
         };
         let mut hashes = persist_cgka_update_ops(storage, cgka_ops).await?;
         for delegation in delegations {
-            hashes.extend(persist_delegation(storage, delegation).await?);
+            hashes.push(persist_delegation(storage, delegation).await?);
         }
         Ok((DocumentId::new(doc_id), hashes))
     }
@@ -509,7 +509,7 @@ impl BigKeyhiveHandle {
         };
         let mut hashes = Vec::new();
         for delegation in delegations {
-            hashes.extend(persist_delegation(storage, delegation).await?);
+            hashes.push(persist_delegation(storage, delegation).await?);
         }
         Ok((BigKeyhiveGroup { id, inner: group }, hashes))
     }
@@ -555,7 +555,7 @@ impl BigKeyhiveHandle {
             .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
             .collect();
         let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        hashes.extend(persist_delegation(storage, update.delegation).await?);
+        hashes.push(persist_delegation(storage, update.delegation).await?);
         Ok((affected_docs, hashes))
     }
 
@@ -586,7 +586,7 @@ impl BigKeyhiveHandle {
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
         let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        hashes.extend(persist_delegation(storage, update.delegation).await?);
+        hashes.push(persist_delegation(storage, update.delegation).await?);
         Ok(hashes)
     }
 
@@ -618,10 +618,10 @@ impl BigKeyhiveHandle {
             .map_err(|err| ferr!("revoke failed: {err}"))?;
         let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops().to_vec()).await?;
         for revocation in update.revocations() {
-            hashes.extend(persist_revocation(storage, Arc::clone(revocation)).await?);
+            hashes.push(persist_revocation(storage, Arc::clone(revocation)).await?);
         }
         for redelegation in update.redelegations() {
-            hashes.extend(persist_delegation(storage, Arc::clone(redelegation)).await?);
+            hashes.push(persist_delegation(storage, Arc::clone(redelegation)).await?);
         }
         Ok(hashes)
     }
@@ -651,7 +651,7 @@ fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::
 async fn persist_delegation(
     storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     delegation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveDelegation>>,
-) -> Res<Vec<EventHash>> {
+) -> Res<EventHash> {
     let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
         future_form::Sendable,
         MemorySigner,
@@ -663,13 +663,13 @@ async fn persist_delegation(
         subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event, None)
             .await
             .map_err(|err| ferr!("failed saving keyhive delegation event: {err}"))?;
-    Ok(vec![hash.0])
+    Ok(hash.0)
 }
 
 async fn persist_revocation(
     storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     revocation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveRevocation>>,
-) -> Res<Vec<EventHash>> {
+) -> Res<EventHash> {
     let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
         future_form::Sendable,
         MemorySigner,
@@ -681,7 +681,7 @@ async fn persist_revocation(
         subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event, None)
             .await
             .map_err(|err| ferr!("failed saving keyhive revocation event: {err}"))?;
-    Ok(vec![hash.0])
+    Ok(hash.0)
 }
 
 async fn persist_cgka_update_ops(

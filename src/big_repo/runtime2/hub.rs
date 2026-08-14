@@ -111,6 +111,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// state generation at retry start. A `Pending` completion whose walk ran
     /// against a generation older than the current one is re-verified (B6).
     materialization_retries_in_flight: HashMap<DocumentId, u64>,
+    next_doc_worker_generation: u64,
 }
 
 struct ConnDeets {
@@ -690,11 +691,11 @@ where
                         .ok();
                 }
             }
-            Runtime2Cmd::ReleaseDocLease { doc_id } => {
-                self.handle_release_doc_lease(doc_id);
+            Runtime2Cmd::ReleaseDocLease { doc_id, generation } => {
+                self.handle_release_doc_lease(doc_id, generation);
             }
-            Runtime2Cmd::ReleaseInternalLease { doc_id } => {
-                self.handle_release_internal_lease(doc_id);
+            Runtime2Cmd::ReleaseInternalLease { doc_id, generation } => {
+                self.handle_release_internal_lease(doc_id, generation);
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
                 let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
@@ -767,6 +768,7 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: DocumentId,
+        generation: u64,
     ) -> F::Future<'static, eyre::Result<()>>;
     /// Await a doc-worker's fence reply and forward it as a `DocWorkerFenced`
     /// event so the hub can clear the probe's pending-doc set.
@@ -968,13 +970,14 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: DocumentId,
+        generation: u64,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             lease_rx.await.ok();
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
             cmd_tx
-                .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
+                .send(Runtime2Cmd::ReleaseInternalLease { doc_id, generation })
                 .await
                 .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                 .ok();
@@ -2150,6 +2153,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         entry.eviction_deadline = None;
         entry.internal_leases += 1;
         let handle = entry.handle.clone();
+        let generation = entry.generation;
 
         // Create a oneshot whose sender is consumed by the lease. When the
         // lease drops (doc-worker finishes the op), the sender is dropped
@@ -2157,7 +2161,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         // forwards this as a `ReleaseInternalLease` command back to the hub.
         let (lease_tx, lease_rx) = futures::channel::oneshot::channel::<()>();
         let cmd_tx = self.cmd_tx.clone();
-        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
+        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id, generation))?;
 
         let lease = DocWorkerInternalLease::new(lease_tx);
         Ok((handle, lease))
@@ -2177,10 +2181,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         entry.eviction_deadline = None;
         entry.internal_leases += 1;
         let handle = entry.handle.clone();
+        let generation = entry.generation;
 
         let (lease_tx, lease_rx) = futures::channel::oneshot::channel::<()>();
         let cmd_tx = self.cmd_tx.clone();
-        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
+        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id, generation))?;
 
         let lease = DocWorkerInternalLease::new(lease_tx);
         Ok(Some((handle, lease)))
@@ -2207,12 +2212,16 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         // Stale entry: remove before re-creating.
         self.doc_workers.remove(&doc_id);
 
+        let generation = self.next_doc_worker_generation;
+        self.next_doc_worker_generation += 1;
+
         let worker = crate::runtime2::spawn_doc_worker(
             doc_id,
             Arc::clone(&self.doc_io),
             Arc::clone(&self.change_manager),
             self.cmd_tx.clone(),
             self.evt_tx.clone(),
+            generation,
         );
         let handle = worker.handle;
         let stop = worker.stop;
@@ -2228,6 +2237,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
                 eviction_deadline: Some(
                     self.clock.instant() + self.sync_policy.doc_worker_idle_ttl,
                 ),
+                generation,
             },
         );
         Ok(())
@@ -2235,25 +2245,20 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
     /// Decrement `local_handles` for a doc-worker; schedule eviction if idle.
     ///
-    /// Saturating on underflow: a doc worker can die with an error while
-    /// handles still hold leases (the mailbox loop errors out and
-    /// `DocWorkerStopped` drops the entry, losing the counts), and a later
-    /// re-spawn resets them to zero. A lost count only delays eviction —
-    /// the idle guard checks both counts before evicting, so it can never
-    /// evict early — whereas the old assert panicked the whole process
-    /// (panic hook exits) on a stale release. Log loudly so the desync is
-    /// visible even though it no longer takes the run down.
-    fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
+    /// Identifies worker incarnation by `generation`: stale releases from
+    /// previous worker generations that were evicted or died are safely ignored.
+    fn handle_release_doc_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            if entry.local_handles > 0 {
-                entry.local_handles -= 1;
+            if entry.generation == generation {
+                entry.local_handles = entry.local_handles.saturating_sub(1);
             } else {
-                warn_loc!(
+                debug!(
                     %doc_id,
-                    local_handles = entry.local_handles,
-                    internal_leases = entry.internal_leases,
-                    "doc lease release without a matching register (worker likely died and was re-created)"
+                    lease_generation = generation,
+                    current_generation = entry.generation,
+                    "ignoring stale doc lease release for superseded worker incarnation"
                 );
+                return;
             }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
@@ -2261,18 +2266,19 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
     /// Decrement `internal_leases` for a doc-worker; schedule eviction if idle.
     ///
-    /// Saturating on underflow — see [`Self::handle_release_doc_lease`].
-    fn handle_release_internal_lease(&mut self, doc_id: DocumentId) {
+    /// Identifies worker incarnation by `generation` — see [`Self::handle_release_doc_lease`].
+    fn handle_release_internal_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            if entry.internal_leases > 0 {
-                entry.internal_leases -= 1;
+            if entry.generation == generation {
+                entry.internal_leases = entry.internal_leases.saturating_sub(1);
             } else {
-                warn_loc!(
+                debug!(
                     %doc_id,
-                    local_handles = entry.local_handles,
-                    internal_leases = entry.internal_leases,
-                    "internal lease release without a matching register (worker likely died and was re-created)"
+                    lease_generation = generation,
+                    current_generation = entry.generation,
+                    "ignoring stale internal lease release for superseded worker incarnation"
                 );
+                return;
             }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
@@ -2611,6 +2617,7 @@ where
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         materialization_retries_in_flight: HashMap::new(),
+        next_doc_worker_generation: 1,
     };
 
     let handle = Runtime2Handle::<F>::new(

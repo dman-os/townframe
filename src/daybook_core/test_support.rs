@@ -258,10 +258,10 @@ pub async fn test_cx_with_options(
         sql_ctx.clone(),
         temp_dir.path().join("local_state"),
         Arc::new(surelock::mutex::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
+            utils_rs::lru::KeyedLruPool::new(1000),
         )),
         Arc::new(surelock::mutex::Mutex::new(
-            crate::drawer::lru::KeyedLruPool::new(1000),
+            utils_rs::lru::KeyedLruPool::new(1000),
         )),
         #[cfg(not(test))]
         Arc::clone(&plugs_repo),

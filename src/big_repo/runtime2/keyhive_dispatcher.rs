@@ -59,31 +59,35 @@ impl KeyhiveChangeDispatcher {
     /// Fire-and-forget: a full channel marks overflow and triggers a
     /// conservative wake-up once congestion clears.
     pub(crate) fn report(&self, hashes: Vec<EventHash>, source: Option<KeyhivePeerId>) {
-        if hashes.is_empty() {
-            return;
-        }
-        if let Err(err) = self
-            .events_tx
-            .try_send(KeyhiveChangeEvent { hashes, source })
-        {
-            match err {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    self.overflow.store(true, Ordering::Release);
-                    warn_loc!("keyhive change hint dropped: dispatcher channel full");
-                }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    // The dispatcher task must outlive every sender (reverse
-                    // shutdown: the boot constructs the channel and the
-                    // dispatcher is its child). A closed channel here is an
-                    // invariant break.
-                    panic!(
-                        "{ERROR_CHANNEL}: keyhive change dispatcher channel closed while senders alive"
-                    );
-                }
+        try_send_change_event(&self.events_tx, &self.overflow, hashes, source);
+    }
+}
+
+pub(crate) fn try_send_change_event(
+    events_tx: &tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
+    overflow: &AtomicBool,
+    hashes: Vec<EventHash>,
+    source: Option<KeyhivePeerId>,
+) {
+    if hashes.is_empty() {
+        return;
+    }
+    if let Err(err) = events_tx.try_send(KeyhiveChangeEvent { hashes, source }) {
+        match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                overflow.store(true, Ordering::Release);
+                warn_loc!("keyhive change hint dropped: dispatcher channel full");
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                panic!(
+                    "{ERROR_CHANNEL}: keyhive change dispatcher channel closed while senders alive"
+                );
             }
         }
     }
+}
 
+impl KeyhiveChangeDispatcher {
     /// Register a peer's notification stream. The peer immediately receives
     /// the initial confirmation event. Returns the subscription ID.
     pub(crate) async fn subscribe(
@@ -153,16 +157,16 @@ pub(crate) fn spawn_keyhive_dispatcher(
     subscriptions: SubscriptionMap,
     overflow: Arc<AtomicBool>,
     policy: DebouncePolicy,
-) -> KeyhiveChangeDispatcher {
+) -> (KeyhiveChangeDispatcher, tokio::task::JoinHandle<()>) {
     let handle = KeyhiveChangeDispatcher {
         events_tx,
         subscriptions: Arc::clone(&subscriptions),
         overflow: Arc::clone(&overflow),
     };
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         run_dispatcher(events_rx, protocol, subscriptions, overflow, policy).await;
     });
-    handle
+    (handle, join_handle)
 }
 
 async fn run_dispatcher(
@@ -253,16 +257,7 @@ async fn classify_and_enqueue(
             // source. Notifications are lossy hints; a missed classification
             // must not silently drop a wake-up.
             tracing::warn!(%error, "keyhive notification classification failed; conservative fallback");
-            for peer in &connected {
-                if Some(peer) != evt.source.as_ref() {
-                    let peer_id = PeerId::new(*peer.verifying_key());
-                    batcher.push(
-                        now,
-                        peer_id,
-                        PendingKeyhiveNotification { conservative: true },
-                    );
-                }
-            }
+            conservative_fanout(batcher, &connected, evt.source.as_ref(), now);
             return;
         }
     };
@@ -275,20 +270,29 @@ async fn classify_and_enqueue(
     if !targets.unclassified.is_empty() {
         // Pending/lagged hashes: conservatively wake every connected peer
         // except the known source.
-        for peer in &connected {
-            if Some(peer) != evt.source.as_ref() {
-                let peer_id = PeerId::new(*peer.verifying_key());
-                batcher.push(
-                    now,
-                    peer_id,
-                    PendingKeyhiveNotification { conservative: true },
-                );
-            }
+        conservative_fanout(batcher, &connected, evt.source.as_ref(), now);
+    }
+}
+
+fn conservative_fanout(
+    batcher: &mut KeyedBatcher<PeerId, PendingKeyhiveNotification, DebouncePolicy>,
+    connected: &BTreeSet<KeyhivePeerId>,
+    source: Option<&KeyhivePeerId>,
+    now: Instant,
+) {
+    for peer in connected {
+        if Some(peer) != source {
+            let peer_id = PeerId::new(*peer.verifying_key());
+            batcher.push(
+                now,
+                peer_id,
+                PendingKeyhiveNotification { conservative: true },
+            );
         }
     }
 }
 
-/// Deliver due notifications, dropping subscriptions whose stream closed.
+/// Deliver due notifications concurrently, dropping subscriptions whose stream closed.
 async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, PendingKeyhiveNotification)>) {
     if due.is_empty() {
         return;
@@ -307,22 +311,27 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, PendingKeyhi
             })
             .collect()
     });
-    let mut failed = Vec::new();
-    for (peer_id, sub_id, tx, notification) in targets {
-        if tx
-            .send(KeyhiveChangedRpcEvent { initial: false })
-            .await
-            .is_err()
-        {
-            failed.push((peer_id, sub_id));
-        } else {
-            tracing::debug!(
-                %peer_id,
-                conservative = notification.conservative,
-                "keyhive change notification delivered"
-            );
-        }
-    }
+    let delivery_futures =
+        targets
+            .into_iter()
+            .map(|(peer_id, sub_id, tx, notification)| async move {
+                if tx
+                    .send(KeyhiveChangedRpcEvent { initial: false })
+                    .await
+                    .is_err()
+                {
+                    Some((peer_id, sub_id))
+                } else {
+                    tracing::debug!(
+                        %peer_id,
+                        conservative = notification.conservative,
+                        "keyhive change notification delivered"
+                    );
+                    None
+                }
+            });
+    let results = futures::future::join_all(delivery_futures).await;
+    let failed: Vec<(PeerId, Uuid)> = results.into_iter().flatten().collect();
     if !failed.is_empty() {
         surelock::key::lock_scope(|key| {
             let (mut subs, _key) = key.lock(subscriptions);

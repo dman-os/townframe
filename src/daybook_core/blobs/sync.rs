@@ -239,6 +239,7 @@ mod tests {
         Arc<dyn SyncBackend>,
         big_repo::SharedPartStore,
         Arc<BlobsRepo>,
+        tempfile::TempDir,
     )> {
         let temp_root = tempdir()?;
         tracing::info!(path = %temp_root.path().display(), "booted test blob sync node");
@@ -261,7 +262,7 @@ mod tests {
             endpoint,
             address_lookup,
         ));
-        Ok((backend, part_store, blobs_repo))
+        Ok((backend, part_store, blobs_repo, temp_root))
     }
 
     struct BlobSyncBackendContractHarness {
@@ -349,7 +350,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn blob_sync_backend_contract() -> Res<()> {
-        let (backend, part_store, blobs_repo) = build_blob_backend().await?;
+        let (backend, part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
         let noop_blob_id = blobs_repo
             .put(b"blob-sync-contract-noop", BlobUseHints::Unknown)
             .await?;

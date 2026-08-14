@@ -1,10 +1,9 @@
 use crate::interlude::*;
 
-use crate::drawer::{
-    DrawerRepo, cache::FacetCacheState, facet_recovery, lru::KeyedLruPool, types::*,
-};
+use crate::drawer::{DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
 use crate::repos::Repo;
 use crate::test_support::{boot_disk_repo, boot_repo};
+use utils_rs::lru::KeyedLruPool;
 
 use automerge::transaction::Transactable;
 use daybook_types::doc::{

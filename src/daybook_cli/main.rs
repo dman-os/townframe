@@ -1006,10 +1006,10 @@ mod tests {
             ctx.sql.clone(),
             ctx.layout.repo_root.join("local_state"),
             Arc::new(surelock::mutex::Mutex::new(
-                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                utils_rs::lru::KeyedLruPool::new(1000),
             )),
             Arc::new(surelock::mutex::Mutex::new(
-                daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                utils_rs::lru::KeyedLruPool::new(1000),
             )),
             Arc::clone(&plugs_repo),
         )
@@ -1302,10 +1302,10 @@ mod lazy {
                     ctx.sql.clone(),
                     ctx.layout.repo_root.join("local_state"),
                     Arc::new(surelock::mutex::Mutex::new(
-                        daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                        utils_rs::lru::KeyedLruPool::new(1000),
                     )),
                     Arc::new(surelock::mutex::Mutex::new(
-                        daybook_core::drawer::lru::KeyedLruPool::new(1000),
+                        utils_rs::lru::KeyedLruPool::new(1000),
                     )),
                     Arc::clone(&plugs),
                 )

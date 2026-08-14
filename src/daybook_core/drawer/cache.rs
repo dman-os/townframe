@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use super::DrawerRepo;
-use crate::drawer::lru::KeyedLruPool;
+use utils_rs::lru::KeyedLruPool;
 
 use daybook_types::doc::{ChangeHashSet, DocId, FacetRaw};
 

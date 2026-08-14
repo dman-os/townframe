@@ -31,6 +31,7 @@ pub fn spawn_doc_worker<F>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     runtime_cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
+    generation: u64,
 ) -> SpawnedDocWorker<F>
 where
     F: FutureForm + DocWorkerLoop<F> + 'static,
@@ -41,6 +42,7 @@ where
     let worker = DocWorker2 {
         doc_id,
         sed_id,
+        generation,
         state: DocState::Unloaded,
         partially_decrypted: false,
         blocked_refs: HashSet::new(),
@@ -138,6 +140,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
 struct DocWorker2<F: FutureForm> {
     doc_id: DocumentId,
     sed_id: sedimentree_core::id::SedimentreeId,
+    generation: u64,
 
     state: DocState,
     partially_decrypted: bool,
@@ -412,7 +415,11 @@ impl<F: FutureForm> DocWorker2<F> {
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             *initial_content,
-            crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+            crate::runtime2::DocLease::new(
+                self.runtime_cmd_tx.clone(),
+                self.doc_id,
+                self.generation,
+            ),
             false,
         ));
 
@@ -469,7 +476,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+                    crate::runtime2::DocLease::new(
+                        self.runtime_cmd_tx.clone(),
+                        self.doc_id,
+                        self.generation,
+                    ),
                     self.partially_decrypted,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -602,7 +613,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+                    crate::runtime2::DocLease::new(
+                        self.runtime_cmd_tx.clone(),
+                        self.doc_id,
+                        self.generation,
+                    ),
                     self.partially_decrypted,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -629,6 +644,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             crate::runtime2::DocLease::new(
                                 self.runtime_cmd_tx.clone(),
                                 self.doc_id,
+                                self.generation,
                             ),
                             partially_decrypted,
                         ));
@@ -762,13 +778,19 @@ impl<F: FutureForm> DocWorker2<F> {
         // parents onto that checkpoint. The bridge then rides the natural
         // sync round, and a receiver's reconcile finds the coverage already
         // present instead of minting its own.
-        let external_parents: BTreeSet<CommitId> = commits
+        let distinct_frontiers: HashSet<BTreeSet<CommitId>> = commits
             .iter()
-            .flat_map(|(_, parents, _)| parents.iter().copied())
-            .filter(|parent| !batch_ids.contains(parent))
+            .map(|(_, parents, _)| {
+                parents
+                    .iter()
+                    .copied()
+                    .filter(|parent| !batch_ids.contains(parent))
+                    .collect()
+            })
+            .filter(|frontier: &BTreeSet<CommitId>| !frontier.is_empty())
             .collect();
-        if !external_parents.is_empty() {
-            self.ensure_frontier_checkpointed(&external_parents).await?;
+        for frontier in distinct_frontiers {
+            self.ensure_frontier_checkpointed(&frontier).await?;
         }
         for (_head, parents, _blob) in &mut commits {
             let external: BTreeSet<_> = parents
@@ -1210,26 +1232,13 @@ impl<F: FutureForm> DocWorker2<F> {
         }
 
         debug!(%self.doc_id, ?current_epoch, ?covered_frontier, "persisting causal coverage checkpoint");
-        let Some((head, checkpoint, heads_observed)) = self
+        let Some((head, checkpoint, _heads_observed)) = self
             .io
             .persist_causal_checkpoint(self.sed_id, covered_frontier)
             .await?
         else {
             return Ok(false);
         };
-        // The persist returns the frontier it observed after the write —
-        // the caller never re-reads the (racy) shared tree.
-        let checkpoint_in_frontier = heads_observed.contains(&head);
-        info!(
-            %self.doc_id,
-            ?current_epoch,
-            ?head,
-            checkpoint_epoch = ?checkpoint.epoch,
-            covered = ?checkpoint.covered_frontier,
-            checkpoint_in_frontier,
-            heads_observed = ?heads_observed,
-            "causal coverage checkpoint persisted",
-        );
         self.causal_checkpoints.insert(head, checkpoint);
         Ok(true)
     }

@@ -1055,10 +1055,10 @@ mod tests {
             crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(surelock::mutex::Mutex::new(
-                crate::drawer::lru::KeyedLruPool::new(1000),
+                utils_rs::lru::KeyedLruPool::new(1000),
             )),
             Arc::new(surelock::mutex::Mutex::new(
-                crate::drawer::lru::KeyedLruPool::new(1000),
+                utils_rs::lru::KeyedLruPool::new(1000),
             )),
             None,
         )

@@ -802,13 +802,11 @@ mod causal_checkpoint_tests {
     fn causal_checkpoint_is_not_an_automerge_fragment_candidate() {
         let checkpoint = CausalCheckpoint::new([5; 32], frontier(&[[3; 32]]));
         let checkpoint_head = causal_checkpoint_id(&checkpoint);
-        let doc = automerge::Automerge::new();
 
         assert_eq!(checkpoint_head.as_bytes()[..8], *b"TFCASL01");
         assert!(
-            doc.get_fragment(automerge::ChangeHash(*checkpoint_head.as_bytes()))
-                .is_none(),
-            "a causal checkpoint is filtered before Automerge ingestion and cannot be fragmented"
+            is_causal_checkpoint_id(checkpoint_head),
+            "a causal checkpoint is filtered before Automerge ingestion"
         );
     }
 

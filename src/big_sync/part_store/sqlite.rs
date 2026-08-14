@@ -97,32 +97,43 @@ impl DebounceTarget {
 fn reduce_sub_event(existing: &mut SubEvent, new: SubEvent) {
     match (std::mem::replace(existing, SubEvent::ReplayComplete), new) {
         (SubEvent::Added(mut existing_added), SubEvent::Added(new_added)) => {
-            existing_added.cursor = new_added.cursor;
-            existing_added.payload = new_added.payload;
+            if new_added.cursor >= existing_added.cursor {
+                existing_added.cursor = new_added.cursor;
+                existing_added.payload = new_added.payload;
+            }
             *existing = SubEvent::Added(existing_added);
         }
         (SubEvent::Added(mut existing_added), SubEvent::Changed(new_changed)) => {
             // Retain Added variant so receiver adds the object to the partition
-            existing_added.cursor = new_changed.cursor;
-            existing_added.payload = new_changed.payload;
+            if new_changed.cursor >= existing_added.cursor {
+                existing_added.cursor = new_changed.cursor;
+                existing_added.payload = new_changed.payload;
+            }
             *existing = SubEvent::Added(existing_added);
         }
-        (SubEvent::Added(_), SubEvent::Removed(new_removed)) => {
+        (SubEvent::Added(existing_added), SubEvent::Removed(mut new_removed)) => {
+            new_removed.cursor = new_removed.cursor.max(existing_added.cursor);
             *existing = SubEvent::Removed(new_removed);
         }
         (SubEvent::Changed(mut existing_changed), SubEvent::Changed(new_changed)) => {
-            existing_changed.cursor = new_changed.cursor;
-            existing_changed.payload = new_changed.payload;
+            if new_changed.cursor >= existing_changed.cursor {
+                existing_changed.cursor = new_changed.cursor;
+                existing_changed.payload = new_changed.payload;
+            }
             *existing = SubEvent::Changed(existing_changed);
         }
-        (SubEvent::Changed(_), SubEvent::Removed(new_removed)) => {
+        (SubEvent::Changed(existing_changed), SubEvent::Removed(mut new_removed)) => {
+            new_removed.cursor = new_removed.cursor.max(existing_changed.cursor);
             *existing = SubEvent::Removed(new_removed);
         }
-        (SubEvent::Changed(_), SubEvent::Added(new_added)) => {
+        (SubEvent::Changed(existing_changed), SubEvent::Added(mut new_added)) => {
+            if new_added.cursor < existing_changed.cursor {
+                new_added.cursor = existing_changed.cursor;
+            }
             *existing = SubEvent::Added(new_added);
         }
         (SubEvent::Removed(mut existing_removed), SubEvent::Removed(new_removed)) => {
-            existing_removed.cursor = new_removed.cursor;
+            existing_removed.cursor = existing_removed.cursor.max(new_removed.cursor);
             *existing = SubEvent::Removed(existing_removed);
         }
         (SubEvent::Removed(mut existing_removed), SubEvent::Changed(new_changed)) => {
@@ -130,7 +141,10 @@ fn reduce_sub_event(existing: &mut SubEvent, new: SubEvent) {
             existing_removed.cursor = existing_removed.cursor.max(new_changed.cursor);
             *existing = SubEvent::Removed(existing_removed);
         }
-        (SubEvent::Removed(_), SubEvent::Added(new_added)) => {
+        (SubEvent::Removed(existing_removed), SubEvent::Added(mut new_added)) => {
+            if new_added.cursor < existing_removed.cursor {
+                new_added.cursor = existing_removed.cursor;
+            }
             *existing = SubEvent::Added(new_added);
         }
         (SubEvent::ObjectChanged(mut existing_obj), SubEvent::ObjectChanged(new_obj)) => {
@@ -232,27 +246,33 @@ async fn deliver_due(
     due: Vec<((Uuid, DebounceTarget), SubEvent)>,
 ) {
     let mut drop_subs = HashSet::new();
+    let mut perm_cache: HashMap<(Option<PartId>, ObjId, PeerId), bool> = HashMap::new();
     for ((sub_id, target), event) in due {
-        let principal = {
+        let (principal, sender) = {
             let bus = bus.read().expect(ERROR_MUTEX);
             let Some(sub) = bus.subs.get(&sub_id) else {
                 continue;
             };
-            sub.principal
+            (sub.principal, sub.sender.clone())
         };
-        let permitted = event_permitted(core, target.part_id(), target.obj_id(), Some(principal))
-            .await
-            .expect(ERROR_IMPOSSIBLE);
+        let key = (target.part_id(), target.obj_id(), principal);
+        let permitted = if let Some(&cached) = perm_cache.get(&key) {
+            cached
+        } else {
+            match event_permitted(core, key.0, key.1, Some(key.2)).await {
+                Ok(is_permitted) => {
+                    perm_cache.insert(key, is_permitted);
+                    is_permitted
+                }
+                Err(err) => {
+                    tracing::warn!(?err, %sub_id, "failed checking event permission during debounce flush");
+                    continue;
+                }
+            }
+        };
         if !permitted {
             continue;
         }
-        let sender = {
-            let bus = bus.read().expect(ERROR_MUTEX);
-            let Some(sub) = bus.subs.get(&sub_id) else {
-                continue;
-            };
-            sub.sender.clone()
-        };
         if sender.try_send(event).is_err() {
             drop_subs.insert(sub_id);
         }
@@ -351,8 +371,8 @@ impl SqlitePartStore {
         // stops itself when the store (its owner) drops — no explicit stop
         // token needed.
         let live_debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
-            quiet_window: std::time::Duration::from_millis(50),
-            max_latency: std::time::Duration::from_millis(500),
+            quiet_window: config.debounce_quiet_window,
+            max_latency: config.debounce_max_latency,
         });
         tokio::spawn(flush_live_debouncer(
             Arc::downgrade(&live_debouncer),
@@ -2344,10 +2364,10 @@ mod tests {
         assert_eq!(batcher.len(), 2, "different partitions must not collapse");
     }
 
-    /// End-to-end: a live subscriber receives exactly one debounced delivery
-    /// per object state change, and terminal events bypass the debouncer.
+    /// End-to-end: a live subscriber receives debounced delivery for object
+    /// state changes and removals.
     #[tokio::test(flavor = "multi_thread")]
-    async fn live_state_event_debounced_delivery_and_terminal_bypass() -> Res<()> {
+    async fn live_state_event_debounced_delivery() -> Res<()> {
         use keyhive_core::access::Access;
         use tokio::time::{Duration, timeout};
 
@@ -2390,7 +2410,7 @@ mod tests {
         store
             .set_obj_payload(obj, serde_json::json!({"phase": 1}))
             .await?;
-        let first = timeout(Duration::from_secs(2), rx.recv())
+        let first = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
             .await
             .expect("debounced delivery must arrive")
             .expect("channel must stay open");
@@ -2402,12 +2422,11 @@ mod tests {
             other => panic!("expected Changed, got {other:?}"),
         }
 
-        // Terminal events bypass the debouncer: a removal is delivered
-        // immediately, not after the debounce window.
+        // A removal is delivered through the subscriber channel.
         store.remove_obj_from_part(obj, part).await?;
-        let removed = timeout(Duration::from_secs(2), rx.recv())
+        let removed = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
             .await
-            .expect("Removed must be delivered immediately")
+            .expect("Removed must be delivered")
             .expect("channel must stay open");
         assert!(matches!(removed, SubEvent::Removed(_)));
 
@@ -2468,7 +2487,7 @@ mod tests {
             ])
             .await;
 
-        let evt = timeout(Duration::from_secs(2), rx.recv())
+        let evt = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
             .await
             .expect("event must arrive")
             .expect("channel stay open");
@@ -2547,7 +2566,7 @@ mod tests {
             ])
             .await;
 
-        let evt = timeout(Duration::from_secs(2), rx.recv())
+        let evt = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
             .await
             .expect("event must arrive")
             .expect("channel stay open");

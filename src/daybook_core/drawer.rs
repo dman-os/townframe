@@ -10,7 +10,6 @@ mod cache;
 pub mod dmeta;
 mod events;
 mod facet_recovery;
-pub mod lru;
 mod meta;
 mod mutations;
 mod queries;
@@ -24,8 +23,8 @@ pub use meta::version_updates;
 use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
 use cache::FacetCacheKey;
 use cache::*;
-use lru::SharedKeyedLruPool;
 use types::{BranchSnapshot, DocDeleteTombstone};
+use utils_rs::lru::SharedKeyedLruPool;
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};

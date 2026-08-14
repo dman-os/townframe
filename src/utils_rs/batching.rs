@@ -15,7 +15,7 @@
 //! differs. The primitive knows nothing about Keyhive, BigSync, RPC, Tokio, or
 //! the concrete batch representation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 /// Decides when a keyed batch is due.
@@ -70,11 +70,13 @@ impl FlushPolicy for BatchPolicy {
 struct PendingEntry<V> {
     value: V,
     first_push: Instant,
-    last_push: Instant,
     deadline: Instant,
     pushes: usize,
     bytes: usize,
 }
+
+pub type SizeFn<V> = Box<dyn Fn(&V) -> usize + Send + Sync>;
+pub type ReduceFn<V> = Box<dyn Fn(&mut V, V) + Send + Sync>;
 
 /// A synchronous keyed batch state machine.
 ///
@@ -82,18 +84,15 @@ struct PendingEntry<V> {
 /// The owner drives time (`push_with`/`take_due` take `now`) and performs
 /// delivery, so the batcher can live inside an actor without owning tasks.
 ///
-/// Deadlines are indexed by `(deadline, key)`, so `next_deadline` is O(1) and
-/// `take_due` returns batches in deterministic order — equal deadlines are
-/// ordered by key.
-pub type SizeFn<V> = Box<dyn Fn(&V) -> usize + Send + Sync>;
-pub type ReduceFn<V> = Box<dyn Fn(&mut V, V) + Send + Sync>;
-
+/// Deadlines are indexed by `(deadline, key)` in a [`BTreeSet`], so
+/// `next_deadline` is O(1) via `first()` and `take_due` returns batches in
+/// deterministic order — equal deadlines are ordered by key.
 pub struct KeyedBatcher<K, V, P> {
     policy: P,
     size_of: SizeFn<V>,
     reduce: ReduceFn<V>,
     pending: BTreeMap<K, PendingEntry<V>>,
-    deadlines: BTreeMap<(Instant, K), ()>,
+    deadlines: BTreeSet<(Instant, K)>,
 }
 
 impl<K, V, P> KeyedBatcher<K, V, P>
@@ -118,7 +117,7 @@ where
             size_of: Box::new(size_of),
             reduce: Box::new(reduce),
             pending: BTreeMap::new(),
-            deadlines: BTreeMap::new(),
+            deadlines: BTreeSet::new(),
         }
     }
 
@@ -130,11 +129,9 @@ where
     /// recomputed from the policy; a policy that reports an immediate flush
     /// (size thresholds) makes the batch due at `now`.
     pub fn push(&mut self, now: Instant, key: K, value: V) {
-        let bytes = (self.size_of)(&value);
         match self.pending.get_mut(&key) {
             Some(entry) => {
                 (self.reduce)(&mut entry.value, value);
-                entry.last_push = now;
                 entry.pushes += 1;
                 entry.bytes = (self.size_of)(&entry.value);
                 self.deadlines.remove(&(entry.deadline, key.clone()));
@@ -142,9 +139,10 @@ where
                 if self.policy.flush_immediately(entry.pushes, entry.bytes) {
                     entry.deadline = now;
                 }
-                self.deadlines.insert((entry.deadline, key), ());
+                self.deadlines.insert((entry.deadline, key));
             }
             None => {
+                let bytes = (self.size_of)(&value);
                 let mut deadline = self.policy.deadline(now, now);
                 if self.policy.flush_immediately(1, bytes) {
                     deadline = now;
@@ -154,22 +152,19 @@ where
                     PendingEntry {
                         value,
                         first_push: now,
-                        last_push: now,
                         deadline,
                         pushes: 1,
                         bytes,
                     },
                 );
-                self.deadlines.insert((deadline, key), ());
+                self.deadlines.insert((deadline, key));
             }
         }
     }
 
     /// The earliest deadline across all pending batches, or `None` when empty.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.deadlines
-            .first_key_value()
-            .map(|((deadline, _), _)| *deadline)
+        self.deadlines.first().map(|(deadline, _)| *deadline)
     }
 
     /// Take and return every batch whose deadline is at or before `now`, in
@@ -177,11 +172,7 @@ where
     pub fn take_due(&mut self, now: Instant) -> Vec<(K, V)> {
         let mut due = Vec::new();
         loop {
-            let Some((deadline, key)) = self
-                .deadlines
-                .first_key_value()
-                .map(|((deadline, key), _)| (*deadline, key.clone()))
-            else {
+            let Some((deadline, key)) = self.deadlines.first().cloned() else {
                 break;
             };
             if deadline > now {
