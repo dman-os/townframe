@@ -52,18 +52,18 @@ This ensures:
 
 ---
 
-### 2. Blob Pin Facets (`org.example.daybook.blob_pin`)
+### 2. Blob Pin Facets (`org.example.daybook.blobPin`)
 
-We introduce a dedicated facet tag for declaring physical blob retention: **`org.example.daybook.blob_pin`**.
+We introduce a dedicated facet tag for declaring physical blob retention: **`org.example.daybook.blobPin`**.
 
 Each pinned representation is represented as an individual facet whose key ID is strictly the **representation multihash**:
 
 ```json
 {
-  "org.example.daybook.blob_pin/<representation-multihash-1>": {
+  "org.example.daybook.blobPin/<representation-multihash-1>": {
     "lengthOctets": 12345
   },
-  "org.example.daybook.blob_pin/<representation-multihash-2>": {
+  "org.example.daybook.blobPin/<representation-multihash-2>": {
     "lengthOctets": 67890
   }
 }
@@ -107,7 +107,7 @@ The synchronization projection treats both identically: any document in an autho
 
 ### 4. Authority & Sponsorship Groups
 
-In [`authority.rs`](file:///home/asdf/repos/rust/townframe-2/src/daybook_core/authority.rs), repositories declare standard Keyhive authority groups:
+In [`authority.rs`](../../src/daybook_core/authority.rs), repositories declare standard Keyhive authority groups:
 - `repo_agents`
 - `core_docs`
 - `content_docs`
@@ -145,14 +145,14 @@ A local background indexer worker (in `index.rs`):
 3. Resolves the corresponding representation multihash:
    - For plaintext blobs: $H_{rep} = H_{plain}$.
    - For encrypted blobs: $H_{rep} = H_{cipher}$ (produced during blob ingestion/encryption).
-4. Automatically upserts the corresponding `org.example.daybook.blob_pin/<H_rep>` facet in the local Blob Inventory document.
-5. When local references to a blob are removed, deletes the corresponding `blob_pin` facet.
+4. Automatically upserts the corresponding `org.example.daybook.blobPin/<H_rep>` facet in the local Blob Inventory document.
+5. When local references to a blob are removed, deletes the corresponding `blobPin` facet.
 
 ---
 
 ### 6. Big Sync Partition Projection
 
-The projection engine ([`DocBlobsIndexRepo`](file:///home/asdf/repos/rust/townframe-2/src/daybook_core/index/doc_blobs.rs)) subscribes to drawer events for all readable documents in sponsored groups:
+The projection engine ([`DocBlobsIndexRepo`](../../src/daybook_core/index/doc_blobs.rs)) subscribes to drawer events for all readable documents in sponsored groups:
 
 ```text
 blob_pin added for multihash H
@@ -225,8 +225,8 @@ The content multihash is authoritative for identity. Resolution hints assist in 
 * **Content Multihash / Content Digest:** Multihash of logical/plaintext bytes (canonical application identity).
 * **Representation:** Concrete byte sequence used for storage and network transfer (ciphertext or plaintext).
 * **Representation Multihash / Representation Digest:** Multihash of the concrete representation bytes.
-* **Blob Pin (`blob_pin`):** An Automerge facet `org.example.daybook.blob_pin/<rep-multihash>` requesting retention/replication of a representation.
-* **Blob Inventory:** An Automerge document containing $N$ `blob_pin` facets.
+* **Blob Pin (`blobPin`):** An Automerge facet `org.example.daybook.blobPin/<rep-multihash>` requesting retention/replication of a representation.
+* **Blob Inventory:** An Automerge document containing $N$ `blobPin` facets.
 * **KEM / Keyring Document:** A private, Keyhive-protected Automerge document containing key encapsulation material for decrypting representations.
 * **Blob Partition:** Local derived Big Sync partition driving peer-to-peer and relay byte replication.
 

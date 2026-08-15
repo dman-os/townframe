@@ -41,6 +41,21 @@ pub struct DocBlobsIndexRepo {
     sql: SqlCtx,
 }
 
+fn record_blob_length(
+    blobs: &mut HashMap<Arc<str>, u64>,
+    hash: Arc<str>,
+    length_octets: u64,
+) -> bool {
+    if let Some(&existing_len) = blobs.get(&hash) {
+        if existing_len != length_octets {
+            return false;
+        }
+    } else {
+        blobs.insert(hash, length_octets);
+    }
+    true
+}
+
 impl Repo for DocBlobsIndexRepo {
     type Event = DocBlobsIndexEvent;
 
@@ -280,18 +295,20 @@ impl DocBlobsIndexRepo {
                             ?err,
                             "failed to parse blob pin facet while indexing; evicting stale blob refs"
                         );
-                        self.delete_doc_branch(doc_id, branch_path).await?;
-                        return Ok(ReindexDocOutcome::Evicted);
+                        return self.delete_doc_branch(doc_id, branch_path).await;
                     }
                 };
                 if facet_key.id.parse::<crate::blobs::BlobId>().is_ok() {
                     let hash: Arc<str> = facet_key.id.as_str().into();
-                    if let Some(existing_len) = blobs.insert(Arc::clone(&hash), pin.length_octets) {
-                        eyre::ensure!(
-                            existing_len == pin.length_octets,
-                            "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
-                            pin.length_octets
+                    if !record_blob_length(&mut blobs, Arc::clone(&hash), pin.length_octets) {
+                        warn!(
+                            %doc_id,
+                            %branch_path,
+                            %hash,
+                            new_length = pin.length_octets,
+                            "inconsistent blob length indexed for hash; evicting stale blob refs"
                         );
+                        return self.delete_doc_branch(doc_id, branch_path).await;
                     }
                 } else {
                     warn!(
@@ -300,8 +317,7 @@ impl DocBlobsIndexRepo {
                         facet_id = %facet_key.id,
                         "invalid blob pin facet id; evicting stale blob refs"
                     );
-                    self.delete_doc_branch(doc_id, branch_path).await?;
-                    return Ok(ReindexDocOutcome::Evicted);
+                    return self.delete_doc_branch(doc_id, branch_path).await;
                 }
             } else if facet_key.tag == WellKnownFacetTag::Blob.into() {
                 let facet = match WellKnownFacet::from_json(
@@ -316,8 +332,7 @@ impl DocBlobsIndexRepo {
                             ?err,
                             "failed to parse blob facet while indexing; evicting stale blob refs"
                         );
-                        self.delete_doc_branch(doc_id, branch_path).await?;
-                        return Ok(ReindexDocOutcome::Evicted);
+                        return self.delete_doc_branch(doc_id, branch_path).await;
                     }
                 };
                 let WellKnownFacet::Blob(blob) = facet else {
@@ -329,14 +344,19 @@ impl DocBlobsIndexRepo {
                         if let Some(hash) = parse_db_blob_hash(&url) {
                             found_url_hash = true;
                             let hash: Arc<str> = hash.into();
-                            if let Some(existing_len) =
-                                blobs.insert(Arc::clone(&hash), blob.length_octets)
-                            {
-                                eyre::ensure!(
-                                    existing_len == blob.length_octets,
-                                    "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
-                                    blob.length_octets
+                            if !record_blob_length(
+                                &mut blobs,
+                                Arc::clone(&hash),
+                                blob.length_octets,
+                            ) {
+                                warn!(
+                                    %doc_id,
+                                    %branch_path,
+                                    %hash,
+                                    new_length = blob.length_octets,
+                                    "inconsistent blob length indexed for hash in blob urls; evicting stale blob refs"
                                 );
+                                return self.delete_doc_branch(doc_id, branch_path).await;
                             }
                         }
                     }
@@ -346,13 +366,15 @@ impl DocBlobsIndexRepo {
                     && blob.digest.parse::<crate::blobs::BlobId>().is_ok()
                 {
                     let hash: Arc<str> = blob.digest.as_str().into();
-                    if let Some(existing_len) = blobs.insert(Arc::clone(&hash), blob.length_octets)
-                    {
-                        eyre::ensure!(
-                            existing_len == blob.length_octets,
-                            "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
-                            blob.length_octets
+                    if !record_blob_length(&mut blobs, Arc::clone(&hash), blob.length_octets) {
+                        warn!(
+                            %doc_id,
+                            %branch_path,
+                            %hash,
+                            new_length = blob.length_octets,
+                            "inconsistent blob length indexed for hash in blob digest; evicting stale blob refs"
                         );
+                        return self.delete_doc_branch(doc_id, branch_path).await;
                     }
                 }
             }
@@ -1133,6 +1155,139 @@ mod tests {
         assert_eq!(blob_refs_2.len(), 1);
         assert_eq!(blob_refs_2[0].blob_hash, hash_empty_urls);
         assert_eq!(blob_refs_2[0].length_octets, 1024);
+
+        env.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_doc_blobs_index_blob_pin_invalid_facet_id_eviction() -> Res<()> {
+        let env = boot_test_index_env().await?;
+
+        let hash_a = crate::blobs::BlobId::random().to_string();
+        let key_pin_a = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_a.clone(),
+        };
+
+        // 1. Initially index valid pin
+        let doc_id = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    key_pin_a.clone(),
+                    FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 100 })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads = env
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads")?;
+        env.repo
+            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+
+        wait_for_hash(&env.repo, &doc_id, &hash_a).await?;
+        assert_eq!(
+            env.repo.list_hashes_for_doc(&doc_id).await?,
+            vec![hash_a.clone()]
+        );
+
+        // 2. Update with invalid BlobId in facet ID
+        let key_pin_invalid = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: "not_a_valid_blob_id".to_string(),
+        };
+
+        env.drawer_repo
+            .update_at_heads(
+                daybook_types::doc::DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        key_pin_invalid,
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 100 })),
+                    )]
+                    .into(),
+                    facets_remove: vec![key_pin_a],
+                    user_path: None,
+                },
+                daybook_types::doc::BranchPath::new("main"),
+                None,
+            )
+            .await?;
+
+        let heads_invalid = env
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, daybook_types::doc::BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("expected main branch heads")?;
+        env.repo
+            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads_invalid)?;
+
+        let start = std::time::Instant::now();
+        while !env.repo.list_hashes_for_doc(&doc_id).await?.is_empty() {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                eyre::bail!("timeout waiting for eviction on invalid facet ID");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        env.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_doc_blobs_index_conflicting_lengths_eviction() -> Res<()> {
+        let env = boot_test_index_env().await?;
+
+        let hash = crate::blobs::BlobId::random().to_string();
+
+        // Doc with conflicting lengths between BlobPin and Blob facets for the same hash
+        let doc_id = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        FacetKey {
+                            tag: WellKnownFacetTag::BlobPin.into(),
+                            id: hash.clone(),
+                        },
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 100 })),
+                    ),
+                    (
+                        FacetKey::from(WellKnownFacetTag::Blob),
+                        FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                            mime: "application/octet-stream".to_string(),
+                            length_octets: 200,
+                            digest: hash.clone(),
+                            inline: None,
+                            urls: None,
+                        })),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads = env
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads")?;
+        env.repo
+            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(env.repo.list_hashes_for_doc(&doc_id).await?.is_empty());
 
         env.stop().await?;
         Ok(())

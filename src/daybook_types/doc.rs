@@ -67,7 +67,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Dmeta struct {
+        "dmeta" Dmeta struct {
             pub id: DocId,
             // FIXME: unix timestamp codec
             pub created_at: Timestamp,
@@ -76,29 +76,29 @@ crate::define_enum_and_tag!(
             pub facet_uuids: HashMap<Uuid,FacetKey>,
             pub facets: HashMap<FacetKey, FacetMeta>
         },
-        RefGeneric type (DocId),
-        LabelGeneric type (String),
-        TitleGeneric type (String),
-        PathGeneric type (String),
+        "refGeneric" RefGeneric type (DocId),
+        "labelGeneric" LabelGeneric type (String),
+        "titleGeneric" TitleGeneric type (String),
+        "pathGeneric" PathGeneric type (String),
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Pending struct {
+        "pending" Pending struct {
             pub key: FacetKey
         },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Body struct {
+        "body" Body struct {
             pub order: Vec<Url>,
         },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Note struct {
+        "note" Note struct {
             pub mime: MimeType,
             pub content: String,
         },
@@ -106,7 +106,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Blob struct {
+        "blob" Blob struct {
             pub mime: MimeType,
             pub length_octets: u64,
             pub digest: Multihash,
@@ -118,14 +118,14 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        "blob_pin" BlobPin struct {
+        "blobPin" BlobPin struct {
             pub length_octets: u64,
         },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        ImageMetadata struct {
+        "imageMetadata" ImageMetadata struct {
             // URL to src Blob facet
             pub facet_ref: Url,
             pub ref_heads: ChangeHashSet,
@@ -137,8 +137,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        OcrResult struct {
-            // URL to src ImageMetadata facet
+        "ocrResult" OcrResult struct {
             pub facet_ref: Url,
             pub ref_heads: ChangeHashSet,
             pub model_tag: String,
@@ -149,7 +148,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        Embedding struct {
+        "embedding" Embedding struct {
             // URL to src facet like Note or ImageMetadata
             pub facet_ref: Url,
             pub ref_heads: ChangeHashSet,

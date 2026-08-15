@@ -165,7 +165,7 @@ fn test_doc_with_all_prop_types() -> Res<()> {
 fn test_doc_with_blob_pin() -> Res<()> {
     assert_eq!(
         WellKnownFacetTag::BlobPin.as_str(),
-        "org.example.daybook.blob_pin"
+        "org.example.daybook.blobPin"
     );
 
     let mut props = HashMap::new();
@@ -173,7 +173,7 @@ fn test_doc_with_blob_pin() -> Res<()> {
         length_octets: 12345,
     };
     props.insert(
-        FacetKey::from("org.example.daybook.blob_pin/hash123"),
+        FacetKey::from("org.example.daybook.blobPin/hash123"),
         FacetRaw::from(WellKnownFacet::BlobPin(blob_pin)),
     );
 

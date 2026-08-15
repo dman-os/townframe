@@ -345,7 +345,7 @@ mod wasm_runtime {
             .primary_doc
             .tags
             .iter()
-            .find(|keyid| keyid.tag() == "org.example.daybook.labelgeneric")
+            .find(|keyid| keyid.tag() == "org.example.daybook.labelGeneric")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric tag token not found")))?;
         let tag_has_read = tag_token
             .rights()
@@ -1481,7 +1481,7 @@ mod tests {
             let has_label_generic = routine.doc_acls.iter().any(|acl| {
                 acl.facet_acl
                     .iter()
-                    .any(|fa| fa.tag.0 == "org.example.daybook.labelgeneric")
+                    .any(|fa| fa.tag.0 == "org.example.daybook.labelGeneric")
             });
             assert!(
                 has_label_generic,

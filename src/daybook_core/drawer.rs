@@ -311,7 +311,7 @@ impl DrawerRepo {
         Ok(Some(latest_heads))
     }
 
-    async fn get_branch_heads_for_path(
+    pub(crate) async fn get_branch_heads_for_path(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,

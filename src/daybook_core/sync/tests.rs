@@ -940,7 +940,7 @@ async fn spawn_doc_blobs_index_bridge_for_tests(
                                                     ),
                                                     ChangeHashSet(Arc::clone(&heads)),
                                                 )
-                                                .unwrap_or_log();
+                                                .expect("failed to enqueue upsert in sync bridge");
                                         }
                                     }
                                 }
@@ -952,7 +952,9 @@ async fn spawn_doc_blobs_index_bridge_for_tests(
                     match evt {
                         Ok(evt) => match evt.as_ref() {
                             crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                                doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
+                                doc_blobs_index_repo
+                                    .enqueue_delete(id.clone())
+                                    .expect("failed to enqueue delete in sync bridge");
                             }
                             crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                                 let id = id.clone();
@@ -984,7 +986,7 @@ async fn spawn_doc_blobs_index_bridge_for_tests(
                                                     let branch_path = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
                                                     doc_blobs_index_repo
                                                         .enqueue_upsert(id.clone(), branch_path, heads)
-                                                        .unwrap_or_log();
+                                                        .expect("failed to enqueue upsert in sync bridge task");
                                                 }
                                                 break;
                                             }
@@ -1006,7 +1008,7 @@ async fn spawn_doc_blobs_index_bridge_for_tests(
                                         id.clone(),
                                         retained_branches,
                                     )
-                                    .unwrap_or_log();
+                                    .expect("failed to enqueue delete branches in sync bridge");
                             }
                         },
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {

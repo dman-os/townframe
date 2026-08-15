@@ -1380,6 +1380,44 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 
 
 
+data class AppBlobInventories (
+    var `coreInventoryDocId`: ObjId
+    , 
+    var `docsInventoryDocId`: ObjId
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAppBlobInventories: FfiConverterRustBuffer<AppBlobInventories> {
+    override fun read(buf: ByteBuffer): AppBlobInventories {
+        return AppBlobInventories(
+            FfiConverterTypeObjId.read(buf),
+            FfiConverterTypeObjId.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AppBlobInventories) = (
+            FfiConverterTypeObjId.allocationSize(value.`coreInventoryDocId`) +
+            FfiConverterTypeObjId.allocationSize(value.`docsInventoryDocId`)
+    )
+
+    override fun write(value: AppBlobInventories, buf: ByteBuffer) {
+            FfiConverterTypeObjId.write(value.`coreInventoryDocId`, buf)
+            FfiConverterTypeObjId.write(value.`docsInventoryDocId`, buf)
+    }
+}
+
+
+
 data class BranchDeleteTombstone (
     var `vtag`: VersionTag
     , 

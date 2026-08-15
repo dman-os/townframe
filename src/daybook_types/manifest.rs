@@ -14,12 +14,7 @@ pub static USERNAME_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9]+([_-]?[a-zA-Z0-9])*$").unwrap());
 
 pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
-    let normalized = if value.contains('_') {
-        value.replace('_', "-")
-    } else {
-        value.to_string()
-    };
-    if let Err(err) = addr::parse_domain_name(&normalized) {
+    if let Err(err) = addr::parse_domain_name(value) {
         return Err(garde::Error::new(format!(
             "error parsing facet tag \"{value}\": {err}"
         )));

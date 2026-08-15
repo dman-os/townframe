@@ -7,16 +7,17 @@ import org.example.daybook.uniffi.types.WellKnownFacetTag
 private val WELL_KNOWN_FACET_DISPLAY_HINT_KEYS =
     mapOf(
         WellKnownFacetTag.DMETA to "org.example.daybook.dmeta",
-        WellKnownFacetTag.REF_GENERIC to "org.example.daybook.refgeneric",
-        WellKnownFacetTag.LABEL_GENERIC to "org.example.daybook.labelgeneric",
-        WellKnownFacetTag.TITLE_GENERIC to "org.example.daybook.titlegeneric",
-        WellKnownFacetTag.PATH_GENERIC to "org.example.daybook.pathgeneric",
+        WellKnownFacetTag.REF_GENERIC to "org.example.daybook.refGeneric",
+        WellKnownFacetTag.LABEL_GENERIC to "org.example.daybook.labelGeneric",
+        WellKnownFacetTag.TITLE_GENERIC to "org.example.daybook.titleGeneric",
+        WellKnownFacetTag.PATH_GENERIC to "org.example.daybook.pathGeneric",
         WellKnownFacetTag.PENDING to "org.example.daybook.pending",
         WellKnownFacetTag.BODY to "org.example.daybook.body",
         WellKnownFacetTag.NOTE to "org.example.daybook.note",
         WellKnownFacetTag.BLOB to "org.example.daybook.blob",
-        WellKnownFacetTag.IMAGE_METADATA to "org.example.daybook.imagemetadata",
-        WellKnownFacetTag.OCR_RESULT to "org.example.daybook.ocrresult",
+        WellKnownFacetTag.BLOB_PIN to "org.example.daybook.blobPin",
+        WellKnownFacetTag.IMAGE_METADATA to "org.example.daybook.imageMetadata",
+        WellKnownFacetTag.OCR_RESULT to "org.example.daybook.ocrResult",
         WellKnownFacetTag.EMBEDDING to "org.example.daybook.embedding",
     )
 

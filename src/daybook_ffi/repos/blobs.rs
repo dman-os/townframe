@@ -18,9 +18,6 @@ impl BlobsRepoFfi {
             .do_on_rt(daybook_core::blobs::BlobsRepo::new(
                 fcx.rcx.layout.blobs_root.to_path_buf(),
                 fcx.rcx.local_user_path.clone(),
-                Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                    Arc::clone(&fcx.rcx.part_store),
-                )),
             ))
             .await?;
         Ok(Arc::new(Self { fcx, repo }))
