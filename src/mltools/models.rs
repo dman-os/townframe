@@ -411,7 +411,7 @@ pub async fn mobile_default_with_observer(
             }),
         },
         LlmBackendConfig::CloudGemini {
-            model: "gemini-flash-latest".to_string(),
+            model: "gemini-3.1-flash-lite".to_string(),
             auth: gemini_api_key
                 .clone()
                 .map(|key| crate::CloudAuth::ApiKey { key }),

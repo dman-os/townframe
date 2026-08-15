@@ -46,8 +46,6 @@ async fn test_fails_until_told() -> Res<()> {
         })
         .await?;
 
-    tracing::info!("First run completed, saw expected failure message, tearing down");
-
     // Save the stores and keyvalue plugin to share between runs
     // Note: We'll create a new metastore for the second run so we can register
     // the workload fresh, but we'll reuse logstore and snap_store which contain
@@ -56,16 +54,18 @@ async fn test_fails_until_told() -> Res<()> {
     let snap_store = Arc::clone(&test_cx.snapstore);
     let keyvalue_plugin = Arc::clone(&test_cx.keyvalue_plugin);
 
-    // Cleanup first run
-    test_cx.stop().await?;
-
-    // Set the keyvalue flag to true
+    // Set the keyvalue flag to true so that retries succeed
     keyvalue_plugin
         .set_value("workload_123", "default", "test-flag", vec![1])
         .await
         .to_eyre()?;
 
-    tracing::info!("Flag set, starting second run");
+    tracing::info!("First run completed, saw expected failure message, tearing down");
+
+    // Cleanup first run
+    test_cx.stop().await?;
+
+    tracing::info!("Starting second run");
 
     // Second run: create a new context with the same AmCtx, shared log/snap stores,
     // and the SAME keyvalue storage so the flag is visible. We also register the

@@ -1180,11 +1180,13 @@ mod tests {
 
         runtime.block_on(async {
             let context = if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+                let model = std::env::var("GEMINI_LLM_MODEL")
+                    .unwrap_or_else(|_| "gemini-3.1-flash-lite".to_string());
                 context_with(
                     vec![],
                     vec![],
                     vec![LlmBackendConfig::CloudGemini {
-                        model: "gemini-flash-latest".to_string(),
+                        model,
                         auth: Some(crate::CloudAuth::ApiKey { key }),
                     }],
                 )
@@ -1245,11 +1247,13 @@ mod tests {
 
         runtime.block_on(async {
             let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
+            let model = std::env::var("GEMINI_LLM_MODEL")
+                .unwrap_or_else(|_| "gemini-3.1-flash-lite".to_string());
             let context = context_with(
                 vec![],
                 vec![],
                 vec![LlmBackendConfig::CloudGemini {
-                    model: "gemini-flash-latest".to_string(),
+                    model,
                     auth: Some(crate::CloudAuth::ApiKey { key }),
                 }],
             );
@@ -1270,7 +1274,7 @@ mod tests {
         runtime.block_on(async {
             let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
             let model = std::env::var("GEMINI_LLM_MODEL")
-                .unwrap_or_else(|_| "gemini-flash-latest".to_string());
+                .unwrap_or_else(|_| "gemini-3.1-flash-lite".to_string());
             let context = context_with(
                 vec![],
                 vec![],

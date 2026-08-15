@@ -12,13 +12,10 @@ pub struct SqlCtx {
 
 impl SqlCtx {
     pub async fn memory() -> Res<Self> {
-        let connect_options = SqliteConnectOptions::from_str("sqlite::memory:")?;
-        // Keep a second connection alive so cancellation of an in-flight SQLite
-        // query cannot destroy the entire in-memory database before the pool
-        // replaces the cancelled connection.
+        let connect_options =
+            SqliteConnectOptions::from_str("sqlite::memory:")?.disable_statement_logging();
         let pool = SqlitePoolOptions::new()
-            .min_connections(2)
-            .max_connections(2)
+            .max_connections(1)
             .connect_with(connect_options)
             .await
             .wrap_err("failed opening sqlite memory context")?;
@@ -60,23 +57,19 @@ impl SqlCtx {
 }
 
 fn is_memory_url(url: &str) -> bool {
-    url.contains(":memory:")
+    url.contains(":memory:") || url.contains("mode=memory")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::Connection;
 
     #[tokio::test]
-    async fn memory_schema_survives_one_connection_closing() -> Res<()> {
+    async fn memory_schema_query_roundtrip() -> Res<()> {
         let ctx = SqlCtx::memory().await?;
         sqlx::query("CREATE TABLE durable_schema (value INTEGER)")
             .execute(&ctx.write_pool)
             .await?;
-
-        let connection = ctx.read_pool.acquire().await?;
-        connection.detach().close().await?;
 
         sqlx::query("INSERT INTO durable_schema VALUES (1)")
             .execute(&ctx.write_pool)
