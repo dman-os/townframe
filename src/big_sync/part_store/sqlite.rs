@@ -2499,10 +2499,7 @@ mod tests {
             ])
             .await;
 
-        let evt = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
-            .await
-            .expect("event must arrive")
-            .expect("channel stay open");
+        let evt = rx.recv().await.expect("channel stay open");
 
         match evt {
             SubEvent::Added(inner) => {
@@ -2578,10 +2575,7 @@ mod tests {
             ])
             .await;
 
-        let evt = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
-            .await
-            .expect("event must arrive")
-            .expect("channel stay open");
+        let evt = rx.recv().await.expect("channel stay open");
 
         match evt {
             SubEvent::Removed(inner) => {

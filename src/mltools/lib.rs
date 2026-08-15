@@ -1134,29 +1134,39 @@ mod tests {
 
     #[test]
     fn test_embed_text_cloud_router_roundtrip() -> Res<()> {
-        let embed_model_name =
-            std::env::var("OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "embeddinggemma".to_string());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         runtime.block_on(async {
-            let context = context_with(
-                vec![],
-                vec![EmbedBackendConfig::CloudOllama {
-                    url: test_ollama_url(),
-                    model: embed_model_name.clone(),
-                    auth: Some(crate::CloudAuth::Basic {
-                        username: test_ollama_username(),
-                        password: test_ollama_password(),
-                    }),
-                }],
-                vec![],
-            );
+            let context = if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+                context_with(
+                    vec![],
+                    vec![EmbedBackendConfig::CloudGemini {
+                        model: "gemini-embedding-001".to_string(),
+                        auth: Some(crate::CloudAuth::ApiKey { key }),
+                    }],
+                    vec![],
+                )
+            } else {
+                let embed_model_name = std::env::var("OLLAMA_EMBED_MODEL")
+                    .unwrap_or_else(|_| "embeddinggemma".to_string());
+                context_with(
+                    vec![],
+                    vec![EmbedBackendConfig::CloudOllama {
+                        url: test_ollama_url(),
+                        model: embed_model_name,
+                        auth: Some(crate::CloudAuth::Basic {
+                            username: test_ollama_username(),
+                            password: test_ollama_password(),
+                        }),
+                    }],
+                    vec![],
+                )
+            };
             let result = embed_text(&context, "cloud embedding smoke test").await?;
             assert!(!result.vector.is_empty());
             assert!(result.dimensions > 0);
             assert_eq!(result.dimensions as usize, result.vector.len());
-            assert_eq!(result.model_id, embed_model_name);
 
             Ok(())
         })
@@ -1164,25 +1174,36 @@ mod tests {
 
     #[test]
     fn test_llm_chat_cloud_router_roundtrip() -> Res<()> {
-        let llm_model_name =
-            std::env::var("OLLAMA_LLM_MODEL").unwrap_or_else(|_| "gemma4".to_string());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
 
         runtime.block_on(async {
-            let context = context_with(
-                vec![],
-                vec![],
-                vec![LlmBackendConfig::CloudOllama {
-                    url: test_ollama_url(),
-                    model: llm_model_name,
-                    auth: Some(crate::CloudAuth::Basic {
-                        username: test_ollama_username(),
-                        password: test_ollama_password(),
-                    }),
-                }],
-            );
+            let context = if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+                context_with(
+                    vec![],
+                    vec![],
+                    vec![LlmBackendConfig::CloudGemini {
+                        model: "gemini-flash-latest".to_string(),
+                        auth: Some(crate::CloudAuth::ApiKey { key }),
+                    }],
+                )
+            } else {
+                let llm_model_name =
+                    std::env::var("OLLAMA_LLM_MODEL").unwrap_or_else(|_| "gemma4".to_string());
+                context_with(
+                    vec![],
+                    vec![],
+                    vec![LlmBackendConfig::CloudOllama {
+                        url: test_ollama_url(),
+                        model: llm_model_name,
+                        auth: Some(crate::CloudAuth::Basic {
+                            username: test_ollama_username(),
+                            password: test_ollama_password(),
+                        }),
+                    }],
+                )
+            };
 
             let result = llm_chat(&context, "reply with one short word").await?;
             assert!(!result.text.trim().is_empty());

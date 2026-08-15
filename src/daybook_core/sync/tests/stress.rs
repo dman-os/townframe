@@ -331,10 +331,7 @@ async fn connect_topology(
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
     peers_set: &[HashSet<PeerId>],
-    timeout: Duration,
-    blob_timeout: Duration,
 ) -> Res<()> {
-    let network_timeout = timeout.max(blob_timeout);
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
         node.as_ref().map(|node| async move {
             let parts = node
