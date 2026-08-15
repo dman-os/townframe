@@ -7,8 +7,8 @@ pub async fn run(sync_urls: Vec<String>, exit_when_synced: bool) -> Res<ExitCode
     let sync_repo = lazy::sync_repo().await?;
     let local_ticket_url = sync_repo.get_clone_ticket_url().await?;
     {
-        use qrcode::render::unicode;
         use qrcode::QrCode;
+        use qrcode::render::unicode;
         let code = QrCode::new(&local_ticket_url[..]).unwrap();
         let image = code
             .render::<unicode::Dense1x2>()

@@ -4,7 +4,7 @@ use wflow_sdk::{JobErrorX, Json, WflowCtx};
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();

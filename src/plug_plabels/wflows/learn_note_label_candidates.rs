@@ -242,7 +242,7 @@ fn get_or_compute_text_embedding(
     query_text: &str,
 ) -> Result<Vec<f32>, JobErrorX> {
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
 
     let cache_rows = sqlite_connection
         .query(

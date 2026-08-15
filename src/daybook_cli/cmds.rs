@@ -6,7 +6,7 @@ pub mod ed;
 pub mod exec;
 pub mod init;
 pub mod ls;
-pub mod server;
+// pub mod server;
 pub mod sync;
 pub mod touch;
 // pub mod template {

@@ -15,6 +15,7 @@ const generatedLibraryPath = targetDir
   .toString();
 
 await $`cargo build -p daybook_ffi`.cwd(repoRoot);
-await $`cargo run -p daybook_ffi generate --library ${generatedLibraryPath} --language kotlin --out-dir ${generatedOutDir} --no-format`.cwd(
-  repoRoot,
-);
+await $`cargo run -p daybook_ffi generate --library ${generatedLibraryPath} --language kotlin --out-dir ${generatedOutDir} --no-format`
+  .cwd(
+    repoRoot,
+  );

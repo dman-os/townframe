@@ -24,8 +24,8 @@ mod binds_guest {
             "townframe:daybook/capabilities.facet-create-token": super::caps::FacetCreateToken,
             "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
             "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
-            "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
-            "townframe:daybook/sqlite-connection.transaction": super::local_state_sql::SqliteTransactionToken,
+            "townframe:sqlite/sqlite-connection.connection": wash_plugin_sqlite::SqliteConnectionToken,
+            "townframe:sqlite/sqlite-connection.transaction": wash_plugin_sqlite::SqliteTransactionToken,
         }
     });
 
@@ -325,7 +325,6 @@ mod binds_guest {
 }
 
 mod caps;
-mod local_state_sql;
 mod mltools;
 mod stateless_view_host;
 
@@ -338,7 +337,7 @@ pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_image_tools;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
-pub use binds_guest::townframe::daybook::sqlite_connection;
+pub use binds_guest::townframe::sqlite::sqlite_connection;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 pub(crate) use stateless_view_host::StatelessViewPlugin;
 
@@ -438,7 +437,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 WitInterface::from("townframe:utils/types"),
                 WitInterface::from("townframe:api-utils/utils"),
                 WitInterface::from(
-                    "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
+                    "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
                 ),
             ]),
         }
@@ -481,12 +480,6 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                         item.linker(),
                         |ctx| ctx,
                     )?;
-                }
-                if iface.interfaces.contains("sqlite-connection") {
-                    sqlite_connection::add_to_linker::<
-                        _,
-                        wasmtime::component::HasSelf<SharedWashCtx>,
-                    >(item.linker(), |ctx| ctx)?;
                 }
                 if iface.interfaces.contains("mltools-ocr") {
                     mltools_ocr::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
@@ -859,11 +852,34 @@ impl facet_routine::Host for SharedWashCtx {
                 &local_state_access.plug_id,
                 &local_state_access.local_state_key.0,
             );
-            let handle = self.table.push(local_state_sql::SqliteConnectionToken {
-                local_state_id,
-                sqlite_file_path: None,
-                sql: None,
-            })?;
+            // Eagerly resolve the sqlite ctx + file path here (the orchestrator),
+            // then hand a fully-resolved token to the sqlite plugin which only
+            // manages the wasm resource table + query execution.
+            let sqlite_file_path = dayook_plugin
+                .sqlite_local_state_repo
+                .get_sqlite_file_path(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error resolving sqlite file path for {local_state_id}: {err}"
+                    ))
+                })?;
+            let sql = dayook_plugin
+                .sqlite_local_state_repo
+                .ensure_sqlite_ctx(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error initializing sqlite ctx for {local_state_id}: {err}"
+                    ))
+                })?;
+            let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
+                self,
+                wash_plugin_sqlite::SqliteConnectionToken {
+                    sqlite_file_path: sqlite_file_path.to_string_lossy().to_string(),
+                    sql,
+                },
+            )?;
             sqlite_connections.push((
                 format!(
                     "{}/{}",

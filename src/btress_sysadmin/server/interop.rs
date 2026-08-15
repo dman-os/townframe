@@ -2,7 +2,7 @@
 // migrate wstd to wasi p3 and expose it to work
 
 use crate::interlude::*;
-use http::{uri::Parts, Uri};
+use http::{Uri, uri::Parts};
 use wasip2::{
     http::types::{
         Headers, IncomingBody, IncomingRequest, Method, OutgoingBody, OutgoingResponse,
@@ -44,7 +44,7 @@ pub fn try_from_incoming(
             match body_stream.read(CHUNK_BYTE_SIZE as u64) {
                 Err(StreamError::Closed) => break,
                 Err(StreamError::LastOperationFailed(err)) => {
-                    return Err(StreamError::LastOperationFailed(err).into())
+                    return Err(StreamError::LastOperationFailed(err).into());
                 }
                 Ok(data) => {
                     body_bytes.extend(data);

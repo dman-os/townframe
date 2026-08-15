@@ -17,8 +17,8 @@ pub async fn run() -> Res<ExitCode> {
         }
     }
 
-    use comfy_table::presets::NOTHING;
     use comfy_table::Table;
+    use comfy_table::presets::NOTHING;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let mut table = Table::new();

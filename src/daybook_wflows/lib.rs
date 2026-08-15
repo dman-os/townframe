@@ -30,7 +30,7 @@ mod wit {
 
             "townframe:mltools/ocr": generate,
             "townframe:mltools/embed": generate,
-            "townframe:sql/types": generate,
+            "townframe:sqlite/types": generate,
 
             "townframe:daybook-types/doc": generate,
 
@@ -38,7 +38,7 @@ mod wit {
             "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/facet-routine": generate,
-            "townframe:daybook/sqlite-connection": generate,
+            "townframe:sqlite/sqlite-connection": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
             "townframe:daybook/mltools-image-tools": generate,
@@ -58,11 +58,11 @@ struct Component;
 
 /*
 pub(crate) fn row_text(
-    row: &crate::wit::townframe::sql::types::ResultRow,
+    row: &crate::wit::townframe::sqlite::types::ResultRow,
     name: &str,
 ) -> Option<String> {
     row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Text(value) if entry.column_name == name => {
+        crate::wit::townframe::sqlite::types::SqlValue::Text(value) if entry.column_name == name => {
             Some(value.clone())
         }
         _ => None,
@@ -70,11 +70,11 @@ pub(crate) fn row_text(
 }
 
 pub(crate) fn row_i64(
-    row: &crate::wit::townframe::sql::types::ResultRow,
+    row: &crate::wit::townframe::sqlite::types::ResultRow,
     name: &str,
 ) -> Option<i64> {
     row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Integer(value)
+        crate::wit::townframe::sqlite::types::SqlValue::Integer(value)
             if entry.column_name == name =>
         {
             Some(*value)
@@ -84,11 +84,11 @@ pub(crate) fn row_i64(
 }
 
 pub(crate) fn row_blob(
-    row: &crate::wit::townframe::sql::types::ResultRow,
+    row: &crate::wit::townframe::sqlite::types::ResultRow,
     name: &str,
 ) -> Option<Vec<u8>> {
     row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Blob(value) if entry.column_name == name => {
+        crate::wit::townframe::sqlite::types::SqlValue::Blob(value) if entry.column_name == name => {
             Some(value.clone())
         }
         _ => None,

@@ -60,6 +60,21 @@ fn is_memory_url(url: &str) -> bool {
     url.contains(":memory:") || url.contains("mode=memory")
 }
 
+/// Register the `sqlite-vec` extension as a sqlite auto-extension so every
+/// subsequently opened sqlite connection has vector search available.
+/// Safe to call multiple times; the registration is guarded by a `OnceLock`.
+pub fn init_sqlite_vec() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| unsafe {
+        let entry_point: unsafe extern "C" fn(
+            *mut libsqlite3_sys::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const libsqlite3_sys::sqlite3_api_routines,
+        ) -> i32 = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+        libsqlite3_sys::sqlite3_auto_extension(Some(entry_point));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

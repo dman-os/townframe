@@ -40,8 +40,9 @@ const desktopId = "org.example.daybook";
 const appName = "daybook";
 
 const machine = (await $`uname -m`.text()).trim();
-const arch =
-  machine === "aarch64" || machine === "arm64" ? "aarch64" : "x86_64";
+const arch = machine === "aarch64" || machine === "arm64"
+  ? "aarch64"
+  : "x86_64";
 if (!(arch === "x86_64" || arch === "aarch64")) {
   throw new Error(`unsupported architecture: ${machine}`);
 }
@@ -53,8 +54,7 @@ const outputPath = outputDir.join(
 const linuxdeployToolPath = appImageToolsDir.join(
   `linuxdeploy-${arch}.AppImage`,
 );
-const linuxdeployUrl =
-  $.env.DAYBOOK_LINUXDEPLOY_URL ??
+const linuxdeployUrl = $.env.DAYBOOK_LINUXDEPLOY_URL ??
   `https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-${arch}.AppImage`;
 
 const stageUsrDir = stageAppDir.join("usr");
@@ -188,8 +188,7 @@ if (await outputPath.exists()) {
   await outputPath.remove();
 }
 const outputValue = outputPath.toString();
-const useAppimageRun =
-  Deno.build.os === "linux" &&
+const useAppimageRun = Deno.build.os === "linux" &&
   (await $`bash -lc "command -v appimage-run"`.noThrow()).code === 0;
 
 const linuxdeployArgs = [

@@ -88,6 +88,7 @@ pub struct Rt {
     pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     pub daybook_plugin: Arc<wash_plugin::DaybookPlugin>,
     pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
+    pub sqlite_plugin: Arc<wash_plugin_sqlite::SqlPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
     pub doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
@@ -357,6 +358,7 @@ impl Rt {
             Arc::clone(&plugs_repo),
         ));
         let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
+        let sqlite_plugin = Arc::new(wash_plugin_sqlite::SqlPlugin::new());
         let wash_host = wflow::build_wash_host(vec![
             #[expect(clippy::clone_on_ref_ptr)]
             wflow_plugin.clone(),
@@ -364,6 +366,8 @@ impl Rt {
             daybook_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
             stateless_view_plugin.clone(),
+            #[expect(clippy::clone_on_ref_ptr)]
+            sqlite_plugin.clone(),
         ])
         .await?;
 
@@ -452,6 +456,7 @@ impl Rt {
             wflow_plugin,
             daybook_plugin,
             stateless_view_plugin,
+            sqlite_plugin,
             blobs_repo,
             doc_blobs_index_repo: Arc::clone(&doc_blobs_index_repo),
             doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
@@ -639,6 +644,11 @@ impl Rt {
                     (
                         wash_plugin::StatelessViewPlugin::ID,
                         Arc::clone(&self.stateless_view_plugin)
+                            as Arc<dyn wash_runtime::plugin::HostPlugin>,
+                    ),
+                    (
+                        wash_plugin_sqlite::SqlPlugin::ID,
+                        Arc::clone(&self.sqlite_plugin)
                             as Arc<dyn wash_runtime::plugin::HostPlugin>,
                     ),
                 ]);
@@ -2611,7 +2621,7 @@ fn stateless_view_host_interfaces() -> Vec<WitInterface> {
         WitInterface::from("townframe:daybook/drawer"),
         WitInterface::from("townframe:daybook/capabilities"),
         WitInterface::from("townframe:daybook/facet-routine"),
-        WitInterface::from("townframe:daybook/sqlite-connection"),
+        WitInterface::from("townframe:sqlite/sqlite-connection"),
         WitInterface::from("townframe:daybook/mltools-ocr"),
         WitInterface::from("townframe:daybook/mltools-embed"),
         WitInterface::from("townframe:daybook/mltools-image-tools"),
@@ -2769,7 +2779,7 @@ async fn start_bundle_workload(
                     WitInterface::from("townframe:daybook/drawer"),
                     WitInterface::from("townframe:daybook/capabilities"),
                     WitInterface::from("townframe:daybook/facet-routine"),
-                    WitInterface::from("townframe:daybook/sqlite-connection"),
+                    WitInterface::from("townframe:sqlite/sqlite-connection"),
                     WitInterface::from("townframe:daybook/mltools-ocr"),
                     WitInterface::from("townframe:daybook/mltools-embed"),
                     WitInterface::from("townframe:daybook/mltools-llm-chat"),

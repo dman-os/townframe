@@ -16,7 +16,7 @@ path = "lib.rs"
 [features]
 default = ["uniffi"]
 uniffi = ["dep:uniffi"]
-test-support = ["dep:tempfile"]
+test-support = ["dep:tempfile", "big_sync/test-support", "big_repo/test-support"]
 
 [dependencies]
 #
@@ -33,6 +33,7 @@ daybook_pdk = { workspace = true }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
 utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
 wash_plugin_wflow.workspace = true
+wash_plugin_sqlite.workspace = true
 wflow = { workspace = true }
 big_sync.workspace = true
 big_sync_core = { workspace = true, features = ["automerge", "uniffi"] }
@@ -98,9 +99,6 @@ oci-spec = "0.8.4"
 #
 # db
 sqlx = { workspace = true, features = ["sqlite"] }
-sqlite-vec.workspace = true
-# used directly by src/daybook_core/lib.rs for sqlite extension registration
-libsqlite3-sys = "0.30.1"
 
 #
 # wasm

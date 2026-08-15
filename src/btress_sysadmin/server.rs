@@ -8,10 +8,10 @@ pub mod session;
 
 pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam) -> Res<()> {
     use crate::app::*;
-    use axum::http;
     use axum::Router;
+    use axum::http;
     use leptos::prelude::*;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum::{LeptosRoutes, generate_route_list};
     use tower_http::ServiceBuilderExt;
 
     utils_rs::setup_tracing().expect("tracing setup error");

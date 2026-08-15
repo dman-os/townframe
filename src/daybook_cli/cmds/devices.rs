@@ -20,8 +20,8 @@ pub async fn run(command: DevicesCommands) -> Res<ExitCode> {
 
     match command {
         DevicesCommands::Ls => {
-            use comfy_table::presets::NOTHING;
             use comfy_table::Table;
+            use comfy_table::presets::NOTHING;
 
             let mut devices = config_repo.list_known_sync_devices().await?;
             devices.sort_by_key(|device| device.added_at);

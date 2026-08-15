@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 mod theme;
 
-use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
+use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
