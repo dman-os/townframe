@@ -331,7 +331,10 @@ impl BigSyncRpcWorker {
                                 .collect(),
                         })
                 };
-                tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                tx.send(out)
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
             }
             BigSyncRpcMessage::SubParts(req) => {
                 let WithChannels { inner, tx, .. } = req;
@@ -410,12 +413,18 @@ impl BigSyncRpcWorker {
             BigSyncRpcMessage::GetChangedBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let out = self.store.get_changed_buckets(inner).await.unwrap();
-                tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                tx.send(out)
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
             }
             BigSyncRpcMessage::LeafBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let out = self.store.leaf_buckets(inner).await.unwrap();
-                tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                tx.send(out)
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
             }
         }
     }

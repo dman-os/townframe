@@ -135,11 +135,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         doc_id,
     )
     .await?;
-    fixtures::wait_for_network_rest(
-        [writer, admin, reader].as_slice(),
-        std::time::Duration::from_secs(20),
-    )
-    .await?;
+    fixtures::wait_for_network_rest([writer, admin, reader].as_slice()).await?;
     let settled_blob_counts = futures::future::try_join_all(
         [writer, admin, reader]
             .into_iter()
@@ -149,11 +145,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     .into_iter()
     .map(|blobs| blobs.len())
     .collect::<Vec<_>>();
-    fixtures::wait_for_network_rest(
-        [writer, admin, reader].as_slice(),
-        std::time::Duration::from_secs(20),
-    )
-    .await?;
+    fixtures::wait_for_network_rest([writer, admin, reader].as_slice()).await?;
     let replayed_blob_counts = futures::future::try_join_all(
         [writer, admin, reader]
             .into_iter()

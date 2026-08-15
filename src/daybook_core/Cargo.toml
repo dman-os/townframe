@@ -123,8 +123,6 @@ jsonschema = { version = "0.42.0", default-features = false }
 iroh = { workspace = true }
 iroh-tickets.workspace = true
 iroh-blobs.workspace = true
-iroh-docs.workspace = true
-iroh-gossip.workspace = true
 
 #
 # actors

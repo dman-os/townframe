@@ -6,7 +6,7 @@ const PROPOSAL_SET_CONFIG_FACET_ID: &str = "label-candidates";
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real multimodal e2e; slow and environment-dependent"]
-async fn test_learned_image_label_proposals_receipt_twice_prints_labels() -> Res<()> {
+async fn long_af_test_learned_image_label_proposals_receipt_twice_prints_labels() -> Res<()> {
     let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
         daybook_core::test_support::DaybookTestCxOptions {

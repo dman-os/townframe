@@ -8,7 +8,7 @@ use std::time::Duration;
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
-const DEFAULT_DOC_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_DOC_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SUBDUCTION_NONCE_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(30);
 

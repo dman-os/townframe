@@ -102,15 +102,14 @@ async fn sync_doc_no_materialize(
     Ok(())
 }
 
-/// Assert sedimentree-head parity across a subset of topology nodes.
-async fn assert_sedimentree_parity_across(
-    topo: &Topo,
+/// Assert sedimentree-head parity across an explicit slice of nodes.
+async fn assert_sedimentree_parity_nodes(
+    nodes: &[&Node],
     doc_id: crate::DocumentId,
-    indices: &[usize],
 ) -> crate::Res<()> {
     let mut baseline: Option<Vec<automerge::ChangeHash>> = None;
-    for &idx in indices {
-        let state = topo.topo_node(idx).repo.doc_head_state(doc_id).await?;
+    for (idx, node) in nodes.iter().enumerate() {
+        let state = node.repo.doc_head_state(doc_id).await?;
         let mut heads: Vec<_> = state.sedimentree_heads.to_vec();
         heads.sort_by_key(|h| h.0);
         if let Some(ref base) = baseline {
@@ -127,6 +126,16 @@ async fn assert_sedimentree_parity_across(
         }
     }
     Ok(())
+}
+
+/// Assert sedimentree-head parity across a subset of topology nodes.
+async fn assert_sedimentree_parity_across(
+    topo: &Topo,
+    doc_id: crate::DocumentId,
+    indices: &[usize],
+) -> crate::Res<()> {
+    let nodes: Vec<_> = indices.iter().map(|&i| topo.topo_node(i)).collect();
+    assert_sedimentree_parity_nodes(&nodes, doc_id).await
 }
 
 // ─── Relay A ↔ R ↔ B ───────────────────────────────────────────────────────
@@ -773,39 +782,51 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     //   │  A  │────│  B  │────│  C  │
     //   │(30) │    │(31) │    │(32) │
     //   └─────┘    └─────┘    └─────┘
-    let topo = Topo::boot_line(30, 31, 32, "Alice", "Bob", "Carol").await?;
+    let guard = ShutdownGuard::boot(&[(30, "Alice"), (31, "Bob"), (32, "Carol")]).await?;
+    let node_a = guard.node(0);
+    let node_b = guard.node(1);
+    let node_c = guard.node(2);
+
+    let a_b_conn = node_a.connect(node_b).await?;
+    let b_a_conn = node_b.accepted_connection().await;
+    b_a_conn.sync_keyhive_with_peer(None).await?;
+    a_b_conn.sync_keyhive_with_peer(None).await?;
 
     let mut initial = automerge::Automerge::new();
     initial
         .transact(|tx| tx.put(automerge::ROOT, "title", "opposite-order"))
         .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
-    let a_doc = topo.topo_node(0).repo.create_doc(initial).await?;
+    let a_doc = node_a.repo.create_doc(initial).await?;
     let doc_id = a_doc.document_id();
     // Grant B as relay and C as Reader via public agent (same pattern as
     // the existing relay/line tests where the far-end agent is not directly
     // learned by the owner across a multi-hop connection).
-    let b_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
-    topo.topo_node(0)
+    let b_agent = fixtures::agent_of(&node_a.repo, node_b).await?;
+    node_a
         .repo
         .grant_doc_access(doc_id, b_agent, Access::Relay)
         .await?;
-    topo.topo_node(0)
+    node_a
         .repo
         .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
         .await?;
 
     // Sync keyhive A↔B.
-    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
-    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+    a_b_conn.sync_keyhive_with_peer(None).await?;
+    b_a_conn.sync_keyhive_with_peer(None).await?;
 
     // B pulls the doc payload from A (stores encrypted parts).
-    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+    sync_doc_no_materialize(&b_a_conn, doc_id).await?;
+
+    // Connect B ↔ C only after B has staged the payload and Keyhive events,
+    // but BEFORE syncing Keyhive to C.
+    let b_c_conn = node_b.connect(node_c).await?;
+    let c_b_conn = node_c.accepted_connection().await;
 
     // C asks B for the doc payload BEFORE receiving membership. Subduction
     // rejects the incoming payload because C has no local document policy;
     // the rejection must be structured and non-fatal.
-    let policy_error = topo
-        .topo_conn(2, 1)
+    let policy_error = c_b_conn
         .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
         .await
         .expect_err("missing local Keyhive document must reject the payload");
@@ -817,25 +838,24 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
         )
     ));
 
-    topo.topo_node(2)
+    node_c
         .repo
         .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
         .await?;
 
     // C must not be materialized before membership arrives.
-    let c_lookup = topo.topo_node(2).repo.get_doc(&doc_id).await?;
+    let c_lookup = node_c.repo.get_doc(&doc_id).await?;
     assert!(
         !matches!(c_lookup, crate::DocLookup::Ready(_)),
         "C must not materialise before membership arrives"
     );
 
     // Now sync membership from B→C.  C learns about Read access.
-    topo.topo_conn(1, 2).sync_keyhive_with_peer(None).await?;
+    b_c_conn.sync_keyhive_with_peer(None).await?;
+    c_b_conn.sync_keyhive_with_peer(None).await?;
 
     // C must be able to materialize now.
-    let c_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
-            .await?;
+    let c_doc = fixtures::sync_doc_expect_ready(&c_b_conn, &node_c.repo, doc_id).await?;
     assert_eq!(
         read_title(&c_doc).await,
         "opposite-order",
@@ -843,8 +863,8 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     );
 
     // Tier 0: sedimentree parity across the line.
-    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
-    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
+    assert_sedimentree_parity_nodes(&[node_a, node_b, node_c], doc_id).await?;
+    kh_snap::assert_document_snapshot_equal(node_a, node_c, doc_id).await?;
 
     drop(a_doc);
     drop(c_doc);

@@ -1864,6 +1864,7 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let hidden = PartId(Byte32Id::new([99u8; 32]));
     let store = MemoryPartStore::with_config(HostPartStoreConfig {
         hidden_parts: HashSet::from([hidden]),
+        ..Default::default()
     });
     let peer = PeerId::new([1u8; 32]);
 

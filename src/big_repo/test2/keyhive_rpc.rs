@@ -1,61 +1,83 @@
 //! Keyhive RPC change-notification contract.
 //!
 //! The cluster's only incremental trigger for a peer to pull a creator's new
-//! Keyhive state is the `SubscribeKeyhiveChanges` RPC stream (`rpc.rs`), which
-//! forwards every `keyhive_change_tx` broadcast as a `KeyhiveChangedRpcEvent`.
-//! The broadcast is fired by the
-//! [`KeyhiveChangeNotifier`](crate::runtime2::KeyhiveChangeNotifier) — the
-//! single funnel that cache-busts the protocol and then notifies peers.
+//! Keyhive state is the `SubscribeKeyhiveChanges` RPC stream (`rpc.rs`). The
+//! stream is served by the
+//! [`KeyhiveChangeNotifier`](crate::runtime2::KeyhiveChangeNotifier) →
+//! dispatcher: each change batch is classified once against the published
+//! cache snapshot and debounced per destination peer, so bursts collapse into
+//! a single payload-free wake-up.
 //!
 //! These tests pin that contract: any local Keyhive mutation (document
 //! creation, CGKA-producing commits) must make the change observable on the
-//! broadcast, and that notification must be sufficient for a connected peer to
-//! converge **without** a manual `sync_keyhive_with_peer` barrier. The rest of
-//! the suite gates every Keyhive assertion behind an explicit sync call, so a
-//! missing notification is invisible there; this module is the exception.
+//! RPC stream, and that notification must be sufficient for a connected peer
+//! to converge **without** a manual `sync_keyhive_with_peer` barrier. The rest
+//! of the suite gates every Keyhive assertion behind an explicit sync call, so
+//! a missing notification is invisible there; this module is the exception.
 
 use super::harness::{Pair, Topo, fixtures};
 use crate::Res;
 use automerge::transaction::Transactable;
 use std::time::Duration;
 use tokio::time::timeout;
-
+use utils_rs::prelude::EyreOptExt;
 /// A freshly created document must make the local Keyhive change observable on
-/// the broadcast that backs the RPC `SubscribeKeyhiveChanges` stream.
+/// the RPC `SubscribeKeyhiveChanges` stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn create_doc_emits_observable_keyhive_change_notification() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(250, 251, "Creator", "Coparent").await?;
 
-    // Direct observer on the same broadcast `BigRepo::subscribe_keyhive_changes`
-    // that `rpc.rs` forwards to remote peers.
-    let mut changes = pair.left().repo.subscribe_keyhive_changes();
+    // Subscribe through the RPC stream — the same path remote peers use. The
+    // document is created with the well-known public agent as coparent, so the
+    // delegation events are public and the dispatcher selects every connected
+    // subscriber (a random RPC client cannot observe private delegations).
+    let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await?;
+    let client =
+        crate::rpc::IrohBigRepoRpcClient::new(client_endpoint.clone(), pair.left().endpoint.addr());
+    let mut changes = client.subscribe_keyhive_changes(8).await?;
+    let ready = timeout(
+        utils_rs::scale_timeout(Duration::from_secs(5)),
+        changes.recv(),
+    )
+    .await
+    .map_err(|_| crate::ferr!("timed out waiting for RPC subscription readiness"))??
+    .ok_or_eyre("RPC stream closed before readiness")?;
+    assert!(ready.initial);
 
     let mut initial = automerge::Automerge::new();
     initial
         .transact(|tx| tx.put(automerge::ROOT, "title", "keyhive-rpc"))
         .map_err(|err| crate::ferr!("failed creating notification doc: {err:?}"))?;
-    let coparent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     let owner_doc = pair
         .left()
         .repo
-        .create_doc_with_parents(initial, vec![coparent.into()])
+        .create_doc_with_parents(initial, vec![fixtures::public_agent().into()])
         .await?;
 
     // `create_doc` must produce a notification: a cluster peer only learns to
-    // pull the new document through this broadcast → RPC → sync chain. The
-    // event is payload-free; arrival is the assertion.
-    timeout(Duration::from_secs(5), changes.recv())
-        .await
-        .map_err(|_| {
-            crate::ferr!(
-                "no observable Keyhive change notification after create_doc — \
+    // pull the new document through this RPC → sync chain. The event is
+    // payload-free; arrival is the assertion.
+    timeout(
+        utils_rs::scale_timeout(Duration::from_secs(5)),
+        changes.recv(),
+    )
+    .await
+    .map_err(|_| {
+        crate::ferr!(
+            "no observable Keyhive change notification after create_doc — \
                  the cluster cannot learn about the new document"
-            )
-        })?
-        .map_err(|e| crate::ferr!("Keyhive change stream failed: {e}"))?;
+        )
+    })??
+    .ok_or_eyre("RPC stream closed before Keyhive change")?;
 
     drop(owner_doc);
+    client_endpoint.close().await;
     Ok(())
 }
 

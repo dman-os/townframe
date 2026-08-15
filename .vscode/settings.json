@@ -1,5 +1,0 @@
-{
-  "deno.enablePaths": [
-    "/var/home/asdf/repos/rust/x/*.ts"
-  ]
-}

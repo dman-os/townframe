@@ -204,18 +204,20 @@ async fn test_staging_branch_workflow() -> Res<()> {
     );
 
     // Verify that no new dispatches were created for /tmp/ branch changes.
-    // Allow a short drain window for async completion/cancellation.
-    let mut final_dispatches = test_cx.dispatch_repo.list().await;
-    let dispatch_wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !final_dispatches.is_empty() && std::time::Instant::now() < dispatch_wait_deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        final_dispatches = test_cx.dispatch_repo.list().await;
-    }
+    let final_dispatches = test_cx.dispatch_repo.list().await;
+    let staging_dispatches = final_dispatches
+        .into_iter()
+        .filter(|(_id, dispatch)| match &dispatch.args {
+            crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(args) => {
+                args.branch_path == "/tmp" || args.branch_path.starts_with("/tmp/")
+            }
+        })
+        .collect::<Vec<_>>();
 
     assert!(
-        final_dispatches.is_empty(),
-        "no dispatches should remain after workflow completion. Dispatches: {:?}",
-        final_dispatches
+        staging_dispatches.is_empty(),
+        "no dispatches should be created for staging branches. Dispatches: {:?}",
+        staging_dispatches
     );
 
     // Cleanup

@@ -13,6 +13,36 @@ macro_rules! anyhow_to_eyre {
         }
     };
 }
+
+/// [`tracing::warn!`] that always attaches `file` and `line` fields, so the
+/// originating location appears in the log output even when the subscriber's
+/// fmt layer is not configured with `with_file`/`with_line_number`.
+///
+/// Use this for the `ERROR_*` expect-tag warnings (e.g. `ERROR_CALLER`,
+/// `ERROR_CHANNEL`) so the noisy ones can be traced back to their exact site.
+#[macro_export]
+macro_rules! warn_loc {
+    ($($arg:tt)*) => {
+        ::tracing::warn!(
+            file = ::core::file!(),
+            line = ::core::line!(),
+            $($arg)*
+        )
+    };
+}
+
+/// [`tracing::error!`] that always attaches `file` and `line` fields. See
+/// [`warn_loc!`].
+#[macro_export]
+macro_rules! error_loc {
+    ($($arg:tt)*) => {
+        ::tracing::error!(
+            file = ::core::file!(),
+            line = ::core::line!(),
+            $($arg)*
+        )
+    };
+}
 #[macro_export]
 macro_rules! eyre_to_anyhow {
     () => {

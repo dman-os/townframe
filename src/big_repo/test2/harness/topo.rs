@@ -100,6 +100,7 @@ impl Node {
             StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(path)?;
                 let db_path = path.join("big_repo.sqlite");
+                ::tracing::info!(seed, label, path = %path.display(), "booted node with disk storage");
                 SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
             }
         };
@@ -110,6 +111,7 @@ impl Node {
                 big_sync_core::BuckId::MAX_LEVEL,
                 big_sync::HostPartStoreConfig {
                     hidden_parts: hidden_parts.clone(),
+                    ..Default::default()
                 },
             )
             .await?,
@@ -367,6 +369,15 @@ pub(crate) struct ShutdownGuard {
 impl ShutdownGuard {
     pub(crate) fn from(nodes: Vec<Node>) -> Self {
         Self { nodes }
+    }
+
+    /// Boot N disconnected nodes managed under this RAII shutdown guard.
+    pub(crate) async fn boot(specs: &[(u8, &'static str)]) -> crate::Res<Self> {
+        let mut nodes = Vec::with_capacity(specs.len());
+        for &(seed, label) in specs {
+            nodes.push(Node::boot(seed, label).await?);
+        }
+        Ok(Self { nodes })
     }
 
     /// Return a reference to a node by index.

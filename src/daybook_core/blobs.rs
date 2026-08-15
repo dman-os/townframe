@@ -803,12 +803,11 @@ impl BlobsRepo {
 
         match tokio::fs::rename(&temp, dest).await {
             Ok(_) => {}
-            Err(err) if Self::is_exists_error(&err) => {
-                tokio::fs::remove_file(&temp)
-                    .await
-                    .inspect_err(|err| warn!(ERROR_CALLER, ?err))
-                    .ok();
-            }
+            Err(err) if Self::is_exists_error(&err) => match tokio::fs::remove_file(&temp).await {
+                Ok(_) => {}
+                Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(remove_err) => return Err(remove_err.into()),
+            },
             Err(err) => return Err(err.into()),
         }
         self.sync_dir(dir).await?;

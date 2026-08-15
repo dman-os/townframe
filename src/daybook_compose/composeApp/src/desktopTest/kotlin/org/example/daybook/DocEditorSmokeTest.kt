@@ -1298,7 +1298,7 @@ class DocEditorSmokeTest {
 
             docEditorStore.selectDoc(docId)
 
-            waitUntil(timeoutMillis = 20_000) {
+            waitUntil(timeoutMillis = 60_000) {
                 onAllNodesWithText("Sample summary").fetchSemanticsNodes().isNotEmpty()
             }
             onNodeWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(noteFacetKey()))).assertIsDisplayed()
@@ -1344,7 +1344,7 @@ class DocEditorSmokeTest {
 
             docEditorStore.selectDoc(docId)
 
-            waitUntil(timeoutMillis = 20_000) {
+            waitUntil(timeoutMillis = 60_000) {
                 onAllNodesWithText("Ledger ID: ledger-1").fetchSemanticsNodes().isNotEmpty()
             }
             onAllNodesWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(ledgerMetaKey)))

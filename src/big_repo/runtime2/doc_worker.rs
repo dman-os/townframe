@@ -6,8 +6,8 @@ use crate::DocumentId;
 use crate::changes::BigRepoChangeOrigin;
 use crate::runtime2::Runtime2Evt;
 use crate::runtime2::support::{
-    BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, is_causal_checkpoint_id,
-    stage_automerge_ingest,
+    BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, causal_checkpoint_id,
+    is_causal_checkpoint_id, stage_automerge_ingest,
 };
 use crate::runtime2::types::{DocLookup, LiveDocBundle};
 use crate::runtime2::{
@@ -31,6 +31,7 @@ pub fn spawn_doc_worker<F>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     runtime_cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
+    generation: u64,
 ) -> SpawnedDocWorker<F>
 where
     F: FutureForm + DocWorkerLoop<F> + 'static,
@@ -41,6 +42,7 @@ where
     let worker = DocWorker2 {
         doc_id,
         sed_id,
+        generation,
         state: DocState::Unloaded,
         partially_decrypted: false,
         blocked_refs: HashSet::new(),
@@ -138,6 +140,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
 struct DocWorker2<F: FutureForm> {
     doc_id: DocumentId,
     sed_id: sedimentree_core::id::SedimentreeId,
+    generation: u64,
 
     state: DocState,
     partially_decrypted: bool,
@@ -330,7 +333,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 let result = self.reconcile_causal_coverage().await;
                 if let Some(resp) = resp {
                     resp.send(result.as_ref().copied().map_err(|error| ferr!("{error:?}")))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
                 result.map(|_| ())
@@ -349,13 +352,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     Ok(status) => {
                         debug!(%self.doc_id, ?status, "document materialization retry completed");
                         resp.send(Ok(status))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         Ok(())
                     }
                     Err(error) => {
                         resp.send(Err(format!("{error:?}")))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         Err(error)
                     }
@@ -363,13 +366,13 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             DocWorkerMsg::QueryHeadState { resp, _lease: _ } => {
                 resp.send(self.head_state().await)
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
                 Ok(())
             }
             DocWorkerMsg::InspectHeadState { resp, _lease: _ } => {
                 resp.send(self.head_state().await.map(Some))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
                 Ok(())
             }
@@ -397,7 +400,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 .is_empty()
         {
             resp.send(Err(ferr!("doc already occupied: {:?}", self.doc_id)))
-                .inspect_err(|_| warn!(ERROR_CALLER))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
         }
@@ -412,7 +415,11 @@ impl<F: FutureForm> DocWorker2<F> {
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             *initial_content,
-            crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+            crate::runtime2::DocLease::new(
+                self.runtime_cmd_tx.clone(),
+                self.doc_id,
+                self.generation,
+            ),
             false,
         ));
 
@@ -426,7 +433,7 @@ impl<F: FutureForm> DocWorker2<F> {
         self.register_bundle_lease().await?;
 
         resp.send(Ok(bundle))
-            .inspect_err(|_| warn!(ERROR_CALLER))
+            .inspect_err(|_| warn_loc!(ERROR_CALLER))
             .ok();
         Ok(())
     }
@@ -469,7 +476,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+                    crate::runtime2::DocLease::new(
+                        self.runtime_cmd_tx.clone(),
+                        self.doc_id,
+                        self.generation,
+                    ),
                     self.partially_decrypted,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -486,7 +497,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
         };
         resp.send(Ok(result))
-            .inspect_err(|_| warn!(ERROR_CALLER))
+            .inspect_err(|_| warn_loc!(ERROR_CALLER))
             .ok();
         Ok(())
     }
@@ -602,7 +613,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
+                    crate::runtime2::DocLease::new(
+                        self.runtime_cmd_tx.clone(),
+                        self.doc_id,
+                        self.generation,
+                    ),
                     self.partially_decrypted,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -629,6 +644,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             crate::runtime2::DocLease::new(
                                 self.runtime_cmd_tx.clone(),
                                 self.doc_id,
+                                self.generation,
                             ),
                             partially_decrypted,
                         ));
@@ -722,7 +738,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 "document write rejected: commit from a stale handle; re-acquire the document"
             };
             resp.send(Err(ferr!("{message}")))
-                .inspect_err(|_| warn!(ERROR_CALLER))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
         }
@@ -737,13 +753,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 resp.send(Err(ferr!(
                     "document write rejected: local access is not writable (revoked or read-only)"
                 )))
-                .inspect_err(|_| warn!(ERROR_CALLER))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
                 return Ok(());
             }
             Err(error) => {
                 resp.send(Err(error))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
                 return Ok(());
             }
@@ -755,19 +771,37 @@ impl<F: FutureForm> DocWorker2<F> {
         // heads: another partition may have produced a checkpoint whose key
         // this writer cannot decrypt.
         let batch_ids: HashSet<_> = commits.iter().map(|(head, _, _)| *head).collect();
+        // Eager causal coverage on the origin: if the frontier being
+        // extended spans an epoch boundary (any external parent predates
+        // the current epoch), ensure a checkpoint covers it under the
+        // current epoch — before the rewrite below rewires this batch's
+        // parents onto that checkpoint. The bridge then rides the natural
+        // sync round, and a receiver's reconcile finds the coverage already
+        // present instead of minting its own.
+        let distinct_frontiers: HashSet<BTreeSet<CommitId>> = commits
+            .iter()
+            .map(|(_, parents, _)| {
+                parents
+                    .iter()
+                    .copied()
+                    .filter(|parent| !batch_ids.contains(parent))
+                    .collect()
+            })
+            .filter(|frontier: &BTreeSet<CommitId>| !frontier.is_empty())
+            .collect();
+        let mut frontier_to_checkpoint: HashMap<BTreeSet<CommitId>, CommitId> = HashMap::new();
+        for frontier in distinct_frontiers {
+            if let Some(checkpoint_head) = self.ensure_frontier_checkpointed(&frontier).await? {
+                frontier_to_checkpoint.insert(frontier, checkpoint_head);
+            }
+        }
         for (_head, parents, _blob) in &mut commits {
             let external: BTreeSet<_> = parents
                 .iter()
                 .filter(|parent| !batch_ids.contains(parent))
                 .copied()
                 .collect();
-            if let Some(checkpoint_head) = self
-                .causal_checkpoints
-                .iter()
-                .filter(|(_, checkpoint)| checkpoint.covered_frontier == external)
-                .map(|(head, _)| *head)
-                .min()
-            {
+            if let Some(&checkpoint_head) = frontier_to_checkpoint.get(&external) {
                 parents.retain(|parent| batch_ids.contains(parent));
                 parents.insert(checkpoint_head);
             }
@@ -797,7 +831,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         .expect("live bundle present for a valid commit")
                         .mark_broken();
                     resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                     return Ok(());
                 }
@@ -811,7 +845,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let heads = Arc::from(heads);
         self.change_manager
             .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
-            .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+            .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
 
         // Fire patches even if heads didn't change (delta can have content
@@ -824,14 +858,16 @@ impl<F: FutureForm> DocWorker2<F> {
                     Arc::clone(&heads),
                     origin.clone(),
                 )
-                .inspect_err(|err| warn!(ERROR_CALLER, ?err))
+                .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
                 .ok();
         }
 
         // ── 4. Process pending fragment requests ───────────────────────────
         self.process_pending_fragment_requests().await?;
 
-        resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+        resp.send(Ok(()))
+            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+            .ok();
         Ok(())
     }
 
@@ -933,7 +969,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn head_state(&self) -> eyre::Result<crate::runtime2::DocHeadState> {
         let mut sedimentree_heads: Vec<automerge::ChangeHash> = self
             .io
-            .sedimentree_heads(self.sed_id)
+            .durable_sedimentree_heads(self.sed_id)
             .await?
             .iter()
             .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
@@ -1157,16 +1193,6 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(true);
         }
 
-        let sedimentree_frontier: BTreeSet<CommitId> = self
-            .io
-            .sedimentree_heads(self.sed_id)
-            .await?
-            .into_iter()
-            .collect();
-        if sedimentree_frontier.is_empty() {
-            debug!(%self.doc_id, "causal coverage deferred: sedimentree frontier is empty");
-            return Ok(false);
-        }
         let covered_frontier: BTreeSet<CommitId> = materialized_heads
             .into_iter()
             .map(|head| CommitId::new(head.0))
@@ -1179,19 +1205,31 @@ impl<F: FutureForm> DocWorker2<F> {
                 debug!(%self.doc_id, covered = covered_frontier.len(), "causal coverage already present for current epoch");
                 return Ok(true);
             }
-            if sedimentree_frontier.len() == 1 {
-                let head = *sedimentree_frontier
-                    .first()
-                    .expect("single frontier must contain one head");
-                if self.io.ciphertext_epoch(self.sed_id, head).await? == Some(epoch) {
-                    debug!(%self.doc_id, "causal coverage satisfied by current-epoch linear frontier");
-                    return Ok(true);
+            // Per-head epoch check. The materialized heads are worker-owned
+            // (the live doc), and each head's ciphertext epoch is an
+            // immutable blob fact — no shared-frontier read, no TOCTOU
+            // between a heads read and the current-epoch read. If every
+            // materialized head is already under the current epoch, the
+            // content is covered; a checkpoint is only needed to bridge
+            // heads that predate the current epoch.
+            let mut all_under_current_epoch = true;
+            for head in &covered_frontier {
+                match self.io.ciphertext_epoch(self.sed_id, *head).await? {
+                    Some(head_epoch) if head_epoch == epoch => {}
+                    _ => {
+                        all_under_current_epoch = false;
+                        break;
+                    }
                 }
+            }
+            if all_under_current_epoch {
+                debug!(%self.doc_id, covered = covered_frontier.len(), "causal coverage satisfied: all materialized heads under current epoch");
+                return Ok(true);
             }
         }
 
-        debug!(%self.doc_id, ?current_epoch, ?covered_frontier, ?sedimentree_frontier, "persisting causal coverage checkpoint");
-        let Some((head, checkpoint)) = self
+        debug!(%self.doc_id, ?current_epoch, ?covered_frontier, "persisting causal coverage checkpoint");
+        let Some((head, checkpoint, _heads_observed)) = self
             .io
             .persist_causal_checkpoint(self.sed_id, covered_frontier)
             .await?
@@ -1200,6 +1238,50 @@ impl<F: FutureForm> DocWorker2<F> {
         };
         self.causal_checkpoints.insert(head, checkpoint);
         Ok(true)
+    }
+
+    /// Eager causal coverage at write time: if the frontier being extended
+    /// spans an epoch boundary (any external parent predates the current
+    /// epoch), ensure a checkpoint covers it under the current epoch. The
+    /// decision uses only immutable facts — the parents' ciphertext epochs
+    /// (stamped in their blobs) and the current keyhive epoch — never a
+    /// shared-frontier read, so it cannot be fooled by mid-arrival or
+    /// stale-cache tree state. Idempotent: the checkpoint id is
+    /// deterministic in (epoch, covered), so a re-mint after a worker
+    /// respawn is a storage no-op.
+    async fn ensure_frontier_checkpointed(
+        &mut self,
+        external_parents: &BTreeSet<CommitId>,
+    ) -> eyre::Result<Option<CommitId>> {
+        let Some(current_epoch) = self.io.current_causal_epoch(self.sed_id).await? else {
+            return Ok(None);
+        };
+        let mut spans_boundary = false;
+        for parent in external_parents {
+            if let Some(epoch) = self.io.ciphertext_epoch(self.sed_id, *parent).await?
+                && epoch != current_epoch
+            {
+                spans_boundary = true;
+                break;
+            }
+        }
+        if !spans_boundary {
+            return Ok(None);
+        }
+        let checkpoint = CausalCheckpoint::new(current_epoch, external_parents.clone());
+        let head = causal_checkpoint_id(&checkpoint);
+        if self.causal_checkpoints.contains_key(&head) {
+            return Ok(Some(head));
+        }
+        if let Some((head, checkpoint, _heads)) = self
+            .io
+            .persist_causal_checkpoint(self.sed_id, external_parents.clone())
+            .await?
+        {
+            self.causal_checkpoints.insert(head, checkpoint);
+            return Ok(Some(head));
+        }
+        Ok(None)
     }
 
     /// Apply decrypted plaintexts into the live bundle under the doc lock.
@@ -1435,7 +1517,10 @@ impl<F: FutureForm> DocWorker2<F> {
         worker: eyre::Result<()>,
     ) -> eyre::Result<()> {
         if let Some(reply) = reply {
-            reply.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            reply
+                .send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
         }
         worker
     }

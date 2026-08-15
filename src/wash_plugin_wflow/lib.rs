@@ -130,9 +130,21 @@ impl SessionHandle {
     fn request_cancel(&self) {
         self.resume_tx
             .send(SessionResume::Stop)
-            .inspect_err(|err| warn!(ERROR_CHANNEL, ?err))
+            .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
             .ok();
         self.cancel_token.cancel();
+    }
+}
+
+/// The spawned run task watches `cancel_token` and panics if its yield channel
+/// is closed while the token is not lit (a dropped owner without cancellation).
+/// Teardown can abort the effect worker while a run is in flight, dropping this
+/// handle without going through `drop_session_handle`, so the token must always
+/// be lit (and the run task aborted) on drop to keep that invariant.
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        self.join_handle.abort();
     }
 }
 
@@ -524,7 +536,7 @@ impl WflowPlugin {
         session
             .resume_tx
             .send(SessionResume::Stop)
-            .inspect_err(|err| warn!(ERROR_CHANNEL, ?err))
+            .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
             .ok();
         session.cancel_token.cancel();
         session.join_handle.abort();

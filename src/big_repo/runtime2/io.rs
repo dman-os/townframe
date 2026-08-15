@@ -95,6 +95,18 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         sed_id: sedimentree_core::id::SedimentreeId,
     ) -> F::Future<'_, eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>>;
 
+    /// Durable (storage-backed) sedimentree frontier — the source of truth.
+    /// [`sedimentree_heads`](Self::sedimentree_heads) is cache-first and can
+    /// lag durable storage behind an eviction/re-hydration race (observed:
+    /// the causal-coverage reconcile read a stale multi-head frontier while
+    /// storage already held the linking commit, minting a spurious
+    /// checkpoint). Correctness-sensitive decisions — like whether a
+    /// checkpoint is needed — must read this.
+    fn durable_sedimentree_heads(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'_, eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>>;
+
     /// Hydrate the full minimized tree (for materialization / decrypt walks).
     /// Returns `None` if the tree has no stored commits or fragments.
     /// The returned [`MinimizedSedimentree`] provides
@@ -152,6 +164,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// Publish a key-only causal checkpoint covering the supplied encryption
     /// frontier. The implementation establishes and durably records a PCS
     /// root first when the healed Keyhive graph has none.
+    #[allow(clippy::type_complexity)]
     fn persist_causal_checkpoint(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
@@ -162,6 +175,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
             Option<(
                 sedimentree_core::loose_commit::id::CommitId,
                 crate::runtime2::support::CausalCheckpoint,
+                Vec<sedimentree_core::loose_commit::id::CommitId>,
             )>,
         >,
     >;

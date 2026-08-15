@@ -1,20 +1,32 @@
-use crate::interlude::*;
+//! A non-generic LRU policy engine plus a keyed wrapper.
+//!
+//! [`LruPool`] tracks abstract "IDs" and their associated "costs". When the
+//! total cost exceeds capacity, it returns the IDs that should be pruned
+//! based on the Least Recently Used strategy. [`KeyedLruPool`] layers typed
+//! keys on top so callers can evict by key without managing slot IDs.
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-/// A non-generic LRU policy engine.
-///
-/// It tracks abstract "IDs" and their associated "costs".
-/// When the total cost exceeds capacity, it returns the IDs that should be pruned
-/// based on the Least Recently Used strategy.
+/// Opaque slot identifier used internally by [`LruPool`].
 pub type LruItemId = u64;
+
+/// A shared, mutex-guarded [`KeyedLruPool`].
 pub type SharedKeyedLruPool<K> = Arc<surelock::mutex::Mutex<KeyedLruPool<K>>>;
 
+struct LruNode {
+    cost: usize,
+    prev: Option<LruItemId>,
+    next: Option<LruItemId>,
+}
+
+/// LRU policy engine: id → cost, with least-recently-used eviction.
 pub struct LruPool {
     capacity: usize,
     current_usage: usize,
-    items: HashMap<LruItemId, usize>, // id -> cost
-    order: VecDeque<LruItemId>,
+    items: HashMap<LruItemId, LruNode>,
+    head: Option<LruItemId>, // Oldest (least recently used)
+    tail: Option<LruItemId>, // Newest (most recently used)
 }
 
 impl LruPool {
@@ -23,42 +35,106 @@ impl LruPool {
             capacity,
             current_usage: 0,
             items: HashMap::new(),
-            order: VecDeque::new(),
+            head: None,
+            tail: None,
+        }
+    }
+
+    fn detach(&mut self, id: LruItemId) {
+        let (prev, next) = match self.items.get_mut(&id) {
+            Some(node) => {
+                let prev_id = node.prev;
+                let next_id = node.next;
+                node.prev = None;
+                node.next = None;
+                (prev_id, next_id)
+            }
+            None => return,
+        };
+        if let Some(prev_id) = prev {
+            if let Some(prev_node) = self.items.get_mut(&prev_id) {
+                prev_node.next = next;
+            }
+        } else {
+            self.head = next;
+        }
+        if let Some(next_id) = next {
+            if let Some(next_node) = self.items.get_mut(&next_id) {
+                next_node.prev = prev;
+            }
+        } else {
+            self.tail = prev;
+        }
+    }
+
+    fn attach_tail(&mut self, id: LruItemId) {
+        let old_tail = self.tail;
+        self.tail = Some(id);
+        if let Some(tail_id) = old_tail {
+            if let Some(tail_node) = self.items.get_mut(&tail_id) {
+                tail_node.next = Some(id);
+            }
+            if let Some(node) = self.items.get_mut(&id) {
+                node.prev = Some(tail_id);
+                node.next = None;
+            }
+        } else {
+            self.head = Some(id);
+            if let Some(node) = self.items.get_mut(&id) {
+                node.prev = None;
+                node.next = None;
+            }
         }
     }
 
     /// Adds or updates an item in the pool.
     /// Returns a list of IDs that should be pruned to stay within capacity.
     pub fn add(&mut self, id: LruItemId, cost: usize) -> Vec<LruItemId> {
-        if let Some(old_cost) = self.items.insert(id, cost) {
-            self.current_usage -= old_cost;
-            // Move to back (most recently used)
-            if let Some(pos) = self.order.iter().position(|order_id| *order_id == id) {
-                self.order.remove(pos);
-            }
+        if let Some(node) = self.items.get_mut(&id) {
+            self.current_usage -= node.cost;
+            node.cost = cost;
+            self.detach(id);
+            self.attach_tail(id);
+        } else {
+            self.items.insert(
+                id,
+                LruNode {
+                    cost,
+                    prev: None,
+                    next: None,
+                },
+            );
+            self.attach_tail(id);
         }
         self.current_usage += cost;
-        self.order.push_back(id);
 
         let mut pruned = Vec::new();
         // Prune until we are under capacity.
         // We never prune the item we just added unless it's the only item
         // and its cost is greater than the total capacity.
-        while self.current_usage > self.capacity && self.order.len() > 1 {
-            let oldest_id = self.order.pop_front().unwrap();
-            if let Some(old_cost) = self.items.remove(&oldest_id) {
-                self.current_usage -= old_cost;
-                pruned.push(oldest_id);
+        while self.current_usage > self.capacity && self.items.len() > 1 {
+            let oldest_id = self.head.unwrap();
+            let node = self.items.remove(&oldest_id).unwrap();
+            self.current_usage -= node.cost;
+            self.head = node.next;
+            if let Some(head_id) = self.head {
+                if let Some(head_node) = self.items.get_mut(&head_id) {
+                    head_node.prev = None;
+                }
+            } else {
+                self.tail = None;
             }
+            pruned.push(oldest_id);
         }
 
         // Edge case: single item exceeds capacity
-        if self.current_usage > self.capacity && !self.order.is_empty() {
-            let only_id = self.order.pop_front().unwrap();
-            if let Some(old_cost) = self.items.remove(&only_id) {
-                self.current_usage -= old_cost;
-                pruned.push(only_id);
-            }
+        if self.current_usage > self.capacity && !self.items.is_empty() {
+            let only_id = self.head.unwrap();
+            let node = self.items.remove(&only_id).unwrap();
+            self.current_usage -= node.cost;
+            self.head = None;
+            self.tail = None;
+            pruned.push(only_id);
         }
 
         pruned
@@ -66,20 +142,31 @@ impl LruPool {
 
     /// Marks an ID as recently used without changing its cost.
     pub fn touch(&mut self, id: LruItemId) {
-        if self.items.contains_key(&id)
-            && let Some(pos) = self.order.iter().position(|oid| *oid == id)
-        {
-            let id = self.order.remove(pos).unwrap();
-            self.order.push_back(id);
+        if self.items.contains_key(&id) && self.tail != Some(id) {
+            self.detach(id);
+            self.attach_tail(id);
         }
     }
 
     /// Removes an ID from the pool.
     pub fn remove(&mut self, id: LruItemId) {
-        if let Some(cost) = self.items.remove(&id) {
-            self.current_usage -= cost;
-            if let Some(pos) = self.order.iter().position(|oid| *oid == id) {
-                self.order.remove(pos);
+        if let Some(node) = self.items.remove(&id) {
+            self.current_usage -= node.cost;
+            let prev = node.prev;
+            let next = node.next;
+            if let Some(prev_id) = prev {
+                if let Some(prev_node) = self.items.get_mut(&prev_id) {
+                    prev_node.next = next;
+                }
+            } else {
+                self.head = next;
+            }
+            if let Some(next_id) = next {
+                if let Some(next_node) = self.items.get_mut(&next_id) {
+                    next_node.prev = prev;
+                }
+            } else {
+                self.tail = prev;
             }
         }
     }
@@ -93,12 +180,12 @@ impl LruPool {
     }
 }
 
+/// A keyed LRU pool: typed keys, cost-weighted eviction, slot reuse with
+/// generation counters so stale slot IDs can never alias a reused slot.
 pub struct KeyedLruPool<K> {
     policy: LruPool,
     key_to_slot: HashMap<K, usize>,
     slots: Vec<Option<K>>,
-    slot_to_id: HashMap<usize, LruItemId>,
-    id_to_slot: HashMap<LruItemId, usize>,
     slot_generations: Vec<u32>,
     free_slots: Vec<usize>,
 }
@@ -109,33 +196,39 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
             policy: LruPool::new(capacity),
             key_to_slot: HashMap::new(),
             slots: Vec::new(),
-            slot_to_id: HashMap::new(),
-            id_to_slot: HashMap::new(),
             slot_generations: Vec::new(),
             free_slots: Vec::new(),
         }
     }
 
+    /// Insert or update `key` with `cost`. Returns the keys pruned to stay
+    /// within capacity (never includes `key` itself unless it is the only
+    /// item and its cost exceeds capacity).
     pub fn insert_key(&mut self, key: &K, cost: usize) -> Vec<K> {
         let id = self.id_for_or_insert_key(key);
         let pruned_ids = self.policy.add(id, cost);
         self.prune_ids(pruned_ids)
     }
 
+    /// Mark `key` as recently used without changing its cost.
     pub fn touch_key(&mut self, key: &K) {
-        if let Some(slot) = self.key_to_slot.get(key).copied()
-            && let Some(id) = self.slot_to_id.get(&slot).copied()
-        {
+        if let Some(&slot) = self.key_to_slot.get(key) {
+            let id = encode_id(
+                u32::try_from(slot).expect("slot index exceeded u32"),
+                self.slot_generations[slot],
+            );
             self.policy.touch(id);
         }
     }
 
+    /// Remove `key` from the pool.
     pub fn remove_key(&mut self, key: &K) {
         if let Some(slot) = self.key_to_slot.remove(key) {
             self.remove_slot(slot);
         }
     }
 
+    /// Remove many keys from the pool.
     pub fn remove_keys<I>(&mut self, keys: I)
     where
         I: IntoIterator<Item = K>,
@@ -146,12 +239,11 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
     }
 
     fn id_for_or_insert_key(&mut self, key: &K) -> LruItemId {
-        if let Some(slot) = self.key_to_slot.get(key).copied() {
-            return self
-                .slot_to_id
-                .get(&slot)
-                .copied()
-                .expect("slot present but no id");
+        if let Some(&slot) = self.key_to_slot.get(key) {
+            return encode_id(
+                u32::try_from(slot).expect("slot index exceeded u32"),
+                self.slot_generations[slot],
+            );
         }
 
         let slot = if let Some(slot) = self.free_slots.pop() {
@@ -170,8 +262,6 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
 
         self.slots[slot] = Some(key.clone());
         self.key_to_slot.insert(key.clone(), slot);
-        self.slot_to_id.insert(slot, id);
-        self.id_to_slot.insert(id, slot);
 
         id
     }
@@ -179,7 +269,9 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
     fn prune_ids(&mut self, pruned_ids: Vec<LruItemId>) -> Vec<K> {
         let mut pruned_keys = Vec::new();
         for id in pruned_ids {
-            if let Some(slot) = self.id_to_slot.get(&id).copied()
+            let (slot_u32, generation) = decode_id(id);
+            let slot = slot_u32 as usize;
+            if self.slot_generations.get(slot).copied() == Some(generation)
                 && let Some(key) = self.remove_slot(slot)
             {
                 pruned_keys.push(key);
@@ -189,13 +281,18 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
     }
 
     fn remove_slot(&mut self, slot: usize) -> Option<K> {
-        let id = self.slot_to_id.remove(&slot);
-        if let Some(id) = id {
-            self.id_to_slot.remove(&id);
+        if let Some(&generation) = self.slot_generations.get(slot) {
+            let id = encode_id(
+                u32::try_from(slot).expect("slot index exceeded u32"),
+                generation,
+            );
             self.policy.remove(id);
         }
 
-        let key = self.slots[slot].take();
+        let key = self
+            .slots
+            .get_mut(slot)
+            .and_then(|slot_key| slot_key.take());
         if let Some(key) = key.as_ref() {
             self.key_to_slot.remove(key);
         }
@@ -210,6 +307,10 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLruPool<K> {
 
 fn encode_id(slot: u32, generation: u32) -> LruItemId {
     (u64::from(generation) << 32) | u64::from(slot)
+}
+
+fn decode_id(id: LruItemId) -> (u32, u32) {
+    (id as u32, (id >> 32) as u32)
 }
 
 #[cfg(test)]

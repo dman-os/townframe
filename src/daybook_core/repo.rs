@@ -542,10 +542,10 @@ impl RepoCtx {
                     .ok_or_eyre("blobs root missing parent")?
                     .join("local_state"),
                 Arc::new(surelock::mutex::Mutex::new(
-                    crate::drawer::lru::KeyedLruPool::new(1000),
+                    utils_rs::lru::KeyedLruPool::new(1000),
                 )),
                 Arc::new(surelock::mutex::Mutex::new(
-                    crate::drawer::lru::KeyedLruPool::new(1000),
+                    utils_rs::lru::KeyedLruPool::new(1000),
                 )),
                 #[cfg(not(test))]
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),

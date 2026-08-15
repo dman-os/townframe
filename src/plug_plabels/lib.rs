@@ -569,14 +569,9 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                 value_schema: schemars::schema_for!(PseudoLabel),
                 display_config: Default::default(),
-                references: vec![
-                    FacetReferenceManifest::UrlString {
-                        json_path: "$.sourceRef".into(),
-                    },
-                    FacetReferenceManifest::UrlString {
-                        json_path: "$.candidateSetRef".into(),
-                    },
-                ],
+                references: vec![FacetReferenceManifest::UrlString {
+                    json_path: "$.sourceRef".into(),
+                }],
             },
             FacetManifest {
                 key_tag: PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),

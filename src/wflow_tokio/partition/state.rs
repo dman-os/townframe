@@ -71,7 +71,7 @@ impl PartitionWorkingState {
         // Ignore errors - receivers may have been dropped
         self.change_tx
             .send(counts)
-            .inspect_err(|err| tracing::warn!(ERROR_CHANNEL, ?err))
+            .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
             .ok();
     }
 

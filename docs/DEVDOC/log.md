@@ -652,6 +652,7 @@ Shortlist of things to study:
 - Keep Notes
 - Telegram Saved Messages
 - HackMD
+- Lotus Notes
 
 ---
 

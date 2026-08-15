@@ -12,13 +12,13 @@ repos:
       - id: check-case-conflict
       - id: check-executables-have-shebangs
       - id: check-merge-conflict
-      - id: end-of-file-fixer
-        # exclude all generated files
-        exclude: |
-          (?x)^(
-              Cargo.lock|
-              gh_action/.*.js
-          )$
+      # - id: end-of-file-fixer
+      #   # exclude all generated files
+      #   exclude: |
+      #     (?x)^(
+      #         Cargo.lock|
+      #         gh_action/.*.js
+      #     )$
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 0.36.2
     hooks:

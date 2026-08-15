@@ -11,10 +11,22 @@ pub mod memory;
 pub mod sqlite;
 pub mod sqlite_core;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HostPartStoreConfig {
     /// Parts that remain physically present but are invisible to remote part access.
     pub hidden_parts: HashSet<PartId>,
+    pub debounce_quiet_window: std::time::Duration,
+    pub debounce_max_latency: std::time::Duration,
+}
+
+impl Default for HostPartStoreConfig {
+    fn default() -> Self {
+        Self {
+            hidden_parts: HashSet::new(),
+            debounce_quiet_window: std::time::Duration::from_millis(50),
+            debounce_max_latency: std::time::Duration::from_millis(500),
+        }
+    }
 }
 
 // pub type ObjStoreLease = u64;
@@ -1415,44 +1427,45 @@ pub mod host_contract {
             .set_obj_payload(obj, payload("live-filter", 2))
             .await?;
 
-        // Authorized (Read) must receive the live Changed event.
-        let auth_live = recv_sub_event(&auth_rx).await?;
-        let SubEvent::Changed(auth_changed) = &auth_live else {
-            panic!("authorized subscriber expected Changed, got {auth_live:?}");
-        };
-        assert_eq!(auth_changed.obj_id, obj);
-        assert_eq!(auth_changed.payload, payload("live-filter", 2));
+        // Authorized (Read) must receive the live Changed event for each subscribed partition.
+        let mut auth_parts = HashSet::new();
+        for _ in 0..2 {
+            let auth_live = recv_sub_event(&auth_rx).await?;
+            let SubEvent::Changed(auth_changed) = auth_live else {
+                panic!("authorized subscriber expected Changed, got {auth_live:?}");
+            };
+            assert_eq!(auth_changed.obj_id, obj);
+            assert_eq!(auth_changed.payload, payload("live-filter", 2));
+            auth_parts.extend(auth_changed.part_ids);
+        }
         assert_eq!(
-            auth_changed
-                .part_ids
-                .iter()
-                .copied()
-                .collect::<HashSet<_>>(),
+            auth_parts,
             HashSet::from([part, overlapping_part]),
-            "one live event must aggregate every subscribed part",
+            "live events must cover every subscribed part",
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(100), auth_rx.recv())
                 .await
                 .is_err(),
-            "multi-part change must not be duplicated on the grouped stream",
+            "multi-part change must not emit more events than subscribed partitions",
         );
 
         // Relay principals receive payload metadata so they can replicate
         // encrypted objects without materializing plaintext.
-        let relay_live = recv_sub_event(&relay_rx).await?;
-        let SubEvent::Changed(relay_changed) = &relay_live else {
-            panic!("relay subscriber expected Changed, got {relay_live:?}");
-        };
-        assert_eq!(relay_changed.obj_id, obj);
-        assert_eq!(relay_changed.payload, payload("live-filter", 2));
+        let mut relay_parts = HashSet::new();
+        for _ in 0..2 {
+            let relay_live = recv_sub_event(&relay_rx).await?;
+            let SubEvent::Changed(relay_changed) = relay_live else {
+                panic!("relay subscriber expected Changed, got {relay_live:?}");
+            };
+            assert_eq!(relay_changed.obj_id, obj);
+            assert_eq!(relay_changed.payload, payload("live-filter", 2));
+            relay_parts.extend(relay_changed.part_ids);
+        }
         assert_eq!(
-            relay_changed
-                .part_ids
-                .iter()
-                .copied()
-                .collect::<HashSet<_>>(),
+            relay_parts,
             HashSet::from([part, overlapping_part]),
+            "live events must cover every subscribed part for relay",
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(100), relay_rx.recv())

@@ -41,7 +41,7 @@ impl Default for BigRepoStressConfig {
         Self {
             node_count: 4,
             relay_idx: None,
-            seed: DEFAULT_STRESS_SEED,
+            seed: utils_rs::testing::test_seed(DEFAULT_STRESS_SEED),
             peer_seed_offset: 0,
             test_revocations: false,
         }
@@ -313,13 +313,8 @@ impl StressFixture for BigRepoStressFixture {
         // Keyhive convergence is notification-driven. The quiescence waits
         // below only let the resulting work settle; they do not initiate a
         // manual sync round.
-        left.repo
-            .wait_for_quiescence(Some(Duration::from_secs(20)))
-            .await?;
-        right
-            .repo
-            .wait_for_quiescence(Some(Duration::from_secs(20)))
-            .await?;
+        left.repo.wait_for_quiescence(None).await?;
+        right.repo.wait_for_quiescence(None).await?;
         // Each side advertises the same explicit route set (the group part).
         // Part selection is a code-level decision, not derived from keyhive
         // visibility, so both directions agree by construction.
@@ -498,9 +493,7 @@ impl StressFixture for BigRepoStressFixture {
         // quiescence barrier, but do not inject explicit Keyhive sync rounds
         // into the stress workload.
         for node in &live {
-            node.repo
-                .wait_for_quiescence(Some(Duration::from_secs(20)))
-                .await?;
+            node.repo.wait_for_quiescence(None).await?;
         }
         for editor in &editors {
             let local_group = editor.repo.keyhive().get_group(group.id()).await;
@@ -549,11 +542,11 @@ impl StressFixture for BigRepoStressFixture {
         // alignment observation runs against a genuinely settled snapshot
         // instead of racing that drift.
         let barrier_nodes: Vec<&Node> = nodes.to_vec();
-        try_join_all(barrier_nodes.iter().map(|node| async {
-            node.repo
-                .wait_for_quiescence_freeze(Some(Duration::from_secs(20)))
-                .await
-        }))
+        try_join_all(
+            barrier_nodes
+                .iter()
+                .map(|node| async { node.repo.wait_for_quiescence_freeze(None).await }),
+        )
         .await?;
         try_join_all(
             barrier_nodes
@@ -561,11 +554,11 @@ impl StressFixture for BigRepoStressFixture {
                 .map(|node| async { node.repo.unfreeze().await }),
         )
         .await?;
-        try_join_all(barrier_nodes.iter().map(|node| async {
-            node.repo
-                .wait_for_quiescence(Some(Duration::from_secs(20)))
-                .await
-        }))
+        try_join_all(
+            barrier_nodes
+                .iter()
+                .map(|node| async { node.repo.wait_for_quiescence(None).await }),
+        )
         .await?;
 
         // Reconnect all nodes so that any peers disconnected during randomized phases
@@ -582,13 +575,15 @@ impl StressFixture for BigRepoStressFixture {
         // itself persist a causal checkpoint and advance a local part cursor.
         // A fixed number of full-sync rounds can therefore stop one round too
         // early.
-        super::harness::fixtures::wait_for_network_rest(nodes, Duration::from_secs(60)).await?;
+        // Scale with the env multiplier like every other timeout here: under
+        // CI's UTILS_RS_TIMEOUT_MULTIPLIER=3 (or full-parallel stress runs)
+        // a fixed 60s network-rest window can expire before the relay
+        // topology converges.
+        super::harness::fixtures::wait_for_network_rest(nodes).await?;
 
         // Natural convergence: alignment is reached via notifs + automerge CRDT
         // semantics.
         let tracked_docs = self.tracked_docs().await;
-        let convergence_deadline =
-            tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(150));
         let mut last_report = tokio::time::Instant::now();
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
             let observations: Vec<(PeerId, BigRepoStressObservation)> =
@@ -669,10 +664,10 @@ impl StressFixture for BigRepoStressFixture {
                 );
                 last_report = tokio::time::Instant::now();
             }
-            if converged || tokio::time::Instant::now() >= convergence_deadline {
+            if converged {
                 break observations;
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         };
 
         let format_heads = |heads: &BTreeSet<[u8; 32]>| {

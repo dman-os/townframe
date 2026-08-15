@@ -12,14 +12,20 @@ use crate::runtime2::messages::DocWorkerMsg;
 pub struct DocLease {
     cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     doc_id: DocumentId,
+    generation: u64,
 }
 
 impl DocLease {
     pub(crate) fn new(
         cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
         doc_id: DocumentId,
+        generation: u64,
     ) -> Self {
-        Self { cmd_tx, doc_id }
+        Self {
+            cmd_tx,
+            doc_id,
+            generation,
+        }
     }
 }
 
@@ -29,6 +35,7 @@ impl Drop for DocLease {
             self.cmd_tx
                 .try_send(crate::runtime2::Runtime2Cmd::ReleaseDocLease {
                     doc_id: self.doc_id,
+                    generation: self.generation,
                 })
         {
             unreachable!("runtime command channel is unbounded");
@@ -123,6 +130,8 @@ pub struct DocWorkerEntry {
     /// Deadline after which the janitor may evict this doc-worker.
     /// `None` when at least one refcount is non-zero.
     pub eviction_deadline: Option<std::time::Instant>,
+    /// Incarnation generation of this doc-worker instance.
+    pub generation: u64,
 }
 
 /// RAII guard for tracked background futures. Emits `TrackedWorkDone` on drop,

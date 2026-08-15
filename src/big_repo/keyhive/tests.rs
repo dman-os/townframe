@@ -77,10 +77,10 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
     owner.save_prekey_secrets(&storage).await?;
 
-    let repo_agents = owner
+    let (repo_agents, _repo_hashes) = owner
         .create_group_with_parents(Vec::new(), &storage)
         .await?;
-    let core_docs = owner
+    let (core_docs, _core_hashes) = owner
         .create_group_with_parents(Vec::new(), &storage)
         .await?;
     let owner_agent = owner
@@ -107,7 +107,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .await?;
 
     let initial_ref = vec![7; 32];
-    let doc_id = owner
+    let (doc_id, _doc_hashes) = owner
         .create_doc(vec![core_docs.into()], nonempty![[7; 32]], &storage)
         .await?;
     let keyhive = owner.clone_keyhive();

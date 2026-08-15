@@ -79,9 +79,16 @@
   - In most machine's you're working on, `jj` is being used and the safest looking git commands could mess up the `jj` state destroying work.
   - Even if on other machines, git mutation commands are too destructive and unsafe.
 
-## User error
+## Performance
 
-- If the users request seems like it comes from a place of misunderstanding, push back!
+Flag code that is doing:
+- question number of allocations
+- nonsensical IO in a hot loop or common operations
+- nonsensical/hacky loops based retry
+- unruly fallbacks like reloading full data where returning errors makes better sense
+
+We're trying to bump the quality of the code so performance footguns should be eliminated.
+Don't be a stickler but don't let anything pass that would be flagged by a senior engineer.
 
 ## Style guide
 
@@ -103,14 +110,13 @@
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
 - Currently doing compaction? Always indicate whoever reads your summary that they should refresh on AGENTS.md and any .md docs linked from it.
 - When operating inside pi, truncation limit is 50KB or 2000 lines which is wasteful. Use your own limits/heads/tail on outputs to avoid flooding the context. Don't do broad, speculative searches that are going to flood the context with garbage.
+
 ## Cheating
 
 Avoid cheating through hacks that violate common sensibilities just to get a task done.
 
 - Code that tires to get tests green by writing shallow or buggy fixes.
 - Code that reads the whole database in a memory HashSet to avoid writing the right SQL.
-
-THIS IS A NO CHEAT REPO!
 
 ## Test code
 
@@ -127,6 +133,7 @@ Tools like snapshot tests, TDD and the macros for TDD found in the repo can help
 - Prefer in-crate test modules instead:
   - unit tests inline in the relevant module
   - cross-module end-to-end style tests in a crate-local `e2e` module (for example `src/my_crate/e2e.rs` with submodules in `src/my_crate/e2e/`).
+- Don't bother with tuning or adding internal timeouts to tests unless the test is explicitly interested in latency specifics. Shared CI runners on Github CI makes it difficult to estimate what a good time out is. Rely instead on using nextest which puts a hard timeout on every test.
 
 ## Pushback and alignment.
 
@@ -135,7 +142,8 @@ Don't hack and boil the ocean to a task completion, you'll be asked to do it aga
 Better to have good alignment with the operator as opposed to spending a million iterations on the same thing.
 
 Try to be intelligent about the user's intention. 
-If it looks or inelegant what you're doing, you're very liekly misalinged and wasting effort.
+If it looks hacky or inelegant what you're doing, you're very likely misaligned and wasting effort.
+
 Make sure to get more confirmations if unsure.
 
 Does the task graze by a FIXME seen in code, flag those ahead of time in case the current work is a good opportunit to resolve them.

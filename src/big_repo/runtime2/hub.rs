@@ -111,6 +111,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// state generation at retry start. A `Pending` completion whose walk ran
     /// against a generation older than the current one is re-verified (B6).
     materialization_retries_in_flight: HashMap<DocumentId, u64>,
+    next_doc_worker_generation: u64,
 }
 
 struct ConnDeets {
@@ -217,7 +218,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 }
                 Err(err) => {
                     resp.send(Err(err))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -232,7 +233,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let stored = runtime_io.contains_sedimentree(sed_id).await;
-            resp.send(stored).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(stored)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -253,7 +256,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                     ))
                     .await
             };
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -265,7 +270,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = runtime_io.inspect_stored_doc_blobs(sed_id).await;
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -395,7 +402,7 @@ where
             // other waiters.
             waiter
                 .send(Ok(()))
-                .inspect_err(|_| warn!(ERROR_CALLER))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
         }
         Ok(())
@@ -498,7 +505,7 @@ where
                     }
                 } else {
                     resp.send(Ok(None))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -629,7 +636,7 @@ where
                 waiter
                     .resp
                     .send(Err(error))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
@@ -656,7 +663,9 @@ where
                     .keyhive_state_generation
                     .load(std::sync::atomic::Ordering::Relaxed);
                 if self.group_part_generation >= captured {
-                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                    resp.send(Ok(()))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                 } else {
                     self.keyhive_reconciliation_waiters.push((captured, resp));
                 }
@@ -678,15 +687,15 @@ where
                     entry.eviction_deadline = None;
                     registered
                         .send(())
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
-            Runtime2Cmd::ReleaseDocLease { doc_id } => {
-                self.handle_release_doc_lease(doc_id);
+            Runtime2Cmd::ReleaseDocLease { doc_id, generation } => {
+                self.handle_release_doc_lease(doc_id, generation);
             }
-            Runtime2Cmd::ReleaseInternalLease { doc_id } => {
-                self.handle_release_internal_lease(doc_id);
+            Runtime2Cmd::ReleaseInternalLease { doc_id, generation } => {
+                self.handle_release_internal_lease(doc_id, generation);
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
                 let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
@@ -710,7 +719,7 @@ where
             #[cfg(test)]
             Runtime2Cmd::HasDocWorker { doc_id, resp } => {
                 resp.send(Ok(self.doc_workers.contains_key(&doc_id)))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
@@ -759,6 +768,7 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: DocumentId,
+        generation: u64,
     ) -> F::Future<'static, eyre::Result<()>>;
     /// Await a doc-worker's fence reply and forward it as a `DocWorkerFenced`
     /// event so the hub can clear the probe's pending-doc set.
@@ -865,7 +875,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                                 ),
                             })
                             .await
-                            .expect(ERROR_CHANNEL);
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
                     }
                     Err(error) => {
                         let error = format!("keyhive sync with {peer_id} failed: {error}");
@@ -876,7 +887,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                                 error,
                             })
                             .await
-                            .expect(ERROR_CHANNEL);
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
                     }
                 }
                 Ok(())
@@ -952,7 +964,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             evt_tx
                 .send(Runtime2Evt::DocWorkerMaterializationRetryCompleted { doc_id, status })
                 .await
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -960,15 +973,16 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: DocumentId,
+        generation: u64,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            lease_rx.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            lease_rx.await.ok();
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
             cmd_tx
-                .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
+                .send(Runtime2Cmd::ReleaseInternalLease { doc_id, generation })
                 .await
-                .inspect_err(|_| warn!(ERROR_CHANNEL))
+                .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                 .ok();
             Ok(())
         })
@@ -983,11 +997,12 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             // The worker replies once its mailbox work has drained past the
             // fence. A dropped reply (worker evicted mid-fence) still acks:
             // `DocWorkerStopped` clears the doc from the probe anyway.
-            reply.await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            reply.await.inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             evt_tx
                 .send(Runtime2Evt::DocWorkerFenced { doc_id, barrier_id })
                 .await
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -1033,7 +1048,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         resp.send(Err(ferr!(
                             "handshake peer mismatch: expected {peer}, got {handshake_peer}"
                         )))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
@@ -1059,7 +1074,6 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // ids can be reused across connections).
                         watcher_end_tx
                             .send((Arc::clone(&watcher_closed), result))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
@@ -1077,7 +1091,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     if let Err(error) = watcher {
                         connect.close(handshake_peer, closed).await?;
                         resp.send(Err(error))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
                     }
@@ -1094,12 +1108,12 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         return Ok(());
                     }
                     resp.send(Ok((handshake_peer, closed, end_rx)))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
                 Err(error) => {
                     resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -1148,7 +1162,6 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // ids can be reused across connections).
                         watcher_end_tx
                             .send((Arc::clone(&watcher_closed), result))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
@@ -1165,7 +1178,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     }));
                     if let Err(error) = watcher {
                         resp.send(Err(error))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
                     }
@@ -1182,12 +1195,12 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         return Ok(());
                     }
                     resp.send(Ok((handshake_peer, closed, end_rx)))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
                 Err(error) => {
                     resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                 }
             }
@@ -1211,13 +1224,16 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             closed: replacement,
                         })
                         .await
-                        .expect(ERROR_CHANNEL);
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                     Ok(())
                 }
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
-            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            resp.send(result)
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -1280,14 +1296,14 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         cmd_tx
                             .send(Runtime2Cmd::DocSyncRoundDone { request_id })
                             .await
-                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
                     }
                     Err(error) => {
                         cmd_tx
                             .send(Runtime2Cmd::DocSyncFailed { request_id, error })
                             .await
-                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
                     }
                 }
@@ -1472,7 +1488,7 @@ where
                     if self.group_part_generation >= captured {
                         waiter
                             .send(Ok(()))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                     } else {
                         pending.push((captured, waiter));
@@ -1581,7 +1597,8 @@ where
                 self.bump_keyhive_state_generation("cgka op");
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
-                    .expect(ERROR_CHANNEL);
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 // Targeted retry: only this doc's keys moved; live docs are
                 // not re-walked (B6).
                 if was_pending {
@@ -1878,7 +1895,7 @@ where
             for (_, sender) in waiters.waiters {
                 sender
                     .send(Err(ferr!("{error}")))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
         }
@@ -1964,7 +1981,7 @@ where
                     waiters.ids.remove(&id);
                     sender
                         .send(Ok(()))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                     resolved_waiters += 1;
                 } else {
@@ -2112,7 +2129,7 @@ where
                     .send(Err(eyre::Report::new(crate::KeyhiveSyncCancelled {
                         reason,
                     })))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
         }
@@ -2142,6 +2159,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         entry.eviction_deadline = None;
         entry.internal_leases += 1;
         let handle = entry.handle.clone();
+        let generation = entry.generation;
 
         // Create a oneshot whose sender is consumed by the lease. When the
         // lease drops (doc-worker finishes the op), the sender is dropped
@@ -2149,7 +2167,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         // forwards this as a `ReleaseInternalLease` command back to the hub.
         let (lease_tx, lease_rx) = futures::channel::oneshot::channel::<()>();
         let cmd_tx = self.cmd_tx.clone();
-        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
+        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id, generation))?;
 
         let lease = DocWorkerInternalLease::new(lease_tx);
         Ok((handle, lease))
@@ -2169,10 +2187,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         entry.eviction_deadline = None;
         entry.internal_leases += 1;
         let handle = entry.handle.clone();
+        let generation = entry.generation;
 
         let (lease_tx, lease_rx) = futures::channel::oneshot::channel::<()>();
         let cmd_tx = self.cmd_tx.clone();
-        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id))?;
+        self.spawn_background(F::release_lease(lease_rx, cmd_tx, doc_id, generation))?;
 
         let lease = DocWorkerInternalLease::new(lease_tx);
         Ok(Some((handle, lease)))
@@ -2199,12 +2218,16 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         // Stale entry: remove before re-creating.
         self.doc_workers.remove(&doc_id);
 
+        let generation = self.next_doc_worker_generation;
+        self.next_doc_worker_generation += 1;
+
         let worker = crate::runtime2::spawn_doc_worker(
             doc_id,
             Arc::clone(&self.doc_io),
             Arc::clone(&self.change_manager),
             self.cmd_tx.clone(),
             self.evt_tx.clone(),
+            generation,
         );
         let handle = worker.handle;
         let stop = worker.stop;
@@ -2220,31 +2243,55 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
                 eviction_deadline: Some(
                     self.clock.instant() + self.sync_policy.doc_worker_idle_ttl,
                 ),
+                generation,
             },
         );
         Ok(())
     }
 
     /// Decrement `local_handles` for a doc-worker; schedule eviction if idle.
-    fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
+    ///
+    /// Identifies worker incarnation by `generation`: stale releases from
+    /// previous worker generations that were evicted or died are safely ignored.
+    fn handle_release_doc_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            assert!(
-                entry.local_handles > 0,
-                "doc lease underflow for doc worker: {doc_id:?}"
-            );
-            entry.local_handles -= 1;
+            if entry.generation == generation {
+                entry.local_handles = entry
+                    .local_handles
+                    .checked_sub(1)
+                    .expect("doc lease refcount underflow for active worker incarnation");
+            } else {
+                debug!(
+                    %doc_id,
+                    lease_generation = generation,
+                    current_generation = entry.generation,
+                    "ignoring stale doc lease release for superseded worker incarnation"
+                );
+                return;
+            }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
 
     /// Decrement `internal_leases` for a doc-worker; schedule eviction if idle.
-    fn handle_release_internal_lease(&mut self, doc_id: DocumentId) {
+    ///
+    /// Identifies worker incarnation by `generation` — see [`Self::handle_release_doc_lease`].
+    fn handle_release_internal_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            assert!(
-                entry.internal_leases > 0,
-                "internal lease underflow for doc worker: {doc_id:?}"
-            );
-            entry.internal_leases -= 1;
+            if entry.generation == generation {
+                entry.internal_leases = entry
+                    .internal_leases
+                    .checked_sub(1)
+                    .expect("internal lease refcount underflow for active worker incarnation");
+            } else {
+                debug!(
+                    %doc_id,
+                    lease_generation = generation,
+                    current_generation = entry.generation,
+                    "ignoring stale internal lease release for superseded worker incarnation"
+                );
+                return;
+            }
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
@@ -2582,6 +2629,7 @@ where
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         materialization_retries_in_flight: HashMap::new(),
+        next_doc_worker_generation: 1,
     };
 
     let handle = Runtime2Handle::<F>::new(

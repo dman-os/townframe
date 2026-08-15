@@ -33,10 +33,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         std::env::set_var("DAYB_SYNC_MAX_BACKOFF_SECS", "5");
     });
 
-    let seed = std::env::var("DAYB_SYNC_TEST_SEED")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_STRESS_SEED);
+    let seed = utils_rs::testing::test_seed(DEFAULT_STRESS_SEED);
     let phase_timeout = utils_rs::scale_timeout(PHASE_TIMEOUT_BASE);
     let full_sync_timeout = utils_rs::scale_timeout(FULL_SYNC_TIMEOUT_BASE);
     let blob_sync_timeout = utils_rs::scale_timeout(BLOB_SYNC_TIMEOUT_BASE);
@@ -50,7 +47,11 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     );
 
     let temp_root = tempfile::tempdir()?;
+    info!(path = %temp_root.path().display(), "initialized stress test cluster temp root");
     let repo_paths = init_and_copy_repo_cluster(temp_root.path()).await?;
+    for (idx, path) in repo_paths.iter().enumerate() {
+        info!(idx, path = %path.display(), "cluster node repo path");
+    }
     let mut nodes = open_cluster_nodes(&repo_paths).await?;
     let result = async {
         let topology_1 = generate_connected_edges(&mut rng);
@@ -330,7 +331,6 @@ async fn wait_network_rest(
     timeout: Duration,
     blob_timeout: Duration,
 ) -> Res<()> {
-    let network_timeout = timeout.max(blob_timeout);
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
         node.as_ref().map(|node| async move {
             let parts = node
@@ -342,7 +342,6 @@ async fn wait_network_rest(
                 .wait_for_network_rest(
                     &peers_set[index].iter().copied().collect::<Vec<_>>(),
                     &parts,
-                    network_timeout,
                 )
                 .await
         })

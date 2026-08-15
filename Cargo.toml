@@ -143,21 +143,21 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 
 #
 # sync
-automerge = "0.9.0"
-autosurgeon = "0.11.0"
+automerge = "0.11.0"
+autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "b2d05c6df38e78fa22d6903be237248862f47c05" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "143c0ac4cbc7972c7b438c326b0b3530895c9ca3" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -206,8 +206,6 @@ clap_complete = "4.5"
 iroh = "1"
 iroh-tickets = "1"
 iroh-blobs = "0.103.0"
-iroh-docs = "0.101.0"
-iroh-gossip = "0.101.0"
 
 #
 # actors
@@ -219,11 +217,12 @@ irpc-iroh = "0.17.0"
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
-autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
-autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
-automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-# sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
-# #
+autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+
+# automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
+# # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
+# # #
 # [patch."https://github.com/dman-os/subduction"]
 # subduction_core = { path = "../subduction/subduction_core" }
 # subduction_iroh = { path = "../subduction/subduction_iroh" }
@@ -233,7 +232,7 @@ automerge = { git = "https://github.com/automerge/automerge", branch = "fragment
 # subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
 # subduction_crypto = { path = "../subduction/subduction_crypto" }
 # subduction_keyhive = { path = "../subduction/subduction_keyhive" }
-#
+
 # [patch."https://github.com/dman-os/keyhive"]
 # keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
 # keyhive_core = { path = "../keyhive/keyhive_core" }

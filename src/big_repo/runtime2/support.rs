@@ -30,6 +30,7 @@ use subduction_core::{
     handler::sync::SyncHandler, storage::traits::Storage, subduction::Subduction,
     transport::message::MessageTransport,
 };
+use subduction_keyhive::message::EventHash;
 
 // Re-exports that handler.rs / keyhive_conn.rs / ephemeral.rs / native.rs need.
 // These type aliases are identical to the old `crate::runtime::*` definitions.
@@ -351,19 +352,20 @@ impl BigRepoCiphertextLocator {
 pub(crate) async fn persist_cgka_update_op(
     keyhive_storage: &BigRepoKeyhiveStorage,
     update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
-) -> Res<()> {
+) -> Res<Vec<EventHash>> {
     let event = StaticEvent::CgkaOperation(Box::new(update_op));
-    subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event)
-        .await
-        .map_err(|err| ferr!("failed to save keyhive cgka update op: {err}"))?;
-    Ok(())
+    let (hash, _) =
+        subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event, None)
+            .await
+            .map_err(|err| ferr!("failed to save keyhive cgka update op: {err}"))?;
+    Ok(vec![hash.0])
 }
 
 pub(crate) async fn persist_cgka_updates_durably(
     keyhive_storage: &BigRepoKeyhiveStorage,
     update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
     local_secrets: Vec<keyhive_core::cgka::LocalCgkaSecret>,
-) -> Res<()> {
+) -> Res<Vec<EventHash>> {
     if update_ops.len() != local_secrets.len() {
         return Err(ferr!(
             "local CGKA persistence invariant violated: {} updates but {} private deltas",
@@ -386,10 +388,11 @@ pub(crate) async fn persist_cgka_updates_durably(
             .await
             .map_err(|error| ferr!("failed saving local CGKA secret: {error}"))?;
     }
+    let mut hashes = Vec::with_capacity(update_ops.len());
     for update_op in update_ops {
-        persist_cgka_update_op(keyhive_storage, update_op).await?;
+        hashes.extend(persist_cgka_update_op(keyhive_storage, update_op).await?);
     }
-    Ok(())
+    Ok(hashes)
 }
 
 pub(crate) async fn encrypt_staged_automerge_ingest(
@@ -793,6 +796,18 @@ mod causal_checkpoint_tests {
         assert!(is_causal_checkpoint_id(first));
         assert!(is_causal_checkpoint_id(next_epoch));
         assert!(!is_causal_checkpoint_id(CommitId::new([0; 32])));
+    }
+
+    #[test]
+    fn causal_checkpoint_is_not_an_automerge_fragment_candidate() {
+        let checkpoint = CausalCheckpoint::new([5; 32], frontier(&[[3; 32]]));
+        let checkpoint_head = causal_checkpoint_id(&checkpoint);
+
+        assert_eq!(checkpoint_head.as_bytes()[..8], *b"TFCASL01");
+        assert!(
+            is_causal_checkpoint_id(checkpoint_head),
+            "a causal checkpoint is filtered before Automerge ingestion"
+        );
     }
 
     #[test]

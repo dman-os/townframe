@@ -206,70 +206,21 @@ async fn handle_rpc_message(
     match msg {
         RepoSyncRpcMessage::SubscribeKeyhiveChanges(req) => {
             let WithChannels { tx, .. } = req;
-            let mut changes = big_repo.subscribe_keyhive_changes();
+            // The dispatcher owns the subscription: it sends the initial
+            // confirmation event, classifies each change batch once, and
+            // debounces the fan-out per peer. This task only keeps the
+            // subscription alive for the connection's lifetime and removes it
+            // on disconnect.
+            let sub_id = big_repo.subscribe_keyhive_changes(peer_id, tx).await;
             let cancel = cancel_token.child_token();
+            let repo = Arc::clone(&big_repo);
             let _task = subscription_tasks
                 .spawn(async move {
-                    if tx
-                        .send(KeyhiveChangedRpcEvent { initial: true })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => break,
-                            event = changes.recv() => {
-                                match event {
-                                    Ok(source_peer_id) => {
-                                        let mut should_notify = source_peer_id != Some(peer_id);
-                                        // Collapse bursts: drain everything immediately
-                                        // available (lag counts as "more happened") into
-                                        // one notification, so a burst of local mutations
-                                        // costs peers a single pull.
-                                        loop {
-                                            match changes.try_recv() {
-                                                Ok(source_peer_id) => {
-                                                    should_notify |= source_peer_id != Some(peer_id);
-                                                }
-                                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
-                                                    should_notify = true;
-                                                }
-                                                Err(
-                                                    tokio::sync::broadcast::error::TryRecvError::Empty
-                                                    | tokio::sync::broadcast::error::TryRecvError::Closed,
-                                                ) => break,
-                                            }
-                                        }
-                                        if should_notify && tx
-                                            .send(KeyhiveChangedRpcEvent { initial: false })
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                        // We no longer know which source(s) were skipped, so
-                                        // conservatively wake this subscriber once.
-                                        if tx
-                                            .send(KeyhiveChangedRpcEvent { initial: false })
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        }
-                    }
+                    cancel.cancelled().await;
+                    repo.unsubscribe_keyhive_changes(&peer_id, sub_id).await;
                 })
                 .expect(ERROR_TOKIO);
-            tracing::debug!(%peer_id, "started direct Keyhive change stream");
+            tracing::debug!(%peer_id, "registered direct Keyhive change stream");
         }
     }
 }

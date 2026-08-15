@@ -649,6 +649,7 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
         })
         .await??;
     drop(owner_doc);
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     // --- Restart the left node WITHOUT syncing the content first.
     let old_left = pair.left_conn.take().expect("left connection");
