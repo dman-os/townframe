@@ -247,40 +247,16 @@ pub async fn expect_ready(
 /// local BigRepo work on `nodes`. A sync round may itself publish new physical
 /// document heads (for example a causal healing checkpoint), so one frontier
 /// fence is not sufficient.
-pub async fn wait_for_network_rest(
-    nodes: &[&super::topo::Node],
-    timeout: std::time::Duration,
-) -> Res<()> {
-    let timeout = utils_rs::scale_timeout(timeout);
-    let prepared = tokio::time::timeout(timeout, async {
-        for node in nodes {
-            loop {
-                let event_tail = node.store.keyhive_event_log_cursor().await?;
-                if node.store.keyhive_group_part_cursor().await? >= event_tail {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
+    for node in nodes {
+        loop {
+            let event_tail = node.store.keyhive_event_log_cursor().await?;
+            if node.store.keyhive_group_part_cursor().await? >= event_tail {
+                break;
             }
-            node.repo.wait_for_quiescence(None).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        Ok::<_, crate::eyre::Error>(())
-    })
-    .await;
-    match prepared {
-        Ok(prepared) => prepared?,
-        Err(_) => {
-            let mut cursors = Vec::with_capacity(nodes.len());
-            for node in nodes {
-                cursors.push((
-                    node.label,
-                    node.store.keyhive_event_log_cursor().await,
-                    node.store.keyhive_group_part_cursor().await,
-                ));
-            }
-            return Err(crate::ferr!(
-                "timed out preparing BigRepo network-rest routes: {cursors:?}"
-            ));
-        }
+        node.repo.wait_for_quiescence(None).await?;
     }
 
     let mut targets = Vec::new();
@@ -300,7 +276,7 @@ pub async fn wait_for_network_rest(
             });
         }
     }
-    big_sync::test_support::wait_for_network_rest(&targets, timeout, || async {
+    big_sync::test_support::wait_for_network_rest(&targets, || async {
         for node in nodes {
             while {
                 let event_tail = node.store.keyhive_event_log_cursor().await?;

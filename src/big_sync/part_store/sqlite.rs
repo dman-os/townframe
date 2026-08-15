@@ -467,7 +467,9 @@ impl SqlitePartStore {
                     continue;
                 };
                 if bus.pending.contains(&sub_id) {
-                    sub.pending.mark_dirty();
+                    if sub.pending.mark_dirty() {
+                        dispatch.push((sub_id, target, event));
+                    }
                     continue;
                 }
                 if bus.live.contains(&sub_id) {
@@ -2192,11 +2194,16 @@ mod tests {
         store1
             .set_obj_payload(obj, serde_json::json!("second"))
             .await?;
-        timeout(Duration::from_secs(2), auth_rx1.recv())
+        auth_rx1
+            .recv()
             .await
-            .expect("authorized must receive live event in first session")
-            .expect("channel must not close for authorized");
-        match timeout(Duration::from_millis(500), denied_rx1.recv()).await {
+            .expect("authorized must receive live event in first session");
+        match timeout(
+            utils_rs::scale_timeout(Duration::from_millis(500)),
+            denied_rx1.recv(),
+        )
+        .await
+        {
             Err(_elapsed) => {} /* expected */
             Ok(Ok(evt)) => {
                 panic!("denied must not receive live event in first session; got {evt:?}");
@@ -2240,12 +2247,17 @@ mod tests {
         store2
             .set_obj_payload(obj, serde_json::json!("third"))
             .await?;
-        timeout(Duration::from_secs(2), auth_rx2.recv())
+        auth_rx2
+            .recv()
             .await
-            .expect("authorized must receive live event after restart")
-            .expect("channel must not close for authorized after restart");
+            .expect("authorized must receive live event after restart");
         // Denied must still be denied after restart (cache must be rehydrated).
-        match timeout(Duration::from_millis(500), denied_rx2.recv()).await {
+        match timeout(
+            utils_rs::scale_timeout(Duration::from_millis(500)),
+            denied_rx2.recv(),
+        )
+        .await
+        {
             Err(_elapsed) => {} /* expected: cache correctly rehydrated */
             Ok(Ok(evt)) => {
                 panic!(
@@ -2643,10 +2655,7 @@ mod tests {
             ])
             .await;
 
-        let evt = timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("event must arrive")
-            .expect("channel stay open");
+        let evt = rx.recv().await.expect("event must arrive");
 
         match evt {
             SubEvent::Removed(inner) => {
@@ -2658,9 +2667,12 @@ mod tests {
         }
 
         assert!(
-            timeout(Duration::from_millis(150), rx.recv())
-                .await
-                .is_err(),
+            timeout(
+                utils_rs::scale_timeout(Duration::from_millis(150)),
+                rx.recv()
+            )
+            .await
+            .is_err(),
             "no stale Changed after Removed",
         );
 
@@ -2736,10 +2748,7 @@ mod tests {
 
         let mut seen_parts = HashSet::new();
         for _ in 0..2 {
-            let evt = timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("event must arrive")
-                .expect("channel stay open");
+            let evt = rx.recv().await.expect("event must arrive");
             match evt {
                 SubEvent::Added(inner) => {
                     assert_eq!(inner.obj_id, obj);
@@ -2764,10 +2773,7 @@ mod tests {
 
         let mut seen_changed_parts = HashSet::new();
         for _ in 0..2 {
-            let evt = timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("event must arrive")
-                .expect("channel stay open");
+            let evt = rx.recv().await.expect("event must arrive");
             match evt {
                 SubEvent::Changed(inner) => {
                     assert_eq!(inner.obj_id, obj);

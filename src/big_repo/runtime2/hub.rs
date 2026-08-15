@@ -875,7 +875,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                                 ),
                             })
                             .await
-                            .expect(ERROR_CHANNEL);
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
                     }
                     Err(error) => {
                         let error = format!("keyhive sync with {peer_id} failed: {error}");
@@ -886,7 +887,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                                 error,
                             })
                             .await
-                            .expect(ERROR_CHANNEL);
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
                     }
                 }
                 Ok(())
@@ -962,7 +964,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             evt_tx
                 .send(Runtime2Evt::DocWorkerMaterializationRetryCompleted { doc_id, status })
                 .await
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -998,7 +1001,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             evt_tx
                 .send(Runtime2Evt::DocWorkerFenced { doc_id, barrier_id })
                 .await
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
             Ok(())
         })
     }
@@ -1220,7 +1224,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             closed: replacement,
                         })
                         .await
-                        .expect(ERROR_CHANNEL);
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                     Ok(())
                 }
                 Ok(None) => Ok(()),
@@ -1592,7 +1597,8 @@ where
                 self.bump_keyhive_state_generation("cgka op");
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
-                    .expect(ERROR_CHANNEL);
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 // Targeted retry: only this doc's keys moved; live docs are
                 // not re-walked (B6).
                 if was_pending {

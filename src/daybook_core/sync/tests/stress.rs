@@ -346,7 +346,6 @@ async fn wait_network_rest(
                 .wait_for_network_rest(
                     &peers_set[index].iter().copied().collect::<Vec<_>>(),
                     &parts,
-                    network_timeout,
                 )
                 .await
         })

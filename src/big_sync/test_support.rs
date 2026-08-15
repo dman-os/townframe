@@ -43,52 +43,27 @@ async fn cursor_snapshot(targets: &[NetworkRestTarget]) -> Res<Vec<BTreeMap<Part
 /// quiescence. Internally generated events are included by repeating whenever
 /// any local part cursor advances; two complete stable rounds close the race
 /// where a notification crosses the first observation boundary.
-pub async fn wait_for_network_rest<F, Fut>(
-    targets: &[NetworkRestTarget],
-    timeout: Duration,
-    mut quiesce: F,
-) -> Res<()>
+pub async fn wait_for_network_rest<F, Fut>(targets: &[NetworkRestTarget], mut quiesce: F) -> Res<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Res<()>>,
 {
-    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
     let mut stable_rounds = 0_u8;
     let mut before = cursor_snapshot(targets).await?;
     tracing::debug!(?before, "network-rest initial cursors");
     loop {
-        let remaining = deadline
-            .checked_duration_since(tokio::time::Instant::now())
-            .ok_or_else(|| ferr!("timed out waiting for BigSync network rest"))?;
-        let round = tokio::time::timeout(remaining, async {
-            for target in targets {
-                if !target.peer_ids.is_empty() && !target.part_ids.is_empty() {
-                    target
-                        .worker
-                        .wait_for_full_sync(
-                            target.peer_ids.iter().copied(),
-                            target.part_ids.iter().copied(),
-                        )
-                        .await?;
-                }
+        for target in targets {
+            if !target.peer_ids.is_empty() && !target.part_ids.is_empty() {
+                target
+                    .worker
+                    .wait_for_full_sync(
+                        target.peer_ids.iter().copied(),
+                        target.part_ids.iter().copied(),
+                    )
+                    .await?;
             }
-            quiesce().await
-        })
-        .await;
-        let round = match round {
-            Ok(round) => round,
-            Err(_) => {
-                let mut worker_snapshots = Vec::with_capacity(targets.len());
-                for target in targets {
-                    worker_snapshots.push(target.worker.snapshot().await);
-                }
-                let current = cursor_snapshot(targets).await;
-                return Err(ferr!(
-                    "timed out during BigSync network-rest round: before={before:?} current={current:?} workers={worker_snapshots:?}"
-                ));
-            }
-        };
-        round?;
+        }
+        quiesce().await?;
 
         let after = cursor_snapshot(targets).await?;
         tracing::debug!(

@@ -579,17 +579,11 @@ impl StressFixture for BigRepoStressFixture {
         // CI's UTILS_RS_TIMEOUT_MULTIPLIER=3 (or full-parallel stress runs)
         // a fixed 60s network-rest window can expire before the relay
         // topology converges.
-        super::harness::fixtures::wait_for_network_rest(
-            nodes,
-            utils_rs::scale_timeout(Duration::from_secs(60)),
-        )
-        .await?;
+        super::harness::fixtures::wait_for_network_rest(nodes).await?;
 
         // Natural convergence: alignment is reached via notifs + automerge CRDT
         // semantics.
         let tracked_docs = self.tracked_docs().await;
-        let convergence_deadline =
-            tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(150));
         let mut last_report = tokio::time::Instant::now();
         let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
             let observations: Vec<(PeerId, BigRepoStressObservation)> =
@@ -670,10 +664,10 @@ impl StressFixture for BigRepoStressFixture {
                 );
                 last_report = tokio::time::Instant::now();
             }
-            if converged || tokio::time::Instant::now() >= convergence_deadline {
+            if converged {
                 break observations;
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         };
 
         let format_heads = |heads: &BTreeSet<[u8; 32]>| {

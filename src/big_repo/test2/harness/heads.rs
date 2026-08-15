@@ -103,11 +103,7 @@ pub async fn tier0_invariants(
     // worker may already be fetching a newly published fragment while both
     // runtime hubs are idle, which exposes an intermediate Sedimentree
     // frontier here. Fence the complete network + runtime fixed point.
-    super::fixtures::wait_for_network_rest(
-        &[pair.left(), pair.right()],
-        utils_rs::scale_timeout(std::time::Duration::from_secs(30)),
-    )
-    .await?;
+    super::fixtures::wait_for_network_rest(&[pair.left(), pair.right()]).await?;
 
     // Poll parity past the rest fence: the fence waits on part cursors, but a
     // fragment fetch already in flight can still advance a node's

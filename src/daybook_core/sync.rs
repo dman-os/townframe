@@ -1069,7 +1069,6 @@ impl IrohSyncRepo {
         &self,
         peer_ids: &[PeerId],
         required_partitions: &[PartId],
-        timeout: Duration,
     ) -> Res<()> {
         self.ensure_repo_live()?;
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
@@ -1090,11 +1089,9 @@ impl IrohSyncRepo {
                 part_ids: blob_parts,
             },
         ];
-        big_sync::test_support::wait_for_network_rest(
-            &targets,
-            utils_rs::scale_timeout(timeout),
-            || self.rcx.big_repo.wait_for_quiescence(None),
-        )
+        big_sync::test_support::wait_for_network_rest(&targets, || {
+            self.rcx.big_repo.wait_for_quiescence(None)
+        })
         .await
     }
 
