@@ -554,14 +554,8 @@ pub async fn clone_repo_init_from_url(
 
         let part_store = big_repo.shared_part_store();
         let blob_part_store = crate::repo::open_blob_part_store(&staging).await?;
-        let blobs_repo = crate::blobs::BlobsRepo::new(
-            staging.join("blobs"),
-            "clone-bootstrap".into(),
-            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&blob_part_store),
-            )),
-        )
-        .await?;
+        let blobs_repo =
+            crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
         ensure_bootstrap_local_partitions(&part_store, &bootstrap).await?;
 
@@ -582,6 +576,8 @@ pub async fn clone_repo_init_from_url(
             &crate::repo::globals::InitState::Created {
                 doc_id_app: bootstrap.app_doc_id,
                 doc_id_drawer: bootstrap.drawer_doc_id,
+                core_inventory_doc_id: None,
+                docs_inventory_doc_id: None,
             },
         )
         .await?;
@@ -605,6 +601,8 @@ pub async fn clone_repo_init_from_url(
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
             secret_repo,
+            core_inventory_doc_id: DocumentId::new([0u8; 32]),
+            docs_inventory_doc_id: DocumentId::new([0u8; 32]),
         })
         .await?;
         crate::repo::mark_repo_initialized(&staging).await?;

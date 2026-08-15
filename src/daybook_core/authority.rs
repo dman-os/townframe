@@ -55,7 +55,6 @@ impl RepoAuthority {
     pub(crate) fn default_drawer_part_id(&self) -> PartId {
         big_repo::group_part_id(self.default_drawer.id().to_bytes())
     }
-    #[expect(dead_code)]
     pub(crate) fn blob_inventories_parent(&self) -> BigKeyhiveAuthority {
         self.blob_inventories.clone().into()
     }

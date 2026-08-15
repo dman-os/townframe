@@ -190,20 +190,32 @@ pub async fn test_cx_with_options(
         handle.document_id()
     };
 
+    let core_inventory_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+    let docs_inventory_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
     // Load config first to get local identity
     let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
 
     let blob_part_store = crate::repo::open_blob_part_store(temp_dir.path()).await?;
-    let blobs = crate::blobs::BlobsRepo::new(
-        temp_dir.path().join("blobs"),
-        local_user_path.clone(),
-        Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&blob_part_store),
-        )),
-    )
-    .await?;
+    let blobs =
+        crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
+            .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
@@ -221,6 +233,13 @@ pub async fn test_cx_with_options(
         sql_ctx.clone(),
     )
     .await?;
+
+    config_repo
+        .set_blob_inventories(crate::config::AppBlobInventories {
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+        })
+        .await?;
 
     let config_user_path =
         daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
@@ -306,11 +325,27 @@ pub async fn test_cx_with_options(
     crate::authority::grant_docs_admin(
         &big_repo,
         &authority.core_docs,
-        [app_doc_id, drawer_doc_id],
+        [
+            app_doc_id,
+            drawer_doc_id,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+        ],
     )
     .await?;
-    crate::repo::ensure_authority_partitions(&part_store, &authority).await?;
-    crate::repo::ensure_blob_partitions(&blob_part_store).await?;
+    crate::repo::ensure_authority_partitions(
+        &part_store,
+        &authority,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+    )
+    .await?;
+    crate::repo::ensure_blob_partitions(
+        &blob_part_store,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+    )
+    .await?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
             layout,
@@ -331,6 +366,8 @@ pub async fn test_cx_with_options(
             iroh_public_key: peer_id.to_string(),
             iroh_secret_key,
             secret_repo,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
         },
         big_repo
             .get_doc(&app_doc_id)

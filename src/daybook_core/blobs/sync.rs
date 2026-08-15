@@ -37,75 +37,6 @@ impl BlobSyncBackend {
             let (mut map, _key) = key.lock(&self.peer_addrs);
             map.insert(peer_id, addr);
         });
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Err(err) = this.reconcile_missing_local_blobs_with_peer(peer_id).await {
-                tracing::warn!(%peer_id, ?err, "error reconciling missing local blobs with peer");
-            }
-        });
-    }
-
-    pub async fn reconcile_missing_local_blobs_with_peer(&self, peer_id: PeerId) -> Res<()> {
-        let parts = vec![
-            crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
-            crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
-        ];
-        for part_id in parts {
-            let items = self.list_all_objs_in_part(part_id).await?;
-            for obj_id in items {
-                let blob_id = BlobId::new(*obj_id.as_bytes());
-                if !self.blobs_repo.has_blob_on_disk(blob_id).await?
-                    && let Err(err) = self.ensure_local_blob(peer_id, blob_id).await
-                {
-                    tracing::warn!(%peer_id, %blob_id, ?err, "failed downloading missing local blob from peer");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn list_all_objs_in_part(&self, part_id: PartId) -> Res<Vec<ObjId>> {
-        let mut objs = Vec::new();
-        let buckets_res = self
-            .part_store
-            .get_changed_buckets(big_sync_core::rpc::GetChangedBucketsRequest {
-                part_id,
-                offset: big_sync_core::BuckId::ROOT,
-                since: 0,
-                limit_hint: 1000,
-            })
-            .await?;
-        let Ok(buckets) = buckets_res else {
-            return Ok(objs);
-        };
-        let leaf_reqs: Vec<_> = buckets
-            .into_iter()
-            .map(|buck| big_sync_core::rpc::LeafBucketRequest {
-                buck_id: buck.id,
-                after: None,
-            })
-            .collect();
-        if leaf_reqs.is_empty() {
-            return Ok(objs);
-        }
-        let leaf_res = self
-            .part_store
-            .leaf_buckets(big_sync_core::rpc::LeafBucketsRequest {
-                part_id,
-                since: 0,
-                buckets: leaf_reqs,
-                seed: big_sync_core::FingerprintSeed::new(0x1234, 0x5678),
-                limit_hint: 1000,
-            })
-            .await?;
-        if let Ok(leaf_result) = leaf_res {
-            for buck in leaf_result.bucks {
-                for item in buck.1.entries {
-                    objs.push(item.obj_id);
-                }
-            }
-        }
-        Ok(objs)
     }
 
     pub fn active_peer_ids(&self) -> Vec<PeerId> {
@@ -215,7 +146,6 @@ impl SyncBackend for BlobSyncBackend {
 mod tests {
     use super::*;
 
-    use crate::blobs::NoopPartitionMembershipWriter;
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
     use big_sync::backend::contract::{
@@ -246,7 +176,6 @@ mod tests {
         let blobs_repo = BlobsRepo::new(
             temp_root.path().to_path_buf(),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
         let part_store: big_repo::SharedPartStore = Arc::new(MemoryPartStore::new());
@@ -421,14 +350,12 @@ mod tests {
         let blobs_repo_a = BlobsRepo::new(
             dir_a.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
         let blobs_repo_b = BlobsRepo::new(
             dir_b.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
@@ -495,14 +422,12 @@ mod tests {
         let blobs_repo_a = BlobsRepo::new(
             dir_a.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/user-a/device-a"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
         let blobs_repo_b = BlobsRepo::new(
             dir_b.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/user-b/device-b"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
@@ -600,7 +525,6 @@ mod tests {
             let blobs_repo = BlobsRepo::new(
                 dir.join("blobs"),
                 daybook_types::doc::UserPathBuf::from(format!("/user-{ii}/device-{ii}")),
-                Arc::new(NoopPartitionMembershipWriter),
             )
             .await?;
 

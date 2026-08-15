@@ -425,7 +425,16 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             )))
         );
 
-        let blob_part = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
+        node_a
+            .sync_repo
+            .rcx
+            .blob_part_store
+            .add_obj_to_parts(
+                crate::blobs::blob_id_from_hash(&hash.to_string()),
+                vec![blob_part],
+            )
+            .await?;
         let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
@@ -579,7 +588,16 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
             .await?;
 
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
-        let blob_part = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
+        node_a
+            .sync_repo
+            .rcx
+            .blob_part_store
+            .add_obj_to_parts(
+                crate::blobs::blob_id_from_hash(&hash.to_string()),
+                vec![blob_part],
+            )
+            .await?;
         let endpoint_id_a = node_a.sync_repo.endpoint_addr().id;
         let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
         node_b

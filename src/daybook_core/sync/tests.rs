@@ -602,20 +602,26 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
         .list_blob_refs_for_doc(&doc_id)
         .await?;
     assert_eq!(blob_refs_b.len(), 2);
-    assert!(blob_refs_b
-        .iter()
-        .any(|r| r.blob_hash == hash_1 && r.length_octets == payload_1.len() as u64));
-    assert!(blob_refs_b
-        .iter()
-        .any(|r| r.blob_hash == hash_2 && r.length_octets == payload_2.len() as u64));
+    assert!(
+        blob_refs_b
+            .iter()
+            .any(|r| r.blob_hash == hash_1 && r.length_octets == payload_1.len() as u64)
+    );
+    assert!(
+        blob_refs_b
+            .iter()
+            .any(|r| r.blob_hash == hash_2 && r.length_octets == payload_2.len() as u64)
+    );
 
     // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
-    let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, Duration::from_secs(60)).await?;
+    let bytes_1 =
+        wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, Duration::from_secs(60)).await?;
     assert_eq!(bytes_1, payload_1);
     let bytes_1_direct = node_b.blobs_repo.get_bytes(blob_id_1).await?;
     assert_eq!(bytes_1_direct, payload_1);
 
-    let bytes_2 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, Duration::from_secs(60)).await?;
+    let bytes_2 =
+        wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, Duration::from_secs(60)).await?;
     assert_eq!(bytes_2, payload_2);
     let bytes_2_direct = node_b.blobs_repo.get_bytes(blob_id_2).await?;
     assert_eq!(bytes_2_direct, payload_2);
@@ -812,14 +818,8 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         "test-device".into(),
     )
     .await?;
-    let blobs_repo = BlobsRepo::new(
-        rtx.layout.blobs_root.clone(),
-        rtx.local_user_path.clone(),
-        Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&rtx.blob_part_store),
-        )),
-    )
-    .await?;
+    let blobs_repo =
+        BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&rtx.big_repo),
         Arc::clone(&blobs_repo),
@@ -859,12 +859,13 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
-    let (doc_blobs_bridge_cancel, doc_blobs_bridge_handle) = spawn_doc_blobs_index_bridge_for_tests(
-        Arc::clone(&rtx.big_repo),
-        Arc::clone(&drawer_repo),
-        Arc::clone(&doc_blobs_index_repo),
-    )
-    .await?;
+    let (doc_blobs_bridge_cancel, doc_blobs_bridge_handle) =
+        spawn_doc_blobs_index_bridge_for_tests(
+            Arc::clone(&rtx.big_repo),
+            Arc::clone(&drawer_repo),
+            Arc::clone(&doc_blobs_index_repo),
+        )
+        .await?;
     let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rtx),
@@ -1407,7 +1408,6 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
     let blobs_repo = BlobsRepo::new(
         temp_root.path().join("blobs"),
         "/u/stress-test/dev-local".into(),
-        Arc::new(crate::blobs::NoopPartitionMembershipWriter),
     )
     .await?;
     let payload = b"delayed-blob-arrival".to_vec();

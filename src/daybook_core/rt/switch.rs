@@ -578,14 +578,21 @@ impl SwitchWorker {
         match event {
             SubEvent::Added(_) | SubEvent::Changed(_) => {
                 // FIXME: Added and Changed carry heads payloads
-                let Some((_, new_heads)) = self
+                let Some(handle) = self
                     .rt
                     .drawer
-                    .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
+                    .get_handle_by_branch_doc_id(branch_doc_id.parse()?)
                     .await?
                 else {
                     return Ok(None);
                 };
+                let new_heads = ChangeHashSet(
+                    handle
+                        .with_document_read(|doc| doc.get_heads())
+                        .await
+                        .into_iter()
+                        .collect(),
+                );
                 let prev_heads = next_state.last_heads.clone();
                 if next_state.present && prev_heads.as_ref() == Some(&new_heads) {
                     return Ok(Some((branch_doc_id, next_state)));
@@ -598,12 +605,13 @@ impl SwitchWorker {
                         Some(&new_heads),
                     )
                     .await?;
-                let entry = self
+                let mut entry = self
                     .rt
                     .drawer
                     .get_doc_branches(&doc_id)
                     .await?
                     .ok_or_else(|| ferr!("missing drawer branches for {}", doc_id))?;
+                entry.branches.insert("main".into(), new_heads.clone());
                 let evt = if !next_state.present {
                     DrawerEvent::DocAdded {
                         id: doc_id.clone(),
@@ -684,7 +692,10 @@ impl SwitchWorker {
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
-                    let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta_raw.clone())? {
+                    let dmeta = match WellKnownFacet::from_json(
+                        dmeta_raw.clone(),
+                        WellKnownFacetTag::Dmeta,
+                    )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
                         other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
                     };
@@ -723,7 +734,10 @@ impl SwitchWorker {
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
-                    let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta_raw.clone())? {
+                    let dmeta = match WellKnownFacet::from_json(
+                        dmeta_raw.clone(),
+                        WellKnownFacetTag::Dmeta,
+                    )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
                         other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
                     };
@@ -752,9 +766,21 @@ impl SwitchWorker {
         let mut added: Vec<FacetKey> = new_keys.difference(&old_keys).cloned().collect();
         let mut removed: Vec<FacetKey> = old_keys.difference(&new_keys).cloned().collect();
         let mut changed = Vec::new();
-        if prev_heads.is_some() && next_heads.is_some() {
+        if let (Some(prev), Some(next)) = (prev_heads, next_heads) {
             for key in old_keys.intersection(&new_keys) {
                 if old_updated_at.get(key) != new_updated_at.get(key) {
+                    changed.push(key.clone());
+                } else if let (Ok(old_h), Ok(new_h)) = (
+                    self.rt
+                        .drawer
+                        .get_facet_heads_at_branch_heads(doc_id, branch_path, prev, key)
+                        .await,
+                    self.rt
+                        .drawer
+                        .get_facet_heads_at_branch_heads(doc_id, branch_path, next, key)
+                        .await,
+                ) && old_h != new_h
+                {
                     changed.push(key.clone());
                 }
             }

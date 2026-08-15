@@ -330,7 +330,7 @@ impl DrawerRepo {
         Ok(Some(heads))
     }
 
-    async fn get_handle_by_branch_doc_id(
+    pub(crate) async fn get_handle_by_branch_doc_id(
         &self,
         document_id: DocumentId,
     ) -> Res<Option<big_repo::BigDocHandle>> {

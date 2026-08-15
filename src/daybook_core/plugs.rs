@@ -878,56 +878,6 @@ impl PlugsRepo {
                             warn!(plug_id = id, "ignoring stale plug patch: entry missing at heads");
                             continue;
                         };
-                        let prev_hashes = match self
-                            .store
-                            .query_sync(|store| {
-                                store
-                                    .manifests
-                                    .get(&id)
-                                    .map(|versioned| Arc::clone(&versioned.val))
-                            })
-                            .await
-                            .map(|manifest| Self::blob_hashes_for_manifest(manifest.as_ref()))
-                            .transpose()
-                        {
-                            Ok(value) => value.unwrap_or_default(),
-                            Err(err) => {
-                                warn!(
-                                    plug_id = id,
-                                    ?err,
-                                    "failed reading previous plug blob hashes; skipping event"
-                                );
-                                continue;
-                            }
-                        };
-                        let next_hashes =
-                            match Self::blob_hashes_for_manifest(new_versioned.val.as_ref()) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    warn!(
-                                        plug_id = id,
-                                        ?err,
-                                        "failed reading next plug blob hashes; skipping event"
-                                    );
-                                    continue;
-                                }
-                            };
-                        if let Err(err) = self
-                            .publish_plug_scope_diff_for_manifest_change(
-                                &id,
-                                &prev_hashes,
-                                &next_hashes,
-                            )
-                            .await
-                        {
-                            warn!(
-                                plug_id = id,
-                                ?err,
-                                "failed publishing plug scope hash diff; skipping event"
-                            );
-                            continue;
-                        }
-
                         self.store
                             .mutate_sync(|store| {
                                 store.manifests.insert(id.clone(), new_versioned);
@@ -941,49 +891,13 @@ impl PlugsRepo {
                         });
                     }
                     PlugsEvent::PlugDeleted { id, heads, origin } => {
-                        let removed_manifest = self
-                            .store
-                            .query_sync(|store| {
-                                store.manifests.get(&id).map(|value| Arc::clone(&value.val))
+                        self.store
+                            .mutate_sync(|store| {
+                                store.manifests.remove(&id);
+                                store.rebuild_indices();
                             })
-                            .await;
-                        if let Some(removed) = removed_manifest {
-                            let removed_hashes = match Self::blob_hashes_for_manifest(
-                                removed.as_ref(),
-                            ) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    warn!(
-                                        plug_id = id,
-                                        ?err,
-                                        "failed reading removed plug blob hashes; skipping event"
-                                    );
-                                    continue;
-                                }
-                            };
-                            if let Err(err) = self
-                                .publish_plug_scope_diff_for_manifest_change(
-                                    &id,
-                                    &removed_hashes,
-                                    &HashSet::new(),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    plug_id = id,
-                                    ?err,
-                                    "failed publishing removed plug scope hash diff; skipping event"
-                                );
-                                continue;
-                            }
-                            self.store
-                                .mutate_sync(|store| {
-                                    store.manifests.remove(&id);
-                                    store.rebuild_indices();
-                                })
-                                .await?;
-                            delivered_events.push(PlugsEvent::PlugDeleted { id, heads, origin });
-                        }
+                            .await?;
+                        delivered_events.push(PlugsEvent::PlugDeleted { id, heads, origin });
                     }
                     PlugsEvent::ConfigDocsChanged { heads, origin } => {
                         let Some(new_versioned) = self
@@ -1467,15 +1381,6 @@ impl PlugsRepo {
         // We use the plug's identity (@namespace/name) as the key in the manifests map
         // to simplify lookups and ensure uniqueness.
         let plug_id = manifest.id();
-        let prev_hashes = self
-            .get(&plug_id)
-            .await
-            .map(|old| Self::blob_hashes_for_manifest(old.as_ref()))
-            .transpose()?
-            .unwrap_or_default();
-        let next_hashes = Self::blob_hashes_for_manifest(&manifest)?;
-        self.publish_plug_scope_diff_for_manifest_change(&plug_id, &prev_hashes, &next_hashes)
-            .await?;
 
         let ((plug_id, is_update), hash) = self
             .store
@@ -1758,80 +1663,6 @@ impl PlugsRepo {
         tokio::fs::read(&path)
             .await
             .wrap_err_with(|| format!("error reading OCI layout blob '{}'", path.display()))
-    }
-
-    fn blob_hashes_for_manifest(manifest: &manifest::PlugManifest) -> Res<HashSet<Arc<str>>> {
-        let mut hashes = HashSet::new();
-        for bundle in manifest.wflow_bundles.values() {
-            for component_url in &bundle.component_urls {
-                if component_url.scheme() != crate::blobs::BLOB_SCHEME {
-                    continue;
-                }
-                eyre::ensure!(
-                    component_url.host_str().is_none(),
-                    "invalid blob URL host in plug manifest: {component_url}"
-                );
-                let hash = component_url.path().trim_start_matches('/');
-                eyre::ensure!(!hash.is_empty(), "empty blob hash in plug manifest URL");
-                hash.parse::<crate::blobs::BlobId>()?;
-                hashes.insert(hash.into());
-            }
-        }
-        Ok(hashes)
-    }
-
-    async fn publish_plug_scope_diff_for_manifest_change(
-        &self,
-        plug_id: &str,
-        prev_hashes: &HashSet<Arc<str>>,
-        next_hashes: &HashSet<Arc<str>>,
-    ) -> Res<()> {
-        for hash in next_hashes.difference(prev_hashes) {
-            let blob_id = hash
-                .parse::<crate::blobs::BlobId>()
-                .wrap_err("invalid blob id in plug manifest")?;
-            self.blobs
-                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, blob_id)
-                .await?;
-        }
-        for hash in prev_hashes.difference(next_hashes) {
-            if !self
-                .is_blob_hash_referenced_by_any_plug_excluding(hash, plug_id)
-                .await
-            {
-                let blob_id = hash
-                    .parse::<crate::blobs::BlobId>()
-                    .wrap_err("invalid blob id in plug manifest")?;
-                self.blobs
-                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, blob_id)
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn is_blob_hash_referenced_by_any_plug_excluding(
-        &self,
-        hash: &str,
-        excluded_plug_id: &str,
-    ) -> bool {
-        self.store
-            .query_sync(|store| {
-                store
-                    .manifests
-                    .iter()
-                    .filter(|(plug_id, _)| plug_id.as_str() != excluded_plug_id)
-                    .any(|(_, manifest)| {
-                        manifest.val.wflow_bundles.values().any(|bundle| {
-                            bundle.component_urls.iter().any(|url| {
-                                url.scheme() == crate::blobs::BLOB_SCHEME
-                                    && url.host_str().is_none()
-                                    && url.path().trim_start_matches('/') == hash
-                            })
-                        })
-                    })
-            })
-            .await
     }
 
     /// Comprehensive validation for an incoming plug.
@@ -2567,14 +2398,9 @@ mod tests {
         let doc_id = handle.document_id();
 
         let temp_dir = tempfile::tempdir()?;
-        let blobs = crate::blobs::BlobsRepo::new(
-            temp_dir.path().to_path_buf(),
-            "/test-user".into(),
-            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&big_sync_host.store),
-            )),
-        )
-        .await?;
+        let blobs =
+            crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf(), "/test-user".into())
+                .await?;
 
         let (repo, _repo_stop) =
             PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
@@ -3523,60 +3349,6 @@ mod tests {
         let blob_content = tokio::fs::read(&blob_path).await?;
         assert_eq!(blob_content, wasm_content);
 
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_blob_scope_partition_tracks_add_and_remove() -> Res<()> {
-        let (_acx, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"scope-membership-bytes").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        let mut plug = mock_plug("scope-membership");
-        plug.version = "0.1.0".parse().unwrap();
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-        repo.add(plug.clone()).await?;
-
-        let saved = repo
-            .get("@test/scope-membership")
-            .await
-            .ok_or_eyre("expected saved plug")?;
-        let hash = saved
-            .wflow_bundles
-            .get("bundle1")
-            .and_then(|bundle| bundle.component_urls.first())
-            .map(|url| url.path().trim_start_matches('/').to_string())
-            .ok_or_eyre("expected converted blob URL in bundle1")?;
-        assert_eq!(part_store.member_count(partition_id).await?, 1);
-        assert_eq!(
-            part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
-                .await?,
-            vec![partition_id]
-        );
-
-        let mut plug_update = mock_plug("scope-membership");
-        plug_update.version = "0.2.0".parse().unwrap();
-        repo.add(plug_update).await?;
-
-        assert_eq!(part_store.member_count(partition_id).await?, 0);
-        assert_eq!(
-            part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
-                .await?,
-            Vec::<PartId>::new()
-        );
         Ok(())
     }
 }

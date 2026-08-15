@@ -368,14 +368,14 @@ impl IrohSyncRepo {
     }
 }
 
-#[inline]
-pub fn is_blob_part(part_id: PartId) -> bool {
-    let docs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-    let plugs_blob = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
-    part_id == docs_blob || part_id == plugs_blob
-}
-
 impl IrohSyncRepo {
+    #[inline]
+    pub fn is_blob_part(&self, part_id: PartId) -> bool {
+        let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);
+        let docs_blob = crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id);
+        part_id == core_blob || part_id == docs_blob
+    }
+
     fn peer_partition_ids(
         &self,
         _peer_key: &str,
@@ -395,15 +395,19 @@ impl IrohSyncRepo {
                 self.authority.default_drawer_part_id(),
                 Arc::clone(&repo_backend_id),
             ),
+            (
+                self.authority.blob_inventories_part_id(),
+                Arc::clone(&repo_backend_id),
+            ),
         ]);
         if include_blob_parts {
             let blob_backend_id = BLOBS_BACKEND_ID.into();
             parts.insert(
-                crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
+                crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id),
                 Arc::clone(&blob_backend_id),
             );
             parts.insert(
-                crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
+                crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id),
                 blob_backend_id,
             );
         }
@@ -1046,7 +1050,7 @@ impl IrohSyncRepo {
         }
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
-            .partition(|part| is_blob_part(**part));
+            .partition(|part| self.is_blob_part(**part));
         tokio::time::timeout(timeout, async {
             let doc_wait = self
                 .big_sync_worker
@@ -1075,7 +1079,7 @@ impl IrohSyncRepo {
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
             .copied()
-            .partition(|part| is_blob_part(*part));
+            .partition(|part| self.is_blob_part(*part));
         let targets = [
             big_sync::test_support::NetworkRestTarget {
                 worker: self.big_sync_worker.clone(),

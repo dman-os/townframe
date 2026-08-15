@@ -188,4 +188,3 @@ fn test_doc_with_blob_pin() -> Res<()> {
     assert_eq!(back.facets, root_doc.facets);
     Ok(())
 }
-
