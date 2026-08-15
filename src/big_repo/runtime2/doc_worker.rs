@@ -789,8 +789,11 @@ impl<F: FutureForm> DocWorker2<F> {
             })
             .filter(|frontier: &BTreeSet<CommitId>| !frontier.is_empty())
             .collect();
+        let mut frontier_to_checkpoint: HashMap<BTreeSet<CommitId>, CommitId> = HashMap::new();
         for frontier in distinct_frontiers {
-            self.ensure_frontier_checkpointed(&frontier).await?;
+            if let Some(checkpoint_head) = self.ensure_frontier_checkpointed(&frontier).await? {
+                frontier_to_checkpoint.insert(frontier, checkpoint_head);
+            }
         }
         for (_head, parents, _blob) in &mut commits {
             let external: BTreeSet<_> = parents
@@ -798,13 +801,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 .filter(|parent| !batch_ids.contains(parent))
                 .copied()
                 .collect();
-            if let Some(checkpoint_head) = self
-                .causal_checkpoints
-                .iter()
-                .filter(|(_, checkpoint)| checkpoint.covered_frontier == external)
-                .map(|(head, _)| *head)
-                .min()
-            {
+            if let Some(&checkpoint_head) = frontier_to_checkpoint.get(&external) {
                 parents.retain(|parent| batch_ids.contains(parent));
                 parents.insert(checkpoint_head);
             }
@@ -1255,9 +1252,9 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn ensure_frontier_checkpointed(
         &mut self,
         external_parents: &BTreeSet<CommitId>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Option<CommitId>> {
         let Some(current_epoch) = self.io.current_causal_epoch(self.sed_id).await? else {
-            return Ok(());
+            return Ok(None);
         };
         let mut spans_boundary = false;
         for parent in external_parents {
@@ -1269,12 +1266,12 @@ impl<F: FutureForm> DocWorker2<F> {
             }
         }
         if !spans_boundary {
-            return Ok(());
+            return Ok(None);
         }
         let checkpoint = CausalCheckpoint::new(current_epoch, external_parents.clone());
         let head = causal_checkpoint_id(&checkpoint);
         if self.causal_checkpoints.contains_key(&head) {
-            return Ok(());
+            return Ok(Some(head));
         }
         if let Some((head, checkpoint, _heads)) = self
             .io
@@ -1282,8 +1279,9 @@ impl<F: FutureForm> DocWorker2<F> {
             .await?
         {
             self.causal_checkpoints.insert(head, checkpoint);
+            return Ok(Some(head));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Apply decrypted plaintexts into the live bundle under the doc lock.

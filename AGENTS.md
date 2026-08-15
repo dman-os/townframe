@@ -133,6 +133,7 @@ Tools like snapshot tests, TDD and the macros for TDD found in the repo can help
 - Prefer in-crate test modules instead:
   - unit tests inline in the relevant module
   - cross-module end-to-end style tests in a crate-local `e2e` module (for example `src/my_crate/e2e.rs` with submodules in `src/my_crate/e2e/`).
+- Don't bother with tuning or adding internal timeouts to tests unless the test is explicitly interested in latency specifics. Shared CI runners on Github CI makes it difficult to estimate what a good time out is. Rely instead on using nextest which puts a hard timeout on every test.
 
 ## Pushback and alignment.
 
@@ -141,7 +142,7 @@ Don't hack and boil the ocean to a task completion, you'll be asked to do it aga
 Better to have good alignment with the operator as opposed to spending a million iterations on the same thing.
 
 Try to be intelligent about the user's intention. 
-If it looks or inelegant what you're doing, you're very likely misalinged and wasting effort.
+If it looks hacky or inelegant what you're doing, you're very likely misaligned and wasting effort.
 
 Make sure to get more confirmations if unsure.
 

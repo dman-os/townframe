@@ -56,6 +56,8 @@ const TREE_CACHE_METADATA_CAPACITY: usize = 4096;
 struct TreeCache {
     lru: KeyedLruPool<SedimentreeId>,
     entries: HashMap<SedimentreeId, MinimizedSedimentree>,
+    epochs: HashMap<SedimentreeId, u64>,
+    next_epoch: u64,
 }
 
 impl TreeCache {
@@ -63,6 +65,8 @@ impl TreeCache {
         Self {
             lru: KeyedLruPool::new(capacity),
             entries: HashMap::new(),
+            epochs: HashMap::new(),
+            next_epoch: 1,
         }
     }
 
@@ -72,11 +76,26 @@ impl TreeCache {
         self.entries.get(id)
     }
 
+    /// Advance and return the installation epoch for `id`.
+    fn bump_epoch(&mut self, id: SedimentreeId) -> u64 {
+        let epoch = self.next_epoch;
+        self.next_epoch = self.next_epoch.wrapping_add(1);
+        self.epochs.insert(id, epoch);
+        epoch
+    }
+
+    /// The current installation epoch for `id`, if present.
+    fn current_epoch(&self, id: &SedimentreeId) -> Option<u64> {
+        self.epochs.get(id).copied()
+    }
+
     /// Insert an entry without touching the LRU. The caller derives heads
     /// first, then calls [`update_cost`](Self::update_cost) so eviction can
     /// never remove the entry before heads are captured.
-    fn insert_no_evict(&mut self, id: SedimentreeId, tree: MinimizedSedimentree) {
+    fn insert_no_evict(&mut self, id: SedimentreeId, tree: MinimizedSedimentree) -> u64 {
+        let epoch = self.bump_epoch(id);
         self.entries.insert(id, tree);
+        epoch
     }
 
     /// Recompute an entry's LRU cost from its (post-minimization) metadata
@@ -92,6 +111,7 @@ impl TreeCache {
         let pruned = self.lru.insert_key(id, cost);
         for key in pruned {
             self.entries.remove(&key);
+            self.epochs.remove(&key);
         }
     }
 
@@ -100,22 +120,34 @@ impl TreeCache {
     fn remove(&mut self, id: &SedimentreeId) {
         self.lru.remove_key(id);
         self.entries.remove(id);
+        self.epochs.remove(id);
+    }
+
+    /// Remove an entry only if its installation epoch matches `epoch`.
+    fn remove_if_epoch(&mut self, id: &SedimentreeId, epoch: u64) {
+        if self.epochs.get(id).copied() == Some(epoch) {
+            self.remove(id);
+        }
     }
 
     /// Apply a loose commit to the cached tree. No LRU update — the caller
     /// derives heads and calls [`update_cost`](Self::update_cost) after.
-    fn apply_commit(&mut self, id: &SedimentreeId, commit: LooseCommit) {
+    fn apply_commit(&mut self, id: &SedimentreeId, commit: LooseCommit) -> u64 {
+        let epoch = self.bump_epoch(*id);
         if let Some(tree) = self.entries.get_mut(id) {
             tree.add_commit(commit);
         }
+        epoch
     }
 
     /// Apply a fragment to the cached tree. No LRU update — the caller
     /// derives heads and calls [`update_cost`](Self::update_cost) after.
-    fn apply_fragment(&mut self, id: &SedimentreeId, fragment: Fragment) {
+    fn apply_fragment(&mut self, id: &SedimentreeId, fragment: Fragment) -> u64 {
+        let epoch = self.bump_epoch(*id);
         if let Some(tree) = self.entries.get_mut(id) {
             tree.add_fragment(fragment);
         }
+        epoch
     }
 
     /// Apply a whole batch to the cached tree. No LRU update — the caller
@@ -125,7 +157,8 @@ impl TreeCache {
         id: &SedimentreeId,
         commits: Vec<LooseCommit>,
         fragments: Vec<Fragment>,
-    ) {
+    ) -> u64 {
+        let epoch = self.bump_epoch(*id);
         if let Some(tree) = self.entries.get_mut(id) {
             for commit in commits {
                 tree.add_commit(commit);
@@ -134,6 +167,7 @@ impl TreeCache {
                 tree.add_fragment(fragment);
             }
         }
+        epoch
     }
 
     /// Metadata weight of a tree: one per loose commit or fragment, plus one
@@ -150,17 +184,23 @@ impl TreeCache {
 /// commits. This covers errors, commit failures, and dropped futures
 /// (cancellation) uniformly: a speculative entry must never survive a
 /// transaction that did not commit.
+///
+/// Guard eviction is epoch-aware: if a subsequent transaction installs a
+/// fresh cache entry after this transaction released the SQLite writer lock,
+/// dropping this guard will not evict that newer entry.
 struct TreeCacheGuard<'a> {
     cache: &'a std::sync::Mutex<TreeCache>,
     id: SedimentreeId,
+    epoch: u64,
     armed: bool,
 }
 
 impl<'a> TreeCacheGuard<'a> {
-    fn arm(cache: &'a std::sync::Mutex<TreeCache>, id: SedimentreeId) -> Self {
+    fn arm(cache: &'a std::sync::Mutex<TreeCache>, id: SedimentreeId, epoch: u64) -> Self {
         Self {
             cache,
             id,
+            epoch,
             armed: true,
         }
     }
@@ -176,7 +216,10 @@ impl Drop for TreeCacheGuard<'_> {
         if self.armed {
             // A poisoned mutex is an invariant break (a thread panicked
             // while holding it) — never swallow it.
-            self.cache.lock().expect(ERROR_MUTEX).remove(&self.id);
+            self.cache
+                .lock()
+                .expect(ERROR_MUTEX)
+                .remove_if_epoch(&self.id, self.epoch);
         }
     }
 }
@@ -2864,7 +2907,7 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         mutation: TreeStorageMutation,
     ) -> Result<(Vec<SubEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
-        let guard = match &mutation {
+        let mut guard = match &mutation {
             TreeStorageMutation::DeleteCommit(_)
             | TreeStorageMutation::DeleteFragment(_)
             | TreeStorageMutation::DeleteAllCommits
@@ -2873,38 +2916,43 @@ impl SqliteBigRepoStore {
                 // have discarded metadata that becomes relevant after
                 // removal — and rebuild from the remaining durable rows.
                 self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
-                TreeCacheGuard::arm(&self.tree_cache, id)
+                TreeCacheGuard::arm(&self.tree_cache, id, 0)
             }
             TreeStorageMutation::InsertCommit(_)
             | TreeStorageMutation::InsertFragment(_)
             | TreeStorageMutation::InsertBatch { .. } => {
                 // Inserts: adopt the cached entry or hydrate it from the
                 // transaction's view of durable storage.
-                let present = self
-                    .tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .get(&id)
-                    .is_some();
-                if !present {
-                    let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                    self.tree_cache
-                        .lock()
-                        .expect(ERROR_MUTEX)
-                        .insert_no_evict(id, tree);
-                }
-                TreeCacheGuard::arm(&self.tree_cache, id)
+                let maybe_epoch = {
+                    let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
+                    if cache.get(&id).is_some() {
+                        Some(cache.current_epoch(&id).unwrap_or(0))
+                    } else {
+                        None
+                    }
+                };
+                let epoch = match maybe_epoch {
+                    Some(epoch) => epoch,
+                    None => {
+                        let tree = self.hydrate_tree_in_tx(tx, id).await?;
+                        self.tree_cache
+                            .lock()
+                            .expect(ERROR_MUTEX)
+                            .insert_no_evict(id, tree)
+                    }
+                };
+                TreeCacheGuard::arm(&self.tree_cache, id, epoch)
             }
         };
 
-        match mutation {
+        guard.epoch = match mutation {
             TreeStorageMutation::InsertCommit(verified) => {
                 let payload = verified.payload().clone();
                 self.insert_commit_rows(tx, id, verified).await?;
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .apply_commit(&id, payload);
+                    .apply_commit(&id, payload)
             }
             TreeStorageMutation::InsertFragment(verified) => {
                 let payload = verified.payload().clone();
@@ -2912,7 +2960,7 @@ impl SqliteBigRepoStore {
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .apply_fragment(&id, payload);
+                    .apply_fragment(&id, payload)
             }
             TreeStorageMutation::InsertBatch { commits, fragments } => {
                 let commit_payloads: Vec<LooseCommit> = commits
@@ -2933,7 +2981,7 @@ impl SqliteBigRepoStore {
                     &id,
                     commit_payloads,
                     fragment_payloads,
-                );
+                )
             }
             TreeStorageMutation::DeleteCommit(commit_id) => {
                 self.delete_commit_rows(tx, id, commit_id).await?;
@@ -2941,7 +2989,7 @@ impl SqliteBigRepoStore {
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree);
+                    .insert_no_evict(id, tree)
             }
             TreeStorageMutation::DeleteFragment(head_id) => {
                 self.delete_fragment_rows(tx, id, head_id).await?;
@@ -2949,7 +2997,7 @@ impl SqliteBigRepoStore {
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree);
+                    .insert_no_evict(id, tree)
             }
             TreeStorageMutation::DeleteAllCommits => {
                 self.delete_all_commit_rows(tx, id).await?;
@@ -2957,7 +3005,7 @@ impl SqliteBigRepoStore {
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree);
+                    .insert_no_evict(id, tree)
             }
             TreeStorageMutation::DeleteAllFragments => {
                 self.delete_all_fragment_rows(tx, id).await?;
@@ -2965,9 +3013,9 @@ impl SqliteBigRepoStore {
                 self.tree_cache
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree);
+                    .insert_no_evict(id, tree)
             }
-        }
+        };
 
         // Durable state and the resident projection must be the same minimal
         // tree. Keeping covered rows in SQLite while hiding them in the cache
@@ -3151,6 +3199,46 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
+    async fn commit_meta_rows(
+        &self,
+        id: SedimentreeId,
+    ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
+            "SELECT signed FROM big_repo_subduction_commits
+             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(id))
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let signed: Vec<u8> = row.try_get("signed")?;
+                Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
+            })
+            .collect()
+    }
+
+    async fn fragment_meta_rows(
+        &self,
+        id: SedimentreeId,
+    ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
+            "SELECT signed FROM big_repo_subduction_fragments
+             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
+        )
+        .bind(self.scope_id)
+        .bind(Self::tree_blob(id))
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let signed: Vec<u8> = row.try_get("signed")?;
+                Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
+            })
+            .collect()
+    }
+
     /// Durable sedimentree frontier, recomputed from the authoritative SQLite
     /// rows (metadata only, no blobs). The projection cache is write-only and
     /// never consulted on read paths.
@@ -3158,8 +3246,8 @@ impl SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> Result<Vec<CommitId>, SqliteBigRepoStoreError> {
-        let commits = self.load_loose_commit_metas(id).await?;
-        let fragments = self.load_fragment_metas(id).await?;
+        let commits = self.commit_meta_rows(id).await?;
+        let fragments = self.fragment_meta_rows(id).await?;
         if commits.is_empty() && fragments.is_empty() {
             return Ok(Vec::new());
         }
@@ -3314,13 +3402,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Vec<LooseCommit>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.commit_rows(id, None)
-                .await?
-                .into_iter()
-                .map(|(signed, _)| Ok(signed.try_decode_trusted_payload()?))
-                .collect()
-        })
+        Sendable::from_future(async move { self.commit_meta_rows(id).await })
     }
 
     fn load_loose_commit(
@@ -3431,13 +3513,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Vec<Fragment>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.fragment_rows(id, None)
-                .await?
-                .into_iter()
-                .map(|(signed, _)| Ok(signed.try_decode_trusted_payload()?))
-                .collect()
-        })
+        Sendable::from_future(async move { self.fragment_meta_rows(id).await })
     }
 
     fn delete_fragment(
@@ -3481,7 +3557,13 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             self.save_tree(&mut tx, id).await?;
             let (events, guard) = if count == 0 {
-                (Vec::new(), TreeCacheGuard::arm(&self.tree_cache, id))
+                let epoch = self
+                    .tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .current_epoch(&id)
+                    .unwrap_or(0);
+                (Vec::new(), TreeCacheGuard::arm(&self.tree_cache, id, epoch))
             } else {
                 self.mutate_tree_in_tx(
                     &mut tx,
@@ -5544,6 +5626,80 @@ mod tests {
         );
         assert_eq!(store.keyhive_group_part_cursor().await?, 0);
         assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entry() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store = SqliteBigRepoStore::new(sql, "guard-stale-drop", BuckId::MAX_LEVEL).await?;
+        let signer = MemorySigner::generate();
+        let tree_id = SedimentreeId::new([42; 32]);
+        let commit_a = make_commit(&signer, tree_id, 1).await;
+        let commit_b = make_commit(&signer, tree_id, 2).await;
+        let commit_c = make_commit(&signer, tree_id, 3).await;
+
+        // Transaction 1: speculatively mutates the tree but is abandoned (simulating tx.commit failure or cancellation).
+        let guard1 = {
+            let mut tx1 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            store.save_tree(&mut tx1, tree_id).await?;
+            let (_events1, guard1) = store
+                .mutate_tree_in_tx(
+                    &mut tx1,
+                    tree_id,
+                    TreeStorageMutation::InsertCommit(commit_a),
+                )
+                .await?;
+            // Transaction 1 releases the SQLite writer lock without disarming guard1.
+            drop(tx1);
+            guard1
+        };
+
+        // Transaction 2: starts immediately on another thread, mutates the same tree, and commits.
+        {
+            let mut tx2 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            store.save_tree(&mut tx2, tree_id).await?;
+            let (_events2, guard2) = store
+                .mutate_tree_in_tx(
+                    &mut tx2,
+                    tree_id,
+                    TreeStorageMutation::InsertCommit(commit_b),
+                )
+                .await?;
+            tx2.commit().await?;
+            guard2.disarm();
+        }
+
+        // Verify the tree entry is present in cache for transaction 2.
+        assert!(
+            store.tree_cache.lock().unwrap().get(&tree_id).is_some(),
+            "tree cache should contain committed entry from transaction 2"
+        );
+
+        // Drop the stale guard from transaction 1.
+        drop(guard1);
+
+        // Epoch-awareness must ensure the newer entry installed by transaction 2 was NOT evicted by guard1's drop.
+        assert!(
+            store.tree_cache.lock().unwrap().get(&tree_id).is_some(),
+            "stale guard drop must not evict newer cache entry installed by transaction 2"
+        );
+
+        // Subsequent mutation should succeed cleanly against the active cached entry.
+        {
+            let mut tx3 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            store.save_tree(&mut tx3, tree_id).await?;
+            let (_events3, guard3) = store
+                .mutate_tree_in_tx(
+                    &mut tx3,
+                    tree_id,
+                    TreeStorageMutation::InsertCommit(commit_c),
+                )
+                .await?;
+            tx3.commit().await?;
+            guard3.disarm();
+        }
+
         Ok(())
     }
 }

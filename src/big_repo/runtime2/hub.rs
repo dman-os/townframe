@@ -2250,7 +2250,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     fn handle_release_doc_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             if entry.generation == generation {
-                entry.local_handles = entry.local_handles.saturating_sub(1);
+                entry.local_handles = entry
+                    .local_handles
+                    .checked_sub(1)
+                    .expect("doc lease refcount underflow for active worker incarnation");
             } else {
                 debug!(
                     %doc_id,
@@ -2270,7 +2273,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     fn handle_release_internal_lease(&mut self, doc_id: DocumentId, generation: u64) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             if entry.generation == generation {
-                entry.internal_leases = entry.internal_leases.saturating_sub(1);
+                entry.internal_leases = entry
+                    .internal_leases
+                    .checked_sub(1)
+                    .expect("internal lease refcount underflow for active worker incarnation");
             } else {
                 debug!(
                     %doc_id,

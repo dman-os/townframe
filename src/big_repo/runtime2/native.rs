@@ -384,29 +384,21 @@ where
         sed_id: SedimentreeId,
     ) -> eyre::Result<Vec<CommitId>> {
         let loose_commits =
-            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit_metas(
                 storage, sed_id,
             )
             .await
             .wrap_err("failed loading loose commits for heads")?;
-        let fragments = <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
-            storage, sed_id,
-        )
-        .await
-        .wrap_err("failed loading fragments for heads")?;
+        let fragments =
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment_metas(
+                storage, sed_id,
+            )
+            .await
+            .wrap_err("failed loading fragments for heads")?;
         if loose_commits.is_empty() && fragments.is_empty() {
             return Ok(Vec::new());
         }
-        let tree = MinimizedSedimentree::new(Sedimentree::new(
-            fragments
-                .iter()
-                .map(|frag| frag.payload().clone())
-                .collect(),
-            loose_commits
-                .iter()
-                .map(|commit| commit.payload().clone())
-                .collect(),
-        ));
+        let tree = MinimizedSedimentree::new(Sedimentree::new(fragments, loose_commits));
         Ok(sedimentree_heads_payload(&tree)
             .iter()
             .map(|head| CommitId::new(head.0))
@@ -747,14 +739,14 @@ where
 
             // Hydrate from storage: load loose commits + fragments, build tree.
             let loose_commits =
-                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit_metas(
                     &self.storage,
                     sed_id,
                 )
                 .await
                 .wrap_err("failed loading loose commits for heads")?;
             let fragments =
-                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment_metas(
                     &self.storage,
                     sed_id,
                 )
@@ -775,16 +767,9 @@ where
                 return Ok(Vec::new());
             }
 
-            let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments
-                    .iter()
-                    .map(|frag| frag.payload().clone())
-                    .collect(),
-                loose_commits
-                    .iter()
-                    .map(|commit| commit.payload().clone())
-                    .collect(),
-            ));
+            let durable_loose = loose_commits.len();
+            let durable_fragments = fragments.len();
+            let tree = MinimizedSedimentree::new(Sedimentree::new(fragments, loose_commits));
             let tree = self.sedimentrees.get_or_insert_with(sed_id, || tree).await;
             let heads = sedimentree_heads_payload(&tree);
             if let Some((cached_loose, cached_fragments)) = empty_cached_counts {
@@ -792,8 +777,8 @@ where
                     ?sed_id,
                     cached_loose,
                     cached_fragments,
-                    durable_loose = loose_commits.len(),
-                    durable_fragments = fragments.len(),
+                    durable_loose,
+                    durable_fragments,
                     durable_heads = heads.len(),
                     "cached Sedimentree reported empty heads; compared durable state"
                 );
@@ -830,14 +815,14 @@ where
 
             // Load from storage.
             let loose_commits =
-                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit_metas(
                     &self.storage,
                     sed_id,
                 )
                 .await
                 .wrap_err("failed loading loose commits for hydrate")?;
             let fragments =
-                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment_metas(
                     &self.storage,
                     sed_id,
                 )
@@ -848,16 +833,7 @@ where
                 return Ok(None);
             }
 
-            let tree = MinimizedSedimentree::new(Sedimentree::new(
-                fragments
-                    .iter()
-                    .map(|frag| frag.payload().clone())
-                    .collect(),
-                loose_commits
-                    .iter()
-                    .map(|commit| commit.payload().clone())
-                    .collect(),
-            ));
+            let tree = MinimizedSedimentree::new(Sedimentree::new(fragments, loose_commits));
 
             // Keep the hydrated tree resident: materialization retries can be
             // frequent while Keyhive operations arrive, and the durable store
