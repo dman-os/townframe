@@ -11,7 +11,7 @@ use crate::progress::ProgressRepo;
 use crate::repo::{RepoCtx, RepoOpenOptions};
 use crate::repos::{Repo, SubscribeOpts};
 use daybook_types::doc::{
-    AddDocArgs, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
+    AddDocArgs, BlobPin, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,7 @@ struct SyncTestNode {
     ctx: Arc<RepoCtx>,
     blobs_repo: Arc<BlobsRepo>,
     drawer: Arc<DrawerRepo>,
+    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Arc<ProgressRepo>,
     progress_stop: crate::repos::RepoStopToken,
     drawer_stop: crate::repos::RepoStopToken,
@@ -40,6 +41,7 @@ impl SyncTestNode {
             ctx,
             blobs_repo: _blobs_repo,
             drawer: _drawer,
+            doc_blobs_index_repo: _doc_blobs_index_repo,
             progress_repo: _progress_repo,
             progress_stop,
             drawer_stop,
@@ -498,6 +500,175 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+
+    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_b = open_sync_node(&repo_b_path).await?;
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
+
+    let payload_1 = b"blob-pin-sync-payload-1".to_vec();
+    let payload_2 = b"blob-pin-sync-payload-2".to_vec();
+    let blob_id_1 = node_a
+        .blobs_repo
+        .put(&payload_1, crate::blobs::BlobUseHints::Docs)
+        .await?;
+    let blob_id_2 = node_a
+        .blobs_repo
+        .put(&payload_2, crate::blobs::BlobUseHints::Docs)
+        .await?;
+    let hash_1 = blob_id_1.to_string();
+    let hash_2 = blob_id_2.to_string();
+
+    let key_pin_1 = FacetKey {
+        tag: WellKnownFacetTag::BlobPin.into(),
+        id: hash_1.clone(),
+    };
+    let key_pin_2 = FacetKey {
+        tag: WellKnownFacetTag::BlobPin.into(),
+        id: hash_2.clone(),
+    };
+
+    let doc_id = node_a
+        .drawer
+        .add(AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: [
+                (
+                    key_pin_1.clone(),
+                    FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                        length_octets: payload_1.len() as u64,
+                    })),
+                ),
+                (
+                    key_pin_2.clone(),
+                    FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                        length_octets: payload_2.len() as u64,
+                    })),
+                ),
+            ]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        })
+        .await?;
+
+    wait_for_drawer_doc_parity(
+        &node_a,
+        &node_b,
+        &doc_id,
+        daybook_types::doc::BranchPath::new("main"),
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    // 1. Verify doc with BlobPin facets exists in node_b.drawer
+    let doc_b = node_b
+        .drawer
+        .get_doc_with_facets_at_branch(&doc_id, daybook_types::doc::BranchPath::new("main"), None)
+        .await?
+        .expect("doc should exist on node_b");
+    assert!(doc_b.facets.contains_key(&key_pin_1));
+    assert!(doc_b.facets.contains_key(&key_pin_2));
+
+    // 2. Verify node_b's DocBlobsIndexRepo has indexed the hashes in SQLite doc_blob_refs
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let hashes = node_b
+            .doc_blobs_index_repo
+            .list_hashes_for_doc(&doc_id)
+            .await?;
+        if hashes.contains(&hash_1) && hashes.contains(&hash_2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let hashes_b = node_b
+        .doc_blobs_index_repo
+        .list_hashes_for_doc(&doc_id)
+        .await?;
+    assert!(hashes_b.contains(&hash_1));
+    assert!(hashes_b.contains(&hash_2));
+
+    let blob_refs_b = node_b
+        .doc_blobs_index_repo
+        .list_blob_refs_for_doc(&doc_id)
+        .await?;
+    assert_eq!(blob_refs_b.len(), 2);
+    assert!(blob_refs_b
+        .iter()
+        .any(|r| r.blob_hash == hash_1 && r.length_octets == payload_1.len() as u64));
+    assert!(blob_refs_b
+        .iter()
+        .any(|r| r.blob_hash == hash_2 && r.length_octets == payload_2.len() as u64));
+
+    // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
+    let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, Duration::from_secs(60)).await?;
+    assert_eq!(bytes_1, payload_1);
+    let bytes_1_direct = node_b.blobs_repo.get_bytes(blob_id_1).await?;
+    assert_eq!(bytes_1_direct, payload_1);
+
+    let bytes_2 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, Duration::from_secs(60)).await?;
+    assert_eq!(bytes_2, payload_2);
+    let bytes_2_direct = node_b.blobs_repo.get_bytes(blob_id_2).await?;
+    assert_eq!(bytes_2_direct, payload_2);
+
+    // 4. Remove a BlobPin facet on node_a, verify propagation to node_b
+    node_a
+        .drawer
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: default(),
+                facets_remove: vec![key_pin_2.clone()],
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+        )
+        .await?;
+
+    wait_for_doc_head_parity(
+        &node_a,
+        &node_b,
+        &doc_id,
+        &daybook_types::doc::BranchPathBuf::from("main"),
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        let hashes = node_b
+            .doc_blobs_index_repo
+            .list_hashes_for_doc(&doc_id)
+            .await?;
+        if hashes.len() == 1 && hashes.contains(&hash_1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let hashes_after = node_b
+        .doc_blobs_index_repo
+        .list_hashes_for_doc(&doc_id)
+        .await?;
+    assert_eq!(hashes_after, vec![hash_1.clone()]);
+
+    node_b.stop().await?;
+    node_a.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let temp_root = tempfile::tempdir()?;
@@ -689,9 +860,11 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     )
     .await?;
     let (doc_blobs_bridge_cancel, doc_blobs_bridge_handle) = spawn_doc_blobs_index_bridge_for_tests(
+        Arc::clone(&rtx.big_repo),
         Arc::clone(&drawer_repo),
         Arc::clone(&doc_blobs_index_repo),
-    );
+    )
+    .await?;
     let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rtx),
@@ -706,6 +879,7 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         ctx: rtx,
         blobs_repo,
         drawer: drawer_repo,
+        doc_blobs_index_repo,
         progress_repo,
         progress_stop,
         drawer_stop,
@@ -721,18 +895,58 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     })
 }
 
-fn spawn_doc_blobs_index_bridge_for_tests(
+async fn spawn_doc_blobs_index_bridge_for_tests(
+    big_repo: big_repo::SharedBigRepo,
     drawer_repo: Arc<DrawerRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
-) -> (CancellationToken, JoinHandle<()>) {
+) -> Res<(CancellationToken, JoinHandle<()>)> {
     let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(16_384));
+    let (_ticket, mut big_repo_rx) = big_repo
+        .subscribe_change_listener(big_repo::BigRepoChangeFilter {
+            doc_id: None,
+            path: vec!["facets".into()],
+            origin: None,
+        })
+        .await?;
     let cancel = CancellationToken::new();
     let cancel_for_task = cancel.clone();
     let handle = tokio::spawn(async move {
+        let _ticket = _ticket;
         loop {
             tokio::select! {
                 biased;
                 _ = cancel_for_task.cancelled() => break,
+                Some(notifs) = big_repo_rx.recv() => {
+                    for notif in notifs {
+                        let big_repo::BigRepoChangeNotification::DocChanged {
+                            doc_id: branch_doc_id,
+                            heads,
+                            ..
+                        } = notif
+                        else {
+                            continue;
+                        };
+                        if let Ok((_, ids)) = drawer_repo.list_just_ids().await {
+                            for doc_id in ids {
+                                if let Ok(Some(entry)) = drawer_repo.get_entry(&doc_id).await {
+                                    for (branch_name, branch_ref) in entry.branches {
+                                        if branch_ref.branch_doc_id == branch_doc_id {
+                                            doc_blobs_index_repo
+                                                .enqueue_upsert(
+                                                    doc_id.clone(),
+                                                    daybook_types::doc::BranchPathBuf::from(
+                                                        branch_name.as_str(),
+                                                    ),
+                                                    ChangeHashSet(Arc::clone(&heads)),
+                                                )
+                                                .unwrap_or_log();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 evt = drawer_listener.recv_async() => {
                     match evt {
                         Ok(evt) => match evt.as_ref() {
@@ -740,17 +954,43 @@ fn spawn_doc_blobs_index_bridge_for_tests(
                                 doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
                             }
                             crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                for (branch_name, heads) in &entry.branches {
-                                    doc_blobs_index_repo
-                                        .enqueue_upsert(
-                                            id.clone(),
-                                            daybook_types::doc::BranchPathBuf::from(
-                                                branch_name.as_str(),
-                                            ),
-                                            heads.clone(),
-                                        )
-                                        .unwrap_or_log();
-                                }
+                                let id = id.clone();
+                                let entry_branches = entry.branches.clone();
+                                let drawer_repo = Arc::clone(&drawer_repo);
+                                let doc_blobs_index_repo = Arc::clone(&doc_blobs_index_repo);
+                                tokio::spawn(async move {
+                                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                                    while tokio::time::Instant::now() < deadline {
+                                        let branches = if !entry_branches.is_empty() {
+                                            entry_branches.clone()
+                                        } else if let Ok(Some(b)) = drawer_repo.get_doc_branches(&id).await {
+                                            b.branches
+                                        } else {
+                                            HashMap::new()
+                                        };
+                                        if !branches.is_empty() {
+                                            let mut all_ready = true;
+                                            for (branch_name, heads) in &branches {
+                                                let branch_path = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
+                                                if let Ok(Some(_)) = drawer_repo.facet_keys_at_branch_heads(&id, &branch_path, heads).await {
+                                                } else {
+                                                    all_ready = false;
+                                                    break;
+                                                }
+                                            }
+                                            if all_ready {
+                                                for (branch_name, heads) in branches {
+                                                    let branch_path = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
+                                                    doc_blobs_index_repo
+                                                        .enqueue_upsert(id.clone(), branch_path, heads)
+                                                        .unwrap_or_log();
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(50)).await;
+                                    }
+                                });
                             }
                             crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
                                 let retained_branches: Vec<daybook_types::doc::BranchPathBuf> = entry
@@ -766,17 +1006,6 @@ fn spawn_doc_blobs_index_bridge_for_tests(
                                         retained_branches,
                                     )
                                     .unwrap_or_log();
-                                for (branch_name, heads) in &entry.branches {
-                                    doc_blobs_index_repo
-                                        .enqueue_upsert(
-                                            id.clone(),
-                                            daybook_types::doc::BranchPathBuf::from(
-                                                branch_name.as_str(),
-                                            ),
-                                            heads.clone(),
-                                        )
-                                        .unwrap_or_log();
-                                }
                             }
                         },
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
@@ -788,7 +1017,7 @@ fn spawn_doc_blobs_index_bridge_for_tests(
             }
         }
     });
-    (cancel, handle)
+    Ok((cancel, handle))
 }
 
 async fn list_doc_ids(drawer: &DrawerRepo) -> Res<HashSet<String>> {

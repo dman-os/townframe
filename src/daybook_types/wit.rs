@@ -3,7 +3,7 @@ pub mod doc {
 
     use crate::doc as root_doc;
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
-    pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPathBuf};
+    pub use root_doc::{Blob, BlobPin, DocId, FacetKey, MimeType, Multihash, Note, UserPathBuf};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct UserMeta {
@@ -75,6 +75,7 @@ pub mod doc {
         Dmeta(Dmeta),
         Note(Note),
         Blob(Blob),
+        BlobPin(BlobPin),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -310,6 +311,7 @@ pub mod doc {
                     content: note.content,
                 }),
                 root_doc::WellKnownFacet::Blob(blob) => Self::Blob(blob),
+                root_doc::WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
             }
         }
     }
@@ -430,6 +432,7 @@ pub mod doc {
                     content: note.content,
                 }),
                 WellKnownFacet::Blob(blob) => Self::Blob(blob),
+                WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
             })
         }
     }

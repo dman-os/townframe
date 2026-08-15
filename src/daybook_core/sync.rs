@@ -808,6 +808,7 @@ impl IrohSyncRepo {
             core_docs_group: self.authority.ids().core_docs,
             content_docs_group: self.authority.ids().content_docs,
             default_drawer_group: self.authority.ids().default_drawer,
+            blob_inventories_group: self.authority.ids().blob_inventories,
         })
     }
 

@@ -87,6 +87,7 @@ pub struct CloneProvisionResponse {
     pub core_docs_group: [u8; 32],
     pub content_docs_group: [u8; 32],
     pub default_drawer_group: [u8; 32],
+    pub blob_inventories_group: [u8; 32],
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -140,6 +141,7 @@ impl CloneProvisionResponse {
                 core_docs: self.core_docs_group,
                 content_docs: self.content_docs_group,
                 default_drawer: self.default_drawer_group,
+                blob_inventories: self.blob_inventories_group,
             },
         })
     }

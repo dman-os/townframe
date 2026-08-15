@@ -739,6 +739,7 @@ pub(crate) async fn ensure_authority_partitions(
         authority.core_docs_part_id(),
         authority.content_docs_part_id(),
         authority.default_drawer_part_id(),
+        authority.blob_inventories_part_id(),
         crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
     ] {
         partition_store.ensure_part(part_id).await?;

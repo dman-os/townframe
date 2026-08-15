@@ -244,7 +244,10 @@ impl DocBlobsIndexRepo {
         };
         let selected_blob_keys: Vec<FacetKey> = facet_keys
             .into_iter()
-            .filter(|facet_key| facet_key.tag == WellKnownFacetTag::Blob.into())
+            .filter(|facet_key| {
+                facet_key.tag == WellKnownFacetTag::Blob.into()
+                    || facet_key.tag == WellKnownFacetTag::BlobPin.into()
+            })
             .collect();
         if selected_blob_keys.is_empty() {
             return self.delete_doc_branch(doc_id, branch_path).await;
@@ -264,37 +267,92 @@ impl DocBlobsIndexRepo {
         };
 
         let mut blobs = HashMap::<Arc<str>, u64>::new();
-        for (_facet_key, facet_raw) in facets {
-            let facet =
-                match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob) {
-                    Ok(facet) => facet,
-                    Err(err) => {
-                        warn!(
-                            %doc_id,
-                            %branch_path,
-                            ?err,
-                            "failed to parse blob facet while indexing; evicting stale blob refs"
-                        );
-                        self.delete_doc_branch(doc_id, branch_path).await?;
-                        return Ok(ReindexDocOutcome::Evicted);
-                    }
-                };
-            let WellKnownFacet::Blob(blob) = facet else {
-                continue;
-            };
-            if let Some(urls) = blob.urls {
-                for url in urls {
-                    if let Some(hash) = parse_db_blob_hash(&url) {
-                        let hash: Arc<str> = hash.into();
-                        if let Some(existing_len) =
-                            blobs.insert(Arc::clone(&hash), blob.length_octets)
-                        {
-                            eyre::ensure!(
-                                existing_len == blob.length_octets,
-                                "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
-                                blob.length_octets
+        for (facet_key, facet_raw) in facets {
+            if facet_key.tag == WellKnownFacetTag::BlobPin.into() {
+                let pin: daybook_types::doc::BlobPin =
+                    match serde_json::from_value((*facet_raw).clone()) {
+                        Ok(pin) => pin,
+                        Err(err) => {
+                            warn!(
+                                %doc_id,
+                                %branch_path,
+                                ?err,
+                                "failed to parse blob pin facet while indexing; evicting stale blob refs"
                             );
+                            self.delete_doc_branch(doc_id, branch_path).await?;
+                            return Ok(ReindexDocOutcome::Evicted);
                         }
+                    };
+                if facet_key.id.parse::<crate::blobs::BlobId>().is_ok() {
+                    let hash: Arc<str> = facet_key.id.as_str().into();
+                    if let Some(existing_len) =
+                        blobs.insert(Arc::clone(&hash), pin.length_octets)
+                    {
+                        eyre::ensure!(
+                            existing_len == pin.length_octets,
+                            "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
+                            pin.length_octets
+                        );
+                    }
+                } else {
+                    warn!(
+                        %doc_id,
+                        %branch_path,
+                        facet_id = %facet_key.id,
+                        "invalid blob pin facet id; evicting stale blob refs"
+                    );
+                    self.delete_doc_branch(doc_id, branch_path).await?;
+                    return Ok(ReindexDocOutcome::Evicted);
+                }
+            } else if facet_key.tag == WellKnownFacetTag::Blob.into() {
+                let facet =
+                    match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob) {
+                        Ok(facet) => facet,
+                        Err(err) => {
+                            warn!(
+                                %doc_id,
+                                %branch_path,
+                                ?err,
+                                "failed to parse blob facet while indexing; evicting stale blob refs"
+                            );
+                            self.delete_doc_branch(doc_id, branch_path).await?;
+                            return Ok(ReindexDocOutcome::Evicted);
+                        }
+                    };
+                let WellKnownFacet::Blob(blob) = facet else {
+                    continue;
+                };
+                let mut found_url_hash = false;
+                if let Some(urls) = blob.urls {
+                    for url in urls {
+                        if let Some(hash) = parse_db_blob_hash(&url) {
+                            found_url_hash = true;
+                            let hash: Arc<str> = hash.into();
+                            if let Some(existing_len) =
+                                blobs.insert(Arc::clone(&hash), blob.length_octets)
+                            {
+                                eyre::ensure!(
+                                    existing_len == blob.length_octets,
+                                    "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
+                                    blob.length_octets
+                                );
+                            }
+                        }
+                    }
+                }
+                if !found_url_hash
+                    && !blob.digest.is_empty()
+                    && blob.digest.parse::<crate::blobs::BlobId>().is_ok()
+                {
+                    let hash: Arc<str> = blob.digest.as_str().into();
+                    if let Some(existing_len) =
+                        blobs.insert(Arc::clone(&hash), blob.length_octets)
+                    {
+                        eyre::ensure!(
+                            existing_len == blob.length_octets,
+                            "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
+                            blob.length_octets
+                        );
                     }
                 }
             }
@@ -838,9 +896,14 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
             consume_plugs: false,
             consume_dispatch: false,
             consume_config: false,
-            drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::HasTag(
-                WellKnownFacetTag::Blob.into(),
-            )),
+            drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::Or(vec![
+                daybook_types::manifest::DocPredicateClause::HasTag(
+                    WellKnownFacetTag::Blob.into(),
+                ),
+                daybook_types::manifest::DocPredicateClause::HasTag(
+                    WellKnownFacetTag::BlobPin.into(),
+                ),
+            ])),
         }
     }
 
@@ -903,10 +966,11 @@ mod tests {
     use crate::e2e::test_cx;
     use crate::repos::SubscribeOpts;
     use big_repo::SharedPartStore;
-    use daybook_types::doc::{AddDocArgs, FacetRaw};
+    use daybook_types::doc::{AddDocArgs, BlobPin, BranchPath, DocPatch, FacetRaw};
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline =
+            tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(60));
         while tokio::time::Instant::now() < deadline {
             let hashes = repo.list_hashes_for_doc(doc_id).await?;
             if hashes.iter().any(|value| value == hash) {
@@ -922,7 +986,8 @@ mod tests {
         partition_id: PartId,
         expected: u64,
     ) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline =
+            tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(60));
         while tokio::time::Instant::now() < deadline {
             let count = part_store.member_count(partition_id).await?;
             if count == expected {
@@ -933,6 +998,87 @@ mod tests {
         eyre::bail!(
             "timeout waiting for partition member count partition_id={partition_id} expected={expected}"
         )
+    }
+
+    struct TestIndexEnv {
+        drawer_repo: Arc<DrawerRepo>,
+        repo: Arc<DocBlobsIndexRepo>,
+        blobs_repo: Arc<BlobsRepo>,
+        big_sync_host: big_sync::Ctx,
+        drawer_stop: crate::repos::RepoStopToken,
+        sqlite_local_state_stop: crate::repos::RepoStopToken,
+        repo_stop: crate::repos::RepoStopToken,
+        big_repo_stop: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+        _temp_dir: tempfile::TempDir,
+    }
+
+    impl TestIndexEnv {
+        async fn stop(self) -> Res<()> {
+            self.repo_stop.stop().await?;
+            self.sqlite_local_state_stop.stop().await?;
+            self.drawer_stop.stop().await?;
+            (self.big_repo_stop)().await?;
+            Ok(())
+        }
+    }
+
+    async fn boot_test_index_env() -> Res<TestIndexEnv> {
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
+        let (big_repo, big_sync_host, big_repo_stop) = crate::test_support::boot_repo().await?;
+        let mut drawer_doc = automerge::Automerge::new();
+        {
+            use automerge::transaction::Transactable;
+            let mut tx = drawer_doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+        }
+        let drawer_doc_id = big_repo.create_doc(drawer_doc).await?.document_id();
+        let temp_dir = tempfile::tempdir()?;
+        let blobs_repo = crate::blobs::BlobsRepo::new(
+            temp_dir.path().join("blobs"),
+            "/test-user".into(),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                Arc::clone(&big_sync_host.store),
+            )),
+        )
+        .await?;
+        let (drawer_repo, drawer_stop) = crate::drawer::DrawerRepo::load(
+            Arc::clone(&big_repo),
+            Arc::clone(&big_sync_host.store),
+            drawer_doc_id,
+            local_user_path.clone(),
+            crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?,
+            temp_dir.path().join("drawer-local-state"),
+            Arc::new(surelock::mutex::Mutex::new(
+                utils_rs::lru::KeyedLruPool::new(1000),
+            )),
+            Arc::new(surelock::mutex::Mutex::new(
+                utils_rs::lru::KeyedLruPool::new(1000),
+            )),
+            None,
+        )
+        .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local-state"))
+                .await?;
+        let (repo, repo_stop) = DocBlobsIndexRepo::boot(
+            Arc::clone(&drawer_repo),
+            Arc::clone(&blobs_repo),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+
+        Ok(TestIndexEnv {
+            drawer_repo,
+            repo,
+            blobs_repo,
+            big_sync_host,
+            drawer_stop,
+            sqlite_local_state_stop,
+            repo_stop,
+            big_repo_stop: Box::new(move || Box::pin(big_repo_stop())),
+            _temp_dir: temp_dir,
+        })
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1018,57 +1164,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
-        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_sync_host, big_repo_stop) = crate::test_support::boot_repo().await?;
-        let mut drawer_doc = automerge::Automerge::new();
-        {
-            use automerge::transaction::Transactable;
-            let mut tx = drawer_doc.transaction();
-            tx.put(automerge::ROOT, "version", "0")?;
-            tx.commit();
-        }
-        let drawer_doc_id = big_repo.create_doc(drawer_doc).await?.document_id();
-        let temp_dir = tempfile::tempdir()?;
-        let blobs_repo = crate::blobs::BlobsRepo::new(
-            temp_dir.path().join("blobs"),
-            "/test-user".into(),
-            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&big_sync_host.store),
-            )),
-        )
-        .await?;
-        let (drawer_repo, drawer_stop) = crate::drawer::DrawerRepo::load(
-            Arc::clone(&big_repo),
-            Arc::clone(&big_sync_host.store),
-            drawer_doc_id,
-            local_user_path.clone(),
-            crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?,
-            temp_dir.path().join("drawer-local-state"),
-            Arc::new(surelock::mutex::Mutex::new(
-                utils_rs::lru::KeyedLruPool::new(1000),
-            )),
-            Arc::new(surelock::mutex::Mutex::new(
-                utils_rs::lru::KeyedLruPool::new(1000),
-            )),
-            None,
-        )
-        .await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local-state"))
-                .await?;
-        let (repo, repo_stop) = DocBlobsIndexRepo::boot(
-            Arc::clone(&drawer_repo),
-            Arc::clone(&blobs_repo),
-            Arc::clone(&sqlite_local_state_repo),
-        )
-        .await?;
+        let env = boot_test_index_env().await?;
 
         let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-        let blob_id = blobs_repo
+        let blob_id = env
+            .blobs_repo
             .put(b"docs-scope-hash-bytes", crate::blobs::BlobUseHints::Docs)
             .await?;
         let hash = blob_id.to_string();
-        let doc_id = drawer_repo
+        let doc_id = env
+            .drawer_repo
             .add(AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
                 facets: [(
@@ -1085,37 +1190,332 @@ mod tests {
                 user_path: None,
             })
             .await?;
-        let heads = drawer_repo
+        let heads = env
+            .drawer_repo
             .get_doc_branches(&doc_id)
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+        env.repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
-        wait_for_partition_member_count(&big_sync_host.store, partition_id, 1).await?;
+        wait_for_partition_member_count(&env.big_sync_host.store, partition_id, 1).await?;
         assert_eq!(
-            big_sync_host
+            env.big_sync_host
                 .store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash))
                 .await?,
             vec![partition_id]
         );
 
-        drawer_repo.del(&doc_id).await?;
-        repo.enqueue_delete(doc_id.clone())?;
-        wait_for_partition_member_count(&big_sync_host.store, partition_id, 0).await?;
+        env.drawer_repo.del(&doc_id).await?;
+        env.repo.enqueue_delete(doc_id.clone())?;
+        wait_for_partition_member_count(&env.big_sync_host.store, partition_id, 0).await?;
         assert_eq!(
-            big_sync_host
+            env.big_sync_host
                 .store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash))
                 .await?,
             Vec::<PartId>::new()
         );
 
-        repo_stop.stop().await?;
-        sqlite_local_state_stop.stop().await?;
-        drawer_stop.stop().await?;
-        big_repo_stop().await?;
+        env.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_doc_blobs_index_tracks_blob_pin_facets() -> Res<()> {
+        let env = boot_test_index_env().await?;
+
+        let hash_a = crate::blobs::BlobId::random().to_string();
+        let hash_b = crate::blobs::BlobId::random().to_string();
+
+        let key_pin_a = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_a.clone(),
+        };
+        let key_pin_b = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_b.clone(),
+        };
+
+        let doc_id = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        key_pin_a,
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                            length_octets: 100,
+                        })),
+                    ),
+                    (
+                        key_pin_b,
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                            length_octets: 200,
+                        })),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads = env
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for test doc")?;
+        env.repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+
+        wait_for_hash(&env.repo, &doc_id, &hash_a).await?;
+        wait_for_hash(&env.repo, &doc_id, &hash_b).await?;
+
+        let hashes = env.repo.list_hashes_for_doc(&doc_id).await?;
+        assert!(hashes.contains(&hash_a));
+        assert!(hashes.contains(&hash_b));
+
+        let blob_refs = env.repo.list_blob_refs_for_doc(&doc_id).await?;
+        assert_eq!(blob_refs.len(), 2);
+        assert!(blob_refs.iter().any(|r| r.blob_hash == hash_a && r.length_octets == 100));
+        assert!(blob_refs.iter().any(|r| r.blob_hash == hash_b && r.length_octets == 200));
+
+        let memberships_a = env.repo.list_docs_for_hash(&hash_a).await?;
+        assert!(
+            memberships_a
+                .iter()
+                .any(|m| m.doc_id == doc_id && m.length_octets == 100)
+        );
+
+        let memberships_b = env.repo.list_docs_for_hash(&hash_b).await?;
+        assert!(
+            memberships_b
+                .iter()
+                .any(|m| m.doc_id == doc_id && m.length_octets == 200)
+        );
+
+        env.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_doc_blobs_index_blob_pin_partition_lifecycle() -> Res<()> {
+        let env = boot_test_index_env().await?;
+
+        let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
+        let blob_id_1 = env
+            .blobs_repo
+            .put(b"blob-pin-lifecycle-bytes-1", crate::blobs::BlobUseHints::Docs)
+            .await?;
+        let blob_id_2 = env
+            .blobs_repo
+            .put(b"blob-pin-lifecycle-bytes-2", crate::blobs::BlobUseHints::Docs)
+            .await?;
+        let hash_1 = blob_id_1.to_string();
+        let hash_2 = blob_id_2.to_string();
+
+        let key_pin_1 = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_1.clone(),
+        };
+        let key_pin_2 = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_2.clone(),
+        };
+
+        let doc_id = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        key_pin_1.clone(),
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                            length_octets: 150,
+                        })),
+                    ),
+                    (
+                        key_pin_2.clone(),
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin {
+                            length_octets: 250,
+                        })),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads = env
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for test doc")?;
+        env.repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+
+        wait_for_hash(&env.repo, &doc_id, &hash_1).await?;
+        wait_for_hash(&env.repo, &doc_id, &hash_2).await?;
+        wait_for_partition_member_count(&env.big_sync_host.store, partition_id, 2).await?;
+        assert_eq!(
+            env.big_sync_host
+                .store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .await?,
+            vec![partition_id]
+        );
+        assert_eq!(
+            env.big_sync_host
+                .store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
+                .await?,
+            vec![partition_id]
+        );
+
+        let hashes = env.repo.list_hashes_for_doc(&doc_id).await?;
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains(&hash_1));
+        assert!(hashes.contains(&hash_2));
+
+        // Update doc: remove pin 2
+        env.drawer_repo
+            .update_at_heads(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: default(),
+                    facets_remove: vec![key_pin_2],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+            )
+            .await?;
+
+        let heads_updated = env
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for updated test doc")?;
+        env.repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads_updated)?;
+
+        wait_for_partition_member_count(&env.big_sync_host.store, partition_id, 1).await?;
+        assert_eq!(
+            env.big_sync_host
+                .store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .await?,
+            vec![partition_id]
+        );
+        assert_eq!(
+            env.big_sync_host
+                .store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
+                .await?,
+            Vec::<PartId>::new()
+        );
+
+        let hashes_after_update = env.repo.list_hashes_for_doc(&doc_id).await?;
+        assert_eq!(hashes_after_update, vec![hash_1.clone()]);
+
+        // Delete doc: removes remaining pin 1
+        env.drawer_repo.del(&doc_id).await?;
+        env.repo.enqueue_delete(doc_id.clone())?;
+        wait_for_partition_member_count(&env.big_sync_host.store, partition_id, 0).await?;
+        assert_eq!(
+            env.big_sync_host
+                .store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .await?,
+            Vec::<PartId>::new()
+        );
+        assert!(env.repo.list_hashes_for_doc(&doc_id).await?.is_empty());
+
+        env.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_doc_blobs_index_blob_facet_digest_fallback() -> Res<()> {
+        let env = boot_test_index_env().await?;
+
+        let hash_none_urls = crate::blobs::BlobId::random().to_string();
+        let hash_empty_urls = crate::blobs::BlobId::random().to_string();
+
+        // 1. Doc with urls: None, but valid digest
+        let doc_id_1 = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: 512,
+                        digest: hash_none_urls.clone(),
+                        inline: None,
+                        urls: None,
+                    })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads_1 = env
+            .drawer_repo
+            .get_doc_branches(&doc_id_1)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for test doc")?;
+        env.repo.enqueue_upsert(doc_id_1.clone(), BranchPathBuf::from("main"), heads_1)?;
+
+        wait_for_hash(&env.repo, &doc_id_1, &hash_none_urls).await?;
+        let hashes_1 = env.repo.list_hashes_for_doc(&doc_id_1).await?;
+        assert_eq!(hashes_1, vec![hash_none_urls.clone()]);
+        let blob_refs_1 = env.repo.list_blob_refs_for_doc(&doc_id_1).await?;
+        assert_eq!(blob_refs_1.len(), 1);
+        assert_eq!(blob_refs_1[0].blob_hash, hash_none_urls);
+        assert_eq!(blob_refs_1[0].length_octets, 512);
+
+        // 2. Doc with urls: Some(vec![]), but valid digest
+        let doc_id_2 = env
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: 1024,
+                        digest: hash_empty_urls.clone(),
+                        inline: None,
+                        urls: Some(vec![]),
+                    })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let heads_2 = env
+            .drawer_repo
+            .get_doc_branches(&doc_id_2)
+            .await?
+            .and_then(|branches| branches.branches.get("main").cloned())
+            .ok_or_eyre("expected main branch heads for test doc")?;
+        env.repo.enqueue_upsert(doc_id_2.clone(), BranchPathBuf::from("main"), heads_2)?;
+
+        wait_for_hash(&env.repo, &doc_id_2, &hash_empty_urls).await?;
+        let hashes_2 = env.repo.list_hashes_for_doc(&doc_id_2).await?;
+        assert_eq!(hashes_2, vec![hash_empty_urls.clone()]);
+        let blob_refs_2 = env.repo.list_blob_refs_for_doc(&doc_id_2).await?;
+        assert_eq!(blob_refs_2.len(), 1);
+        assert_eq!(blob_refs_2[0].blob_hash, hash_empty_urls);
+        assert_eq!(blob_refs_2[0].length_octets, 1024);
+
+        env.stop().await?;
         Ok(())
     }
 }

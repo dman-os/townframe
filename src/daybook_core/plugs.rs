@@ -98,6 +98,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     references: default(),
                 },
                 FacetManifest {
+                    key_tag: WellKnownFacetTag::BlobPin.into(),
+                    value_schema: schemars::schema_for!(BlobPin),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Pending.into(),
                     value_schema: schemars::schema_for!(Pending),
                     display_config: default(),

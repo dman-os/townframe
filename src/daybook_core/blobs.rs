@@ -464,6 +464,11 @@ impl BlobsRepo {
         }
     }
 
+    pub async fn get_bytes(&self, blob_id: BlobId) -> Result<Vec<u8>, eyre::Report> {
+        let path = self.get_path(blob_id).await?;
+        Ok(tokio::fs::read(path).await?)
+    }
+
     pub fn iroh_store(&self) -> iroh_blobs::api::Store {
         self.iroh_store.clone()
     }
