@@ -6,7 +6,9 @@ const repoRoot = $.relativeDir("../");
 const generatedOutDir = $.relativeDir(
   "../src/daybook_compose/composeApp/src/commonMain/kotlin/",
 ).toString();
-const targetMeta = await $`cargo metadata --format-version 1 --no-deps`.cwd(repoRoot).json();
+const targetMeta = await $`cargo metadata --format-version 1 --no-deps`.cwd(
+  repoRoot,
+).json();
 const targetDir = $.path(targetMeta.target_directory);
 const generatedLibraryPath = targetDir
   .join("debug", "libdaybook_ffi.so")
