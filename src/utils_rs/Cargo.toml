@@ -55,6 +55,7 @@ regex = "1"
 time.workspace = true
 url.workspace = true
 jiff = { version = "0.2.17", features = ["serde"] }
+rand.workspace = true
 
 #
 # error

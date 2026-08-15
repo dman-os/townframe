@@ -33,10 +33,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         std::env::set_var("DAYB_SYNC_MAX_BACKOFF_SECS", "5");
     });
 
-    let seed = std::env::var("DAYB_SYNC_TEST_SEED")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_STRESS_SEED);
+    let seed = utils_rs::testing::test_seed(DEFAULT_STRESS_SEED);
     let phase_timeout = utils_rs::scale_timeout(PHASE_TIMEOUT_BASE);
     let full_sync_timeout = utils_rs::scale_timeout(FULL_SYNC_TIMEOUT_BASE);
     let blob_sync_timeout = utils_rs::scale_timeout(BLOB_SYNC_TIMEOUT_BASE);
@@ -331,6 +328,8 @@ async fn connect_topology(
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
     peers_set: &[HashSet<PeerId>],
+    timeout: Duration,
+    blob_timeout: Duration,
 ) -> Res<()> {
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
         node.as_ref().map(|node| async move {

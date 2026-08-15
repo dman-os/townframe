@@ -783,10 +783,7 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     phase3_mutations: usize,
     settle_timeout: Duration,
 ) -> Res<()> {
-    let seed = std::env::var("BIG_SYNC_STRESS_SEED")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_STRESS_SEED);
+    let seed = utils_rs::testing::test_seed(DEFAULT_STRESS_SEED);
     run_randomized_stress(
         fixture,
         world,

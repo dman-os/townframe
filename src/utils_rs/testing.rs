@@ -112,3 +112,23 @@ pub fn assert_eq_json(
         (check, json) => assert_eq!(check, json, "{check_name} != {json_name}"),
     }
 }
+
+/// Resolve the test seed from the `TEST_SEED` environment variable, falling back to `default_seed`.
+/// If `TEST_SEED` is set to `"rand"` or `"random"`, generates a random u64 using system entropy (`rand::random()`).
+/// If `TEST_SEED` is set to an integer (decimal or `0x` hex), parses it as u64.
+/// Otherwise returns `default_seed`.
+pub fn test_seed(default_seed: u64) -> u64 {
+    match std::env::var("TEST_SEED") {
+        Ok(val) => {
+            let val = val.trim();
+            if val.eq_ignore_ascii_case("rand") || val.eq_ignore_ascii_case("random") {
+                rand::random()
+            } else if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).unwrap_or(default_seed)
+            } else {
+                val.parse::<u64>().unwrap_or(default_seed)
+            }
+        }
+        Err(_) => default_seed,
+    }
+}

@@ -41,7 +41,7 @@ impl Default for BigRepoStressConfig {
         Self {
             node_count: 4,
             relay_idx: None,
-            seed: DEFAULT_STRESS_SEED,
+            seed: utils_rs::testing::test_seed(DEFAULT_STRESS_SEED),
             peer_seed_offset: 0,
             test_revocations: false,
         }
