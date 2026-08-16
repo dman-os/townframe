@@ -191,7 +191,6 @@ interface stateless-view {
     ) -> result<render-view-response, render-view-error>;
 }
 
-
 interface mltools-ocr {
     use capabilities.{facet-token};
     use townframe:mltools/ocr.{ocr-result};
@@ -237,6 +236,7 @@ world all-guest {
     import drawer;
     import capabilities;
     import facet-routine;
+    import townframe:api-utils/http-service;
     import townframe:sqlite/sqlite-connection;
     import mltools-ocr;
     import mltools-embed;

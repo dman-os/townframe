@@ -35,9 +35,9 @@
             };
           };
 
-          androidBuildToolsVersion = "36.0.0";
+          androidBuildToolsVersion = "37.0.0";
           androidApiLevel = "31";
-          rustVersion = "2026-04-16";
+          rustVersion = "2026-08-16";
 
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
@@ -56,13 +56,13 @@
           # Android SDK/NDK without Studio (for CI)
           androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
             includeNDK = true;
-            platformToolsVersion = "36.0.0";
+            platformToolsVersion = "37.0.1";
             buildToolsVersions = [ androidBuildToolsVersion ];
             platformVersions = [ "35" "36" ];
           };
 
           # Android SDK/NDK with Studio (for dev)
-          androidComposition = pkgs.android-studio.withSdk androidSdkOnly.androidsdk;
+          # androidComposition = pkgs.android-studio.withSdk androidSdkOnly.androidsdk;
 
           # Rust toolchain for CI (wasm32 + native Linux targets)
           rustRust = pkgs.rust-bin.nightly.${rustVersion}.default.override {
@@ -256,7 +256,7 @@
             # FIXME: why do we need golang for again?
             # did an llm strip comments?
             # go
-            androidComposition
+            (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
             v4l-utils
             libv4l
             gh
@@ -367,7 +367,7 @@
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi
               '';
-            } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidComposition; }));
+            } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; }));
 
         in
         {

@@ -2957,6 +2957,8 @@ dependencies = [
  "surelock",
  "tokio",
  "utils_rs",
+ "wash-runtime",
+ "wash_plugin_sqlite",
 ]
 
 [[package]]

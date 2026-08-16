@@ -4,7 +4,8 @@
     "@bytecodealliance/jco-std": "^0.1.0",
     "@logtape/logtape": "^2.3.0",
     "better-auth": "^1.6.25",
-    "hono": "^4.12.25"
+    "hono": "^4.12.25",
+    "kysely": "^0.29.4"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.27.0",
@@ -22,7 +23,7 @@
     "dev": "nodemon",
     "generate:types": "rimraf generated/types && jco guest-types wit/ -o generated/types",
     "serve": "jco serve dist/http_logging_handler_hono.wasm",
-    "fetch:wit": "wash wit fetch",
+    "fetch:wit": "wash wit fetch && node patch-wit-deps.mjs",
     "setup:wit": "pnpm run fetch:wit && pnpm run generate:types"
   },
   "type": "module"

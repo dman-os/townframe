@@ -106,6 +106,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         } => {
             return cmds::clone::run(source, destination).await;
         }
+        StaticCommands::Server => {
+            return cmds::server::run().await;
+        }
         _ => {}
     }
 
@@ -123,7 +126,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     match cli.command {
         StaticCommands::Init {}
         | StaticCommands::Clone { .. }
-        | StaticCommands::Completions { .. } => unreachable!(),
+        | StaticCommands::Completions { .. }
+        | StaticCommands::Server => unreachable!(),
         StaticCommands::Dump => cmds::dump::run().await,
         StaticCommands::Ls => cmds::ls::run().await,
         StaticCommands::Cat { id, branch } => cmds::cat::run(id, branch).await,
@@ -203,7 +207,8 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Cat { .. })
         | Ok(StaticCommands::Ed { .. })
         | Ok(StaticCommands::Devices { .. })
-        | Ok(StaticCommands::Sync { .. }) => {
+        | Ok(StaticCommands::Sync { .. })
+        | Ok(StaticCommands::Server) => {
             unreachable!("static_cli will prevent these");
         }
     }
@@ -274,6 +279,8 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::devices::DevicesCommands,
     },
+    /// Run the btress_auth service host (playground)
+    Server,
     /// Generate shell completions
     Completions {
         #[clap(value_enum)]

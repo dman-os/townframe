@@ -20,6 +20,8 @@ utils_rs = { workspace = true, features = ["native"] }
 am_utils_rs.workspace = true
 daybook_core = { workspace = true }
 daybook_types = { workspace = true }
+wash-runtime = { workspace = true }
+wash_plugin_sqlite.workspace = true
 
 #
 # cli

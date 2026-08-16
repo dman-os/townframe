@@ -1,59 +1,94 @@
-/*
+use crate::interlude::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use daybook_core::rt::wash_plugin::ServicePlugin;
+use wash_plugin_sqlite::SqlPlugin;
 use wash_runtime::{
     engine::Engine,
-    host::{HostBuilder, HostApi, http::{Ingress, DevRouter}},
-    plugin::wasi_config::DynamicConfig,
-    types::{Workload, WorkloadStartRequest, Component, LocalResources},
+    host::{HostApi, HostBuilder, http::{DevRouter, Ingress}},
+    types::{Component, LocalResources, Workload, WorkloadStartRequest, WorkloadStopRequest},
+    wit::WitInterface,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize tracing for observability
-    tracing_subscriber::fmt::init();
-
-    Ok(())
-}
-*/
-use crate::interlude::*;
+/// Run the `btress_auth` wash host (playground).
+///
+/// Builds a wash host with the capability plugins `btress_auth` needs
+/// (`townframe:sqlite/sqlite-connection` via [`SqlPlugin`] and
+/// `townframe:api-utils/http-service` via [`ServicePlugin`]), starts the
+/// `btress_auth` component (which exports `wasi:http/incoming-handler`), and
+/// serves it on `0.0.0.0:8080`.
+///
+/// Playground: the sqlite path is hardcoded inside [`ServicePlugin`] and the
+/// component env vars are hardcoded below — not config-driven yet.
 pub async fn run() -> Res<ExitCode> {
+    run_inner()
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))
+}
+
+async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
     // Create the engine with pooling enabled
     let engine = Engine::builder().with_pooling_allocator(true).build()?;
 
-    // Configure HTTP handler and plugins
+    // Configure the HTTP ingress (btress_auth exports wasi:http/incoming-handler)
     let http_handler = Ingress::new(DevRouter::default(), "0.0.0.0:8080".parse()?).await?;
-    let config_plugin = DynamicConfig::new(false);
 
-    // Build and start the host
+    // Build and start the host with the capability plugins btress_auth needs
     let host = HostBuilder::new()
         .with_engine(engine)
-        .with_friendly_name("my-custom-host")
+        .with_friendly_name("btress-auth-host")
         .with_http_handler(Arc::new(http_handler))
-        .with_plugin(Arc::new(config_plugin))?
+        .with_plugin(Arc::new(SqlPlugin::new()))?
+        .with_plugin(Arc::new(ServicePlugin::new()))?
         .build()?;
 
     let host = host.start().await?;
     println!("Host started: {}", host.friendly_name());
 
-    // Load a component from disk
-    let component_bytes = std::fs::read("./my-component.wasm")?;
+    // Load the btress_auth component from disk
+    let component_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../btress_auth/dist/btress_auth.wasm");
+    let component_bytes = std::fs::read(&component_path)?;
 
-    // Create and start a workload
+    // Start the btress_auth workload
+    let workload_id = "btress-auth".to_string();
     let request = WorkloadStartRequest {
-        workload_id: uuid::Uuid::new_v4().to_string(),
+        workload_id: workload_id.clone(),
         workload: Workload {
             namespace: "default".to_string(),
-            name: "my-component".to_string(),
+            name: "btress-auth".to_string(),
             annotations: HashMap::new(),
             service: None,
             components: vec![Component {
-                name: "my-component".to_string(),
+                name: "btress-auth".to_string(),
                 bytes: component_bytes.into(),
                 digest: None,
-                local_resources: LocalResources::default(),
-                pool_size: 5,
+                local_resources: LocalResources {
+                    environment: HashMap::from([
+                        ("BTRESS_URL".to_string(), "http://localhost:8080".to_string()),
+                        (
+                            "ROOT_WEB_DOMAIN".to_string(),
+                            "localhost".to_string(),
+                        ),
+                        (
+                            "BETTER_AUTH_URL".to_string(),
+                            "http://localhost:8080".to_string(),
+                        ),
+                        (
+                            "BETTER_AUTH_SECRET".to_string(),
+                            "dev-secret-change-me".to_string(),
+                        ),
+                    ]),
+                    ..LocalResources::default()
+                },
+                pool_size: 1,
                 max_invocations: 0,
             }],
-            host_interfaces: vec![],
+            host_interfaces: vec![
+                WitInterface::from("townframe:api-utils/http-service"),
+                WitInterface::from("townframe:sqlite/sqlite-connection"),
+            ],
             volumes: vec![],
         },
     };
@@ -67,9 +102,8 @@ pub async fn run() -> Res<ExitCode> {
     tokio::signal::ctrl_c().await?;
 
     // Clean shutdown
-    host.workload_stop(wash_runtime::types::WorkloadStopRequest { workload_id })
+    host.workload_stop(WorkloadStopRequest { workload_id })
         .await?;
-
     host.stop().await?;
     println!("Host shutdown complete");
     Ok(ExitCode::SUCCESS)

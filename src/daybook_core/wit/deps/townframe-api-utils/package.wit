@@ -21,6 +21,17 @@ interface utils {
   noop: func(inc: tuple<errors-validation, error-internal, datetime, uuid>) -> result;
 }
 
+interface http-service {
+  use townframe:sqlite/sqlite-connection.{connection as sqlite-connection-token};
+
+  record service-args {
+    sqlite-connections: list<tuple<string, sqlite-connection-token>>,
+  }
+
+  /// Acquire service args (capabilities) for an http-service component.
+  get-args: func() -> service-args;
+}
+
 world imports {
   import wasi:io/poll@0.2.6;
   import wasi:clocks/monotonic-clock@0.2.6;

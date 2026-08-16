@@ -338,6 +338,7 @@ pub use binds_guest::townframe::daybook::mltools_image_tools;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::sqlite::sqlite_connection;
+pub use binds_guest::townframe::api_utils::http_service;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
 pub(crate) use stateless_view_host::StatelessViewPlugin;
 
@@ -945,4 +946,132 @@ fn config_doc_owner_plug_id(
     }
 
     Ok(owner_plug_id.unwrap_or_else(|| default_owner_plug_id.to_string()))
+}
+
+/// Host plugin for `townframe:api-utils/http-service`.
+///
+/// Playground implementation, not config-driven yet: resolves a single sqlite
+/// connection from a hardcoded file path and hands it to the guest via
+/// `get-args`, mirroring how [`DaybookPlugin`] provides `facet-routine` args.
+pub struct ServicePlugin {
+    sqlite_file_path: PathBuf,
+    sql: tokio::sync::RwLock<Option<SqlCtx>>,
+}
+
+impl Default for ServicePlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ServicePlugin {
+    pub const ID: &str = "townframe:api-utils/http-service";
+
+    pub fn new() -> Self {
+        Self {
+            sqlite_file_path: std::env::temp_dir().join("townframe-auth.sqlite"),
+            sql: default(),
+        }
+    }
+
+    fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
+    }
+
+    async fn sql_ctx(&self) -> Res<SqlCtx> {
+        if let Some(sql) = self.sql.read().await.clone() {
+            return Ok(sql);
+        }
+        let sqlite_url = format!("sqlite://{}", self.sqlite_file_path.display());
+        sqlx_utils_rs::init_sqlite_vec();
+        let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
+            .await
+            .wrap_err("error initializing auth sqlite ctx")?;
+        let mut slot = self.sql.write().await;
+        *slot = Some(sql.clone());
+        Ok(sql)
+    }
+}
+
+#[async_trait]
+impl wash_runtime::plugin::HostPlugin for ServicePlugin {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            exports: std::collections::HashSet::new(),
+            imports: std::collections::HashSet::from([
+                WitInterface::from("townframe:api-utils/http-service"),
+            ]),
+        }
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_bind(
+        &self,
+        _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
+        _interface_configs: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_item_bind<'a>(
+        &self,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        let world = item.world();
+        for iface in world.imports {
+            if iface.namespace == "townframe" && iface.package == "api-utils"
+                && iface.interfaces.contains("http-service") {
+                    http_service::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+        }
+        Ok(())
+    }
+
+    async fn on_workload_resolved(
+        &self,
+        _resolved: &wash_runtime::engine::workload::ResolvedWorkload,
+        _component_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_unbind(
+        &self,
+        _workload_id: &str,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl http_service::Host for SharedWashCtx {
+    async fn get_args(&mut self) -> wasmtime::Result<http_service::ServiceArgs> {
+        let plugin = ServicePlugin::from_ctx(self);
+        let sql = plugin.sql_ctx().await.map_err(wasmtime_err)?;
+        let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
+            self,
+            wash_plugin_sqlite::SqliteConnectionToken {
+                sqlite_file_path: plugin.sqlite_file_path.to_string_lossy().to_string(),
+                sql,
+            },
+        )?;
+        Ok(http_service::ServiceArgs {
+            sqlite_connections: vec![("auth-db".to_string(), handle)],
+        })
+    }
 }
