@@ -1331,10 +1331,7 @@ impl PlugsRepo {
                             let data = tokio::fs::read(&path).await.wrap_err_with(|| {
                                 format!("failed to read component file: {}", path.display())
                             })?;
-                            let hash = self
-                                .blobs
-                                .put(&data, crate::blobs::BlobUseHints::Plugs)
-                                .await?;
+                            let hash = self.blobs.put(&data).await?;
                             *url = url::Url::parse(&format!(
                                 "{}:///{}",
                                 crate::blobs::BLOB_SCHEME,
@@ -1359,10 +1356,7 @@ impl PlugsRepo {
                                 eyre::Ok(wasm_bytes)
                             })
                             .await??;
-                            let hash = self
-                                .blobs
-                                .put(&data, crate::blobs::BlobUseHints::Plugs)
-                                .await?;
+                            let hash = self.blobs.put(&data).await?;
                             *url = url::Url::parse(&format!(
                                 "{}:///{}",
                                 crate::blobs::BLOB_SCHEME,
@@ -1453,10 +1447,7 @@ impl PlugsRepo {
             if opts.strict {
                 Self::validate_sha256_digest(&layer.digest, &layer_bytes)?;
             }
-            let repo_hash = self
-                .blobs
-                .put(&layer_bytes, crate::blobs::BlobUseHints::Plugs)
-                .await?;
+            let repo_hash = self.blobs.put(&layer_bytes).await?;
             let repo_hash_str = crate::blobs::blob_hash_from_id(repo_hash);
             oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash_str.clone());
             imported_blob_hashes.push(repo_hash_str);

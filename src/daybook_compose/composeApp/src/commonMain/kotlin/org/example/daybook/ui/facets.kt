@@ -101,25 +101,26 @@ fun buildNoteFacet(content: String, mime: String = "text/plain"): WellKnownFacet
 
 fun buildBodyFacet(order: List<String>): WellKnownFacet.Body = WellKnownFacet.Body(Body(order = order))
 
+fun wellKnownFacetTagCanonicalString(tag: org.example.daybook.uniffi.types.WellKnownFacetTag): String = when (tag) {
+    org.example.daybook.uniffi.types.WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refGeneric"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelGeneric"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titleGeneric"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathGeneric"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.BODY -> "org.example.daybook.body"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE -> "org.example.daybook.note"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB_PIN -> "org.example.daybook.blobPin"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imageMetadata"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrResult"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
+}
+
 fun buildSelfFacetRefUrl(key: FacetKey): String {
     val tagString =
         when (val tag = key.tag) {
-            is FacetTag.WellKnown -> when (tag.v1) {
-                org.example.daybook.uniffi.types.WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refGeneric"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelGeneric"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titleGeneric"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathGeneric"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.BODY -> "org.example.daybook.body"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE -> "org.example.daybook.note"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB_PIN -> "org.example.daybook.blobPin"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imageMetadata"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrResult"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
-            }
-
+            is FacetTag.WellKnown -> wellKnownFacetTagCanonicalString(tag.v1)
             is FacetTag.Any -> tag.v1
         }
     return "db+facet:///self/$tagString/${key.id}"

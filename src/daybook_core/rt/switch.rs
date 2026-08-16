@@ -770,18 +770,20 @@ impl SwitchWorker {
             for key in old_keys.intersection(&new_keys) {
                 if old_updated_at.get(key) != new_updated_at.get(key) {
                     changed.push(key.clone());
-                } else if let (Ok(old_h), Ok(new_h)) = (
-                    self.rt
+                } else {
+                    let old_h = self
+                        .rt
                         .drawer
                         .get_facet_heads_at_branch_heads(doc_id, branch_path, prev, key)
-                        .await,
-                    self.rt
+                        .await?;
+                    let new_h = self
+                        .rt
                         .drawer
                         .get_facet_heads_at_branch_heads(doc_id, branch_path, next, key)
-                        .await,
-                ) && old_h != new_h
-                {
-                    changed.push(key.clone());
+                        .await?;
+                    if old_h != new_h {
+                        changed.push(key.clone());
+                    }
                 }
             }
         }

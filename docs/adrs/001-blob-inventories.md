@@ -139,12 +139,14 @@ iroh-blobs transfer backend
 
 Application documents remain self-contained. Application code, UI components, and plugs write standard logical `org.example.daybook.blob` facets and do not interact directly with inventory documents.
 
-A local background indexer worker (in `index.rs`):
+A local background indexer worker ([`BlobPinWorker`](../../src/daybook_core/blobs/pin_worker.rs)):
 1. Observes document changes from the Drawer.
 2. Identifies `org.example.daybook.blob` facets on local documents.
-3. Resolves the corresponding representation multihash:
+3. Resolves the corresponding representation multihash ($H_{rep}$):
    - For plaintext blobs: $H_{rep} = H_{plain}$.
    - For encrypted blobs: $H_{rep} = H_{cipher}$ (produced during blob ingestion/encryption).
+   - Valid blob URLs map to one or more representations by their $H_{rep}$.
+   - When a blob is re-encrypted with new keys or formats, the obsolete representation pin is removed and the new $H_{rep}$ pin is inserted.
 4. Automatically upserts the corresponding `org.example.daybook.blobPin/<H_rep>` facet in the local Blob Inventory document.
 5. When local references to a blob are removed, deletes the corresponding `blobPin` facet.
 

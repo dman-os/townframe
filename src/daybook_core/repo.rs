@@ -779,8 +779,10 @@ pub(crate) async fn finish_clone_init(mut parts: RepoCtxParts) -> Res<Arc<RepoCt
         }
     }
 
-    let core_inventory_doc_id = core_inv.unwrap_or(parts.core_inventory_doc_id);
-    let docs_inventory_doc_id = docs_inv.unwrap_or(parts.docs_inventory_doc_id);
+    let core_inventory_doc_id = core_inv
+        .ok_or_else(|| eyre::eyre!("missing core_inventory_doc_id during finish_clone_init"))?;
+    let docs_inventory_doc_id = docs_inv
+        .ok_or_else(|| eyre::eyre!("missing docs_inventory_doc_id during finish_clone_init"))?;
 
     parts.core_inventory_doc_id = core_inventory_doc_id;
     parts.docs_inventory_doc_id = docs_inventory_doc_id;
@@ -816,16 +818,14 @@ pub(crate) async fn finish_clone_init(mut parts: RepoCtxParts) -> Res<Arc<RepoCt
 pub(crate) async fn ensure_authority_partitions(
     partition_store: &SharedPartStore,
     authority: &crate::authority::RepoAuthority,
-    core_inventory_doc_id: &DocumentId,
-    docs_inventory_doc_id: &DocumentId,
+    _core_inventory_doc_id: &DocumentId,
+    _docs_inventory_doc_id: &DocumentId,
 ) -> Res<()> {
     for part_id in [
         authority.core_docs_part_id(),
         authority.content_docs_part_id(),
         authority.default_drawer_part_id(),
         authority.blob_inventories_part_id(),
-        crate::blobs::blob_inventory_part_id(core_inventory_doc_id),
-        crate::blobs::blob_inventory_part_id(docs_inventory_doc_id),
         crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
     ] {
         partition_store.ensure_part(part_id).await?;
@@ -987,7 +987,7 @@ async fn init_core_docs(
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
         big_repo
-            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
+            .create_doc_with_parents(doc, vec![authority.blob_inventories_parent()])
             .await
             .map_err(|err| ferr!("{err}"))?
     };

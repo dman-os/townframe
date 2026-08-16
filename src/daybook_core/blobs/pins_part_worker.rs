@@ -93,10 +93,9 @@ impl BlobPinsPartWorker {
                             let Some(item) = item else {
                                 break;
                             };
-                            worker
-                                .handle_worker_item(item)
-                                .await
-                                .expect("blob pins part worker item handling failed");
+                            if let Err(err) = worker.handle_worker_item(item).await {
+                                tracing::error!(?err, "error in blob pins part worker handle_worker_item");
+                            }
                         }
                     }
                 }

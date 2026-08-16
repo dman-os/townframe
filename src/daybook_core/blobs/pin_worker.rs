@@ -566,17 +566,16 @@ impl BlobPinWorker {
                     if let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>() {
                         let length_octets = if let Some(blobs) = &self.blobs_repo {
                             if let Ok(path) = blobs.get_path(blob_id).await {
-                                tokio::fs::metadata(&path)
-                                    .await
-                                    .map(|meta| meta.len())
-                                    .unwrap_or(0)
+                                tokio::fs::metadata(&path).await.map(|meta| meta.len()).ok()
                             } else {
-                                0
+                                None
                             }
                         } else {
-                            0
+                            None
                         };
-                        current_pins.insert(hash.to_string(), length_octets);
+                        if let Some(length) = length_octets {
+                            current_pins.insert(hash.to_string(), length);
+                        }
                     }
                 }
             }
@@ -895,12 +894,12 @@ mod tests {
         let blob_id_1 = test_context
             .rt
             .blobs_repo
-            .put(b"test doc blob 1 content", crate::blobs::BlobUseHints::Docs)
+            .put(b"test doc blob 1 content")
             .await?;
         let blob_id_2 = test_context
             .rt
             .blobs_repo
-            .put(b"test doc blob 2 content", crate::blobs::BlobUseHints::Docs)
+            .put(b"test doc blob 2 content")
             .await?;
         let hash_1 = blob_id_1.to_string();
         let hash_2 = blob_id_2.to_string();
@@ -986,10 +985,7 @@ mod tests {
         let blob_id_plug = test_context
             .rt
             .blobs_repo
-            .put(
-                b"test wasm bundle content",
-                crate::blobs::BlobUseHints::Plugs,
-            )
+            .put(b"test wasm bundle content")
             .await?;
         let hash_plug = blob_id_plug.to_string();
 

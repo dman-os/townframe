@@ -1,25 +1,9 @@
 package org.example.daybook.ui.editor
 
+import org.example.daybook.ui.wellKnownFacetTagCanonicalString
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacetTag
-
-private val WELL_KNOWN_FACET_DISPLAY_HINT_KEYS =
-    mapOf(
-        WellKnownFacetTag.DMETA to "org.example.daybook.dmeta",
-        WellKnownFacetTag.REF_GENERIC to "org.example.daybook.refGeneric",
-        WellKnownFacetTag.LABEL_GENERIC to "org.example.daybook.labelGeneric",
-        WellKnownFacetTag.TITLE_GENERIC to "org.example.daybook.titleGeneric",
-        WellKnownFacetTag.PATH_GENERIC to "org.example.daybook.pathGeneric",
-        WellKnownFacetTag.PENDING to "org.example.daybook.pending",
-        WellKnownFacetTag.BODY to "org.example.daybook.body",
-        WellKnownFacetTag.NOTE to "org.example.daybook.note",
-        WellKnownFacetTag.BLOB to "org.example.daybook.blob",
-        WellKnownFacetTag.BLOB_PIN to "org.example.daybook.blobPin",
-        WellKnownFacetTag.IMAGE_METADATA to "org.example.daybook.imageMetadata",
-        WellKnownFacetTag.OCR_RESULT to "org.example.daybook.ocrResult",
-        WellKnownFacetTag.EMBEDDING to "org.example.daybook.embedding",
-    )
 
 fun titleFacetKey(): FacetKey = FacetKey(FacetTag.WellKnown(WellKnownFacetTag.TITLE_GENERIC), "main")
 
@@ -43,7 +27,7 @@ fun facetKeyString(key: FacetKey): String {
 }
 
 fun facetTagDisplayString(tag: FacetTag): String = when (tag) {
-    is FacetTag.WellKnown -> WELL_KNOWN_FACET_DISPLAY_HINT_KEYS.getValue(tag.v1)
+    is FacetTag.WellKnown -> wellKnownFacetTagCanonicalString(tag.v1)
     is FacetTag.Any -> tag.v1
 }
 
@@ -51,6 +35,6 @@ fun facetKeyRefPathString(key: FacetKey): String =
     org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")
 
 fun facetDisplayHintKey(key: FacetKey): String = when (val tag = key.tag) {
-    is FacetTag.WellKnown -> WELL_KNOWN_FACET_DISPLAY_HINT_KEYS.getValue(tag.v1)
+    is FacetTag.WellKnown -> wellKnownFacetTagCanonicalString(tag.v1)
     is FacetTag.Any -> tag.v1
 }

@@ -403,10 +403,7 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let mut args_batch = Vec::new();
     for idx in 0..100usize {
         let payload = format!("blob-payload-{idx:03}").into_bytes();
-        let hash = node_a
-            .blobs_repo
-            .put(&payload, crate::blobs::BlobUseHints::Docs)
-            .await?;
+        let hash = node_a.blobs_repo.put(&payload).await?;
         let hash = crate::blobs::blob_id_to_digest_str(hash);
         args_batch.push(AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
@@ -461,10 +458,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let mut args_batch = Vec::new();
     for idx in 0..8usize {
         let payload = format!("blob-bytes-validation-{idx:03}").into_bytes();
-        let hash = node_a
-            .blobs_repo
-            .put(&payload, crate::blobs::BlobUseHints::Docs)
-            .await?;
+        let hash = node_a.blobs_repo.put(&payload).await?;
         blob_payloads.push((hash, payload));
         args_batch.push(AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
@@ -515,14 +509,8 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
 
     let payload_1 = b"blob-pin-sync-payload-1".to_vec();
     let payload_2 = b"blob-pin-sync-payload-2".to_vec();
-    let blob_id_1 = node_a
-        .blobs_repo
-        .put(&payload_1, crate::blobs::BlobUseHints::Docs)
-        .await?;
-    let blob_id_2 = node_a
-        .blobs_repo
-        .put(&payload_2, crate::blobs::BlobUseHints::Docs)
-        .await?;
+    let blob_id_1 = node_a.blobs_repo.put(&payload_1).await?;
+    let blob_id_2 = node_a.blobs_repo.put(&payload_2).await?;
     let hash_1 = blob_id_1.to_string();
     let hash_2 = blob_id_2.to_string();
 
@@ -1377,6 +1365,7 @@ async fn wait_for_blob_bytes(
     blob_id: BlobId,
     timeout: Duration,
 ) -> Res<Vec<u8>> {
+    let timeout = utils_rs::scale_timeout(timeout);
     tokio::time::timeout(timeout, async {
         loop {
             let path = match blobs_repo.get_path(blob_id).await {
@@ -1419,10 +1408,7 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
     let payload_bg = payload.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        repo_bg
-            .put(&payload_bg, crate::blobs::BlobUseHints::Unknown)
-            .await
-            .expect("put should succeed");
+        repo_bg.put(&payload_bg).await.expect("put should succeed");
     });
 
     let got = wait_for_blob_bytes(

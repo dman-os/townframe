@@ -1232,7 +1232,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         while !env.repo.list_hashes_for_doc(&doc_id).await?.is_empty() {
-            if start.elapsed() > std::time::Duration::from_secs(5) {
+            if start.elapsed() > utils_rs::scale_timeout(std::time::Duration::from_secs(5)) {
                 eyre::bail!("timeout waiting for eviction on invalid facet ID");
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1286,7 +1286,13 @@ mod tests {
         env.repo
             .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let start = std::time::Instant::now();
+        while !env.repo.list_hashes_for_doc(&doc_id).await?.is_empty() {
+            if start.elapsed() > utils_rs::scale_timeout(std::time::Duration::from_secs(5)) {
+                eyre::bail!("timeout waiting for conflicting length eviction");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert!(env.repo.list_hashes_for_doc(&doc_id).await?.is_empty());
 
         env.stop().await?;
