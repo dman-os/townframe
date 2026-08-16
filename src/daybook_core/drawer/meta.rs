@@ -17,6 +17,24 @@ pub mod version_updates {
     }
 }
 
+pub mod doc_version_updates {
+    use crate::interlude::*;
+    use automerge::ROOT;
+    use automerge::transaction::Transactable;
+
+    pub fn version_latest() -> Res<Vec<u8>> {
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.doc")?;
+            tx.put_object(ROOT, "facets", automerge::ObjType::Map)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
+        Ok(doc.save_nocompress())
+    }
+}
+
 #[cfg(test)]
 use super::BranchStateRow;
 use super::{BranchKind, BranchRefRow, DrawerRepo};

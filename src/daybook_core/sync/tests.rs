@@ -13,47 +13,47 @@ use crate::repos::{Repo, SubscribeOpts};
 use daybook_types::doc::{
     AddDocArgs, BlobPin, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 struct SyncTestNode {
     ctx: Arc<RepoCtx>,
-    blobs_repo: Arc<BlobsRepo>,
+    rt: Arc<crate::rt::Rt>,
     drawer: Arc<DrawerRepo>,
+    blobs_repo: Arc<BlobsRepo>,
     doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Arc<ProgressRepo>,
-    progress_stop: crate::repos::RepoStopToken,
-    drawer_stop: crate::repos::RepoStopToken,
-    _plugs_repo: Arc<PlugsRepo>,
-    plugs_stop: crate::repos::RepoStopToken,
-    config_stop: crate::repos::RepoStopToken,
-    doc_blobs_index_stop: crate::repos::RepoStopToken,
-    sqlite_local_state_stop: crate::repos::RepoStopToken,
-    doc_blobs_bridge_cancel: CancellationToken,
-    doc_blobs_bridge_handle: Option<JoinHandle<()>>,
+    plugs_repo: Arc<PlugsRepo>,
     sync_repo: Arc<IrohSyncRepo>,
     sync_stop: IrohSyncRepoStopToken,
+    rt_stop: crate::rt::RtStopToken,
+    drawer_stop: crate::repos::RepoStopToken,
+    plugs_stop: crate::repos::RepoStopToken,
+    config_stop: crate::repos::RepoStopToken,
+    dispatch_stop: crate::repos::RepoStopToken,
+    init_stop: crate::repos::RepoStopToken,
+    progress_stop: crate::repos::RepoStopToken,
+    sqlite_local_state_stop: crate::repos::RepoStopToken,
 }
 
 impl SyncTestNode {
     async fn stop(self) -> Res<()> {
         let SyncTestNode {
             ctx,
+            rt: _rt,
             blobs_repo: _blobs_repo,
             drawer: _drawer,
             doc_blobs_index_repo: _doc_blobs_index_repo,
             progress_repo: _progress_repo,
-            progress_stop,
-            drawer_stop,
-            _plugs_repo,
-            plugs_stop,
-            config_stop,
-            doc_blobs_index_stop,
-            sqlite_local_state_stop,
-            doc_blobs_bridge_cancel,
-            doc_blobs_bridge_handle,
+            plugs_repo: _plugs_repo,
             sync_repo,
             sync_stop,
+            rt_stop,
+            progress_stop,
+            drawer_stop,
+            plugs_stop,
+            config_stop,
+            dispatch_stop,
+            init_stop,
+            sqlite_local_state_stop,
         } = self;
         drop(sync_repo);
         sync_stop.cancel_token.cancel();
@@ -65,29 +65,30 @@ impl SyncTestNode {
         .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
+            rt_stop.stop(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("timeout waiting rt stop"))??;
+        tokio::time::timeout(
+            utils_rs::scale_timeout(Duration::from_secs(10)),
             progress_stop.stop(),
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
-        doc_blobs_bridge_cancel.cancel();
-        if let Some(handle) = doc_blobs_bridge_handle {
-            tokio::time::timeout(
-                utils_rs::scale_timeout(Duration::from_secs(5)),
-                utils_rs::wait_on_handle_with_timeout(
-                    handle,
-                    utils_rs::scale_timeout(Duration::from_secs(2)),
-                ),
-            )
-            .await
-            .map_err(|_| eyre::eyre!("timeout waiting doc blobs bridge join"))??;
-        }
-        doc_blobs_index_stop.cancel_token.cancel();
+        dispatch_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
-            doc_blobs_index_stop.stop(),
+            dispatch_stop.stop(),
         )
         .await
-        .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
+        .map_err(|_| eyre::eyre!("timeout waiting dispatch stop"))??;
+        init_stop.cancel_token.cancel();
+        tokio::time::timeout(
+            utils_rs::scale_timeout(Duration::from_secs(10)),
+            init_stop.stop(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("timeout waiting init stop"))??;
         sqlite_local_state_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -796,8 +797,29 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SyncNodeOptions {
+    #[expect(dead_code)]
+    enable_switch: bool,
+}
+
+impl Default for SyncNodeOptions {
+    fn default() -> Self {
+        Self {
+            enable_switch: true,
+        }
+    }
+}
+
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    info!(repo_root = %repo_root.display(), "opening sync test node");
+    open_sync_node_with_options(repo_root, SyncNodeOptions::default()).await
+}
+
+async fn open_sync_node_with_options(
+    repo_root: &std::path::Path,
+    options: SyncNodeOptions,
+) -> Res<SyncTestNode> {
+    info!(repo_root = %repo_root.display(), ?options, "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {
@@ -839,176 +861,71 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         rtx.sql.clone(),
     )
     .await?;
+    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
+        Arc::clone(&rtx.big_repo),
+        rtx.doc_app.document_id(),
+        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
+        rtx.sql.clone(),
+    )
+    .await?;
+    let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
+    let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
+        Arc::clone(&rtx.big_repo),
+        rtx.doc_app.document_id(),
+        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
+        rtx.sql.clone(),
+        Arc::clone(&progress_repo),
+        None,
+    )
+    .await?;
     let (sqlite_local_state_repo, sqlite_local_state_stop) =
         SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
-    let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
+
+    let (rt, rt_stop) = crate::rt::Rt::boot(
+        crate::rt::RtConfig {
+            device_id: "test-device".to_string(),
+            startup_progress_task_id: None,
+        },
+        Arc::clone(&rtx),
         Arc::clone(&drawer_repo),
+        Arc::clone(&plugs_repo),
+        Arc::clone(&dispatch_repo),
+        Arc::clone(&progress_repo),
         Arc::clone(&blobs_repo),
+        Arc::clone(&config_repo),
+        Arc::clone(&init_repo),
         Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
-    let (doc_blobs_bridge_cancel, doc_blobs_bridge_handle) =
-        spawn_doc_blobs_index_bridge_for_tests(
-            Arc::clone(&rtx.big_repo),
-            Arc::clone(&drawer_repo),
-            Arc::clone(&doc_blobs_index_repo),
-        )
-        .await?;
-    let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
+
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rtx),
         Arc::clone(&config_repo),
         Arc::clone(&blobs_repo),
-        Arc::clone(&doc_blobs_index_repo),
+        Arc::clone(&rt.doc_blobs_index_repo),
         Some(Arc::clone(&progress_repo)),
     )
     .await?;
 
     Ok(SyncTestNode {
         ctx: rtx,
-        blobs_repo,
-        drawer: drawer_repo,
-        doc_blobs_index_repo,
-        progress_repo,
-        progress_stop,
-        drawer_stop,
-        _plugs_repo: plugs_repo,
-        plugs_stop,
-        config_stop,
-        doc_blobs_index_stop,
-        sqlite_local_state_stop,
-        doc_blobs_bridge_cancel,
-        doc_blobs_bridge_handle: Some(doc_blobs_bridge_handle),
+        drawer: Arc::clone(&rt.drawer),
+        blobs_repo: Arc::clone(&rt.blobs_repo),
+        doc_blobs_index_repo: Arc::clone(&rt.doc_blobs_index_repo),
+        progress_repo: Arc::clone(&rt.progress_repo),
+        plugs_repo: Arc::clone(&rt.plugs_repo),
+        rt,
+        rt_stop,
         sync_repo,
         sync_stop,
+        drawer_stop,
+        plugs_stop,
+        config_stop,
+        dispatch_stop,
+        init_stop,
+        progress_stop,
+        sqlite_local_state_stop,
     })
-}
-
-async fn spawn_doc_blobs_index_bridge_for_tests(
-    big_repo: big_repo::SharedBigRepo,
-    drawer_repo: Arc<DrawerRepo>,
-    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
-) -> Res<(CancellationToken, JoinHandle<()>)> {
-    let drawer_listener = drawer_repo.subscribe(SubscribeOpts::new(16_384));
-    let (_ticket, mut big_repo_rx) = big_repo
-        .subscribe_change_listener(big_repo::BigRepoChangeFilter {
-            doc_id: None,
-            path: vec!["facets".into()],
-            origin: None,
-        })
-        .await?;
-    let cancel = CancellationToken::new();
-    let cancel_for_task = cancel.clone();
-    let handle = tokio::spawn(async move {
-        let _ticket = _ticket;
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel_for_task.cancelled() => break,
-                Some(notifs) = big_repo_rx.recv() => {
-                    for notif in notifs {
-                        let big_repo::BigRepoChangeNotification::DocChanged {
-                            doc_id: branch_doc_id,
-                            heads,
-                            ..
-                        } = notif
-                        else {
-                            continue;
-                        };
-                        if let Ok((_, ids)) = drawer_repo.list_just_ids().await {
-                            for doc_id in ids {
-                                if let Ok(Some(entry)) = drawer_repo.get_entry(&doc_id).await {
-                                    for (branch_name, branch_ref) in entry.branches {
-                                        if branch_ref.branch_doc_id == branch_doc_id {
-                                            doc_blobs_index_repo
-                                                .enqueue_upsert(
-                                                    doc_id.clone(),
-                                                    daybook_types::doc::BranchPathBuf::from(
-                                                        branch_name.as_str(),
-                                                    ),
-                                                    ChangeHashSet(Arc::clone(&heads)),
-                                                )
-                                                .expect("failed to enqueue upsert in sync bridge");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                evt = drawer_listener.recv_async() => {
-                    match evt {
-                        Ok(evt) => match evt.as_ref() {
-                            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                                doc_blobs_index_repo
-                                    .enqueue_delete(id.clone())
-                                    .expect("failed to enqueue delete in sync bridge");
-                            }
-                            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                let id = id.clone();
-                                let entry_branches = entry.branches.clone();
-                                let drawer_repo = Arc::clone(&drawer_repo);
-                                let doc_blobs_index_repo = Arc::clone(&doc_blobs_index_repo);
-                                tokio::spawn(async move {
-                                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                                    while tokio::time::Instant::now() < deadline {
-                                        let branches = if !entry_branches.is_empty() {
-                                            entry_branches.clone()
-                                        } else if let Ok(Some(b)) = drawer_repo.get_doc_branches(&id).await {
-                                            b.branches
-                                        } else {
-                                            HashMap::new()
-                                        };
-                                        if !branches.is_empty() {
-                                            let mut all_ready = true;
-                                            for (branch_name, heads) in &branches {
-                                                let branch_path = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
-                                                if let Ok(Some(_)) = drawer_repo.facet_keys_at_branch_heads(&id, &branch_path, heads).await {
-                                                } else {
-                                                    all_ready = false;
-                                                    break;
-                                                }
-                                            }
-                                            if all_ready {
-                                                for (branch_name, heads) in branches {
-                                                    let branch_path = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
-                                                    doc_blobs_index_repo
-                                                        .enqueue_upsert(id.clone(), branch_path, heads)
-                                                        .expect("failed to enqueue upsert in sync bridge task");
-                                                }
-                                                break;
-                                            }
-                                        }
-                                        tokio::time::sleep(Duration::from_millis(50)).await;
-                                    }
-                                });
-                            }
-                            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                let retained_branches: Vec<daybook_types::doc::BranchPathBuf> = entry
-                                    .branches
-                                    .keys()
-                                    .map(|branch_name| {
-                                        daybook_types::doc::BranchPathBuf::from(branch_name.as_str())
-                                    })
-                                    .collect();
-                                doc_blobs_index_repo
-                                    .enqueue_delete_branches_not_in(
-                                        id.clone(),
-                                        retained_branches,
-                                    )
-                                    .expect("failed to enqueue delete branches in sync bridge");
-                            }
-                        },
-                        Err(crate::repos::RecvError::Dropped { dropped_count }) => {
-                            panic!("doc blobs bridge dropped {dropped_count} drawer events");
-                        }
-                        Err(crate::repos::RecvError::Closed) => break,
-                    }
-                }
-            }
-        }
-    });
-    Ok((cancel, handle))
 }
 
 async fn list_doc_ids(drawer: &DrawerRepo) -> Res<HashSet<String>> {

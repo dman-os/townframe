@@ -380,6 +380,7 @@ impl DocBlobsIndexRepo {
             }
         }
 
+        info!(%doc_id, %branch_path, ?blobs, "reindex_doc_hashes called");
         self.reindex_doc_hashes(doc_id, branch_path, heads, &blobs)
             .await
     }
@@ -791,6 +792,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 }
             }
             crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
+                info!(%id, ?entry.branches, "DocBlobsTriageListener received DocUpdated");
                 let branch_paths: Vec<BranchPathBuf> = entry
                     .branches
                     .keys()
@@ -805,6 +807,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                         .get_facet_keys_if_latest(id, &branch_path, heads)
                         .await?
                     else {
+                        info!(%id, %branch_path, ?heads, "DocBlobsTriageListener get_facet_keys_if_latest returned None");
                         continue;
                     };
                     self.index_repo

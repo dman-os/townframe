@@ -42,7 +42,7 @@ async fn wait_for_facet_manifest(node: &SyncTestNode, tag: WellKnownFacetTag) ->
     tokio::time::timeout(utils_rs::scale_timeout(Duration::from_secs(30)), async {
         loop {
             if node
-                ._plugs_repo
+                .plugs_repo
                 .get_facet_manifest_by_tag(&tag_str)
                 .await
                 .is_some()
@@ -583,15 +583,6 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
 
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
-        node_a
-            .sync_repo
-            .rcx
-            .blob_part_store
-            .add_obj_to_parts(
-                crate::blobs::blob_id_from_hash(&hash.to_string()),
-                vec![blob_part],
-            )
-            .await?;
         let endpoint_id_a = node_a.sync_repo.endpoint_addr().id;
         let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
         node_b

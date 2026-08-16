@@ -1,5 +1,4 @@
 use crate::interlude::*;
-use automerge::transaction::Transactable;
 
 use big_repo::{BigRepo, SharedBigRepo};
 
@@ -175,10 +174,8 @@ pub async fn test_cx_with_options(
 
     // Create a drawer document
     let drawer_doc_id = {
-        let mut doc = automerge::Automerge::new();
-        let mut tx = doc.transaction();
-        tx.put(automerge::ROOT, "version", "0")?;
-        tx.commit();
+        let doc =
+            automerge::Automerge::load(&crate::drawer::version_updates::version_latest()?)?;
         let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
@@ -186,23 +183,6 @@ pub async fn test_cx_with_options(
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let handle = big_repo.create_doc(doc).await?;
-        handle.document_id()
-    };
-
-    let core_inventory_doc_id = {
-        let mut doc = automerge::Automerge::new();
-        let mut tx = doc.transaction();
-        tx.put(automerge::ROOT, "version", "0")?;
-        tx.commit();
-        let handle = big_repo.create_doc(doc).await?;
-        handle.document_id()
-    };
-    let docs_inventory_doc_id = {
-        let mut doc = automerge::Automerge::new();
-        let mut tx = doc.transaction();
-        tx.put(automerge::ROOT, "version", "0")?;
-        tx.commit();
         let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
@@ -233,13 +213,6 @@ pub async fn test_cx_with_options(
         sql_ctx.clone(),
     )
     .await?;
-
-    config_repo
-        .set_blob_inventories(crate::config::AppBlobInventories {
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
-        })
-        .await?;
 
     let config_user_path =
         daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
@@ -322,6 +295,53 @@ pub async fn test_cx_with_options(
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
     let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
+    let core_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    let docs_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    let core_entry = drawer_repo
+        .get_entry(&core_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing core inventory doc entry")?;
+    let docs_entry = drawer_repo
+        .get_entry(&docs_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing docs inventory doc entry")?;
+    let core_inventory_doc_id = core_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for core inventory doc")?
+        .branch_doc_id;
+    let docs_inventory_doc_id = docs_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for docs inventory doc")?
+        .branch_doc_id;
+
+    big_repo
+        .add_admin_member_to_doc(core_inventory_doc_id, authority.blob_inventories.clone())
+        .await?;
+    big_repo
+        .add_admin_member_to_doc(docs_inventory_doc_id, authority.blob_inventories.clone())
+        .await?;
+
+    config_repo
+        .set_blob_inventories(crate::config::AppBlobInventories {
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+        })
+        .await?;
+
     crate::authority::grant_docs_admin(
         &big_repo,
         &authority.core_docs,
@@ -366,8 +386,6 @@ pub async fn test_cx_with_options(
             iroh_public_key: peer_id.to_string(),
             iroh_secret_key,
             secret_repo,
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
         },
         big_repo
             .get_doc(&app_doc_id)
@@ -377,6 +395,8 @@ pub async fn test_cx_with_options(
             .get_doc(&drawer_doc_id)
             .await?
             .into_ready(drawer_doc_id)?,
+        core_inventory_doc_id,
+        docs_inventory_doc_id,
     );
 
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(

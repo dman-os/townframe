@@ -601,8 +601,6 @@ pub async fn clone_repo_init_from_url(
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
             secret_repo,
-            core_inventory_doc_id: DocumentId::new([0u8; 32]),
-            docs_inventory_doc_id: DocumentId::new([0u8; 32]),
         })
         .await?;
         crate::repo::mark_repo_initialized(&staging).await?;

@@ -348,23 +348,13 @@ impl Rt {
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
-        let core_inventory_doc_handle = rcx
-            .big_repo
-            .get_doc(&rcx.core_inventory_doc_id)
-            .await?
-            .into_ready(rcx.core_inventory_doc_id)?;
-        let docs_inventory_doc_handle = rcx
-            .big_repo
-            .get_doc(&rcx.docs_inventory_doc_id)
-            .await?
-            .into_ready(rcx.docs_inventory_doc_id)?;
         let (blob_pin_worker, blob_pin_worker_stop) = crate::blobs::BlobPinWorker::boot(
             Arc::clone(&drawer),
             Arc::clone(&plugs_repo),
             rcx.sql.clone(),
             Some(Arc::clone(&blobs_repo)),
-            core_inventory_doc_handle,
-            docs_inventory_doc_handle,
+            rcx.core_inventory_doc_id,
+            rcx.docs_inventory_doc_id,
         )
         .await?;
         Self::emit_startup_progress_status(

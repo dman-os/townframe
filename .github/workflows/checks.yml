@@ -108,12 +108,20 @@ jobs:
 
       - name: rust tests
         run: |
-          nix develop .#ci-rust --command cargo nextest run --color=always --workspace --all-features --no-fail-fast --retries 2
+          nix develop .#ci-rust --command cargo llvm-cov --no-report nextest --color=always --workspace --all-targets --profile ci
+          nix develop .#ci-rust --command cargo llvm-cov --no-report --doc
+          nix develop .#ci-rust --command cargo llvm-cov --doctests --lcov --output-path lcov.info
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
           OLLAMA_MODEL: gemma3
+      - name: Upload coverage data to codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          files: lcov.info
 
   kotlin-tests:
     name: Kotlin tests

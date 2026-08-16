@@ -549,23 +549,24 @@ impl SwitchWorker {
             SubEvent::Added(inner) => inner.obj_id.to_string().into(),
             SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
             SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ObjectChanged(inner) => inner.obj_id.to_string().into(),
+            SubEvent::ReplayComplete => return Ok(None),
         };
+        info!(%branch_doc_id, ?event, "SwitchWorker handle_partition_doc_event received");
         let stored_state = self
             .store
             .get_doc_state_by_branch_doc_id(&branch_doc_id)
             .await?;
         let resolved_branch = self.resolve_branch_ref(&branch_doc_id).await?;
+        info!(%branch_doc_id, ?resolved_branch, ?stored_state, "SwitchWorker resolved branch");
         let (doc_id, branch_name) = if let Some(branch) = resolved_branch {
             (branch.doc_id, branch.branch_name)
         } else if let Some(state) = &stored_state {
             (state.doc_id.clone(), state.branch_name.clone())
         } else {
+            info!(%branch_doc_id, "SwitchWorker ignoring unresolved branch_doc_id");
             return Ok(None);
         };
-        if branch_name != "main" {
-            return Ok(None);
-        }
         let mut next_state = stored_state.unwrap_or(SwitchDocState {
             doc_id: doc_id.clone(),
             branch_name: branch_name.clone(),
@@ -576,31 +577,68 @@ impl SwitchWorker {
         next_state.branch_name = branch_name.clone();
 
         match event {
-            SubEvent::Added(_) | SubEvent::Changed(_) => {
-                // FIXME: Added and Changed carry heads payloads
+            SubEvent::Added(_) | SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => {
                 let Some(handle) = self
                     .rt
                     .drawer
                     .get_handle_by_branch_doc_id(branch_doc_id.parse()?)
                     .await?
                 else {
+                    info!(%branch_doc_id, "SwitchWorker get_handle_by_branch_doc_id returned None");
                     return Ok(None);
                 };
-                let new_heads = ChangeHashSet(
-                    handle
-                        .with_document_read(|doc| doc.get_heads())
-                        .await
-                        .into_iter()
-                        .collect(),
-                );
+
+                let payload = match event {
+                    SubEvent::Added(inner) => Some(&inner.payload),
+                    SubEvent::Changed(inner) => Some(&inner.payload),
+                    _ => None,
+                };
+
+                let target_heads: Option<Vec<automerge::ChangeHash>> = payload
+                    .and_then(|p| p.get("heads"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        let strings: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+                        am_utils_rs::parse_commit_heads(&strings).ok().map(|h| h.to_vec())
+                    });
+
+                let new_heads = if let Some(target) = target_heads {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    loop {
+                        let (has_all, heads) = handle
+                            .with_document_read(|doc| {
+                                let has_all = target
+                                    .iter()
+                                    .all(|h| automerge::ReadDoc::get_change_by_hash(doc, h).is_some());
+                                (has_all, ChangeHashSet(doc.get_heads().into()))
+                            })
+                            .await;
+                        if has_all || tokio::time::Instant::now() >= deadline {
+                            break heads;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                } else {
+                    ChangeHashSet(
+                        handle
+                            .with_document_read(|doc| doc.get_heads())
+                            .await
+                            .into_iter()
+                            .collect(),
+                    )
+                };
+
                 let prev_heads = next_state.last_heads.clone();
+                info!(%branch_doc_id, ?prev_heads, ?new_heads, present = next_state.present, "SwitchWorker heads comparison");
                 if next_state.present && prev_heads.as_ref() == Some(&new_heads) {
+                    info!(%branch_doc_id, "SwitchWorker heads unchanged; skipping");
                     return Ok(Some((branch_doc_id, next_state)));
                 }
+                let branch_path = BranchPathBuf::from(branch_name.as_str());
                 let (diff, origin, _deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
-                        &BranchPathBuf::from("main"),
+                        &branch_path,
                         prev_heads.as_ref(),
                         Some(&new_heads),
                     )
@@ -611,7 +649,7 @@ impl SwitchWorker {
                     .get_doc_branches(&doc_id)
                     .await?
                     .ok_or_else(|| ferr!("missing drawer branches for {}", doc_id))?;
-                entry.branches.insert("main".into(), new_heads.clone());
+                entry.branches.insert(branch_name.clone(), new_heads.clone());
                 let evt = if !next_state.present {
                     DrawerEvent::DocAdded {
                         id: doc_id.clone(),
@@ -620,6 +658,7 @@ impl SwitchWorker {
                         origin,
                     }
                 } else {
+                    info!(%doc_id, %branch_doc_id, ?diff, "SwitchWorker dispatching DocUpdated from partition event");
                     DrawerEvent::DocUpdated {
                         id: doc_id.clone(),
                         entry,
@@ -640,10 +679,11 @@ impl SwitchWorker {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
+                let branch_path = BranchPathBuf::from(branch_name.as_str());
                 let (_diff, origin, deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
-                        &BranchPathBuf::from("main"),
+                        &branch_path,
                         next_state.last_heads.as_ref(),
                         None,
                     )
@@ -662,7 +702,7 @@ impl SwitchWorker {
                 next_state.present = false;
                 next_state.last_heads = None;
             }
-            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ReplayComplete => return Ok(None),
         }
         Ok(Some((branch_doc_id, next_state)))
     }
@@ -678,7 +718,10 @@ impl SwitchWorker {
         crate::event_origin::SwitchEventOrigin,
         Vec<FacetKey>,
     )> {
-        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+        let dmeta_key = FacetKey {
+            tag: WellKnownFacetTag::Dmeta.into(),
+            id: branch_path.as_str().to_string(),
+        };
         let (old_keys, old_updated_at) = if let Some(heads) = prev_heads {
             if let Some(doc) = self
                 .rt
@@ -800,7 +843,7 @@ impl SwitchWorker {
                 changed_facet_keys: changed,
                 added_facet_keys: added,
                 removed_facet_keys: removed.clone(),
-                moved_branch_names: vec!["main".to_string()],
+                moved_branch_names: vec![branch_path.to_string()],
             },
             origin,
             removed,
@@ -910,10 +953,14 @@ impl SwitchWorker {
                 ))
             }
             DrawerEvent::DocAdded { id, entry, .. } => {
-                let Some(heads) = entry.branches.get("main") else {
+                let Some((branch_name, heads)) = entry
+                    .branches
+                    .get_key_value("main")
+                    .or_else(|| entry.branches.iter().next())
+                else {
                     return Ok(false);
                 };
-                let branch_path = BranchPathBuf::from("main");
+                let branch_path = BranchPathBuf::from(branch_name.as_str());
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
@@ -939,11 +986,7 @@ impl SwitchWorker {
             DrawerEvent::DocUpdated {
                 id, entry, diff, ..
             } => {
-                if !diff
-                    .moved_branch_names
-                    .iter()
-                    .any(|branch_name| branch_name == "main")
-                {
+                if diff.moved_branch_names.is_empty() {
                     return Ok(false);
                 }
                 let referenced_tags = predicate.referenced_tags();
@@ -961,10 +1004,16 @@ impl SwitchWorker {
                 }) {
                     return Ok(false);
                 }
-                let Some(heads) = entry.branches.get("main") else {
+                let Some((branch_name, heads)) = diff
+                    .moved_branch_names
+                    .iter()
+                    .find_map(|branch| entry.branches.get_key_value(branch))
+                    .or_else(|| entry.branches.get_key_value("main"))
+                    .or_else(|| entry.branches.iter().next())
+                else {
                     return Ok(false);
                 };
-                let branch_path = BranchPathBuf::from("main");
+                let branch_path = BranchPathBuf::from(branch_name.as_str());
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
@@ -1343,6 +1392,83 @@ mod tests {
         assert!(
             dispatch_id.is_some(),
             "DocAdded with Note should trigger test-label via facet-key matching"
+        );
+
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// DocUpdated on a non-main branch (e.g. "draft") triggers switch and processor dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_switch_doc_updated_on_custom_branch_triggers_event() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let ctx = test_cx("switch_custom_branch").await?;
+
+        let doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    WellKnownFacetTag::TitleGeneric.into(),
+                    daybook_types::doc::WellKnownFacet::TitleGeneric("Initial title".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let main_heads = ctx
+            .drawer_repo
+            .get_doc_branches(&doc_id)
+            .await?
+            .ok_or_eyre("doc branches missing")?
+            .branches
+            .get("main")
+            .ok_or_eyre("main heads missing")?
+            .clone();
+
+        ctx.drawer_repo
+            .create_branch_at_heads_from_branch(
+                &doc_id,
+                daybook_types::doc::BranchPath::new("/user/draft"),
+                daybook_types::doc::BranchPath::new("main"),
+                &main_heads,
+                None,
+            )
+            .await?;
+
+        // Update the /user/draft branch with a Note facet (which matches the test-label processor)
+        ctx.drawer_repo
+            .update_at_heads(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        WellKnownFacetTag::Note.into(),
+                        daybook_types::doc::WellKnownFacet::Note("Hi on draft branch".into()).into(),
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                daybook_types::doc::BranchPath::new("/user/draft"),
+                None,
+            )
+            .await?;
+
+        let mut dispatch_id: Option<String> = None;
+        for _ in 0..300 {
+            if let Some((id, _dispatch)) =
+                ctx.dispatch_repo.get_any_by_wflow_key("test-label").await
+            {
+                dispatch_id = Some(id.clone());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            dispatch_id.is_some(),
+            "DocUpdated on non-main branch '/user/draft' should trigger test-label processor"
         );
 
         ctx.stop().await?;

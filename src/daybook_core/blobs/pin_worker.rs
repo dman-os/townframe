@@ -1,12 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use am_utils_rs::codecs::ThroughJson;
 use async_trait::async_trait;
-use automerge::ReadDoc;
-use big_repo::BigDocHandle;
 use daybook_types::doc::{
-    BlobPin, BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRaw, WellKnownFacet,
+    BlobPin, BranchPathBuf, ChangeHashSet, DocId, DocPatch, FacetKey, FacetRaw, WellKnownFacet,
     WellKnownFacetTag,
 };
 use eyre::Context;
@@ -48,8 +45,8 @@ pub struct BlobPinWorker {
     plugs_repo: Arc<PlugsRepo>,
     sql: SqlCtx,
     blobs_repo: Option<Arc<BlobsRepo>>,
-    core_inventory_doc_handle: BigDocHandle,
-    docs_inventory_doc_handle: BigDocHandle,
+    core_inventory_doc_id: DocId,
+    docs_inventory_doc_id: DocId,
     work_tx: tokio::sync::mpsc::UnboundedSender<BlobPinWorkItem>,
     _cancel_token: CancellationToken,
 }
@@ -60,21 +57,26 @@ impl BlobPinWorker {
         plugs_repo: Arc<PlugsRepo>,
         sql: SqlCtx,
         blobs_repo: Option<Arc<BlobsRepo>>,
-        core_inventory_doc_handle: BigDocHandle,
-        docs_inventory_doc_handle: BigDocHandle,
+        core_inventory_doc_id: DocumentId,
+        docs_inventory_doc_id: DocumentId,
     ) -> Res<(Arc<Self>, RepoStopToken)> {
         Self::ensure_schema(&sql).await?;
 
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel::<BlobPinWorkItem>();
         let cancel_token = CancellationToken::new();
 
+        let core_doc_id =
+            Self::resolve_doc_id_for_branch(&drawer_repo, core_inventory_doc_id).await?;
+        let docs_doc_id =
+            Self::resolve_doc_id_for_branch(&drawer_repo, docs_inventory_doc_id).await?;
+
         let worker = Arc::new(Self {
             drawer_repo,
             plugs_repo: Arc::clone(&plugs_repo),
             sql,
             blobs_repo,
-            core_inventory_doc_handle,
-            docs_inventory_doc_handle,
+            core_inventory_doc_id: core_doc_id,
+            docs_inventory_doc_id: docs_doc_id,
             work_tx,
             _cancel_token: cancel_token.clone(),
         });
@@ -104,6 +106,26 @@ impl BlobPinWorker {
                 worker_handle: Some(worker_handle),
             },
         ))
+    }
+
+    async fn resolve_doc_id_for_branch(
+        drawer_repo: &DrawerRepo,
+        branch_doc_id: DocumentId,
+    ) -> Res<DocId> {
+        let (_, doc_ids) = drawer_repo.list_just_ids().await?;
+        for id_str in doc_ids {
+            let doc_id = DocId::from(id_str);
+            if let Some(entry) = drawer_repo.get_entry(&doc_id).await? {
+                if entry
+                    .branches
+                    .values()
+                    .any(|b| b.branch_doc_id == branch_doc_id)
+                {
+                    return Ok(doc_id);
+                }
+            }
+        }
+        Ok(DocId::from(branch_doc_id.to_string()))
     }
 
     async fn ensure_schema(sql: &SqlCtx) -> Res<()> {
@@ -376,31 +398,19 @@ impl BlobPinWorker {
         }
 
         if !pins_to_set.is_empty() || !pins_to_remove.is_empty() {
-            self.docs_inventory_doc_handle
-                .with_document(|doc| {
-                    use automerge::transaction::Transactable;
-                    let mut tx = doc.transaction();
-                    let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
-                    };
-                    for (key, value) in &pins_to_set {
-                        let key_str = key.to_string();
-                        autosurgeon::reconcile_prop(
-                            &mut tx,
-                            &facets_obj,
-                            &*key_str,
-                            ThroughJson(value.clone()),
-                        )?;
-                    }
-                    for key in &pins_to_remove {
-                        let key_str = key.to_string();
-                        tx.delete(&facets_obj, &*key_str)?;
-                    }
-                    tx.commit();
-                    eyre::Ok(())
-                })
-                .await??;
+            let mut facets_set = HashMap::new();
+            for (key, value) in pins_to_set {
+                facets_set.insert(key, FacetRaw::from(serde_json::to_value(value)?));
+            }
+            let patch = DocPatch {
+                id: self.docs_inventory_doc_id.clone(),
+                user_path: None,
+                facets_set,
+                facets_remove: pins_to_remove,
+            };
+            self.drawer_repo
+                .update_at_heads(patch, daybook_types::doc::BranchPath::new("main"), None)
+                .await?;
         }
 
         Ok(())
@@ -453,22 +463,15 @@ impl BlobPinWorker {
         }
 
         if !pins_to_remove.is_empty() {
-            self.docs_inventory_doc_handle
-                .with_document(|doc| {
-                    use automerge::transaction::Transactable;
-                    let mut tx = doc.transaction();
-                    if let Some((automerge::Value::Object(automerge::ObjType::Map), facets_obj)) =
-                        tx.get(automerge::ROOT, "facets")?
-                    {
-                        for key in &pins_to_remove {
-                            let key_str = key.to_string();
-                            tx.delete(&facets_obj, &*key_str)?;
-                        }
-                        tx.commit();
-                    }
-                    eyre::Ok(())
-                })
-                .await??;
+            let patch = DocPatch {
+                id: self.docs_inventory_doc_id.clone(),
+                user_path: None,
+                facets_set: HashMap::new(),
+                facets_remove: pins_to_remove,
+            };
+            self.drawer_repo
+                .update_at_heads(patch, daybook_types::doc::BranchPath::new("main"), None)
+                .await?;
         }
 
         Ok(())
@@ -532,22 +535,15 @@ impl BlobPinWorker {
         }
 
         if !pins_to_remove.is_empty() {
-            self.docs_inventory_doc_handle
-                .with_document(|doc| {
-                    use automerge::transaction::Transactable;
-                    let mut tx = doc.transaction();
-                    if let Some((automerge::Value::Object(automerge::ObjType::Map), facets_obj)) =
-                        tx.get(automerge::ROOT, "facets")?
-                    {
-                        for key in &pins_to_remove {
-                            let key_str = key.to_string();
-                            tx.delete(&facets_obj, &*key_str)?;
-                        }
-                        tx.commit();
-                    }
-                    eyre::Ok(())
-                })
-                .await??;
+            let patch = DocPatch {
+                id: self.docs_inventory_doc_id.clone(),
+                user_path: None,
+                facets_set: HashMap::new(),
+                facets_remove: pins_to_remove,
+            };
+            self.drawer_repo
+                .update_at_heads(patch, daybook_types::doc::BranchPath::new("main"), None)
+                .await?;
         }
 
         Ok(())
@@ -651,31 +647,19 @@ impl BlobPinWorker {
         }
 
         if !pins_to_set.is_empty() || !pins_to_remove.is_empty() {
-            self.core_inventory_doc_handle
-                .with_document(|doc| {
-                    use automerge::transaction::Transactable;
-                    let mut tx = doc.transaction();
-                    let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
-                    };
-                    for (key, value) in &pins_to_set {
-                        let key_str = key.to_string();
-                        autosurgeon::reconcile_prop(
-                            &mut tx,
-                            &facets_obj,
-                            &*key_str,
-                            ThroughJson(value.clone()),
-                        )?;
-                    }
-                    for key in &pins_to_remove {
-                        let key_str = key.to_string();
-                        tx.delete(&facets_obj, &*key_str)?;
-                    }
-                    tx.commit();
-                    eyre::Ok(())
-                })
-                .await??;
+            let mut facets_set = HashMap::new();
+            for (key, value) in pins_to_set {
+                facets_set.insert(key, FacetRaw::from(serde_json::to_value(value)?));
+            }
+            let patch = DocPatch {
+                id: self.core_inventory_doc_id.clone(),
+                user_path: None,
+                facets_set,
+                facets_remove: pins_to_remove,
+            };
+            self.drawer_repo
+                .update_at_heads(patch, daybook_types::doc::BranchPath::new("main"), None)
+                .await?;
         }
 
         Ok(())
@@ -716,59 +700,51 @@ impl BlobPinWorker {
         }
 
         if !pins_to_remove.is_empty() {
-            self.core_inventory_doc_handle
-                .with_document(|doc| {
-                    use automerge::transaction::Transactable;
-                    let mut tx = doc.transaction();
-                    if let Some((automerge::Value::Object(automerge::ObjType::Map), facets_obj)) =
-                        tx.get(automerge::ROOT, "facets")?
-                    {
-                        for key in &pins_to_remove {
-                            let key_str = key.to_string();
-                            tx.delete(&facets_obj, &*key_str)?;
-                        }
-                        tx.commit();
-                    }
-                    eyre::Ok(())
-                })
-                .await??;
+            let patch = DocPatch {
+                id: self.core_inventory_doc_id.clone(),
+                user_path: None,
+                facets_set: HashMap::new(),
+                facets_remove: pins_to_remove,
+            };
+            self.drawer_repo
+                .update_at_heads(patch, daybook_types::doc::BranchPath::new("main"), None)
+                .await?;
         }
 
         Ok(())
     }
 
     pub async fn list_doc_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        Self::list_pins_from_handle(&self.docs_inventory_doc_handle).await
+        self.list_pins_from_doc_id(&self.docs_inventory_doc_id).await
     }
 
     pub async fn list_core_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        Self::list_pins_from_handle(&self.core_inventory_doc_handle).await
+        self.list_pins_from_doc_id(&self.core_inventory_doc_id).await
     }
 
-    async fn list_pins_from_handle(handle: &BigDocHandle) -> Res<HashMap<String, BlobPin>> {
-        handle
-            .with_document_read(|am_doc| {
-                let facets_obj = match automerge::ReadDoc::get(am_doc, automerge::ROOT, "facets")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => return eyre::Ok(HashMap::new()),
-                };
-                let mut pins = HashMap::new();
-                for item in automerge::ReadDoc::map_range(am_doc, &facets_obj, ..) {
-                    let key = FacetKey::from(&*item.key);
-                    if key.tag == WellKnownFacetTag::BlobPin.into() {
-                        let value: Option<ThroughJson<FacetRaw>> =
-                            autosurgeon::hydrate_prop(am_doc, &facets_obj, item.key)?;
-                        if let Some(ThroughJson(raw)) = value
-                            && let Ok(WellKnownFacet::BlobPin(pin)) =
-                                WellKnownFacet::from_json(raw, WellKnownFacetTag::BlobPin)
-                        {
-                            pins.insert(key.id, pin);
-                        }
-                    }
+    async fn list_pins_from_doc_id(&self, doc_id: &DocId) -> Res<HashMap<String, BlobPin>> {
+        let Some(doc) = self
+            .drawer_repo
+            .get_doc_with_facets_at_branch(
+                doc_id,
+                &daybook_types::doc::BranchPathBuf::from("main"),
+                None,
+            )
+            .await?
+        else {
+            return Ok(HashMap::new());
+        };
+        let mut pins = HashMap::new();
+        for (key, raw) in &doc.facets {
+            if key.tag == WellKnownFacetTag::BlobPin.into() {
+                if let Ok(WellKnownFacet::BlobPin(pin)) =
+                    WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::BlobPin)
+                {
+                    pins.insert(key.id.clone(), pin);
                 }
-                eyre::Ok(pins)
-            })
-            .await
+            }
+        }
+        Ok(pins)
     }
 }
 
