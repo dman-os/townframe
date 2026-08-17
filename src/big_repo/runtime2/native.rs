@@ -2120,7 +2120,7 @@ where
 
     let causal_checkpoint_worker =
         crate::runtime2::causal_checkpoint_worker::CausalCheckpointWorker::new(
-            group_part_store,
+            group_part_store.clone(),
             keyhive.clone(),
             handle.clone(),
             Arc::clone(&timer),
@@ -2131,6 +2131,23 @@ where
         .child_tasks
         .spawn(Sendable::from_future(async move {
             causal_checkpoint_worker.run().await.unwrap();
+            Ok(())
+        }))?;
+
+    let automerge_frontier_worker =
+        crate::runtime2::automerge_frontier_worker::AutomergeFrontierWorker::new(
+            group_part_store.clone(),
+            Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
+            handle.clone(),
+            Arc::clone(&timer),
+            evt_tx.clone(),
+            Arc::clone(&keyhive_state_generation),
+            crate::GLOBAL_PART_ID,
+        );
+    stop_token
+        .child_tasks
+        .spawn(Sendable::from_future(async move {
+            automerge_frontier_worker.run().await.unwrap();
             Ok(())
         }))?;
 

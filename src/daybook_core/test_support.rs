@@ -174,8 +174,7 @@ pub async fn test_cx_with_options(
 
     // Create a drawer document
     let drawer_doc_id = {
-        let doc =
-            automerge::Automerge::load(&crate::drawer::version_updates::version_latest()?)?;
+        let doc = automerge::Automerge::load(&crate::drawer::version_updates::version_latest()?)?;
         let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };

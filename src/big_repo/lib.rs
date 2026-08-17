@@ -36,6 +36,7 @@ pub use runtime2::types::{
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 mod sqlite_big_repo_store;
+pub use runtime2::{automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id};
 #[cfg(feature = "test-support")]
 pub use sqlite_big_repo_store::BigSyncStoreSnapshot;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;

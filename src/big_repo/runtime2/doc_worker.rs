@@ -504,14 +504,18 @@ impl<F: FutureForm> DocWorker2<F> {
 
     async fn register_bundle_lease(&self) -> eyre::Result<()> {
         let (registered_tx, registered_rx) = futures::channel::oneshot::channel();
-        self.runtime_cmd_tx
+        if self
+            .runtime_cmd_tx
             .send(crate::runtime2::Runtime2Cmd::RegisterDocLease {
                 doc_id: self.doc_id,
                 registered: registered_tx,
             })
             .await
-            .expect(ERROR_CHANNEL);
-        registered_rx.await.expect(ERROR_CHANNEL);
+            .is_err()
+        {
+            return Ok(());
+        }
+        drop(registered_rx.await);
         Ok(())
     }
     /// Load the materializable document state and retain whether any stored
@@ -844,7 +848,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let heads = Arc::from(heads);
         self.change_manager
-            .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
+            .notify_sedimentree_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
 
@@ -1348,7 +1352,7 @@ impl<F: FutureForm> DocWorker2<F> {
         patches: Vec<automerge::Patch>,
         origin: &BigRepoChangeOrigin,
     ) -> eyre::Result<()> {
-        self.change_manager.notify_doc_heads_changed(
+        self.change_manager.notify_sedimentree_heads_changed(
             self.doc_id,
             Arc::clone(&after_heads),
             origin.clone(),
@@ -1490,6 +1494,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.blocked_refs.clear();
                 self.sync_partial_state().await?;
             }
+            self.change_manager
+                .notify_cold_sedimentree_heads_updated(
+                    self.doc_id,
+                    BigRepoChangeOrigin::Remote { peer_id },
+                )
+                .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
+                .ok();
             Ok(crate::runtime2::types::SyncDocReceipt {
                 outcome: crate::runtime2::types::SyncDocOutcome::Stored,
             })
@@ -1669,11 +1680,12 @@ impl<F: FutureForm> DocWorker2<F> {
             .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
             .collect();
 
-        self.change_manager.notify_doc_pending_heads_changed(
-            self.doc_id,
-            heads,
-            BigRepoChangeOrigin::Remote { peer_id },
-        )?;
+        self.change_manager
+            .notify_doc_pending_sedimentree_heads_changed(
+                self.doc_id,
+                heads,
+                BigRepoChangeOrigin::Remote { peer_id },
+            )?;
         Ok(())
     }
 
@@ -1726,7 +1738,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 if was_pending {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-                    self.change_manager.notify_doc_heads_changed(
+                    self.change_manager.notify_sedimentree_heads_changed(
                         self.doc_id,
                         Arc::clone(&heads),
                         origin.clone(),

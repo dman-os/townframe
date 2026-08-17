@@ -333,7 +333,7 @@ pub async fn spawn_switch_worker(
                     .await?;
             }
 
-            let docs_partition_id = worker.rt.drawer.replicated_partition_id();
+            let docs_partition_id = big_repo::automerge_docs_part_id();
             let docs_partition_id_text = docs_partition_id.to_string();
             let mut cursor = worker
                 .store
@@ -546,10 +546,18 @@ impl SwitchWorker {
         event: &SubEvent,
     ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
         let branch_doc_id: Arc<str> = match event {
-            SubEvent::Added(inner) => inner.obj_id.to_string().into(),
-            SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::ObjectChanged(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Added(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::Changed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::Removed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::ObjectChanged(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
             SubEvent::ReplayComplete => return Ok(None),
         };
         info!(%branch_doc_id, ?event, "SwitchWorker handle_partition_doc_event received");
@@ -588,45 +596,13 @@ impl SwitchWorker {
                     return Ok(None);
                 };
 
-                let payload = match event {
-                    SubEvent::Added(inner) => Some(&inner.payload),
-                    SubEvent::Changed(inner) => Some(&inner.payload),
-                    _ => None,
-                };
-
-                let target_heads: Option<Vec<automerge::ChangeHash>> = payload
-                    .and_then(|p| p.get("heads"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| {
-                        let strings: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-                        am_utils_rs::parse_commit_heads(&strings).ok().map(|h| h.to_vec())
-                    });
-
-                let new_heads = if let Some(target) = target_heads {
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let (has_all, heads) = handle
-                            .with_document_read(|doc| {
-                                let has_all = target
-                                    .iter()
-                                    .all(|h| automerge::ReadDoc::get_change_by_hash(doc, h).is_some());
-                                (has_all, ChangeHashSet(doc.get_heads().into()))
-                            })
-                            .await;
-                        if has_all || tokio::time::Instant::now() >= deadline {
-                            break heads;
-                        }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                } else {
-                    ChangeHashSet(
-                        handle
-                            .with_document_read(|doc| doc.get_heads())
-                            .await
-                            .into_iter()
-                            .collect(),
-                    )
-                };
+                let new_heads = ChangeHashSet(
+                    handle
+                        .with_document_read(|doc| doc.get_heads())
+                        .await
+                        .into_iter()
+                        .collect(),
+                );
 
                 let prev_heads = next_state.last_heads.clone();
                 info!(%branch_doc_id, ?prev_heads, ?new_heads, present = next_state.present, "SwitchWorker heads comparison");
@@ -649,7 +625,9 @@ impl SwitchWorker {
                     .get_doc_branches(&doc_id)
                     .await?
                     .ok_or_else(|| ferr!("missing drawer branches for {}", doc_id))?;
-                entry.branches.insert(branch_name.clone(), new_heads.clone());
+                entry
+                    .branches
+                    .insert(branch_name.clone(), new_heads.clone());
                 let evt = if !next_state.present {
                     DrawerEvent::DocAdded {
                         id: doc_id.clone(),
@@ -718,10 +696,7 @@ impl SwitchWorker {
         crate::event_origin::SwitchEventOrigin,
         Vec<FacetKey>,
     )> {
-        let dmeta_key = FacetKey {
-            tag: WellKnownFacetTag::Dmeta.into(),
-            id: branch_path.as_str().to_string(),
-        };
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
         let (old_keys, old_updated_at) = if let Some(heads) = prev_heads {
             if let Some(doc) = self
                 .rt
@@ -1444,7 +1419,8 @@ mod tests {
                     id: doc_id.clone(),
                     facets_set: [(
                         WellKnownFacetTag::Note.into(),
-                        daybook_types::doc::WellKnownFacet::Note("Hi on draft branch".into()).into(),
+                        daybook_types::doc::WellKnownFacet::Note("Hi on draft branch".into())
+                            .into(),
                     )]
                     .into(),
                     facets_remove: vec![],

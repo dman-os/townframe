@@ -219,10 +219,13 @@ impl DrawerRepo {
                     }
 
                     let key_str = key.to_string();
-                    let value: Option<ThroughJson<FacetRaw>> =
-                        autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
-                    if let Some(facet_value) = value {
-                        facets.insert(key, Arc::new(facet_value.0));
+                    if automerge::ReadDoc::get_at(am_doc, &facets_obj, &*key_str, heads)?.is_some()
+                    {
+                        let value: Option<ThroughJson<FacetRaw>> =
+                            autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
+                        if let Some(facet_value) = value {
+                            facets.insert(key, Arc::new(facet_value.0));
+                        }
                     }
                 }
                 eyre::Ok((facets, facet_heads_by_key, to_probe))

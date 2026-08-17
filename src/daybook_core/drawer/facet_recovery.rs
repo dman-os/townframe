@@ -23,28 +23,28 @@ fn recover_facet_heads_inner(
     // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
     let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("facets object not found"),
+        _ => return Ok(Vec::new()),
     };
 
     let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
     let dmeta_obj = match get(doc, &facets_obj, &dmeta_key, read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta facet not found"),
+        _ => return Ok(Vec::new()),
     };
 
     let dmeta_facets_obj = match get(doc, &dmeta_obj, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta.facets map not found"),
+        _ => return Ok(Vec::new()),
     };
 
     let facet_meta_obj = match get(doc, &dmeta_facets_obj, facet_key.to_string(), read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("facet meta not found for key: {}", facet_key),
+        _ => return Ok(Vec::new()),
     };
 
     let updated_at_list = match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
         Some((Value::Object(ObjType::List), id)) => id,
-        _ => eyre::bail!("updatedAt list not found for facet: {}", facet_key),
+        _ => return Ok(Vec::new()),
     };
 
     let mut recovered = Vec::new();

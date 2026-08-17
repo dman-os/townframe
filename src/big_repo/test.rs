@@ -2444,7 +2444,7 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
         recv_head_batch(&mut head_rx).await;
     assert!(matches!(
         head_batch.as_slice(),
-        [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+        [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
             doc_id: seen_doc_id,
             origin: BigRepoChangeOrigin::Remote { .. },
             ..
@@ -3574,12 +3574,15 @@ async fn run_remote_change_listener_without_live_handle_case(
             .is_err(),
         "a document without a live handle must not emit materialized change notifications"
     );
-    assert!(
-        timeout(Duration::from_millis(250), head_rx.recv())
-            .await
-            .is_err(),
-        "a document without a live handle must not emit materialized head notifications"
-    );
+    let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+        recv_head_batch(&mut head_rx).await;
+    assert!(matches!(
+        head_batch.as_slice(),
+        [super::changes::BigRepoHeadNotification::ColdSedimentreeHeadsUpdated {
+            doc_id: seen_doc_id,
+            origin: BigRepoChangeOrigin::Remote { .. },
+        }] if *seen_doc_id == doc_id
+    ));
 
     let reopened = server.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     wait_for_json_doc(&reopened, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -3643,7 +3646,7 @@ async fn apply_local_sync_mutation_and_assert_notifications(
         recv_head_batch(&mut head_rx).await;
     assert!(matches!(
         head_batch.as_slice(),
-        [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+        [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
             doc_id: seen_doc_id,
             origin: BigRepoChangeOrigin::Local,
             ..
@@ -4631,7 +4634,7 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
             recv_head_batch(&mut head_rx).await;
         assert!(matches!(
             head_batch.as_slice(),
-            [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+            [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
                 doc_id: seen_doc_id,
                 origin: BigRepoChangeOrigin::Remote { .. },
                 ..
@@ -4731,7 +4734,7 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
             recv_head_batch(&mut head_rx).await;
         assert!(matches!(
             head_batch.as_slice(),
-            [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+            [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
                 doc_id: seen_doc_id,
                 origin: BigRepoChangeOrigin::Local,
                 ..

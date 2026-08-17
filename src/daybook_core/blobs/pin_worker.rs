@@ -715,11 +715,13 @@ impl BlobPinWorker {
     }
 
     pub async fn list_doc_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        self.list_pins_from_doc_id(&self.docs_inventory_doc_id).await
+        self.list_pins_from_doc_id(&self.docs_inventory_doc_id)
+            .await
     }
 
     pub async fn list_core_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        self.list_pins_from_doc_id(&self.core_inventory_doc_id).await
+        self.list_pins_from_doc_id(&self.core_inventory_doc_id)
+            .await
     }
 
     async fn list_pins_from_doc_id(&self, doc_id: &DocId) -> Res<HashMap<String, BlobPin>> {

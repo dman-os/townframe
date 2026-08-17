@@ -352,24 +352,6 @@ impl DrawerRepo {
             handles.insert(handle.document_id(), handle);
         });
 
-        let updated_entry = self
-            .current_doc_branches(&patch.id)
-            .await?
-            .ok_or_eyre("branch state missing after update_at_heads")?;
-        let drawer_heads = self.get_drawer_heads();
-        self.registry.notify([DrawerEvent::DocUpdated {
-            id: patch.id.clone(),
-            entry: updated_entry,
-            diff: DocEntryDiff {
-                changed_facet_keys: patch.facets_set.keys().cloned().collect(),
-                added_facet_keys: Vec::new(),
-                removed_facet_keys: patch.facets_remove.clone(),
-                moved_branch_names: vec![branch_path.to_string()],
-            },
-            drawer_heads,
-            origin: self.local_origin(),
-        }]);
-
         Ok(())
     }
 
