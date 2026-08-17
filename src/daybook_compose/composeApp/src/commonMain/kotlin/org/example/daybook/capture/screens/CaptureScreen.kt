@@ -50,6 +50,8 @@ import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
@@ -61,6 +63,7 @@ class CaptureScreenViewModel(
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel,
     val initialDocId: String? = null,
+    val rt: RtFfi? = null,
 ) : ViewModel() {
     private val _captureMode = MutableStateFlow(CaptureMode.TEXT)
     val captureMode = _captureMode.asStateFlow()
@@ -197,20 +200,15 @@ class CaptureScreenViewModel(
     }
 
     // Registration handle to auto-unregister
-    private var listenerRegistration: ListenerRegistration? = null
+    private var drawerRegistration: ListenerRegistration? = null
+    private var rtRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
-    private val listener =
+    private val drawerListener =
         object : DrawerEventListener {
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
-                        is DrawerEvent.DocUpdated -> {
-                            if (event.id == _currentDocId.value) {
-                                loadDoc(event.id)
-                            }
-                        }
-
                         is DrawerEvent.DocDeleted -> {
                             if (event.id == _currentDocId.value) {
                                 _currentDocId.value = null
@@ -225,6 +223,17 @@ class CaptureScreenViewModel(
             }
         }
 
+    private val switchDocListener =
+        object : SwitchDocEventListener {
+            override fun onSwitchDocEvent(event: SwitchDocEvent) {
+                viewModelScope.launch {
+                    if (event.docId == _currentDocId.value) {
+                        loadDoc(event.docId)
+                    }
+                }
+            }
+        }
+
     init {
         if (initialDocId != null) {
             loadDoc(initialDocId)
@@ -232,7 +241,8 @@ class CaptureScreenViewModel(
             editorController.bindDoc(null)
         }
         viewModelScope.launch {
-            listenerRegistration = drawerRepo.ffiRegisterListener(listener)
+            drawerRegistration = drawerRepo.ffiRegisterListener(drawerListener)
+            rtRegistration = rt?.ffiRegisterListener(switchDocListener)
         }
 
         // Initialize mode from current window
@@ -258,7 +268,8 @@ class CaptureScreenViewModel(
     }
 
     override fun onCleared() {
-        listenerRegistration?.unregister()
+        drawerRegistration?.unregister()
+        rtRegistration?.unregister()
         super.onCleared()
     }
 }
@@ -275,6 +286,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 blobsRepo = container.blobsRepo,
                 tablesVm = tablesVm,
                 initialDocId = initialDocId,
+                rt = container.rtFfi,
             )
         }
 

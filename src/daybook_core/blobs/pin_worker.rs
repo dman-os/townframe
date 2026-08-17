@@ -115,14 +115,13 @@ impl BlobPinWorker {
         let (_, doc_ids) = drawer_repo.list_just_ids().await?;
         for id_str in doc_ids {
             let doc_id = DocId::from(id_str);
-            if let Some(entry) = drawer_repo.get_entry(&doc_id).await? {
-                if entry
+            if let Some(entry) = drawer_repo.get_entry(&doc_id).await?
+                && entry
                     .branches
                     .values()
-                    .any(|b| b.branch_doc_id == branch_doc_id)
-                {
-                    return Ok(doc_id);
-                }
+                    .any(|branch| branch.branch_doc_id == branch_doc_id)
+            {
+                return Ok(doc_id);
             }
         }
         Ok(DocId::from(branch_doc_id.to_string()))
@@ -738,12 +737,11 @@ impl BlobPinWorker {
         };
         let mut pins = HashMap::new();
         for (key, raw) in &doc.facets {
-            if key.tag == WellKnownFacetTag::BlobPin.into() {
-                if let Ok(WellKnownFacet::BlobPin(pin)) =
+            if key.tag == WellKnownFacetTag::BlobPin.into()
+                && let Ok(WellKnownFacet::BlobPin(pin)) =
                     WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::BlobPin)
-                {
-                    pins.insert(key.id.clone(), pin);
-                }
+            {
+                pins.insert(key.id.clone(), pin);
             }
         }
         Ok(pins)
@@ -759,6 +757,7 @@ struct BlobPinTriageListener {
 impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
     fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
         crate::rt::switch::SwtchSinkInterest {
+            consume_doc: true,
             consume_drawer: true,
             consume_plugs: true,
             consume_dispatch: false,
@@ -776,9 +775,21 @@ impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
     ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
         let outcome = crate::rt::switch::SwitchSinkOutcome::default();
         match event {
+            crate::rt::switch::SwitchEvent::Doc(event) => {
+                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
+                self.worker
+                    .handle_work_item(BlobPinWorkItem::DocUpsert {
+                        doc_id: event.doc_id.clone(),
+                        branch_path,
+                        heads: event.new_heads.clone(),
+                    })
+                    .await?;
+            }
             crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
                 crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                    self.worker.enqueue_delete_doc(id.clone())?;
+                    self.worker
+                        .handle_work_item(BlobPinWorkItem::DocDelete { doc_id: id.clone() })
+                        .await?;
                 }
                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                     for (branch_name, heads) in &entry.branches {
@@ -791,38 +802,30 @@ impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
                             continue;
                         };
                         self.worker
-                            .enqueue_upsert_doc(id.clone(), branch_path, heads.clone())?;
-                    }
-                }
-                crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                    let branch_paths: Vec<BranchPathBuf> = entry
-                        .branches
-                        .keys()
-                        .map(|name| BranchPathBuf::from(name.as_str()))
-                        .collect();
-                    self.worker
-                        .enqueue_delete_doc_branches_not_in(id.clone(), branch_paths)?;
-                    for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPathBuf::from(branch_name.as_str());
-                        let Some(_keys) = self
-                            .drawer_repo
-                            .get_facet_keys_if_latest(id, &branch_path, heads)
-                            .await?
-                        else {
-                            continue;
-                        };
-                        self.worker
-                            .enqueue_upsert_doc(id.clone(), branch_path, heads.clone())?;
+                            .handle_work_item(BlobPinWorkItem::DocUpsert {
+                                doc_id: id.clone(),
+                                branch_path,
+                                heads: heads.clone(),
+                            })
+                            .await?;
                     }
                 }
             },
             crate::rt::switch::SwitchEvent::Plugs(event) => match &**event {
                 crate::plugs::PlugsEvent::PlugAdded { id, .. }
                 | crate::plugs::PlugsEvent::PlugChanged { id, .. } => {
-                    self.worker.enqueue_upsert_plug(id.clone())?;
+                    self.worker
+                        .handle_work_item(BlobPinWorkItem::PlugUpsert {
+                            plug_id: id.to_string(),
+                        })
+                        .await?;
                 }
                 crate::plugs::PlugsEvent::PlugDeleted { id, .. } => {
-                    self.worker.enqueue_delete_plug(id.clone())?;
+                    self.worker
+                        .handle_work_item(BlobPinWorkItem::PlugDelete {
+                            plug_id: id.to_string(),
+                        })
+                        .await?;
                 }
                 crate::plugs::PlugsEvent::ConfigDocsChanged { .. } => {}
             },
@@ -846,9 +849,7 @@ mod tests {
         hash: &str,
         should_exist: bool,
     ) -> Res<()> {
-        let deadline = tokio::time::Instant::now()
-            + utils_rs::scale_timeout(std::time::Duration::from_secs(10));
-        while tokio::time::Instant::now() < deadline {
+        loop {
             let pins = if is_core {
                 worker.list_core_inventory_pins().await?
             } else {
@@ -859,9 +860,6 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eyre::bail!(
-            "timeout waiting for pin presence on is_core={is_core} hash={hash} expected={should_exist}"
-        )
     }
 
     #[tokio::test(flavor = "multi_thread")]

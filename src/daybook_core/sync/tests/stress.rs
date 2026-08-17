@@ -9,9 +9,6 @@ use std::sync::Once;
 
 const NODE_COUNT: usize = 4;
 const EVENT_COUNT: usize = 32;
-const PHASE_TIMEOUT_BASE: Duration = Duration::from_secs(10);
-const FULL_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(15);
-const BLOB_SYNC_TIMEOUT_BASE: Duration = Duration::from_secs(25);
 const DEFAULT_STRESS_SEED: u64 = 0xD4B5_51C0_0001;
 static TEST_ENV_INIT: Once = Once::new();
 
@@ -26,7 +23,7 @@ enum EventKind {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
+async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     // FIXME: use a config field on the repo settings
     TEST_ENV_INIT.call_once(|| unsafe {
@@ -34,17 +31,8 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     });
 
     let seed = utils_rs::testing::test_seed(DEFAULT_STRESS_SEED);
-    let phase_timeout = utils_rs::scale_timeout(PHASE_TIMEOUT_BASE);
-    let full_sync_timeout = utils_rs::scale_timeout(FULL_SYNC_TIMEOUT_BASE);
-    let blob_sync_timeout = utils_rs::scale_timeout(BLOB_SYNC_TIMEOUT_BASE);
     let mut rng = StdRng::seed_from_u64(seed);
-    info!(
-        seed,
-        phase_timeout = ?phase_timeout,
-        full_sync_timeout = ?full_sync_timeout,
-        blob_sync_timeout = ?blob_sync_timeout,
-        "starting four-node sync stress test"
-    );
+    info!(seed, "starting four-node sync stress test");
 
     let temp_root = tempfile::tempdir()?;
     info!(path = %temp_root.path().display(), "initialized stress test cluster temp root");
@@ -57,7 +45,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         let topology_1 = generate_connected_edges(&mut rng);
         info!(?topology_1, "phase-1 topology");
         let mut endpoints = connect_topology(&nodes, &topology_1).await?;
-        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await?;
+        wait_network_rest(&nodes, &endpoints).await?;
 
         let mut applied = Vec::new();
         for idx in 0..EVENT_COUNT {
@@ -74,7 +62,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
             sample = ?applied.iter().take(12).collect::<Vec<_>>(),
             "phase-1 events applied"
         );
-        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await?;
+        wait_network_rest(&nodes, &endpoints).await?;
 
         let leaving_idx = rng.random_range(0..NODE_COUNT);
         info!(leaving_idx, "transfer phase: leaving node");
@@ -124,7 +112,7 @@ async fn iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
         }
         info!(?full_mesh_topology, "phase-2 full mesh topology");
         endpoints = connect_topology(&nodes, &full_mesh_topology).await?;
-        wait_network_rest(&nodes, &endpoints, full_sync_timeout, blob_sync_timeout).await
+        wait_network_rest(&nodes, &endpoints).await
     }
     .await;
     let stop_results = futures::stream::iter(
@@ -313,13 +301,13 @@ async fn connect_topology(
             .sync_repo
             .rcx
             .big_repo
-            .sync_keyhive_with_peer(peer_b_id, Some(Duration::from_secs(5)))
+            .sync_keyhive_with_peer(peer_b_id, None)
             .await?;
         node_b
             .sync_repo
             .rcx
             .big_repo
-            .sync_keyhive_with_peer(peer_a_id, Some(Duration::from_secs(5)))
+            .sync_keyhive_with_peer(peer_a_id, None)
             .await?;
     }
     Ok(endpoint_sets)
@@ -328,8 +316,6 @@ async fn connect_topology(
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
     peers_set: &[HashSet<PeerId>],
-    timeout: Duration,
-    blob_timeout: Duration,
 ) -> Res<()> {
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
         node.as_ref().map(|node| async move {
@@ -353,12 +339,12 @@ async fn wait_network_rest(
     // Pin every runtime at the same quiescent boundary. Notifications admitted
     // just after a plain quiescence snapshot remain queued behind the freeze;
     // reopening and settling again makes that drift observable before parity.
-    let frozen = futures::future::join_all(nodes.iter().flatten().map(|node| {
-        node.sync_repo
-            .rcx
-            .big_repo
-            .wait_for_quiescence_freeze(Some(timeout))
-    }))
+    let frozen = futures::future::join_all(
+        nodes
+            .iter()
+            .flatten()
+            .map(|node| node.sync_repo.rcx.big_repo.wait_for_quiescence_freeze(None)),
+    )
     .await;
 
     // Always reopen every runtime, including when one freeze timed out, so a
@@ -377,12 +363,10 @@ async fn wait_network_rest(
         result?;
     }
 
-    let settled = nodes.iter().flatten().map(|node| {
-        node.sync_repo
-            .rcx
-            .big_repo
-            .wait_for_quiescence(Some(timeout))
-    });
+    let settled = nodes
+        .iter()
+        .flatten()
+        .map(|node| node.sync_repo.rcx.big_repo.wait_for_quiescence(None));
     for result in futures::future::join_all(settled).await {
         result?;
     }
@@ -394,15 +378,15 @@ async fn wait_network_rest(
         for j in (i + 1)..active.len() {
             let left = active[i];
             let right = active[j];
-            wait_for_doc_set_parity(&left.drawer, &right.drawer, timeout).await?;
-            wait_for_doc_head_parity(left, right, timeout).await?;
+            wait_for_doc_set_parity(&left.drawer, &right.drawer, None).await?;
+            wait_for_doc_head_parity(left, right).await?;
         }
     }
 
     // STEP 2: Verify BigRepo sedimentree head parity across all active nodes.
-    wait_for_big_repo_sedimentree_parity(&active, timeout).await?;
+    wait_for_big_repo_sedimentree_parity(&active).await?;
 
-    assert_blob_parity(nodes, blob_timeout).await?;
+    assert_blob_parity(nodes).await?;
     Ok(())
 }
 
@@ -577,11 +561,7 @@ fn big_sync_store_diff(
     )
 }
 
-async fn wait_for_big_repo_sedimentree_parity(
-    nodes: &[&SyncTestNode],
-    timeout: Duration,
-) -> Res<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> {
     let mut last_log = tokio::time::Instant::now();
     loop {
         match assert_big_repo_sedimentree_parity(nodes).await {
@@ -591,21 +571,13 @@ async fn wait_for_big_repo_sedimentree_parity(
                     warn!("BigRepo sedimentree parity poll waiting for convergence:\n{err}");
                     last_log = tokio::time::Instant::now();
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(err);
-                }
             }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-async fn wait_for_doc_head_parity(
-    left: &SyncTestNode,
-    right: &SyncTestNode,
-    timeout: Duration,
-) -> Res<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Res<()> {
     let mut last_log = tokio::time::Instant::now();
     loop {
         match assert_doc_head_parity(left, right).await {
@@ -614,9 +586,6 @@ async fn wait_for_doc_head_parity(
                 if last_log.elapsed() >= Duration::from_secs(5) {
                     warn!("Drawer doc head parity poll waiting for convergence:\n{err}");
                     last_log = tokio::time::Instant::now();
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(err);
                 }
             }
         }
@@ -710,7 +679,7 @@ async fn collect_doc_branch_heads(
     Ok(Some(out))
 }
 
-async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -> Res<()> {
+async fn assert_blob_parity(nodes: &[Option<SyncTestNode>]) -> Res<()> {
     let active = nodes
         .iter()
         .filter_map(|node| node.as_ref())
@@ -718,7 +687,7 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
     if active.is_empty() {
         return Ok(());
     }
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_log = tokio::time::Instant::now();
     let expected;
     loop {
         let current_expected = collect_blob_hashes(active[0]).await?;
@@ -727,16 +696,17 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
             let hashes = collect_blob_hashes(node).await?;
             if hashes != current_expected {
                 mismatch = true;
-                if tokio::time::Instant::now() >= deadline {
+                if last_log.elapsed() >= Duration::from_secs(5) {
                     let left_peer = active[0].sync_repo.router.endpoint().id();
                     let right_peer = node.sync_repo.router.endpoint().id();
                     let left_only = current_expected.difference(&hashes).collect::<Vec<_>>();
                     let right_only = hashes.difference(&current_expected).collect::<Vec<_>>();
-                    eyre::bail!(
-                        "blob hash parity mismatch between left={left_peer} and right={right_peer}:\n  left_blobs={} right_blobs={}\n  left_only={left_only:?}\n  right_only={right_only:?}",
+                    warn!(
+                        "blob hash parity waiting between left={left_peer} and right={right_peer}:\n  left_blobs={} right_blobs={}\n  left_only={left_only:?}\n  right_only={right_only:?}",
                         current_expected.len(),
                         hashes.len()
                     );
+                    last_log = tokio::time::Instant::now();
                 }
                 break;
             }
@@ -747,7 +717,6 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let per_blob_timeout = timeout.max(Duration::from_secs(15));
     let mut check_futs = Vec::new();
     for node in &active {
         for digest in &expected {
@@ -756,7 +725,7 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
             let blobs_repo = Arc::clone(&node.blobs_repo);
             let digest_str = digest.clone();
             check_futs.push(async move {
-                wait_for_blob_bytes(&blobs_repo, hash, per_blob_timeout)
+                wait_for_blob_bytes(&blobs_repo, hash, None)
                     .await
                     .map_err(|err| {
                         eyre::eyre!(

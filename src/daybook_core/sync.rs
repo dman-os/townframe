@@ -1038,9 +1038,8 @@ impl IrohSyncRepo {
         &self,
         peer_ids: &[PeerId],
         required_partitions: &[PartId],
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Res<()> {
-        let timeout = utils_rs::scale_timeout(timeout);
         self.ensure_repo_live()?;
         let Some(_progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
@@ -1051,7 +1050,7 @@ impl IrohSyncRepo {
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
             .iter()
             .partition(|part| self.is_blob_part(**part));
-        tokio::time::timeout(timeout, async {
+        let wait_fut = async {
             let doc_wait = self
                 .big_sync_worker
                 .wait_for_full_sync(peer_ids.iter().copied(), doc_parts.iter().copied());
@@ -1060,9 +1059,15 @@ impl IrohSyncRepo {
                 .wait_for_full_sync(peer_ids.iter().copied(), blob_parts.iter().copied());
             tokio::try_join!(doc_wait, blob_wait)?;
             eyre::Ok(())
-        })
-        .await
-        .wrap_err("timeout waiting for full_sync")??;
+        };
+        if let Some(timeout) = timeout {
+            let timeout = utils_rs::scale_timeout(timeout);
+            tokio::time::timeout(timeout, wait_fut)
+                .await
+                .wrap_err("timeout waiting for full_sync")??;
+        } else {
+            wait_fut.await?;
+        }
         Ok(())
     }
 
@@ -1100,7 +1105,11 @@ impl IrohSyncRepo {
         .await
     }
 
-    pub async fn wait_until_peers_sync(&self, peer_ids: &[PeerId], timeout: Duration) -> Res<()> {
+    pub async fn wait_until_peers_sync(
+        &self,
+        peer_ids: &[PeerId],
+        timeout: Option<Duration>,
+    ) -> Res<()> {
         let parts = self
             .peer_partition_ids("", true)
             .into_keys()

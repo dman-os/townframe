@@ -71,6 +71,8 @@ pub struct RtConfig {
     pub startup_progress_task_id: Option<String>,
 }
 
+pub use switch::SwitchDocEvent;
+
 pub struct Rt {
     pub config: RtConfig,
     pub rcx: Arc<RepoCtx>,
@@ -96,7 +98,20 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
+    pub registry: Arc<crate::repos::ListenersRegistry>,
     local_wflow_part_id: String,
+}
+
+impl crate::repos::Repo for Rt {
+    type Event = SwitchDocEvent;
+
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.registry
+    }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancel_token
+    }
 }
 
 pub struct RtStopToken {
@@ -504,6 +519,7 @@ impl Rt {
             sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
+            registry: crate::repos::ListenersRegistry::new(),
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 

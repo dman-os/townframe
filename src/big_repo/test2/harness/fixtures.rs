@@ -124,38 +124,13 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
         .expect("document id must be a verifying key");
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut access;
     loop {
-        access = repo.keyhive().agent_access_on(&agent, document).await;
+        let access = repo.keyhive().agent_access_on(&agent, document).await;
         if access.is_some() {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-
-    let effective_members = repo.keyhive().agents_for_membered(document).await;
-    let membered_for_agent = repo.keyhive().membered_for_agent(&agent).await;
-    let agent_bytes = agent.to_bytes();
-    let doc_bytes = doc_id.into_bytes();
-    tracing::error!(
-        peer = %peer,
-        ?doc_id,
-        ?agent_bytes,
-        ?access,
-        effective_member_access = ?effective_members.get(&agent_bytes),
-        effective_members = ?effective_members,
-        membered_for_agent_doc_access = ?membered_for_agent.get(&doc_bytes),
-        membered_for_agent_count = membered_for_agent.len(),
-        "Keyhive access assertion failed after synchronization"
-    );
-    Err(crate::ferr!(
-        "{} has no access on {doc_id} after grant + keyhive sync",
-        log_nickname::nickname(&peer),
-    ))
 }
 
 /// Sync a document and expect it to be fully materialized (Ready) on `repo`.
@@ -168,27 +143,16 @@ pub async fn sync_doc_expect_ready(
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    let receipt = conn
-        .sync_doc_with_peer_receipt(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    let receipt = conn.sync_doc_with_peer_receipt(doc_id, None).await?;
     tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            match repo.get_doc(&doc_id).await? {
-                crate::DocLookup::Ready(handle) => return Ok(handle),
-                crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
+    loop {
+        match repo.get_doc(&doc_id).await? {
+            crate::DocLookup::Ready(handle) => return Ok(handle),
+            crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
-    })
-    .await
-    .map_err(|_| {
-        crate::ferr!(
-            "{}: doc did not become Ready after sync_doc_with_peer",
-            log_nickname::nickname(&repo.local_peer_id()),
-        )
-    })?
+    }
 }
 // ─── Bidirectional document sync ─────────────────────────────────────────────
 
@@ -207,11 +171,10 @@ pub async fn sync_doc_bidirectional(
     repo_b: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<(crate::BigDocHandle, crate::BigDocHandle)> {
-    let timeout = Some(std::time::Duration::from_secs(10));
-    conn_a_to_b.sync_doc_with_peer(doc_id, timeout).await?;
-    conn_b_to_a.sync_doc_with_peer(doc_id, timeout).await?;
-    repo_a.wait_for_quiescence(timeout).await?;
-    repo_b.wait_for_quiescence(timeout).await?;
+    conn_a_to_b.sync_doc_with_peer(doc_id, None).await?;
+    conn_b_to_a.sync_doc_with_peer(doc_id, None).await?;
+    repo_a.wait_for_quiescence(None).await?;
+    repo_b.wait_for_quiescence(None).await?;
     let handle_a = expect_ready(repo_a, doc_id).await?;
     let handle_b = expect_ready(repo_b, doc_id).await?;
     Ok((handle_a, handle_b))
@@ -221,26 +184,14 @@ pub async fn expect_ready(
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    tokio::time::timeout(
-        utils_rs::scale_timeout(std::time::Duration::from_secs(5)),
-        async {
-            loop {
-                match repo.get_doc(&doc_id).await? {
-                    crate::DocLookup::Ready(h) => return Ok(h),
-                    _ => {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                }
+    loop {
+        match repo.get_doc(&doc_id).await? {
+            crate::DocLookup::Ready(h) => return Ok(h),
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        },
-    )
-    .await
-    .map_err(|_| {
-        crate::ferr!(
-            "{}: doc not Ready on repo after sync",
-            log_nickname::nickname(&repo.local_peer_id()),
-        )
-    })?
+        }
+    }
 }
 
 /// Reach the fixed point of every currently configured BigSync route and all

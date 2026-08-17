@@ -515,7 +515,7 @@ impl<F: FutureForm> DocWorker2<F> {
         {
             return Ok(());
         }
-        drop(registered_rx.await);
+        registered_rx.await.ok();
         Ok(())
     }
     /// Load the materializable document state and retain whether any stored

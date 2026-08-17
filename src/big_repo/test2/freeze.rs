@@ -41,9 +41,6 @@ async fn freeze_holds_commands_until_unfreeze() -> Res<()> {
     assert!(!resolved, "unknown document must not be present");
 
     // The hub is a normal hub again: commands flow without freezing.
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(Duration::from_secs(10)))
-        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
     Ok(())
 }

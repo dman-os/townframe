@@ -45,8 +45,7 @@ async fn assert_relay_only(
         )
         .await;
     assert_eq!(access, Some(Access::Relay));
-    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    repo.wait_for_quiescence(None).await?;
     assert!(
         !relay
             .obj_parts_contains(doc_id, crate::GLOBAL_PART_ID)
@@ -97,8 +96,7 @@ async fn sync_doc_no_materialize(
     conn: &crate::BigRepoConnection,
     doc_id: crate::DocumentId,
 ) -> crate::Res<()> {
-    conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    conn.sync_doc_with_peer(doc_id, None).await?;
     Ok(())
 }
 
@@ -222,7 +220,7 @@ async fn tier3_pull_only_relay_does_not_materialize() -> crate::Res<()> {
         .await?;
     topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
     topo.topo_conn(1, 0)
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .sync_doc_with_peer(doc_id, None)
         .await?;
     assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
     let relay_state = topo.topo_node(1).repo.doc_head_state(doc_id).await?;
@@ -531,10 +529,8 @@ async fn tier3_partial_mesh_replication() -> crate::Res<()> {
 
     // Pull only along A→B→C→D; the D↔A edge is an alternate route that is
     // deliberately not used for this transfer.
-    b_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    c_b.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    b_a.sync_doc_with_peer(doc_id, None).await?;
+    c_b.sync_doc_with_peer(doc_id, None).await?;
     let d_doc = fixtures::sync_doc_expect_ready(&d_c, &guard.node(3).repo, doc_id).await?;
     assert_eq!(read_title(&d_doc).await, "partial-mesh");
 
@@ -710,27 +706,15 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
     }
 
     // Path 1: A→B→C→D.
-    b_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    c_b.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    d_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(3)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    b_a.sync_doc_with_peer(doc_id, None).await?;
+    c_b.sync_doc_with_peer(doc_id, None).await?;
+    d_c.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(3).repo.wait_for_quiescence(None).await?;
 
     // Path 2: A→D (direct).  This sends the same doc again.  D must
     // converge without duplication.
-    a_d.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(3)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    a_d.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(3).repo.wait_for_quiescence(None).await?;
 
     // All four nodes must have identical sedimentree heads.
     let mut baseline = guard
@@ -827,7 +811,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // rejects the incoming payload because C has no local document policy;
     // the rejection must be structured and non-fatal.
     let policy_error = c_b_conn
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .sync_doc_with_peer(doc_id, None)
         .await
         .expect_err("missing local Keyhive document must reject the payload");
     assert!(matches!(
@@ -838,10 +822,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
         )
     ));
 
-    node_c
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    node_c.repo.wait_for_quiescence(None).await?;
 
     // C must not be materialized before membership arrives.
     let c_lookup = node_c.repo.get_doc(&doc_id).await?;
@@ -938,13 +919,8 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
         })
         .await??;
     // R pulls the update.
-    r_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    r_a.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Phase 3: reader connects to the relay.
     let r_b = guard.node(1).connect(guard.node(2)).await?;
@@ -1046,18 +1022,11 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     for conn in [&a_b, &b_c, &c_d, &d_a] {
         conn.sync_keyhive_with_peer(None).await?;
     }
-    b_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    c_b.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    d_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    b_a.sync_doc_with_peer(doc_id, None).await?;
+    c_b.sync_doc_with_peer(doc_id, None).await?;
+    d_c.sync_doc_with_peer(doc_id, None).await?;
     for idx in 1..4 {
-        guard
-            .node(idx)
-            .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await?;
+        guard.node(idx).repo.wait_for_quiescence(None).await?;
         let _h = guard
             .node(idx)
             .repo
@@ -1123,38 +1092,24 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
 
     // Sync doc across A↔B and C↔D, then the existing B↔C and D↔A edges
     // will propagate everything to all nodes.
-    b_a2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    a_b2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    d_c2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    c_d2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    b_a2.sync_doc_with_peer(doc_id, None).await?;
+    a_b2.sync_doc_with_peer(doc_id, None).await?;
+    d_c2.sync_doc_with_peer(doc_id, None).await?;
+    c_d2.sync_doc_with_peer(doc_id, None).await?;
     for idx in 0..4 {
-        guard
-            .node(idx)
-            .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await?;
+        guard.node(idx).repo.wait_for_quiescence(None).await?;
     }
     // Push C's edit to B (B↔C was never partitioned, so use b_c).
-    b_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    b_c.sync_doc_with_peer(doc_id, None).await?;
     guard.node(1).repo.wait_for_quiescence(None).await?;
     guard.node(2).repo.wait_for_quiescence(None).await?;
 
     // Second round of healing syncs.
     for conn in [&b_a2, &a_b2, &d_c2, &c_d2, &b_c, &c_b] {
-        conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
+        conn.sync_doc_with_peer(doc_id, None).await?;
     }
     for idx in 0..4 {
-        guard
-            .node(idx)
-            .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await?;
+        guard.node(idx).repo.wait_for_quiescence(None).await?;
     }
 
     // Both independent branches must survive the heal.

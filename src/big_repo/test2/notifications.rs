@@ -65,8 +65,7 @@ async fn assert_no_notification(
     repo: &Arc<crate::BigRepo>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
 ) -> crate::Res<()> {
-    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
-        .await?;
+    repo.wait_for_quiescence(None).await?;
     match rx.try_recv() {
         Ok(notifications) => panic!("unexpected notification(s): {notifications:?}"),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(()),
@@ -439,9 +438,7 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
         .await??;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
@@ -571,9 +568,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
     drop(reader_doc);
 
     // First sync: delivers the change → notification fires.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     let first = recv_one(&mut rx).await;
     assert!(
@@ -584,9 +579,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
     );
 
     // Second sync: no new data → no notification.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     assert_no_notification(&pair.left().repo, &mut rx).await?;
 
@@ -1072,12 +1065,8 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     );
 
     // --- Sync both directions.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 

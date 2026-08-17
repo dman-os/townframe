@@ -139,13 +139,22 @@ pub(crate) async fn ensure(
         }
     }
 
-    Ok(RepoAuthority {
+    let auth = RepoAuthority {
         repo_agents,
         core_docs,
         content_docs,
         default_drawer,
         blob_inventories,
-    })
+    };
+    big_repo
+        .set_automerge_source_parts([
+            auth.core_docs_part_id(),
+            auth.content_docs_part_id(),
+            auth.default_drawer_part_id(),
+        ])
+        .await?;
+
+    Ok(auth)
 }
 
 async fn ensure_group(

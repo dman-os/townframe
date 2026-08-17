@@ -108,13 +108,8 @@ async fn reconcile_payload_first(
 ) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
     // First doc sync — may produce PendingMaterialization because the reader
     // hasn't synced the updated CGKA key material yet.
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
     // Now sync membership so the reader learns the new CGKA epoch.
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;

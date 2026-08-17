@@ -568,14 +568,8 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
             .collect();
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.left()
-            .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await?;
-        pair.right()
-            .repo
-            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await?;
+        pair.left().repo.wait_for_quiescence(None).await?;
+        pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
         let owner_doc =
             fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -751,18 +745,8 @@ async fn run_group_case(
             })
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
-        pair.left()
-            .repo
-            .wait_for_quiescence(Some(utils_rs::scale_timeout(
-                std::time::Duration::from_secs(30),
-            )))
-            .await?;
-        pair.right()
-            .repo
-            .wait_for_quiescence(Some(utils_rs::scale_timeout(
-                std::time::Duration::from_secs(30),
-            )))
-            .await?;
+        pair.left().repo.wait_for_quiescence(None).await?;
+        pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
         drop(member_doc);
         let (owner_doc, member_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
@@ -981,12 +965,7 @@ async fn run_document_as_member_case(
     // Document commits and deterministic fragmentation are published
     // independently of the Keyhive exchange. Settle the owner before asking
     // the member to synchronize the resulting Sedimentree frontier.
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(utils_rs::scale_timeout(
-            std::time::Duration::from_secs(30),
-        )))
-        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     drop(target_doc);
     let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;

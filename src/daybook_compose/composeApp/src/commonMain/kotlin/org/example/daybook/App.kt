@@ -733,11 +733,11 @@ fun App(
                 val containerKey = "container:${appContainer.ffiCtx}"
                 val drawerVm: DrawerViewModel =
                     viewModel(key = "drawerVm:$containerKey") {
-                        DrawerViewModel(appContainer.drawerRepo)
+                        DrawerViewModel(appContainer.drawerRepo, appContainer.rtFfi)
                     }
                 val docEditorStore: DocEditorStoreViewModel =
                     viewModel(key = "docEditorStoreVm:$containerKey") {
-                        DocEditorStoreViewModel(appContainer.drawerRepo)
+                        DocEditorStoreViewModel(appContainer.drawerRepo, appContainer.rtFfi)
                     }
                 var shutdownDone by remember(appContainer.ffiCtx) { mutableStateOf(false) }
 

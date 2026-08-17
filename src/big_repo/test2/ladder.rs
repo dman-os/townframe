@@ -192,20 +192,10 @@ async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
     // Pull the editor branch into Owner first, then pull the converged state
     // back into Editor. Each call is a synchronization barrier; a concurrent
     // pair of calls can race before either side has the other's new branch.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
     for (label, handle) in [("Owner", &owner_doc), ("Editor", &editor_doc)] {
         assert_eq!(
             read_optional_text(handle, "owner_note").await.as_deref(),
@@ -252,13 +242,8 @@ async fn tier1_noop_sync_emits_no_change_notification() -> crate::Res<()> {
         .await?;
     let before = pair.right().repo.doc_head_state(doc_id).await?;
 
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
     let after = pair.right().repo.doc_head_state(doc_id).await?;
 
     assert_eq!(before, after);
@@ -490,20 +475,10 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
 
     pair.right_conn().sync_keyhive_with_peer(None).await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     for (label, handle) in [("owner", &owner_doc), ("editor", &editor_doc)] {
         assert_eq!(

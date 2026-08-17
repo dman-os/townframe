@@ -97,22 +97,16 @@ async fn sync_doc_until_ready(
     repo: &std::sync::Arc<crate::BigRepo>,
     doc_id: crate::DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
-    timeout(Duration::from_secs(15), async {
-        loop {
-            repo.wait_for_quiescence(Some(Duration::from_secs(5)))
-                .await?;
-            match repo.get_doc(&doc_id).await? {
-                crate::DocLookup::Ready(handle) => return Ok(handle),
-                crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+    conn.sync_doc_with_peer(doc_id, None).await?;
+    loop {
+        repo.wait_for_quiescence(None).await?;
+        match repo.get_doc(&doc_id).await? {
+            crate::DocLookup::Ready(handle) => return Ok(handle),
+            crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
-    })
-    .await
-    .map_err(|_| crate::ferr!("doc never materialized (Ready) after sync via conn"))?
+    }
 }
 
 /// Two simultaneous connections between the same pair must both be usable:

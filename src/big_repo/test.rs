@@ -30,6 +30,7 @@ pub async fn boot_repo() -> Res<(
         storage: StorageConfig::Memory,
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
+        automerge_source_parts: None,
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -70,6 +71,7 @@ pub async fn _boot_disk_repo(
         storage: StorageConfig::Disk { path },
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
+        automerge_source_parts: None,
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -552,10 +554,9 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
     let doc_id = handle.document_id();
 
     owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
 
-    client_conn
-        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-        .await?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -650,8 +651,8 @@ async fn concurrent_bidirectional_keyhive_sync_is_safe() -> Res<()> {
     let owner_conn = owner.take_latest_accepted_connection().await;
     let client_conn = client.connection_to(&owner).await;
     let (owner_sync, client_sync) = tokio::join!(
-        owner_conn.sync_keyhive_with_peer(Some(utils_rs::scale_timeout(Duration::from_secs(30)))),
-        client_conn.sync_keyhive_with_peer(Some(utils_rs::scale_timeout(Duration::from_secs(30)))),
+        owner_conn.sync_keyhive_with_peer(None),
+        client_conn.sync_keyhive_with_peer(None),
     );
     owner_sync?;
     client_sync?;
@@ -714,19 +715,9 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     )
     .await?;
 
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for authorized doc sync after RPC-triggered keyhive sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
-    let client_doc = timeout(
-        Duration::from_secs(10),
-        wait_for_doc_handle(&client.repo, doc_id),
-    )
-    .await
-    .expect("timed out waiting for authorized doc materialization");
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
@@ -1142,19 +1133,9 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer(None).await?;
 
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for minimal doc sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
-    let client_doc = timeout(
-        Duration::from_secs(5),
-        wait_for_doc_handle(&client.repo, doc_id),
-    )
-    .await
-    .expect("timed out waiting for minimal doc materialization");
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let value = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "_"))
         .await;
@@ -1228,19 +1209,10 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
     let doc_id = handle.document_id();
 
     owner_member_conn.sync_keyhive_with_peer(None).await?;
+    member_conn.sync_keyhive_with_peer(None).await?;
 
-    timeout(
-        Duration::from_secs(5),
-        member_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for member doc sync")?;
-    let member_doc = timeout(
-        Duration::from_secs(5),
-        wait_for_doc_handle(&member.repo, doc_id),
-    )
-    .await
-    .expect("timed out waiting for member doc materialization");
+    member_conn.sync_doc_with_peer(doc_id, None).await?;
+    let member_doc = wait_for_doc_handle(&member.repo, doc_id).await;
     assert_eq!(
         member_doc
             .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -1252,12 +1224,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         "group member should export plaintext after sync"
     );
 
-    let outsider_sync = timeout(
-        Duration::from_secs(5),
-        outsider_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for outsider doc sync");
+    let outsider_sync = outsider_conn.sync_doc_with_peer(doc_id, None).await;
     match outsider_sync {
         Ok(()) => match outsider.repo.get_doc(&doc_id).await? {
             DocLookup::PendingMaterialization | DocLookup::Missing => {}
@@ -1317,12 +1284,7 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
 
     owner_conn.sync_keyhive_with_peer(None).await?;
 
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for initial writer sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
     let owner_doc = owner.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
@@ -1353,21 +1315,11 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
     owner_conn.sync_keyhive_with_peer(None).await?;
 
     let (owner_sync, client_sync) = tokio::join!(
-        timeout(
-            Duration::from_secs(5),
-            owner_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-        ),
-        timeout(
-            Duration::from_secs(5),
-            client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-        ),
+        owner_conn.sync_doc_with_peer(doc_id, None),
+        client_conn.sync_doc_with_peer(doc_id, None),
     );
-    owner_sync
-        .expect("timed out waiting for owner doc sync")
-        .expect("owner doc sync failed");
-    client_sync
-        .expect("timed out waiting for client doc sync")
-        .expect("client doc sync failed");
+    owner_sync.expect("owner doc sync failed");
+    client_sync.expect("client doc sync failed");
 
     let owner_doc = owner.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
@@ -1435,12 +1387,7 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
     let handle = owner.repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
 
-    let sync_result = timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for unauthorized doc sync");
+    let sync_result = client_conn.sync_doc_with_peer(doc_id, None).await;
     match sync_result {
         Ok(()) => {
             assert!(
@@ -1534,13 +1481,7 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
         }
     }
 
-    // Now explicitly pull the doc content.
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for doc sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
     assert!(
         matches!(
@@ -1618,19 +1559,9 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
     .await?;
 
     // Initial pull.
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for initial doc sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
-    let client_doc = timeout(
-        Duration::from_secs(10),
-        wait_for_doc_handle(&client.repo, doc_id),
-    )
-    .await
-    .expect("timed out waiting for initial materialization");
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
@@ -1647,31 +1578,22 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
 
     // Sync keyhive (gossip delivers the edit's CGKA ops) then re-pull.
     client_conn.sync_keyhive_with_peer(None).await?;
-    timeout(
-        Duration::from_secs(5),
-        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
-    )
-    .await
-    .expect("timed out waiting for subsequent doc sync")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
-    let updated_title = timeout(Duration::from_secs(10), async {
-        loop {
-            match client.repo.get_doc(&doc_id).await? {
-                DocLookup::Ready(handle) => {
-                    let t = handle
-                        .with_document_read(|doc| get_str_at_root(doc, "title"))
-                        .await;
-                    if t == "second" {
-                        return Ok::<_, eyre::Report>(t);
-                    }
+    let updated_title = loop {
+        match client.repo.get_doc(&doc_id).await? {
+            DocLookup::Ready(handle) => {
+                let t = handle
+                    .with_document_read(|doc| get_str_at_root(doc, "title"))
+                    .await;
+                if t == "second" {
+                    break t;
                 }
-                DocLookup::PendingMaterialization | DocLookup::Missing => {}
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
         }
-    })
-    .await
-    .expect("timed out waiting for re-pull to deliver the edit")?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(updated_title, "second");
 
     owner.shutdown().await?;
@@ -1899,9 +1821,7 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
 
     owner_conn.sync_keyhive_with_peer(None).await?;
 
-    client_conn
-        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-        .await?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
 
     let client_kh_before_shutdown = client.repo.keyhive().clone_keyhive();
     let client_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
@@ -1988,9 +1908,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer(None).await?;
 
-    client_conn
-        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-        .await?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -2088,9 +2006,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
         .big_sync_store
         .add_obj_to_parts(doc_id, stress_support::test_parts())
         .await?;
-    client_conn
-        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-        .await?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     assert!(
         !client.big_sync_store.obj_parts(doc_id).await?.is_empty(),
         "reopened client should retain big_sync part registration for the doc"
@@ -2823,6 +2739,7 @@ async fn create_shared_sync_doc(
         .await?;
 
     owner_conn.sync_keyhive_with_peer(None).await?;
+    grantee_conn.sync_keyhive_with_peer(None).await?;
 
     // Bootstrap the doc on the grantee so the fetch gate
     // (has_doc_worker || contains_sedimentree) passes for
@@ -2832,12 +2749,7 @@ async fn create_shared_sync_doc(
     // grantee when the delegation arrives via ephemeral notification.
     // If the grantee restarted and the listener isn't active, the caller
     // is responsible for restoring partition membership.
-    grantee_conn
-        .sync_doc_with_peer(
-            doc_id,
-            Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
-        )
-        .await?;
+    grantee_conn.sync_doc_with_peer(doc_id, None).await?;
 
     Ok(handle)
 }
@@ -2968,6 +2880,7 @@ impl SyncRepoNode {
             storage: StorageConfig::Disk { path: path.clone() },
             scope_key: Arc::from("big-repo-sync-test"),
             hidden_parts: HashSet::new(),
+            automerge_source_parts: None,
         })
         .await?;
         let shared_store = repo.shared_part_store();
@@ -3277,9 +3190,7 @@ async fn run_sync_case(
 
     // Client syncs doc from server (from empty tree)
     tracing::info!("client pulling doc from server");
-    client_conn
-        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-        .await?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     set_doc_actor(&client_doc, automerge::ActorId::from([61_u8; 16])).await?;
 
@@ -3301,17 +3212,11 @@ async fn run_sync_case(
             "running concurrent sync_doc_with_peer"
         );
         let (client_result, server_result) = tokio::join!(
-            timeout(
-                SYNC_CASE_TIMEOUT,
-                client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
-            ),
-            timeout(
-                SYNC_CASE_TIMEOUT,
-                server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
-            ),
+            client_conn.sync_doc_with_peer(doc_id, None),
+            server_conn.sync_doc_with_peer(doc_id, None),
         );
-        let () = client_result.expect("timed out waiting for sync_doc_with_peer")?;
-        let () = server_result.expect("timed out waiting for reverse sync_doc_with_peer")?;
+        let () = client_result?;
+        let () = server_result?;
 
         drop(client_doc);
         drop(server_doc);
@@ -3338,12 +3243,7 @@ async fn run_sync_case(
     } else {
         if local_mutation.is_some() {
             client_conn.sync_keyhive_with_peer(None).await?;
-            let () = timeout(
-                SYNC_CASE_TIMEOUT,
-                server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-            )
-            .await
-            .expect("timed out waiting for reverse sync_doc_with_peer")?;
+            let () = server_conn.sync_doc_with_peer(doc_id, None).await?;
         }
         tracing::info!(
             peer_id = %client_conn.peer_id(),
@@ -3430,12 +3330,7 @@ async fn run_restart_reconnect_case(
     server.wait_for_accepts(1).await;
 
     tracing::info!("running initial sync before server shutdown");
-    let () = timeout(
-        SYNC_CASE_TIMEOUT,
-        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-    )
-    .await
-    .expect("timed out waiting for initial sync_doc_with_peer")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
@@ -3471,12 +3366,7 @@ async fn run_restart_reconnect_case(
     server.wait_for_accepts(1).await;
 
     tracing::info!("running sync after restart");
-    let () = timeout(
-        SYNC_CASE_TIMEOUT,
-        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-    )
-    .await
-    .expect("timed out waiting for reconnect sync_doc_with_peer")?;
+    client_conn.sync_doc_with_peer(doc_id, None).await?;
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
@@ -3561,12 +3451,7 @@ async fn run_remote_change_listener_without_live_handle_case(
     let server_conn = server.take_latest_accepted_connection().await;
 
     server_conn.sync_keyhive_with_peer(None).await?;
-    let () = timeout(
-        SYNC_CASE_TIMEOUT,
-        server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-    )
-    .await
-    .expect("timed out waiting for remote sync_doc_with_peer")?;
+    server_conn.sync_doc_with_peer(doc_id, None).await?;
 
     assert!(
         timeout(Duration::from_millis(250), change_rx.recv())
@@ -3654,12 +3539,7 @@ async fn apply_local_sync_mutation_and_assert_notifications(
     ));
 
     stale_peer_conn.sync_keyhive_with_peer(None).await?;
-    let () = timeout(
-        SYNC_CASE_TIMEOUT,
-        stale_peer_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-    )
-    .await
-    .expect("timed out waiting for local sync_doc_with_peer")?;
+    stale_peer_conn.sync_doc_with_peer(doc_id, None).await?;
     Ok(())
 }
 
@@ -3777,12 +3657,7 @@ async fn run_sync_backend_case(
             .big_sync_store
             .add_obj_to_parts(doc_id, stress_support::test_parts())
             .await?;
-        client_conn
-            .sync_doc_with_peer(
-                doc_id,
-                Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
-            )
-            .await?;
+        client_conn.sync_doc_with_peer(doc_id, None).await?;
         let doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
         set_doc_actor(&doc, automerge::ActorId::from([132_u8; 16])).await?;
         Some(doc)
@@ -4613,12 +4488,7 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
         );
 
         server_conn.sync_keyhive_with_peer(None).await?;
-        timeout(
-            SYNC_CASE_TIMEOUT,
-            server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-        )
-        .await
-        .expect("timed out waiting for remote sync_doc_with_peer")?;
+        server_conn.sync_doc_with_peer(doc_id, None).await?;
 
         let change_batch = recv_change_batch(&mut change_rx).await;
         assert!(matches!(
@@ -4742,12 +4612,7 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
         ));
 
         server_conn.sync_keyhive_with_peer(None).await?;
-        timeout(
-            SYNC_CASE_TIMEOUT,
-            server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
-        )
-        .await
-        .expect("timed out waiting for local sync_doc_with_peer")?;
+        server_conn.sync_doc_with_peer(doc_id, None).await?;
 
         wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;

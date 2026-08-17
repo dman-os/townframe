@@ -377,6 +377,7 @@ struct FacetSetTriageListener {
 impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
     fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
         crate::rt::switch::SwtchSinkInterest {
+            consume_doc: true,
             consume_drawer: true,
             consume_plugs: false,
             consume_dispatch: false,
@@ -391,61 +392,66 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
         _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
     ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
         let outcome = crate::rt::switch::SwitchSinkOutcome::default();
-        let crate::rt::switch::SwitchEvent::Drawer(event) = event else {
-            return Ok(outcome);
-        };
-        match &**event {
-            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                self.index_repo.enqueue_delete(id.clone())?;
-            }
-            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                let Some(heads) = entry.branches.get("main") else {
+        match event {
+            crate::rt::switch::SwitchEvent::Doc(event) => {
+                if event.branch_name != "main" {
                     return Ok(outcome);
-                };
-                let branch_path = BranchPathBuf::from("main");
-                let Some(_keys) = self
-                    .drawer_repo
-                    .get_facet_keys_if_latest(id, &branch_path, heads)
-                    .await?
-                else {
-                    return Ok(outcome);
-                };
-                self.index_repo
-                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
-            }
-            crate::drawer::DrawerEvent::DocUpdated {
-                id, entry, diff, ..
-            } => {
-                if diff
-                    .changed_facet_keys
-                    .iter()
-                    .all(|facet_key| facet_key.tag == WellKnownFacetTag::Dmeta.into())
+                }
+                if let Some(diff) = &event.diff
+                    && !diff.changed_facet_keys.is_empty()
+                    && diff
+                        .changed_facet_keys
+                        .iter()
+                        .all(|facet_key| facet_key.tag == WellKnownFacetTag::Dmeta.into())
+                    && diff.added_facet_keys.is_empty()
+                    && diff.removed_facet_keys.is_empty()
                 {
                     return Ok(outcome);
                 }
-                if !diff
-                    .moved_branch_names
-                    .iter()
-                    .any(|branch_name| branch_name == "main")
-                {
-                    return Ok(outcome);
-                }
-                let Some(heads) = entry.branches.get("main") else {
-                    self.index_repo.enqueue_delete(id.clone())?;
-                    return Ok(outcome);
-                };
                 let branch_path = BranchPathBuf::from("main");
-                let Some(_keys) = self
-                    .drawer_repo
-                    .get_facet_keys_if_latest(id, &branch_path, heads)
-                    .await?
-                else {
-                    self.index_repo.enqueue_delete(id.clone())?;
-                    return Ok(outcome);
-                };
                 self.index_repo
-                    .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
+                    .handle_worker_item(DocFacetSetIndexWorkItem::Upsert {
+                        doc_id: event.doc_id.clone(),
+                        branch_path,
+                        heads: event.new_heads.clone(),
+                    })
+                    .await?;
             }
+            crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
+                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                    self.index_repo
+                        .handle_worker_item(DocFacetSetIndexWorkItem::DeleteDoc {
+                            doc_id: id.clone(),
+                        })
+                        .await?;
+                }
+                crate::drawer::DrawerEvent::DocAdded {
+                    id,
+                    entry,
+                    drawer_heads: _,
+                    ..
+                } => {
+                    let Some(heads) = entry.branches.get("main") else {
+                        return Ok(outcome);
+                    };
+                    let branch_path = BranchPathBuf::from("main");
+                    let Some(_keys) = self
+                        .drawer_repo
+                        .get_facet_keys_if_latest(id, &branch_path, heads)
+                        .await?
+                    else {
+                        return Ok(outcome);
+                    };
+                    self.index_repo
+                        .handle_worker_item(DocFacetSetIndexWorkItem::Upsert {
+                            doc_id: id.clone(),
+                            branch_path,
+                            heads: heads.clone(),
+                        })
+                        .await?;
+                }
+            },
+            _ => {}
         }
         Ok(outcome)
     }

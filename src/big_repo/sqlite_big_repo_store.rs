@@ -2128,10 +2128,16 @@ impl SqliteBigRepoStore {
                 latest_commit_row_id INTEGER NOT NULL,
                 PRIMARY KEY(scope_id, doc_id, big_sync_txid)
             ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_automerge_frontier_cursor (
+            "CREATE TABLE IF NOT EXISTS big_repo_automerge_part_cursor (
+                scope_id INTEGER NOT NULL,
+                source_part_id BLOB NOT NULL,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(scope_id, source_part_id),
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
+            ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_automerge_keyhive_cursor (
                 scope_id INTEGER PRIMARY KEY,
-                part_cursor INTEGER NOT NULL DEFAULT 0,
-                keyhive_cursor INTEGER NOT NULL DEFAULT 0,
+                cursor INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
             ) STRICT",
             "CREATE TABLE IF NOT EXISTS big_repo_causal_ciphertext_index (
@@ -2519,38 +2525,55 @@ impl SqliteBigRepoStore {
         Ok(row_id)
     }
 
-    pub(crate) async fn automerge_frontier_cursors(&self) -> Res<(u64, u64)> {
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            "SELECT part_cursor, keyhive_cursor
-             FROM big_repo_automerge_frontier_cursor
-             WHERE scope_id = ?1",
+    pub(crate) async fn automerge_part_cursor(&self, part_id: PartId) -> Res<u64> {
+        let cursor: Option<i64> = sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_automerge_part_cursor WHERE scope_id = ?1 AND source_part_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
+    }
+
+    pub(crate) async fn commit_automerge_part_cursor(
+        &self,
+        part_id: PartId,
+        cursor: u64,
+    ) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_repo_automerge_part_cursor(scope_id, source_part_id, cursor)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope_id, source_part_id)
+             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .bind(i64::try_from(cursor).unwrap_or(i64::MAX))
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn automerge_keyhive_cursor(&self) -> Res<u64> {
+        let cursor: Option<i64> = sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_automerge_keyhive_cursor WHERE scope_id = ?1",
         )
         .bind(self.scope_id)
         .fetch_optional(&self.sql.read_pool)
         .await?;
-        Ok(row
-            .map(|(part_val, keyhive_val)| {
-                (Self::u64_from_db(part_val), Self::u64_from_db(keyhive_val))
-            })
-            .unwrap_or((0, 0)))
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 
-    pub(crate) async fn commit_automerge_frontier_cursors(
-        &self,
-        part_cursor: u64,
-        keyhive_cursor: u64,
-    ) -> Res<()> {
+    pub(crate) async fn commit_automerge_keyhive_cursor(&self, cursor: u64) -> Res<()> {
         sqlx::query(
-            "INSERT INTO big_repo_automerge_frontier_cursor(scope_id, part_cursor, keyhive_cursor)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO big_repo_automerge_keyhive_cursor(scope_id, cursor)
+             VALUES (?1, ?2)
              ON CONFLICT(scope_id)
-             DO UPDATE SET
-                 part_cursor = MAX(part_cursor, excluded.part_cursor),
-                 keyhive_cursor = MAX(keyhive_cursor, excluded.keyhive_cursor)",
+             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
         )
         .bind(self.scope_id)
-        .bind(i64::try_from(part_cursor).unwrap_or(i64::MAX))
-        .bind(i64::try_from(keyhive_cursor).unwrap_or(i64::MAX))
+        .bind(i64::try_from(cursor).unwrap_or(i64::MAX))
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())

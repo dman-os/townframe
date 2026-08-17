@@ -172,10 +172,7 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
         // propagate: sync back to owner and check.
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        let owner_sync = pair
-            .left_conn()
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await;
+        let owner_sync = pair.left_conn().sync_doc_with_peer(doc_id, None).await;
         match owner_sync {
             Ok(()) => {
                 let owner_handle =
@@ -873,17 +870,12 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
     if write_result.is_ok() {
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        let sync_result = pair
-            .right_conn()
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await;
+        let sync_result = pair.right_conn().sync_doc_with_peer(doc_id, None).await;
         // Sync may fail entirely because the transport rejects encrypted
         // content from a revoked member, or it may succeed but the owner
         // won't apply the decrypted changes.
         if sync_result.is_ok() {
-            pair.left_conn()
-                .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-                .await?;
+            pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
             let owner_handle = pair
                 .left()
                 .repo
@@ -1005,10 +997,7 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
     );
 
     // Sync must not materialise.
-    let sync_result = pair
-        .right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await;
+    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id, None).await;
     if sync_result.is_ok() {
         let lookup = pair.right().repo.get_doc(&doc_id).await?;
         assert!(
@@ -1080,16 +1069,11 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
 
     // Editor tries to sync the offline write. The transport may accept the
     // bytes, but the owner's runtime must not materialise the stale content.
-    let sync_result = pair
-        .right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await;
+    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id, None).await;
 
     // Whether the sync returns Ok or Err, the owner must NOT see "stale" = "offline-write".
     if sync_result.is_ok() {
-        pair.left_conn()
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
+        pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
     }
     let owner_handle = pair
         .left()
@@ -1189,14 +1173,8 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     // Keyhive completion and the incremental BigSync access-index refresh are
     // separate runtime activities; wait for the latter before syncing content.
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     let editor_regranted =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -1307,11 +1285,7 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, alice_agent.clone(), Access::Edit)
         .await?;
-    guard
-        .node(0)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    guard.node(0).repo.wait_for_quiescence(None).await?;
 
     // Sync grant to Alice.
     owner_alice_conn.sync_keyhive_with_peer(None).await?;
@@ -1323,11 +1297,7 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
         .repo
         .revoke_doc_access(doc_id, alice_agent)
         .await?;
-    guard
-        .node(0)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    guard.node(0).repo.wait_for_quiescence(None).await?;
 
     // Sync both events through different paths:
     //   Path A: Observer syncs with Owner → gets grant + revoke (in order).
@@ -1509,9 +1479,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     if write_attempt.is_ok() {
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.right_conn()
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
+        pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
         let owner_final = pair
             .left()
             .repo
@@ -1698,14 +1666,8 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Sync doc to Reader so they have a materialized handle (needed for
     // grant_doc_access to work).
-    reader_owner_conn
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    reader_owner_conn.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Capture snapshot before escalation attempts.
     let pre_delegations: Vec<_> = {
@@ -1879,33 +1841,17 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
         .await?;
 
     // Sync grant to Alice so she can re-grant (needs materialised handle).
-    guard
-        .node(0)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    guard.node(0).repo.wait_for_quiescence(None).await?;
     owner_alice.sync_keyhive_with_peer(None).await?;
     alice_owner.sync_keyhive_with_peer(None).await?;
-    alice_owner
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    alice_owner.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Sync grant to Bob.
     owner_bob.sync_keyhive_with_peer(None).await?;
     bob_owner.sync_keyhive_with_peer(None).await?;
-    bob_owner
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(2)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    bob_owner.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(2).repo.wait_for_quiescence(None).await?;
 
     // Alice grants Charlie Edit.
     guard
@@ -1957,14 +1903,8 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
     );
 
     // Charlie can sync and materialise the doc.
-    charlie_alice
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    guard
-        .node(3)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    charlie_alice.sync_doc_with_peer(doc_id, None).await?;
+    guard.node(3).repo.wait_for_quiescence(None).await?;
     let charlie_handle = guard
         .node(3)
         .repo

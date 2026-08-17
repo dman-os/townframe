@@ -163,6 +163,7 @@ pub async fn test_cx_with_options(
         storage: big_repo::StorageConfig::Memory,
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
+        automerge_source_parts: None,
     })
     .await?;
     let part_store = big_repo.shared_part_store();
@@ -501,6 +502,7 @@ pub async fn boot_repo() -> Res<(
         storage: big_repo::StorageConfig::Memory,
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
+        automerge_source_parts: None,
     })
     .await?;
     let part_store = repo.shared_part_store();
@@ -542,6 +544,7 @@ pub async fn boot_disk_repo(
         storage: big_repo::StorageConfig::Disk { path },
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
+        automerge_source_parts: None,
     })
     .await?;
     let part_store = repo.shared_part_store();

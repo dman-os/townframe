@@ -2136,6 +2136,69 @@ public object FfiConverterTypeStoredBranchRef: FfiConverterRustBuffer<StoredBran
 
 
 
+data class SwitchDocEvent (
+    var `docId`: kotlin.String
+    , 
+    var `branchName`: kotlin.String
+    , 
+    var `prevHeads`: ChangeHashSet?
+    , 
+    var `newHeads`: ChangeHashSet
+    , 
+    var `diff`: DocEntryDiff?
+    , 
+    var `drawerHeads`: ChangeHashSet?
+    , 
+    var `origin`: SwitchEventOrigin
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSwitchDocEvent: FfiConverterRustBuffer<SwitchDocEvent> {
+    override fun read(buf: ByteBuffer): SwitchDocEvent {
+        return SwitchDocEvent(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterOptionalTypeDocEntryDiff.read(buf),
+            FfiConverterOptionalTypeChangeHashSet.read(buf),
+            FfiConverterTypeSwitchEventOrigin.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SwitchDocEvent) = (
+            FfiConverterString.allocationSize(value.`docId`) +
+            FfiConverterString.allocationSize(value.`branchName`) +
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`prevHeads`) +
+            FfiConverterTypeChangeHashSet.allocationSize(value.`newHeads`) +
+            FfiConverterOptionalTypeDocEntryDiff.allocationSize(value.`diff`) +
+            FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`drawerHeads`) +
+            FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
+    )
+
+    override fun write(value: SwitchDocEvent, buf: ByteBuffer) {
+            FfiConverterString.write(value.`docId`, buf)
+            FfiConverterString.write(value.`branchName`, buf)
+            FfiConverterOptionalTypeChangeHashSet.write(value.`prevHeads`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`newHeads`, buf)
+            FfiConverterOptionalTypeDocEntryDiff.write(value.`diff`, buf)
+            FfiConverterOptionalTypeChangeHashSet.write(value.`drawerHeads`, buf)
+            FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
+    }
+}
+
+
+
 data class Tab (
     var `id`: Uuid
     , 
@@ -3088,19 +3151,6 @@ sealed class DrawerEvent {
         companion object
     }
     
-    data class DocUpdated(
-        val `id`: kotlin.String, 
-        val `entry`: org.example.daybook.uniffi.core.DocNBranches, 
-        val `diff`: org.example.daybook.uniffi.core.DocEntryDiff, 
-        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet, 
-        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DrawerEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
     data class DocDeleted(
         val `id`: kotlin.String, 
         val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet, 
@@ -3136,14 +3186,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 FfiConverterTypeChangeHashSet.read(buf),
                 FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
-            2 -> DrawerEvent.DocUpdated(
-                FfiConverterString.read(buf),
-                FfiConverterTypeDocNBranches.read(buf),
-                FfiConverterTypeDocEntryDiff.read(buf),
-                FfiConverterTypeChangeHashSet.read(buf),
-                FfiConverterTypeSwitchEventOrigin.read(buf),
-                )
-            3 -> DrawerEvent.DocDeleted(
+            2 -> DrawerEvent.DocDeleted(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
                 FfiConverterSequenceTypeFacetKey.read(buf),
@@ -3161,17 +3204,6 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeDocNBranches.allocationSize(value.`entry`)
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
-                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
-            )
-        }
-        is DrawerEvent.DocUpdated -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterTypeDocNBranches.allocationSize(value.`entry`)
-                + FfiConverterTypeDocEntryDiff.allocationSize(value.`diff`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
                 + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
@@ -3199,17 +3231,8 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
-            is DrawerEvent.DocUpdated -> {
-                buf.putInt(2)
-                FfiConverterString.write(value.`id`, buf)
-                FfiConverterTypeDocNBranches.write(value.`entry`, buf)
-                FfiConverterTypeDocEntryDiff.write(value.`diff`, buf)
-                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
-                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
-                Unit
-            }
             is DrawerEvent.DocDeleted -> {
-                buf.putInt(3)
+                buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
                 FfiConverterSequenceTypeFacetKey.write(value.`deletedFacetKeys`, buf)
@@ -4865,6 +4888,38 @@ public object FfiConverterOptionalTypeDocEntry: FfiConverterRustBuffer<DocEntry?
         } else {
             buf.put(1)
             FfiConverterTypeDocEntry.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeDocEntryDiff: FfiConverterRustBuffer<DocEntryDiff?> {
+    override fun read(buf: ByteBuffer): DocEntryDiff? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeDocEntryDiff.read(buf)
+    }
+
+    override fun allocationSize(value: DocEntryDiff?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeDocEntryDiff.allocationSize(value)
+        }
+    }
+
+    override fun write(value: DocEntryDiff?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeDocEntryDiff.write(value, buf)
         }
     }
 }

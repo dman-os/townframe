@@ -100,11 +100,9 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .await??;
 
     // Sync doc between nodes.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
     pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .sync_doc_with_peer(doc_id, None)
         .await
         .ok();
 

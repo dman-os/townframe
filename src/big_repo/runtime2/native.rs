@@ -1871,10 +1871,12 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
+    automerge_source_parts: HashSet<PartId>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
     crate::runtime2::KeyhiveChangeNotifier,
+    tokio::sync::mpsc::UnboundedSender<HashSet<PartId>>,
     crate::runtime2::Runtime2StopToken<Sendable, crate::runtime2::TokioTaskRuntime>,
 )>
 where
@@ -2134,6 +2136,8 @@ where
             Ok(())
         }))?;
 
+    let (automerge_frontier_parts_tx, automerge_frontier_parts_rx) =
+        tokio::sync::mpsc::unbounded_channel();
     let automerge_frontier_worker =
         crate::runtime2::automerge_frontier_worker::AutomergeFrontierWorker::new(
             group_part_store.clone(),
@@ -2142,7 +2146,8 @@ where
             Arc::clone(&timer),
             evt_tx.clone(),
             Arc::clone(&keyhive_state_generation),
-            crate::GLOBAL_PART_ID,
+            automerge_frontier_parts_rx,
+            automerge_source_parts,
         );
     stop_token
         .child_tasks
@@ -2219,7 +2224,13 @@ where
         BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard)
     };
 
-    Ok((handle, ephemeral, keyhive_notifier, stop_token))
+    Ok((
+        handle,
+        ephemeral,
+        keyhive_notifier,
+        automerge_frontier_parts_tx,
+        stop_token,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

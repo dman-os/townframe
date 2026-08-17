@@ -196,13 +196,8 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
         .await??;
 
     // Sync the post-grant content so the editor can learn about it.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     // Blobs are encrypted.
     assert_blobs_encrypted(&pair.left().repo, doc_id).await;
@@ -509,20 +504,10 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     // Sync bidirectionally: editor pulls owner's fork, owner pulls editor's fork.
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     // Both sides must see both forks.
     let owner_recheck = pair

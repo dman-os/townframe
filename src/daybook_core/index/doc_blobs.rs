@@ -751,6 +751,7 @@ struct DocBlobsTriageListener {
 impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
     fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
         crate::rt::switch::SwtchSinkInterest {
+            consume_doc: true,
             consume_drawer: true,
             consume_plugs: false,
             consume_dispatch: false,
@@ -770,50 +771,49 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
         _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
     ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
         let outcome = crate::rt::switch::SwitchSinkOutcome::default();
-        let crate::rt::switch::SwitchEvent::Drawer(event) = event else {
-            return Ok(outcome);
-        };
-        match &**event {
-            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                self.index_repo.enqueue_delete(id.clone())?;
-            }
-            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPathBuf::from(branch_name.as_str());
-                    let Some(_keys) = self
-                        .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads)
-                        .await?
-                    else {
-                        continue;
-                    };
-                    self.index_repo
-                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
-                }
-            }
-            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                info!(%id, ?entry.branches, "DocBlobsTriageListener received DocUpdated");
-                let branch_paths: Vec<BranchPathBuf> = entry
-                    .branches
-                    .keys()
-                    .map(|name| BranchPathBuf::from(name.as_str()))
-                    .collect();
+        match event {
+            crate::rt::switch::SwitchEvent::Doc(event) => {
+                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
                 self.index_repo
-                    .enqueue_delete_branches_not_in(id.clone(), branch_paths)?;
-                for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPathBuf::from(branch_name.as_str());
-                    let Some(_keys) = self
-                        .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads)
-                        .await?
-                    else {
-                        info!(%id, %branch_path, ?heads, "DocBlobsTriageListener get_facet_keys_if_latest returned None");
-                        continue;
-                    };
-                    self.index_repo
-                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
-                }
+                    .handle_worker_item(DocBlobsIndexWorkItem::Upsert {
+                        doc_id: event.doc_id.clone(),
+                        branch_path,
+                        heads: event.new_heads.clone(),
+                    })
+                    .await?;
             }
+            crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
+                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                    self.index_repo
+                        .handle_worker_item(DocBlobsIndexWorkItem::DeleteDoc { doc_id: id.clone() })
+                        .await?;
+                }
+                crate::drawer::DrawerEvent::DocAdded {
+                    id,
+                    entry,
+                    drawer_heads: _,
+                    ..
+                } => {
+                    for (branch_name, heads) in &entry.branches {
+                        let branch_path = BranchPathBuf::from(branch_name.as_str());
+                        let Some(_keys) = self
+                            .drawer_repo
+                            .get_facet_keys_if_latest(id, &branch_path, heads)
+                            .await?
+                        else {
+                            continue;
+                        };
+                        self.index_repo
+                            .handle_worker_item(DocBlobsIndexWorkItem::Upsert {
+                                doc_id: id.clone(),
+                                branch_path,
+                                heads: heads.clone(),
+                            })
+                            .await?;
+                    }
+                }
+            },
+            _ => {}
         }
         Ok(outcome)
     }

@@ -645,7 +645,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
+async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
 
@@ -2240,6 +2240,8 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
 
     let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let facet_note = FacetKey::from(WellKnownFacetTag::Note);
+    let listener = repo.subscribe(crate::repos::SubscribeOpts::new(256));
+
     let doc_id = repo
         .add(AddDocArgs {
             branch_path: BranchPathBuf::from("main"),
@@ -2258,7 +2260,14 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
         })
         .await?;
 
-    let listener = repo.subscribe(crate::repos::SubscribeOpts::new(256));
+    let added_event = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        listener.recv_lossy_async(),
+    )
+    .await
+    .wrap_err("timeout waiting for doc added event")?
+    .map_err(|_| eyre::eyre!("listener closed"))?;
+    assert!(matches!(&*added_event, DrawerEvent::DocAdded { id, .. } if id == &doc_id));
 
     repo.update_at_heads(
         DocPatch {

@@ -145,6 +145,7 @@ impl Node {
                 storage,
                 scope_key: Arc::from("big-repo-test"),
                 hidden_parts: Default::default(),
+                automerge_source_parts: Some(HashSet::from([crate::GLOBAL_PART_ID])),
             },
             (*store).clone(),
         )

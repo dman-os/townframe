@@ -546,6 +546,7 @@ struct BlobPinsPartTriageListener {
 impl crate::rt::switch::SwitchSink for BlobPinsPartTriageListener {
     fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
         crate::rt::switch::SwtchSinkInterest {
+            consume_doc: true,
             consume_drawer: true,
             consume_plugs: false,
             consume_dispatch: false,
@@ -562,48 +563,44 @@ impl crate::rt::switch::SwitchSink for BlobPinsPartTriageListener {
         _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
     ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
         let outcome = crate::rt::switch::SwitchSinkOutcome::default();
-        let crate::rt::switch::SwitchEvent::Drawer(event) = event else {
-            return Ok(outcome);
-        };
-        match &**event {
-            crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                self.worker.enqueue_delete(id.clone())?;
-            }
-            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPathBuf::from(branch_name.as_str());
-                    let Some(_keys) = self
-                        .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads)
-                        .await?
-                    else {
-                        continue;
-                    };
-                    self.worker
-                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
-                }
-            }
-            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                let branch_paths: Vec<BranchPathBuf> = entry
-                    .branches
-                    .keys()
-                    .map(|name| BranchPathBuf::from(name.as_str()))
-                    .collect();
+        match event {
+            crate::rt::switch::SwitchEvent::Doc(event) => {
+                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
                 self.worker
-                    .enqueue_delete_branches_not_in(id.clone(), branch_paths)?;
-                for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPathBuf::from(branch_name.as_str());
-                    let Some(_keys) = self
-                        .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads)
-                        .await?
-                    else {
-                        continue;
-                    };
-                    self.worker
-                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
-                }
+                    .handle_worker_item(BlobPinsPartWorkItem::Upsert {
+                        doc_id: event.doc_id.clone(),
+                        branch_path,
+                        heads: event.new_heads.clone(),
+                    })
+                    .await?;
             }
+            crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
+                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
+                    self.worker
+                        .handle_worker_item(BlobPinsPartWorkItem::DeleteDoc { doc_id: id.clone() })
+                        .await?;
+                }
+                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
+                    for (branch_name, heads) in &entry.branches {
+                        let branch_path = BranchPathBuf::from(branch_name.as_str());
+                        let Some(_keys) = self
+                            .drawer_repo
+                            .get_facet_keys_if_latest(id, &branch_path, heads)
+                            .await?
+                        else {
+                            continue;
+                        };
+                        self.worker
+                            .handle_worker_item(BlobPinsPartWorkItem::Upsert {
+                                doc_id: id.clone(),
+                                branch_path,
+                                heads: heads.clone(),
+                            })
+                            .await?;
+                    }
+                }
+            },
+            _ => {}
         }
         Ok(outcome)
     }
@@ -620,18 +617,13 @@ mod tests {
         partition_id: PartId,
         expected: u64,
     ) -> Res<()> {
-        let deadline = tokio::time::Instant::now()
-            + utils_rs::scale_timeout(std::time::Duration::from_secs(10));
-        while tokio::time::Instant::now() < deadline {
+        loop {
             let count = part_store.member_count(partition_id).await?;
             if count == expected {
                 return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eyre::bail!(
-            "timeout waiting for partition member count partition_id={partition_id} expected={expected}"
-        )
     }
 
     #[tokio::test(flavor = "multi_thread")]

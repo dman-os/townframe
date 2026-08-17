@@ -122,13 +122,13 @@ pub trait StressFixture: Sync {
         Ok(true)
     }
 
-    /// Wait for all `nodes` to reach a locally-stable observation within `timeout`.
+    /// Wait for all `nodes` to reach a locally-stable observation within optional `timeout`.
     /// Default polls per-node [`observed_state`] until stable for
     /// [`STRESS_SETTLE_STABLE_ROUNDS`] consecutive rounds.
     async fn wait_for_settled(
         &self,
         nodes: &[&Self::Node],
-        timeout: Duration,
+        timeout: Option<Duration>,
         label: &str,
     ) -> Res<()> {
         wait_for_cluster_settled(self, nodes, timeout, label).await
@@ -522,13 +522,14 @@ pub async fn maybe_restart_node<F: StressFixture>(
 pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
     fixture: &F,
     nodes: &[&F::Node],
-    timeout: Duration,
+    timeout: Option<Duration>,
     label: &str,
 ) -> Res<()> {
     let started_at = std::time::Instant::now();
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
     let mut last_snapshot = None;
     let mut stable_rounds = 0usize;
+    let mut last_warn = std::time::Instant::now();
 
     loop {
         let mut current = Vec::with_capacity(nodes.len());
@@ -547,7 +548,13 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
         }
 
         last_snapshot = Some(current);
-        if std::time::Instant::now() >= deadline {
+        if last_warn.elapsed() >= Duration::from_secs(10) {
+            warn!(label, elapsed = ?started_at.elapsed(), "waiting for stress cluster to settle");
+            last_warn = std::time::Instant::now();
+        }
+        if let Some(target_deadline) = deadline
+            && std::time::Instant::now() >= target_deadline
+        {
             log_if_slow(label, started_at);
             return Err(ferr!(
                 "timed out waiting for stress cluster to settle at {label}: last_snapshot={last_snapshot:?}"
@@ -572,7 +579,7 @@ pub async fn run_randomized_stress<F: StressFixture>(
     phase1_mutations: usize,
     phase2_mutations: usize,
     phase3_mutations: usize,
-    settle_timeout: Duration,
+    settle_timeout: Option<Duration>,
 ) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
@@ -769,7 +776,7 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
         phase1_mutations,
         phase2_mutations,
         phase3_mutations,
-        Duration::from_secs(60),
+        None,
     )
     .await
 }
@@ -781,7 +788,7 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     phase1_mutations: usize,
     phase2_mutations: usize,
     phase3_mutations: usize,
-    settle_timeout: Duration,
+    settle_timeout: Option<Duration>,
 ) -> Res<()> {
     let seed = utils_rs::testing::test_seed(DEFAULT_STRESS_SEED);
     run_randomized_stress(

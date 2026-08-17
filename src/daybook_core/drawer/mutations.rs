@@ -5,8 +5,8 @@ use super::{BranchKind, DrawerRepo};
 use crate::drawer::{
     dmeta,
     types::{
-        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DocEntryDiff, DocNBranches,
-        DrawerError, DrawerEvent, StoredBranchRef, UpdateDocArgsV2, UpdateDocBatchErrV2,
+        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, StoredBranchRef,
+        UpdateDocArgsV2, UpdateDocBatchErrV2,
     },
 };
 
@@ -162,7 +162,6 @@ impl DrawerRepo {
             .await??;
 
         let mut doc_ids = Vec::with_capacity(prepared_docs.len());
-        let mut events = Vec::with_capacity(prepared_docs.len());
 
         {
             surelock::key::lock_scope(|key| {
@@ -193,21 +192,11 @@ impl DrawerRepo {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
                 handles.insert(prepared.branch_doc_id, prepared.handle);
             });
-            events.push(DrawerEvent::DocAdded {
-                id: prepared.doc_id.clone(),
-                entry: DocNBranches {
-                    doc_id: prepared.doc_id,
-                    branches: [("main".to_string(), prepared.branch_heads)].into(),
-                },
-                drawer_heads: drawer_heads.clone(),
-                origin: self.local_origin(),
-            });
         }
         surelock::key::lock_scope(|key| {
             let (mut heads, _key) = key.lock(&self.current_heads);
             *heads = drawer_heads.clone();
         });
-        self.registry.notify(events);
 
         Ok(doc_ids)
     }
@@ -487,7 +476,7 @@ impl DrawerRepo {
             .await?;
 
         let _user_path = user_path;
-        let drawer_heads = if branch_kind == BranchKind::Local {
+        let _drawer_heads = if branch_kind == BranchKind::Local {
             let vtag = VersionTag::update(self.local_actor_id.clone());
             self.upsert_local_branch_ref(id, to_branch, branch_doc_id, &vtag)
                 .await?;
@@ -542,26 +531,10 @@ impl DrawerRepo {
             });
             drawer_heads
         };
-        let updated_entry = self
-            .current_doc_branches(id)
-            .await?
-            .ok_or_eyre("branch state missing after create_branch_at_heads_from_branch")?;
         surelock::key::lock_scope(|key| {
             let (mut handles, _key) = key.lock(&self.branch_handles);
             handles.insert(branch_doc_id, handle);
         });
-        self.registry.notify([DrawerEvent::DocUpdated {
-            id: id.clone(),
-            entry: updated_entry,
-            diff: DocEntryDiff {
-                changed_facet_keys: Vec::new(),
-                added_facet_keys: Vec::new(),
-                removed_facet_keys: Vec::new(),
-                moved_branch_names: vec![to_branch.to_string()],
-            },
-            drawer_heads,
-            origin: self.local_origin(),
-        }]);
         Ok(())
     }
 
@@ -776,23 +749,6 @@ impl DrawerRepo {
             *heads = drawer_heads.clone();
         });
 
-        let updated_entry = self
-            .current_doc_branches(id)
-            .await?
-            .ok_or_eyre("branch state missing after merge_from_heads")?;
-        self.registry.notify([DrawerEvent::DocUpdated {
-            id: id.clone(),
-            entry: updated_entry,
-            diff: DocEntryDiff {
-                changed_facet_keys: Vec::new(),
-                added_facet_keys: Vec::new(),
-                removed_facet_keys: Vec::new(),
-                moved_branch_names: vec![to_branch.to_string()],
-            },
-            drawer_heads,
-            origin: self.local_origin(),
-        }]);
-
         Ok(())
     }
 
@@ -919,13 +875,6 @@ impl DrawerRepo {
                 let (mut heads, _key) = key.lock(&self.current_heads);
                 *heads = drawer_heads.clone();
             });
-            self.registry.notify([DrawerEvent::DocDeleted {
-                id: id.clone(),
-                entry: Some(entry.clone()),
-                drawer_heads: drawer_heads.clone(),
-                deleted_facet_keys: deleted_facet_keys.clone(),
-                origin: self.local_origin(),
-            }]);
         }
 
         Ok(existed)
@@ -1024,23 +973,6 @@ impl DrawerRepo {
             )
             .await?;
             self.invalidate_entry_cache(id);
-            let drawer_heads = self.get_drawer_heads();
-            let updated_entry = self
-                .current_doc_branches(id)
-                .await?
-                .ok_or_eyre("branch state missing after local delete_branch")?;
-            self.registry.notify([DrawerEvent::DocUpdated {
-                id: id.clone(),
-                entry: updated_entry,
-                diff: DocEntryDiff {
-                    changed_facet_keys: Vec::new(),
-                    added_facet_keys: Vec::new(),
-                    removed_facet_keys: Vec::new(),
-                    moved_branch_names: vec![branch_name.clone()],
-                },
-                drawer_heads,
-                origin: self.local_origin(),
-            }]);
             return Ok(true);
         }
 
@@ -1093,7 +1025,6 @@ impl DrawerRepo {
                 eyre::Ok(ChangeHashSet(Arc::from([heads])))
             })
             .await??;
-        let diff = DocEntryDiff::new(&entry, &new_entry, Vec::new());
 
         // Update caches and notify
         self.invalidate_entry_cache(id);
@@ -1102,17 +1033,6 @@ impl DrawerRepo {
             let (mut heads, _key) = key.lock(&self.current_heads);
             *heads = drawer_heads.clone();
         });
-        let updated_entry = self
-            .current_doc_branches(id)
-            .await?
-            .ok_or_eyre("branch state missing after delete_branch")?;
-        self.registry.notify([DrawerEvent::DocUpdated {
-            id: id.clone(),
-            entry: updated_entry,
-            diff,
-            drawer_heads,
-            origin: self.local_origin(),
-        }]);
 
         Ok(true)
     }
