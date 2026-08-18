@@ -89,7 +89,7 @@ pub async fn grant_and_propagate(
         .repo
         .grant_doc_access(doc_id, grantee.clone(), access)
         .await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
@@ -109,7 +109,7 @@ pub async fn grant_group_and_propagate(
         .repo
         .grant_doc_access(doc_id, group.clone(), access)
         .await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
@@ -143,7 +143,7 @@ pub async fn sync_doc_expect_ready(
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    let receipt = conn.sync_doc_with_peer_receipt(doc_id, None).await?;
+    let receipt = conn.sync_doc_with_peer_receipt(doc_id).await?;
     tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
     loop {
         match repo.get_doc(&doc_id).await? {
@@ -171,8 +171,8 @@ pub async fn sync_doc_bidirectional(
     repo_b: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<(crate::BigDocHandle, crate::BigDocHandle)> {
-    conn_a_to_b.sync_doc_with_peer(doc_id, None).await?;
-    conn_b_to_a.sync_doc_with_peer(doc_id, None).await?;
+    conn_a_to_b.sync_doc_with_peer(doc_id).await?;
+    conn_b_to_a.sync_doc_with_peer(doc_id).await?;
     repo_a.wait_for_quiescence(None).await?;
     repo_b.wait_for_quiescence(None).await?;
     let handle_a = expect_ready(repo_a, doc_id).await?;

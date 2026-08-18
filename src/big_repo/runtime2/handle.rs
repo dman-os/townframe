@@ -276,15 +276,13 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     // ── sync ───────────────────────────────────────────────────────────────
 
-    /// Sync a document's sedimentree with a peer. Waits for completion or
-    /// `timeout`.
+    /// Sync a document's sedimentree with a peer.
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
         peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
     ) -> Result<(), crate::runtime2::types::SyncDocError> {
-        self.sync_doc_with_peer_receipt(doc_id, peer_id, timeout)
+        self.sync_doc_with_peer_receipt(doc_id, peer_id)
             .await
             .map(|_| ())
     }
@@ -293,7 +291,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         doc_id: DocumentId,
         peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
     ) -> Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
         debug!(
@@ -302,51 +299,28 @@ impl<F: FutureForm> Runtime2Handle<F> {
             %peer_id,
             "document sync requested"
         );
+        let mut guard = DocSyncWaiterGuard {
+            cmd_tx: self.cmd_tx.clone(),
+            doc_id,
+            peer_id,
+            waiter_id,
+            completed: false,
+        };
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
                 waiter_id,
-                timeout,
                 resp,
             })
             .await
             .map_err(|_| crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(ERROR_ACTOR)))?;
-        let result = if let Some(duration) = timeout {
-            let duration = utils_rs::scale_timeout(duration);
-            match self.race_timeout(rx, duration).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(ferr!(
-                    ERROR_CHANNEL
-                ))),
-                Err(()) => {
-                    self.cmd_tx
-                        .try_send(Runtime2Cmd::CancelDocSyncWaiter {
-                            doc_id,
-                            peer_id,
-                            waiter_id,
-                        })
-                        .map_err(|err| match err {
-                            async_channel::TrySendError::Closed(_) => {
-                                crate::runtime2::types::SyncDocError::IoError(ferr!(
-                                    "task was found dead"
-                                ))
-                            }
-                            async_channel::TrySendError::Full(_) => {
-                                crate::runtime2::types::SyncDocError::IoError(ferr!("mailbox full"))
-                            }
-                        })?;
-                    Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
-                        "doc sync timed out"
-                    )))
-                }
-            }
-        } else {
-            rx.await
-                .map_err(|_| crate::runtime2::types::SyncDocError::IoError(ferr!(ERROR_CHANNEL)))?
-        };
-        match &result {
+        let res = rx
+            .await
+            .map_err(|_| crate::runtime2::types::SyncDocError::IoError(ferr!(ERROR_CHANNEL)))?;
+        guard.completed = true;
+        match &res {
             Ok(receipt) => debug!(
                 sync_id = waiter_id,
                 ?receipt.outcome,
@@ -354,16 +328,18 @@ impl<F: FutureForm> Runtime2Handle<F> {
             ),
             Err(error) => debug!(sync_id = waiter_id, ?error, "document sync failed"),
         }
-        result
+        res
     }
 
-    /// Sync keyhive state with a peer. Waits for completion or `timeout`.
-    pub async fn sync_keyhive_with_peer(
-        &self,
-        peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
-    ) -> eyre::Result<()> {
+    /// Sync keyhive state with a peer.
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> eyre::Result<()> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
+        let mut guard = KeyhiveSyncWaiterGuard {
+            cmd_tx: self.cmd_tx.clone(),
+            peer_id,
+            waiter_id,
+            completed: false,
+        };
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncKeyhiveWithPeer {
@@ -373,55 +349,29 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let timeout =
-            utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
-        let deadline = std::time::Instant::now() + timeout;
-        match self.race_timeout(rx, timeout).await {
-            Ok(Ok(result)) => {
-                result.wrap_err("keyhive sync failed")?;
-                let (resp, reconciled) = futures::channel::oneshot::channel();
-                self.cmd_tx
-                    .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
-                    .await
-                    .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                match self.race_timeout(reconciled, remaining).await {
-                    Ok(Ok(result)) => result.wrap_err("keyhive post-sync reconciliation failed"),
-                    Ok(Err(_)) => Err(eyre::eyre!(
-                        "runtime dropped keyhive reconciliation response"
-                    )),
-                    Err(()) => Err(eyre::eyre!("keyhive post-sync reconciliation timed out")),
-                }
-            }
-            Ok(Err(_)) => Err(ferr!(ERROR_CHANNEL)),
-            Err(()) => {
-                self.cmd_tx
-                    .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
-                    .map_err(|err| match err {
-                        async_channel::TrySendError::Closed(_) => eyre::eyre!(ERROR_ACTOR),
-                        async_channel::TrySendError::Full(_) => eyre::eyre!("mailbox full"),
-                    })?;
-                Err(eyre::eyre!("keyhive sync timed out"))
-            }
-        }
+        let result = rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?;
+        guard.completed = true;
+        result.wrap_err("keyhive sync failed")?;
+        let (resp, reconciled) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        reconciled
+            .await
+            .map_err(|_| eyre::eyre!("runtime dropped keyhive reconciliation response"))?
+            .wrap_err("keyhive post-sync reconciliation failed")
     }
 
-    pub async fn wait_for_keyhive_reconciliation(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> eyre::Result<()> {
+    pub async fn wait_for_keyhive_reconciliation(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let timeout =
-            utils_rs::scale_timeout(timeout.unwrap_or_else(|| std::time::Duration::from_secs(30)));
-        match self.race_timeout(rx, timeout).await {
-            Ok(Ok(result)) => result.wrap_err("keyhive reconciliation failed"),
-            Ok(Err(_)) => Err(ferr!(ERROR_CHANNEL)),
-            Err(()) => Err(eyre::eyre!("keyhive reconciliation timed out")),
-        }
+        rx.await
+            .map_err(|_| ferr!(ERROR_CHANNEL))?
+            .wrap_err("keyhive reconciliation failed")
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -528,6 +478,44 @@ impl<F: FutureForm> Runtime2Handle<F> {
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),
             Either::Right((result, _)) => Ok(result),
+        }
+    }
+}
+
+struct DocSyncWaiterGuard {
+    cmd_tx: async_channel::Sender<Runtime2Cmd>,
+    doc_id: DocumentId,
+    peer_id: PeerId,
+    waiter_id: u64,
+    completed: bool,
+}
+
+impl Drop for DocSyncWaiterGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            drop(self.cmd_tx.try_send(Runtime2Cmd::CancelDocSyncWaiter {
+                doc_id: self.doc_id,
+                peer_id: self.peer_id,
+                waiter_id: self.waiter_id,
+            }));
+        }
+    }
+}
+
+struct KeyhiveSyncWaiterGuard {
+    cmd_tx: async_channel::Sender<Runtime2Cmd>,
+    peer_id: PeerId,
+    waiter_id: u64,
+    completed: bool,
+}
+
+impl Drop for KeyhiveSyncWaiterGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            drop(self.cmd_tx.try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
+                peer_id: self.peer_id,
+                waiter_id: self.waiter_id,
+            }));
         }
     }
 }

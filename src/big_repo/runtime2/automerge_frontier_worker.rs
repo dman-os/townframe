@@ -11,7 +11,6 @@ use std::time::Duration;
 
 const EVENT_BATCH_SIZE: u32 = 64;
 const IDLE_POLL: Duration = Duration::from_millis(25);
-const WATERMARK_TIMEOUT: Duration = Duration::from_millis(500);
 const AUTOMERGE_OBJ_MASK: [u8; 32] = [0x5A; 32];
 
 pub fn automerge_docs_part_id() -> PartId {
@@ -84,7 +83,7 @@ impl AutomergeFrontierWorker {
         }
         let mut targets = HashSet::new();
         for &part_id in parts {
-            let cursor = store.automerge_part_cursor(part_id).await.unwrap_or(0);
+            let cursor = store.automerge_part_cursor(part_id).await?;
             targets.insert(SubscriptionTarget::Part { part_id, cursor });
         }
         match big_sync_store
@@ -115,11 +114,7 @@ impl AutomergeFrontierWorker {
             runtime.get_doc_handle(doc_id).await
         {
             if let Some(target_row_id) = watermark {
-                drop(
-                    bundle
-                        .await_commit_watermark(target_row_id, WATERMARK_TIMEOUT)
-                        .await,
-                );
+                bundle.await_commit_watermark(target_row_id).await?;
             }
             let heads = surelock::key::lock_scope(|key| {
                 let (doc, _key) = key.lock(&bundle.doc);
@@ -161,7 +156,15 @@ impl AutomergeFrontierWorker {
                         }
                         let event: StaticEvent<Vec<u8>> = match bincode::deserialize(&row.bytes) {
                             Ok(ev) => ev,
-                            Err(_) => continue,
+                            Err(err) => {
+                                warn!(
+                                    seq = row.seq,
+                                    ?err,
+                                    "failed to deserialize keyhive event; advancing cursor"
+                                );
+                                keyhive_cursor = row.seq;
+                                continue;
+                            }
                         };
                         if let StaticEvent::CgkaOperation(op) = event {
                             let doc_id = crate::DocumentId::new(*op.payload().doc_id().as_bytes());

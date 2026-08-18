@@ -280,6 +280,48 @@ impl BlobPinsPartWorker {
             .collect();
         let next_hashes: HashSet<Arc<str>> = pins.keys().cloned().collect();
 
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ?1 AND branch_path = ?2")
+            .bind(doc_id)
+            .bind(branch_path.as_str())
+            .execute(&mut *tx)
+            .await?;
+
+        if !pins.is_empty() {
+            let serialized_heads =
+                serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
+                    .expect(ERROR_JSON);
+
+            let mut rows: Vec<(&str, i64)> = Vec::with_capacity(pins.len());
+            for (hash, length_octets) in pins {
+                let length_octets_i64 = i64::try_from(*length_octets).map_err(|_| {
+                    eyre::eyre!(
+                        "blob pin length octets exceeds sqlite INTEGER range: doc_id={} branch={} length_octets={}",
+                        doc_id,
+                        branch_path.as_str(),
+                        length_octets
+                    )
+                })?;
+                rows.push((&hash[..], length_octets_i64));
+            }
+
+            let mut query_builder = QueryBuilder::new(
+                "INSERT INTO doc_blob_pins (doc_id, branch_path, blob_hash, length_octets, origin_heads) ",
+            );
+            query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
+                row.push_bind(doc_id)
+                    .push_bind(branch_path.as_str())
+                    .push_bind(hash)
+                    .push_bind(*length_octets_i64)
+                    .push_bind(&serialized_heads);
+            });
+            query_builder.push(
+                " ON CONFLICT(doc_id, branch_path, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
+            );
+            query_builder.build().execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+
         for (hash, length_octets) in pins {
             let obj_id = crate::blobs::blob_id_from_hash(hash);
             let payload = serde_json::json!({ "lengthOctets": length_octets });
@@ -303,68 +345,24 @@ impl BlobPinsPartWorker {
             }
         }
 
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ?1 AND branch_path = ?2")
-            .bind(doc_id)
-            .bind(branch_path.as_str())
-            .execute(&mut *tx)
-            .await?;
-
-        if pins.is_empty() {
-            tx.commit().await?;
-            return self.doc_presence_outcome(doc_id).await;
-        }
-
-        let serialized_heads =
-            serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
-                .expect(ERROR_JSON);
-
-        let mut rows: Vec<(&str, i64)> = Vec::with_capacity(pins.len());
-        for (hash, length_octets) in pins {
-            let length_octets_i64 = i64::try_from(*length_octets).map_err(|_| {
-                eyre::eyre!(
-                    "blob pin length octets exceeds sqlite INTEGER range: doc_id={} branch={} length_octets={}",
-                    doc_id,
-                    branch_path.as_str(),
-                    length_octets
-                )
-            })?;
-            rows.push((&hash[..], length_octets_i64));
-        }
-
-        let mut query_builder = QueryBuilder::new(
-            "INSERT INTO doc_blob_pins (doc_id, branch_path, blob_hash, length_octets, origin_heads) ",
-        );
-        query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
-            row.push_bind(doc_id)
-                .push_bind(branch_path.as_str())
-                .push_bind(hash)
-                .push_bind(*length_octets_i64)
-                .push_bind(&serialized_heads);
-        });
-        query_builder.push(
-            " ON CONFLICT(doc_id, branch_path, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
-        );
-        query_builder.build().execute(&mut *tx).await?;
-        tx.commit().await?;
         self.doc_presence_outcome(doc_id).await
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
         let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(doc_id);
         let prev_hashes = self.list_hashes_for_doc(doc_id).await?;
-        for hash in &prev_hashes {
-            let obj_id = crate::blobs::blob_id_from_hash(hash);
-            self.part_store
-                .remove_obj_from_part(obj_id, part_id)
-                .await?;
-        }
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        for hash in &prev_hashes {
+            let obj_id = crate::blobs::blob_id_from_hash(hash);
+            self.part_store
+                .remove_obj_from_part(obj_id, part_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -375,6 +373,13 @@ impl BlobPinsPartWorker {
     ) -> Res<ReindexDocOutcome> {
         let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(doc_id);
         let prev_hashes = self.list_hashes_for_doc_branch(doc_id, branch_path).await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ?1 AND branch_path = ?2")
+            .bind(doc_id)
+            .bind(branch_path.as_str())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         for hash in &prev_hashes {
             if self
                 .hash_is_unused_by_other_branches(hash, doc_id, branch_path)
@@ -386,13 +391,6 @@ impl BlobPinsPartWorker {
                     .await?;
             }
         }
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ?1 AND branch_path = ?2")
-            .bind(doc_id)
-            .bind(branch_path.as_str())
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
         self.doc_presence_outcome(doc_id).await
     }
 

@@ -479,7 +479,7 @@ impl Pair {
         guard.nodes.push(right);
         let left_conn = guard.node(0).connect(guard.node(1)).await?;
         let right_conn = guard.node(1).accepted_connection().await;
-        left_conn.sync_keyhive_with_peer(None).await?;
+        left_conn.sync_keyhive_with_peer().await?;
         Ok(Self {
             guard,
             left_idx: 0,
@@ -549,7 +549,7 @@ impl Pair {
         let mut pair =
             Self::boot_disconnected(left_seed, right_seed, left_label, right_label).await?;
         pair.connect().await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
         Ok(pair)
     }
 
@@ -669,8 +669,8 @@ impl Topo {
         let edges = vec![(0, a_r_conn, 1, r_a_conn), (1, r_b_conn, 2, b_r_conn)];
         // Sync from the far end inward so A learns B's contact identity
         // through the relay before topology tests issue grants.
-        edges[1].1.sync_keyhive_with_peer(None).await?;
-        edges[0].1.sync_keyhive_with_peer(None).await?;
+        edges[1].1.sync_keyhive_with_peer().await?;
+        edges[0].1.sync_keyhive_with_peer().await?;
         Ok(Self::Relay(TopoData3 { guard, edges }))
     }
 
@@ -697,8 +697,8 @@ impl Topo {
 
         let edges = vec![(0, a_b_conn, 1, b_a_conn), (1, b_c_conn, 2, c_b_conn)];
         // Sync from the far end inward so A learns C through B.
-        edges[1].1.sync_keyhive_with_peer(None).await?;
-        edges[0].1.sync_keyhive_with_peer(None).await?;
+        edges[1].1.sync_keyhive_with_peer().await?;
+        edges[0].1.sync_keyhive_with_peer().await?;
         Ok(Self::Line(TopoData3 { guard, edges }))
     }
 
@@ -727,8 +727,8 @@ impl Topo {
         let l2_h_conn = guard.node(2).accepted_connection().await;
 
         let edges = vec![(0, h_l1_conn, 1, l1_h_conn), (0, h_l2_conn, 2, l2_h_conn)];
-        edges[0].1.sync_keyhive_with_peer(None).await?;
-        edges[1].1.sync_keyhive_with_peer(None).await?;
+        edges[0].1.sync_keyhive_with_peer().await?;
+        edges[1].1.sync_keyhive_with_peer().await?;
         Ok(Self::Star(TopoData3 { guard, edges }))
     }
 
@@ -761,9 +761,9 @@ impl Topo {
             (1, b_c_conn, 2, c_b_conn),
             (2, c_a_conn, 0, a_c_conn),
         ];
-        edges[0].1.sync_keyhive_with_peer(None).await?;
-        edges[1].1.sync_keyhive_with_peer(None).await?;
-        edges[2].1.sync_keyhive_with_peer(None).await?;
+        edges[0].1.sync_keyhive_with_peer().await?;
+        edges[1].1.sync_keyhive_with_peer().await?;
+        edges[2].1.sync_keyhive_with_peer().await?;
         Ok(Self::Triangle(TopoData3 { guard, edges }))
     }
 

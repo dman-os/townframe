@@ -92,8 +92,8 @@ async fn reconcile_membership_first(
     pair: &Pair,
     doc_id: crate::DocumentId,
 ) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     fixtures::sync_doc_pair(pair, doc_id).await
 }
 
@@ -108,11 +108,11 @@ async fn reconcile_payload_first(
 ) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
     // First doc sync — may produce PendingMaterialization because the reader
     // hasn't synced the updated CGKA key material yet.
-    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
     // Now sync membership so the reader learns the new CGKA epoch.
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     // Bidirectional doc sync: the second pull materialises, reverse pull
     // settles parity so tier0_invariants is safe.
     fixtures::sync_doc_pair(pair, doc_id).await
@@ -590,8 +590,8 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
 
     // Reconnect and sync.
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let (owner_doc2, reader_doc2) = fixtures::sync_doc_pair(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "both-restart");
@@ -656,8 +656,8 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     // Reconnect.
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Now sync bidirectionally — the local write should be pushed to the reader
     // and both repos settle for safe convergence checks.

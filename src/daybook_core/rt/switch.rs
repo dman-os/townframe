@@ -1482,7 +1482,7 @@ mod tests {
 
     /// Tests that SwitchStore correctly persists cursors and doc states across worker lifecycle.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_switch_replay_resumes_from_persisted_cursor() -> Res<()> {
+    async fn test_switch_persists_cursor_and_doc_state() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_cursor_resume").await?;
 

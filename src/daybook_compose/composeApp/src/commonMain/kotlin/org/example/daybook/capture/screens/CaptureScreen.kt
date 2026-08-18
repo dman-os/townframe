@@ -16,11 +16,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
 import org.example.daybook.LocalBigDialogController
@@ -200,6 +202,7 @@ class CaptureScreenViewModel(
     }
 
     // Registration handle to auto-unregister
+    private var registerJob: Job? = null
     private var drawerRegistration: ListenerRegistration? = null
     private var rtRegistration: ListenerRegistration? = null
 
@@ -240,10 +243,18 @@ class CaptureScreenViewModel(
         } else {
             editorController.bindDoc(null)
         }
-        viewModelScope.launch {
-            drawerRegistration = drawerRepo.ffiRegisterListener(drawerListener)
-            rtRegistration = rt?.ffiRegisterListener(switchDocListener)
-        }
+        registerJob =
+            viewModelScope.launch {
+                val dReg = drawerRepo.ffiRegisterListener(drawerListener)
+                val rReg = rt?.ffiRegisterListener(switchDocListener)
+                if (!isActive) {
+                    dReg.unregister()
+                    rReg?.unregister()
+                    return@launch
+                }
+                drawerRegistration = dReg
+                rtRegistration = rReg
+            }
 
         // Initialize mode from current window
         viewModelScope.launch {
@@ -268,6 +279,7 @@ class CaptureScreenViewModel(
     }
 
     override fun onCleared() {
+        registerJob?.cancel()
         drawerRegistration?.unregister()
         rtRegistration?.unregister()
         super.onCleared()

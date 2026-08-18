@@ -364,12 +364,13 @@ async fn pull_required_partitions_via_big_sync_worker(
     if !ready.initial {
         eyre::bail!("clone Keyhive subscription did not send its readiness event");
     }
-    big_repo
-        .sync_keyhive_with_peer(peer_id, Some(timeout))
-        .await?;
-    big_repo
-        .wait_for_keyhive_reconciliation(Some(timeout))
-        .await?;
+    tokio::time::timeout(timeout, async {
+        big_repo.sync_keyhive_with_peer(peer_id).await?;
+        big_repo.wait_for_keyhive_reconciliation().await?;
+        eyre::Ok(())
+    })
+    .await
+    .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
     let big_sync_rpc_client =
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
     let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
@@ -408,9 +409,7 @@ async fn pull_required_partitions_via_big_sync_worker(
             .await?;
 
         for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id] {
-            big_repo
-                .sync_doc_with_peer(doc_id, peer_id, Some(timeout))
-                .await?;
+            big_repo.sync_doc_with_peer(doc_id, peer_id).await?;
         }
         Ok(())
     })

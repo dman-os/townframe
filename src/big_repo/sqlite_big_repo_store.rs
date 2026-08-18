@@ -2126,7 +2126,8 @@ impl SqliteBigRepoStore {
                 doc_id BLOB NOT NULL,
                 big_sync_txid INTEGER NOT NULL,
                 latest_commit_row_id INTEGER NOT NULL,
-                PRIMARY KEY(scope_id, doc_id, big_sync_txid)
+                PRIMARY KEY(scope_id, doc_id, big_sync_txid),
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
             ) STRICT",
             "CREATE TABLE IF NOT EXISTS big_repo_automerge_part_cursor (
                 scope_id INTEGER NOT NULL,
@@ -2500,7 +2501,7 @@ impl SqliteBigRepoStore {
         )
         .bind(self.scope_id)
         .bind(doc_id.as_bytes().as_slice())
-        .bind(i64::try_from(big_sync_txid).unwrap_or(i64::MAX))
+        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
         .bind(latest_commit_row_id)
         .execute(&self.sql.write_pool)
         .await?;
@@ -2519,7 +2520,7 @@ impl SqliteBigRepoStore {
         )
         .bind(self.scope_id)
         .bind(doc_id.as_bytes().as_slice())
-        .bind(i64::try_from(big_sync_txid).unwrap_or(i64::MAX))
+        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
         .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(row_id)
@@ -2549,7 +2550,7 @@ impl SqliteBigRepoStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(part_id))
-        .bind(i64::try_from(cursor).unwrap_or(i64::MAX))
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())
@@ -2573,7 +2574,7 @@ impl SqliteBigRepoStore {
              DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
         )
         .bind(self.scope_id)
-        .bind(i64::try_from(cursor).unwrap_or(i64::MAX))
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -44,8 +45,8 @@ private data class DrawerRefreshIntent(
 }
 
 class DrawerViewModel(
-    val drawerRepo: DrawerRepoFfi,
-    val rt: RtFfi? = null,
+    private val drawerRepo: DrawerRepoFfi,
+    private val rt: RtFfi? = null,
 ) : ViewModel() {
     // Document IDs list (loaded lazily)
     private val _docListState = MutableStateFlow<DocListState>(DocListState.Loading)
@@ -74,6 +75,7 @@ class DrawerViewModel(
     // Internal access for optimistic updates
     internal val _selectedDocMutable = _selectedDoc
 
+    private var registerJob: Job? = null
     private var drawerRegistration: ListenerRegistration? = null
     private var rtRegistration: ListenerRegistration? = null
 
@@ -127,10 +129,18 @@ class DrawerViewModel(
 
     init {
         refreshRunner.submit(DrawerRefreshIntent.ListOnly)
-        viewModelScope.launch {
-            drawerRegistration = drawerRepo.ffiRegisterListener(drawerListener)
-            rtRegistration = rt?.ffiRegisterListener(switchDocListener)
-        }
+        registerJob =
+            viewModelScope.launch {
+                val dReg = drawerRepo.ffiRegisterListener(drawerListener)
+                val rReg = rt?.ffiRegisterListener(switchDocListener)
+                if (!isActive) {
+                    dReg.unregister()
+                    rReg?.unregister()
+                    return@launch
+                }
+                drawerRegistration = dReg
+                rtRegistration = rReg
+            }
     }
 
     fun refreshDocIds() {
@@ -283,6 +293,7 @@ class DrawerViewModel(
     }
 
     override fun onCleared() {
+        registerJob?.cancel()
         refreshRunner.cancel()
         drawerRegistration?.unregister()
         rtRegistration?.unregister()

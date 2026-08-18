@@ -97,7 +97,7 @@ async fn tier2_grant_before_content_edit() -> crate::Res<()> {
         .await??;
 
     // Sync back to Owner and verify convergence.
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -202,8 +202,8 @@ async fn tier2_grant_after_content_edit() -> crate::Res<()> {
         })
         .await??;
 
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -348,8 +348,8 @@ async fn tier2_nested_group_edit_propagates_member_update() -> crate::Res<()> {
         })
         .await??;
 
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -395,8 +395,8 @@ async fn tier2_grant_after_content_while_offline_read() -> crate::Res<()> {
     pair.left_conn = Some(new_left);
     pair.right_conn = Some(new_right);
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?;
     fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     let reader_doc = pair
@@ -437,8 +437,8 @@ async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
     let new_right = pair.right().accepted_connection().await;
     pair.left_conn = Some(new_left);
     pair.right_conn = Some(new_right);
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -449,8 +449,8 @@ async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
         })
         .await??;
 
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -483,8 +483,8 @@ async fn tier2_no_grant_blocks_materialization() -> crate::Res<()> {
 
     // No grant — the stranger node has no access to this doc.
     // The stranger never gets a Ready handle.
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // The doc must not be Ready — the get_doc call may error (no doc worker)
     // or return Missing/PendingMaterialization. Both are expected for no-grant.
@@ -538,8 +538,8 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
         .grant_doc_access(doc_id, agent, access)
         .await?;
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     if before_content {
         owner_doc
             .with_document(|doc| {
@@ -566,8 +566,8 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
             .filter(|head| !agent_heads_before.contains(head))
             .copied()
             .collect();
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
         pair.left().repo.wait_for_quiescence(None).await?;
         pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
@@ -706,14 +706,14 @@ async fn run_group_case(
         // offline dimension is the document grant, not the creation of the
         // group/member delegation that the grant depends on. Otherwise the
         // reconnect can deliver the document grant before its root proof.
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
         fixtures::go_offline(&mut pair).await?;
         pair.left()
             .repo
             .grant_doc_access(doc_id, target_group.clone(), access)
             .await?;
         pair.connect().await?;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
         fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?
     } else {
         fixtures::grant_group_and_propagate(&pair, doc_id, &target_group, access).await?;
@@ -744,7 +744,7 @@ async fn run_group_case(
                     .map_err(|err| crate::ferr!("failed group member write: {err:?}"))
             })
             .await??;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
         pair.left().repo.wait_for_quiescence(None).await?;
         pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
@@ -794,12 +794,9 @@ async fn run_public_case(
     if offline {
         pair.connect().await?;
     }
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.right()
-        .repo
-        .wait_for_keyhive_reconciliation(None)
-        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.right().repo.wait_for_keyhive_reconciliation().await?;
     if before_content {
         owner_doc
             .with_document(|doc| {
@@ -820,8 +817,8 @@ async fn run_public_case(
                     .map_err(|err| crate::ferr!("failed public member write: {err:?}"))
             })
             .await??;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
         drop(owner_doc);
         drop(public_doc);
         let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
@@ -959,8 +956,8 @@ async fn run_document_as_member_case(
     if offline {
         pair.connect().await?;
     }
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Document commits and deterministic fragmentation are published
     // independently of the Keyhive exchange. Settle the owner before asking
@@ -978,8 +975,8 @@ async fn run_document_as_member_case(
                     .map_err(|err| crate::ferr!("failed document-member write: {err:?}"))
             })
             .await??;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
         drop(target_doc);
         drop(member_doc);
         let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;
@@ -1028,8 +1025,8 @@ async fn run_no_grant_case(seed: u8, offline: bool, before_content: bool) -> cra
             })
             .await??;
     }
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     match pair.right().repo.get_doc(&doc_id).await {
         Ok(crate::DocLookup::Ready(_)) => {
             return Err(crate::ferr!(concat!(

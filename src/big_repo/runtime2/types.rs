@@ -237,13 +237,10 @@ impl LiveDocBundle {
         self.barrier_notify.notify_waiters();
     }
 
-    pub async fn await_commit_watermark(
-        &self,
-        target_row_id: i64,
-        timeout: std::time::Duration,
-    ) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+    pub async fn await_commit_watermark(&self, target_row_id: i64) -> Res<()> {
         loop {
+            let notified = self.barrier_notify.notified();
+            tokio::pin!(notified);
             if self
                 .latest_commit_row_id
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -251,27 +248,15 @@ impl LiveDocBundle {
             {
                 return Ok(());
             }
-            tokio::select! {
-                _ = self.barrier_notify.notified() => {}
-                _ = tokio::time::sleep_until(deadline) => {
-                    eyre::bail!(
-                        "timed out waiting for commit watermark {} on doc {}",
-                        target_row_id,
-                        self.doc_id
-                    );
-                }
-            }
+            notified.await;
         }
     }
 
     #[allow(dead_code)]
-    pub async fn await_keyhive_watermark(
-        &self,
-        target_seq: i64,
-        timeout: std::time::Duration,
-    ) -> Res<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+    pub async fn await_keyhive_watermark(&self, target_seq: i64) -> Res<()> {
         loop {
+            let notified = self.barrier_notify.notified();
+            tokio::pin!(notified);
             if self
                 .latest_keyhive_seq
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -279,16 +264,7 @@ impl LiveDocBundle {
             {
                 return Ok(());
             }
-            tokio::select! {
-                _ = self.barrier_notify.notified() => {}
-                _ = tokio::time::sleep_until(deadline) => {
-                    eyre::bail!(
-                        "timed out waiting for keyhive watermark {} on doc {}",
-                        target_seq,
-                        self.doc_id
-                    );
-                }
-            }
+            notified.await;
         }
     }
 }

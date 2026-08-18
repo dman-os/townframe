@@ -218,7 +218,6 @@ async fn wait_for_synced_doc_on_both_sides(
     right: &SyncTestNode,
     doc_id: &String,
     branch: &BranchPathBuf,
-    _timeout: Duration,
 ) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
     loop {
         let left_doc = left
@@ -983,22 +982,10 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .await?;
 
         let branch = BranchPathBuf::from("main");
-        let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(
-            &reopened_a,
-            &node_b,
-            &doc_on_a,
-            &branch,
-            Duration::from_secs(60),
-        )
-        .await?;
-        let (doc_b_on_reopened_a, doc_b_on_b) = wait_for_synced_doc_on_both_sides(
-            &reopened_a,
-            &node_b,
-            &doc_on_b,
-            &branch,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let (doc_a_on_reopened_a, doc_a_on_b) =
+            wait_for_synced_doc_on_both_sides(&reopened_a, &node_b, &doc_on_a, &branch).await?;
+        let (doc_b_on_reopened_a, doc_b_on_b) =
+            wait_for_synced_doc_on_both_sides(&reopened_a, &node_b, &doc_on_b, &branch).await?;
 
         assert_eq!(doc_a_on_reopened_a.id, doc_a_on_b.id);
         assert_eq!(doc_a_on_reopened_a.facets, doc_a_on_b.facets);
@@ -1164,14 +1151,8 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
     wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id).await?;
 
     // 7. Verify both nodes reach identical merged facet state on main branch.
-    let (doc_a, doc_b) = wait_for_synced_doc_on_both_sides(
-        &node_a,
-        &reopened_b,
-        &doc_id,
-        &main_branch,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let (doc_a, doc_b) =
+        wait_for_synced_doc_on_both_sides(&node_a, &reopened_b, &doc_id, &main_branch).await?;
 
     assert_eq!(doc_a.id, doc_b.id);
     assert_eq!(doc_a.facets, doc_b.facets);

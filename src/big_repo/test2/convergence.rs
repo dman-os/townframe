@@ -49,7 +49,7 @@ async fn tier4_repeated_sync_is_idempotent() -> crate::Res<()> {
     let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
     let before = pair.right().repo.doc_head_state(doc_id).await?;
 
-    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
     let after = pair.right().repo.doc_head_state(doc_id).await?;
     assert_eq!(before.sedimentree_heads, after.sedimentree_heads);
@@ -192,10 +192,10 @@ async fn tier4_fork_then_merge_preserves_decryption() -> crate::Res<()> {
         .await??;
 
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
-    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
     drop(owner_doc);
     let owner_doc =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -244,7 +244,7 @@ async fn tier4_rapid_fire_then_idle_sync_converges_once() -> crate::Res<()> {
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     drop(reader_doc);
     let before = pair.right().repo.doc_head_state(doc_id).await?;
-    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
     let after = pair.right().repo.doc_head_state(doc_id).await?;
     assert_eq!(before.sedimentree_heads, after.sedimentree_heads);
@@ -278,7 +278,7 @@ async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
 
     // All three tasks run concurrently: a doc sync (left→right) while
     // both sides make independent local edits.
-    let sync_fut = pair.left_conn().sync_doc_with_peer(doc_id, None);
+    let sync_fut = pair.left_conn().sync_doc_with_peer(doc_id);
     let left_edit_fut = owner_doc.with_document(|doc| {
         doc.transact(|tx| tx.put(automerge::ROOT, "field_a", "from_left"))
             .map_err(|err| crate::ferr!("owner concurrent edit failed: {err:?}"))
@@ -296,8 +296,8 @@ async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
     right_result??;
 
     // Follow-up sync to capture any edits that the in-flight sync missed.
-    pair.right_conn().sync_doc_with_peer(doc_id, None).await?;
-    pair.left_conn().sync_doc_with_peer(doc_id, None).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 

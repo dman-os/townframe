@@ -301,13 +301,13 @@ async fn connect_topology(
             .sync_repo
             .rcx
             .big_repo
-            .sync_keyhive_with_peer(peer_b_id, None)
+            .sync_keyhive_with_peer(peer_b_id)
             .await?;
         node_b
             .sync_repo
             .rcx
             .big_repo
-            .sync_keyhive_with_peer(peer_a_id, None)
+            .sync_keyhive_with_peer(peer_a_id)
             .await?;
     }
     Ok(endpoint_sets)

@@ -150,13 +150,12 @@ impl BigRepo {
     pub const BACKEND_ID: &'static str = "BigRepoSyncBackend";
 
     /// Replace the set of source partitions for AutomergeFrontierWorker to tail.
-    pub async fn set_automerge_source_parts(
+    pub fn set_automerge_source_parts(
         &self,
         parts: impl IntoIterator<Item = PartId>,
-    ) -> Res<()> {
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<HashSet<PartId>>> {
         let parts_set: HashSet<PartId> = parts.into_iter().collect();
-        self.automerge_frontier_parts_tx.send(parts_set).ok();
-        Ok(())
+        self.automerge_frontier_parts_tx.send(parts_set)
     }
 
     /// Boot BigRepo, constructing its own SQLite-backed store for both the
@@ -314,7 +313,7 @@ impl BigRepo {
             .await?;
 
         runtime
-            .wait_for_keyhive_reconciliation(None)
+            .wait_for_keyhive_reconciliation()
             .await
             .inspect_err(|err| warn!(?err, "initial keyhive reconciliation failed"))?;
 
@@ -447,12 +446,8 @@ impl BigRepo {
     }
 
     /// Synchronize local Keyhive state with a directly connected peer.
-    pub async fn sync_keyhive_with_peer(
-        &self,
-        peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
-    ) -> Res<()> {
-        self.runtime.sync_keyhive_with_peer(peer_id, timeout).await
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> Res<()> {
+        self.runtime.sync_keyhive_with_peer(peer_id).await
     }
 
     /// Synchronize a document with a directly connected peer.
@@ -460,10 +455,9 @@ impl BigRepo {
         &self,
         doc_id: DocumentId,
         peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
     ) -> Result<SyncDocReceipt, SyncDocError> {
         self.runtime
-            .sync_doc_with_peer_receipt(doc_id, peer_id, timeout)
+            .sync_doc_with_peer_receipt(doc_id, peer_id)
             .await
     }
 
@@ -539,11 +533,8 @@ impl BigRepo {
     }
 
     /// Wait until Keyhive event reconciliation currently queued on this repository finishes.
-    pub async fn wait_for_keyhive_reconciliation(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Res<()> {
-        self.runtime.wait_for_keyhive_reconciliation(timeout).await
+    pub async fn wait_for_keyhive_reconciliation(&self) -> Res<()> {
+        self.runtime.wait_for_keyhive_reconciliation().await
     }
 
     /// Wait until finite runtime work currently admitted to this repository
@@ -608,10 +599,7 @@ impl BigRepo {
         self.keyhive_notifier
             .note_local_keyhive_changed(&hashes)
             .await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
-            std::time::Duration::from_secs(5),
-        )))
-        .await?;
+        self.wait_for_keyhive_reconciliation().await?;
         Ok(group)
     }
 
@@ -657,10 +645,7 @@ impl BigRepo {
         self.keyhive_notifier
             .note_local_keyhive_changed(&hashes)
             .await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
-            std::time::Duration::from_secs(5),
-        )))
-        .await?;
+        self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
 
@@ -702,10 +687,7 @@ impl BigRepo {
         self.keyhive_notifier
             .note_local_keyhive_changed(&hashes)
             .await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
-            std::time::Duration::from_secs(5),
-        )))
-        .await?;
+        self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
 
@@ -734,10 +716,7 @@ impl BigRepo {
         self.keyhive_notifier
             .note_local_keyhive_changed(&hashes)
             .await?;
-        self.wait_for_keyhive_reconciliation(Some(utils_rs::scale_timeout(
-            std::time::Duration::from_secs(5),
-        )))
-        .await?;
+        self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
 }
@@ -872,43 +851,35 @@ impl BigRepoConnection {
     }
 
     /// Initiate a keyhive protocol sync with the connected peer.
-    pub async fn sync_keyhive_with_peer(&self, timeout: Option<std::time::Duration>) -> Res<()> {
+    pub async fn sync_keyhive_with_peer(&self) -> Res<()> {
         if self.is_closed() {
             return Err(ferr!("connection is closed"));
         }
-        self.repo
-            .runtime
-            .sync_keyhive_with_peer(self.peer_id, timeout)
-            .await
+        self.repo.runtime.sync_keyhive_with_peer(self.peer_id).await
     }
 
     /// NOTE: a succesful outcome doesn't correspond to doc
     /// handles having the latest heads
-    pub async fn sync_doc_with_peer(
-        &self,
-        doc_id: DocumentId,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<(), SyncDocError> {
+    pub async fn sync_doc_with_peer(&self, doc_id: DocumentId) -> Result<(), SyncDocError> {
         if self.is_closed() {
             return Err(SyncDocError::IoError(ferr!("connection is closed")));
         }
         self.repo
             .runtime
-            .sync_doc_with_peer(doc_id, self.peer_id, timeout)
+            .sync_doc_with_peer(doc_id, self.peer_id)
             .await
     }
 
     pub async fn sync_doc_with_peer_receipt(
         &self,
         doc_id: DocumentId,
-        timeout: Option<std::time::Duration>,
     ) -> Result<SyncDocReceipt, SyncDocError> {
         if self.is_closed() {
             return Err(SyncDocError::IoError(ferr!("connection is closed")));
         }
         self.repo
             .runtime
-            .sync_doc_with_peer_receipt(doc_id, self.peer_id, timeout)
+            .sync_doc_with_peer_receipt(doc_id, self.peer_id)
             .await
     }
 
