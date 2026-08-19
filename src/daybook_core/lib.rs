@@ -46,10 +46,6 @@ pub mod secrets;
 pub mod stores;
 pub mod sync;
 pub mod tables;
-
-#[cfg(test)]
-mod e2e;
-
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 

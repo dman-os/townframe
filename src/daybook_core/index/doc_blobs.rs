@@ -791,7 +791,6 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 crate::drawer::DrawerEvent::DocAdded {
                     id,
                     entry,
-                    drawer_heads: _,
                     ..
                 } => {
                     for (branch_name, heads) in &entry.branches {
@@ -822,8 +821,8 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e::test_cx;
     use crate::repos::SubscribeOpts;
+    use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, BlobPin, FacetRaw};
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {

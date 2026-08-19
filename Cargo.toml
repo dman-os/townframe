@@ -12,7 +12,6 @@ members = [
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
-  "./src/daybook_wflows/",
   "./src/mltools/",
   "./src/plug_dayledger/",
   "./src/plug_plabels/",

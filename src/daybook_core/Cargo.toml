@@ -84,7 +84,7 @@ futures-buffered = { version = "0.2.13", features = ["tokio-coop"] }
 
 #
 # ffi
-uniffi = { workspace = true, features = ["cli"] }
+uniffi = { workspace = true, features = ["cli"], optional = true }
 
 #
 # sync
@@ -157,11 +157,6 @@ windows-native-keyring-store = { version = "1.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = { version = "1.0" }
-
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"], optional = true }
-zstd.workspace = true
-# wasmtime.workspace = true
 
 [dev-dependencies]
 big_repo = { workspace = true, features = ["test-support"] }

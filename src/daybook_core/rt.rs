@@ -2722,7 +2722,8 @@ async fn ensure_bundle_workload_running(
                 }
             }
             None => {
-                wcx.metastore
+                if let Err(err) = wcx
+                    .metastore
                     .set_wflow(
                         &key[..],
                         &WflowMeta {
@@ -2732,39 +2733,57 @@ async fn ensure_bundle_workload_running(
                             }),
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    if let Some(meta) = wcx.metastore.get_wflow(key).await? {
+                        if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
+                            workload_id: meta_workload_id,
+                        }) = &meta.service
+                        {
+                            if meta_workload_id != &workload_id {
+                                return Err(err);
+                            }
+                        } else {
+                            return Err(err);
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                }
             }
         }
     }
-    let has_workload = wash_host
-        .workload_status(wash_runtime::types::WorkloadStatusRequest {
-            workload_id: workload_id.clone(),
-        })
-        .await
-        .ok()
-        .map(|status| match &status.workload_status.workload_state {
-            wash_runtime::types::WorkloadState::Starting
-            | wash_runtime::types::WorkloadState::Running => true,
-            wash_runtime::types::WorkloadState::NotFound => false,
-            wash_runtime::types::WorkloadState::Unspecified
-            | wash_runtime::types::WorkloadState::Completed
-            | wash_runtime::types::WorkloadState::Stopping
-            | wash_runtime::types::WorkloadState::Error => {
-                panic!("unexpected workload status: {status:?}")
+    loop {
+        let status = wash_host
+            .workload_status(wash_runtime::types::WorkloadStatusRequest {
+                workload_id: workload_id.clone(),
+            })
+            .await
+            .ok();
+        match status.as_ref().map(|st| &st.workload_status.workload_state) {
+            Some(wash_runtime::types::WorkloadState::Running) => break,
+            Some(wash_runtime::types::WorkloadState::Starting) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        })
-        .unwrap_or_default();
-    if !has_workload {
-        start_bundle_workload(
-            wash_host,
-            blobs_repo,
-            workload_id.clone(),
-            plug_id,
-            bundle_name,
-            bundle_man,
-        )
-        .await
-        .wrap_err("error starting bundle wflow")?;
+            Some(wash_runtime::types::WorkloadState::NotFound) | None => {
+                start_bundle_workload(
+                    wash_host,
+                    blobs_repo,
+                    workload_id.clone(),
+                    plug_id.clone(),
+                    bundle_name.clone(),
+                    bundle_man,
+                )
+                .await
+                .wrap_err("error starting bundle wflow")?;
+            }
+            Some(wash_runtime::types::WorkloadState::Unspecified)
+            | Some(wash_runtime::types::WorkloadState::Completed)
+            | Some(wash_runtime::types::WorkloadState::Stopping)
+            | Some(wash_runtime::types::WorkloadState::Error) => {
+                eyre::bail!("unexpected workload status for {workload_id}: {status:?}")
+            }
+        }
     }
     Ok(workload_id)
 }

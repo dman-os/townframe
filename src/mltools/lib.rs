@@ -1269,7 +1269,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let image_bytes = include_bytes!("../daybook_core/e2e/sample-screenshot-meme.jpg").to_vec();
+        let image_bytes = include_bytes!("../plug_test/e2e/sample-screenshot-meme.jpg").to_vec();
 
         runtime.block_on(async {
             let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");

@@ -428,7 +428,6 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                 crate::drawer::DrawerEvent::DocAdded {
                     id,
                     entry,
-                    drawer_heads: _,
                     ..
                 } => {
                     let Some(heads) = entry.branches.get("main") else {
@@ -460,7 +459,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e::test_cx;
+    use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet};
 
     async fn wait_for_doc_tag(

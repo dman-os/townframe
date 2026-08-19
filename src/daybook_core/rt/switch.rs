@@ -1061,8 +1061,8 @@ pub fn facet_keys_set_to_meta_doc(doc_id: &DocId, facet_keys_set: &HashSet<Facet
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e::test_cx;
     use crate::rt::dispatch::ActiveDispatch;
+    use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, DocPatch, WellKnownFacetTag};
     use std::sync::{Arc as StdArc, Mutex};
 
@@ -1240,6 +1240,7 @@ mod tests {
     async fn test_switch_worker_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_smoke").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         // Add a doc that should trigger the test-label processor
         let _doc_id = ctx
@@ -1283,6 +1284,7 @@ mod tests {
     async fn test_switch_skip_when_no_processor_read_set_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_skip_unrelated").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1309,7 +1311,7 @@ mod tests {
             }
             if ctx
                 .rt
-                .get_processor_runlog_done(&doc_id, "@daybook/wip/test-label")
+                .get_processor_runlog_done(&doc_id, "@daybook/test/test-label")
                 .await?
                 .is_some()
             {
@@ -1368,6 +1370,7 @@ mod tests {
     async fn test_switch_doc_added_facet_key_matching() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_doc_added").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let _doc_id = ctx
             .drawer_repo
@@ -1393,10 +1396,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        assert!(
-            dispatch_id.is_some(),
-            "DocAdded with Note should trigger test-label via facet-key matching"
-        );
+        let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+        ctx.rt
+            .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
 
         ctx.stop().await?;
         Ok(())
@@ -1407,6 +1410,7 @@ mod tests {
     async fn test_switch_doc_updated_on_custom_branch_triggers_event() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_custom_branch").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1471,10 +1475,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        assert!(
-            dispatch_id.is_some(),
-            "DocUpdated on non-main branch '/user/draft' should trigger test-label processor"
-        );
+        let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+        ctx.rt
+            .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
 
         ctx.stop().await?;
         Ok(())
@@ -1485,6 +1489,7 @@ mod tests {
     async fn test_switch_persists_cursor_and_doc_state() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_cursor_resume").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo

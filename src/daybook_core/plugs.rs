@@ -125,420 +125,39 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             version: "0.0.1".parse().unwrap(),
             title: "Daybook WIP".into(),
             desc: "Experiment bed for WIP features".into(),
-            local_states: [
-                (
-                    "doc-embedding-index".into(),
-                    Arc::new(LocalStateManifest::SqliteFile {}),
-                ),
-                (
-                    "doc-facet-set-index".into(),
-                    Arc::new(LocalStateManifest::SqliteFile {}),
-                ),
-                (
-                    "doc-facet-ref-index".into(),
-                    Arc::new(LocalStateManifest::SqliteFile {}),
-                ),
-            ]
-            .into(),
-            dependencies: [
-                //
-                (
-                    "@daybook/core@v0.0.1".into(),
-                    PlugDependencyManifest {
-                        keys: vec![
-                            FacetDependencyManifest {
-                                key_tag: WellKnownFacetTag::Note.into(),
-                                value_schema: schemars::schema_for!(Note),
-                            },
-                            FacetDependencyManifest {
-                                key_tag: WellKnownFacetTag::LabelGeneric.into(),
-                                value_schema: schemars::schema_for!(String),
-                            },
-                            FacetDependencyManifest {
-                                key_tag: WellKnownFacetTag::Blob.into(),
-                                value_schema: schemars::schema_for!(Blob),
-                            },
-                            FacetDependencyManifest {
-                                key_tag: WellKnownFacetTag::Embedding.into(),
-                                value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
-                            },
-                        ],
-                        local_states: vec![],
-                    }
-                    .into(),
-                ),
-            ]
+            local_states: default(),
+            dependencies: [(
+                "@daybook/core@v0.0.1".into(),
+                PlugDependencyManifest {
+                    keys: vec![
+                        FacetDependencyManifest {
+                            key_tag: WellKnownFacetTag::Note.into(),
+                            value_schema: schemars::schema_for!(Note),
+                        },
+                        FacetDependencyManifest {
+                            key_tag: WellKnownFacetTag::LabelGeneric.into(),
+                            value_schema: schemars::schema_for!(String),
+                        },
+                        FacetDependencyManifest {
+                            key_tag: WellKnownFacetTag::Blob.into(),
+                            value_schema: schemars::schema_for!(Blob),
+                        },
+                        FacetDependencyManifest {
+                            key_tag: WellKnownFacetTag::Embedding.into(),
+                            value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
+                        },
+                    ],
+                    local_states: vec![],
+                }
+                .into(),
+            )]
             .into(),
             views: default(),
-            routines: [
-                (
-                    "ocr-image".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "ocr-image".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Blob.into(),
-                            ),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Blob.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                    create: false,
-                                    delete: false,
-                                },
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Note.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                    create: true,
-                                    delete: false,
-                                },
-                            ],
-                        }],
-                        query_acls: vec![],
-                        config_facet_acl: vec![],
-                        local_state_acl: vec![],
-                        command_invoke_acl: vec![],
-                    }
-                    .into(),
-                ),
-                (
-                    "embed-image".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "embed-image".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Blob.into(),
-                            ),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Blob.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                    create: false,
-                                    delete: false,
-                                },
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Embedding.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                    create: true,
-                                    delete: false,
-                                },
-                            ],
-                        }],
-                        query_acls: vec![],
-                        config_facet_acl: vec![],
-                        local_state_acl: vec![],
-                        command_invoke_acl: vec![],
-                    }
-                    .into(),
-                ),
-                (
-                    "embed-text".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "embed-text".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Note.into(),
-                            ),
-                            facet_acl: vec![
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Note.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: false,
-                                    create: true,
-                                    delete: false,
-                                },
-                                RoutineFacetAccess {
-                                    owner_plug_id: None,
-                                    tag: WellKnownFacetTag::Embedding.into(),
-                                    key_id: None,
-                                    read: true,
-                                    write: true,
-                                    create: true,
-                                    delete: false,
-                                },
-                            ],
-                        }],
-                        query_acls: vec![],
-                        config_facet_acl: vec![],
-                        local_state_acl: vec![],
-                        command_invoke_acl: vec![],
-                    }
-                    .into(),
-                ),
-                (
-                    "index-embedding".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "index-embedding".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Embedding.into(),
-                            ),
-                            facet_acl: vec![RoutineFacetAccess {
-                                owner_plug_id: None,
-                                tag: WellKnownFacetTag::Embedding.into(),
-                                key_id: None,
-                                read: true,
-                                write: false,
-                                create: false,
-                                delete: false,
-                            }],
-                        }],
-                        query_acls: vec![],
-                        config_facet_acl: vec![],
-                        local_state_acl: vec![RoutineLocalStateAccess {
-                            plug_id: "@daybook/wip".into(),
-                            local_state_key: "doc-embedding-index".into(),
-                        }],
-                        command_invoke_acl: vec![],
-                    }
-                    .into(),
-                ),
-                #[cfg(debug_assertions)]
-                (
-                    "test-label".into(),
-                    RoutineManifest {
-                        r#impl: RoutineImpl::Wflow {
-                            key: "test-label".into(),
-                            bundle: "daybook_wflows".into(),
-                        },
-                        doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Note.into(),
-                            ),
-                            facet_acl: vec![RoutineFacetAccess {
-                                owner_plug_id: None,
-                                tag: WellKnownFacetTag::LabelGeneric.into(),
-                                key_id: None,
-                                read: true,
-                                write: true,
-                                create: true,
-                                delete: false,
-                            }],
-                        }],
-                        query_acls: vec![],
-                        config_facet_acl: vec![],
-                        local_state_acl: vec![],
-                        command_invoke_acl: vec![],
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
-            commands: [
-                (
-                    "embed-image".into(),
-                    CommandManifest {
-                        desc: "Embed image blob and write embedding facet".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "embed-image".into(),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "embed-text".into(),
-                    CommandManifest {
-                        desc: "Embed note text and write embedding facet".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "embed-text".into(),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "index-embedding".into(),
-                    CommandManifest {
-                        desc: "Index embedding facet into local vector store".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "index-embedding".into(),
-                        },
-                    }
-                    .into(),
-                ),
-                #[cfg(debug_assertions)]
-                (
-                    "test-label".into(),
-                    CommandManifest {
-                        desc: "Add a test LabelGeneric for testing".into(),
-                        deets: CommandDeets::DocCommand {
-                            routine_name: "test-label".into(),
-                        },
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
+            routines: default(),
+            commands: default(),
             inits: default(),
-            processors: [
-                (
-                    "ocr-image".into(),
-                    ProcessorManifest {
-                        desc: "Extract OCR text from blob image into note".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            event_predicate: default(),
-                            routine_name: "ocr-image".into(),
-                            predicate: DocPredicateClause::And(vec![
-                                DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::Note.into(),
-                                ))),
-                            ]),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "embed-image".into(),
-                    ProcessorManifest {
-                        desc: "Compute image embedding facet from image blob".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            event_predicate: default(),
-                            routine_name: "embed-image".into(),
-                            predicate: DocPredicateClause::And(vec![
-                                DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
-                                DocPredicateClause::Not(Box::new(
-                                    DocPredicateClause::HasReferenceToTag {
-                                        source_tag: WellKnownFacetTag::Embedding.into(),
-                                        target_tag: WellKnownFacetTag::Blob.into(),
-                                    },
-                                )),
-                            ]),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "embed-text".into(),
-                    ProcessorManifest {
-                        desc: "Compute embedding facet from note content".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            event_predicate: default(),
-                            routine_name: "embed-text".into(),
-                            predicate: DocPredicateClause::And(vec![
-                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::Blob.into(),
-                                ))),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::Embedding.into(),
-                                ))),
-                            ]),
-                        },
-                    }
-                    .into(),
-                ),
-                (
-                    "index-embedding".into(),
-                    ProcessorManifest {
-                        desc: "Index embedding facets into local sqlite vec store".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            event_predicate: default(),
-                            routine_name: "index-embedding".into(),
-                            predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Embedding.into(),
-                            ),
-                        },
-                    }
-                    .into(),
-                ),
-                // FIXME: temporary disable label learner
-                // (
-                //     "learn-image-label-proposals".into(),
-                //     ProcessorManifest {
-                //         desc:
-                //             "Learn image label proposals from image embeddings using multimodal LLM"
-                //                 .into(),
-                //         deets: ProcessorDeets::DocProcessor {
-                //             routine_name: "learn-image-label-proposals".into(),
-                //             predicate: DocPredicateClause::HasReferenceToTag {
-                //                 source_tag: WellKnownFacetTag::Embedding.into(),
-                //                 target_tag: WellKnownFacetTag::Blob.into(),
-                //             },
-                //         },
-                //     }
-                //     .into(),
-                // ),
-                #[cfg(debug_assertions)]
-                (
-                    "test-label".into(),
-                    ProcessorManifest {
-                        desc: "Add a test LabelGeneric for testing".into(),
-                        deets: ProcessorDeets::DocProcessor {
-                            event_predicate: default(),
-                            routine_name: "test-label".into(),
-                            predicate: DocPredicateClause::And(vec![
-                                DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::Blob.into(),
-                                ))),
-                                DocPredicateClause::Not(Box::new(DocPredicateClause::HasTag(
-                                    WellKnownFacetTag::LabelGeneric.into(),
-                                ))),
-                            ]),
-                        },
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
-            wflow_bundles: [
-                //
-                (
-                    "daybook_wflows".into(),
-                    WflowBundleManifest {
-                        keys: vec![
-                            "test-label".into(),
-                            "ocr-image".into(),
-                            "embed-image".into(),
-                            "embed-text".into(),
-                            "index-embedding".into(),
-                        ],
-                        // FIXME: make this more generic
-                        component_urls: vec![
-                            "static:daybook_wflows.wasm.zst".parse().unwrap(),
-                            /*{
-                                let path = std::path::absolute(
-                                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                                        .join("../../target/wasm32-wasip2/release/daybook_wflows.wasm"),
-                                )
-                                .unwrap();
-
-                                format!("file://{path}", path = path.to_string())
-                                    .parse()
-                                    .unwrap()
-                            }*/
-                        ],
-                    }
-                    .into(),
-                ),
-            ]
-            .into(),
+            processors: default(),
+            wflow_bundles: default(),
             facets: vec![],
         },
     ];
@@ -1339,29 +958,7 @@ impl PlugsRepo {
                             ))?;
                         }
                         "static" => {
-                            let wasm_zst_bytes: &[u8] = match url.path() {
-                                "daybook_wflows.wasm.zst" => include_bytes!(concat!(
-                                    env!("OUT_DIR"),
-                                    "/daybook_wflows.wasm.zst"
-                                ))
-                                .as_slice(),
-                                _ => {
-                                    eyre::bail!("unsupported static wasm component_url");
-                                }
-                            };
-                            let data = tokio::task::spawn_blocking(move || {
-                                let mut wasm_bytes = vec![];
-                                zstd::stream::copy_decode(wasm_zst_bytes, &mut wasm_bytes)
-                                    .wrap_err("error decompressing serialized component")?;
-                                eyre::Ok(wasm_bytes)
-                            })
-                            .await??;
-                            let hash = self.blobs.put(&data).await?;
-                            *url = url::Url::parse(&format!(
-                                "{}:///{}",
-                                crate::blobs::BLOB_SCHEME,
-                                hash
-                            ))?;
+                            eyre::bail!("unsupported static wasm component_url: {url}");
                         }
                         crate::blobs::BLOB_SCHEME => {}
                         _ => eyre::bail!("unsupported component_url scheme: {url}"),
@@ -1907,10 +1504,9 @@ impl PlugsRepo {
                             );
                         }
                     }
-                    "static" => match url.path() {
-                        "daybook_wflows.wasm.zst" => {}
-                        _ => eyre::bail!("Unrecognized static component_url: {url}",),
-                    },
+                    "static" => {
+                        eyre::bail!("Unrecognized static component_url: {url}");
+                    }
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
                         let hash = url.path().trim_start_matches('/');
                         let blob_id = match hash.parse::<crate::blobs::BlobId>() {
@@ -2422,7 +2018,7 @@ mod tests {
         assert!(!manifest.facets.is_empty());
         assert!(!manifest.views.is_empty());
         assert!(!manifest.routines.is_empty());
-        assert!(manifest.processors.is_empty());
+        assert!(!manifest.processors.is_empty());
         Ok(())
     }
 

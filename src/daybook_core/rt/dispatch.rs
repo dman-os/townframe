@@ -343,7 +343,7 @@ impl DispatchRepo {
         found
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn get_any_by_wflow_key(
         &self,
         wflow_key: &str,

@@ -752,8 +752,8 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e::test_cx;
-    use daybook_types::doc::{AddDocArgs, FacetRaw, WellKnownFacet, WellKnownFacetTag};
+    use crate::test_support::test_cx;
+    use daybook_types::doc::{AddDocArgs, FacetRaw, Note, WellKnownFacet, WellKnownFacetTag};
 
     async fn wait_for_outgoing(
         repo: &DocFacetRefIndexRepo,
@@ -782,7 +782,10 @@ mod tests {
                 branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Note),
-                    FacetRaw::from(WellKnownFacet::Note("hello".to_string().into())),
+                    FacetRaw::from(WellKnownFacet::Note(Note {
+                        mime: "text/plain".into(),
+                        content: "hello".into(),
+                    })),
                 )]
                 .into(),
                 user_path: None,

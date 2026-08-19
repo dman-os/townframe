@@ -29,17 +29,18 @@ impl SecretRepo {
         // `cfg(test)` is only set for this crate's own unit tests. Integration/e2e
         // tests build `daybook_core` as a normal dependency, so we also honor CI
         // and the `test-support` feature here.
-        let store: Arc<keyring_core::CredentialStore> =
-            if cfg!(test) || cfg!(feature = "test-support") {
-                static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
-                    tokio::sync::OnceCell::const_new();
-                Arc::clone(
-                    TEST_STORE
-                        .get_or_try_init(|| async { keyring_core::mock::Store::new() })
-                        .await?,
-                ) as _
-            } else {
-                tokio::task::spawn_blocking(move || {
+        let store: Arc<keyring_core::CredentialStore> = if cfg!(test)
+            || cfg!(feature = "test-support")
+        {
+            static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
+                tokio::sync::OnceCell::const_new();
+            Arc::clone(
+                TEST_STORE
+                    .get_or_try_init(|| async { keyring_core::mock::Store::new() })
+                    .await?,
+            ) as _
+        } else {
+            tokio::task::spawn_blocking(move || {
                 cfg_select! {
                     target_os = "linux" => match zbus_secret_service_keyring_store::Store::new() {
                         Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
@@ -70,7 +71,7 @@ impl SecretRepo {
             })
             .await
             .expect(ERROR_TOKIO)?
-            };
+        };
 
         Ok(Self { store: Some(store) })
     }

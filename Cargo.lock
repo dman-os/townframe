@@ -2936,7 +2936,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -3101,18 +3100,6 @@ dependencies = [
  "uniffi",
  "utils_rs",
  "uuid",
-]
-
-[[package]]
-name = "daybook_wflows"
-version = "0.1.0"
-dependencies = [
- "am_utils_rs",
- "api_utils_rs",
- "color-eyre",
- "daybook_types",
- "wflow_sdk",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]
@@ -8822,6 +8809,7 @@ dependencies = [
 name = "plug_test"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "api_utils_rs",
  "color-eyre",
  "daybook_core",
@@ -11691,6 +11679,17 @@ name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
 dependencies = [
  "proc-macro2",
  "quote",
