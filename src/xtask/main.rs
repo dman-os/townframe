@@ -414,29 +414,70 @@ fn append_tokio_unstable_rustflags(cmd: &mut tokio::process::Command) {
     const TOKIO_UNSTABLE_FLAG: &str = "--cfg";
     const TOKIO_UNSTABLE_VALUE: &str = "tokio_unstable";
 
-    let encoded_flag = format!("{TOKIO_UNSTABLE_FLAG}\x1f{TOKIO_UNSTABLE_VALUE}");
-    let encoded = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    if !encoded
-        .split('\x1f')
-        .any(|part| part == TOKIO_UNSTABLE_VALUE)
-    {
-        let new_encoded = if encoded.is_empty() {
-            encoded_flag
-        } else {
-            format!("{encoded}\x1f{encoded_flag}")
-        };
-        cmd.env("CARGO_ENCODED_RUSTFLAGS", new_encoded);
+    fn sanitize_flags(flags: &[String]) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut index = 0;
+        while index < flags.len() {
+            let flag = &flags[index];
+            if flag == "-C"
+                && index + 1 < flags.len()
+                && flags[index + 1].starts_with("instrument-coverage")
+            {
+                index += 2;
+                continue;
+            }
+            if flag == "--cfg"
+                && index + 1 < flags.len()
+                && (flags[index + 1] == "coverage" || flags[index + 1] == "coverage_nightly")
+            {
+                index += 2;
+                continue;
+            }
+            if flag.starts_with("-Cinstrument-coverage")
+                || flag.starts_with("-C instrument-coverage")
+                || flag.starts_with("--cfg=coverage")
+                || flag == "coverage"
+                || flag == "coverage_nightly"
+            {
+                index += 1;
+                continue;
+            }
+            result.push(flag.clone());
+            index += 1;
+        }
+        result
     }
 
-    let rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.contains("tokio_unstable") {
-        let new_rustflags = if rustflags.is_empty() {
-            format!("{TOKIO_UNSTABLE_FLAG} {TOKIO_UNSTABLE_VALUE}")
-        } else {
-            format!("{rustflags} {TOKIO_UNSTABLE_FLAG} {TOKIO_UNSTABLE_VALUE}")
-        };
-        cmd.env("RUSTFLAGS", new_rustflags);
+    let encoded_raw = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    let encoded_parts: Vec<String> = encoded_raw
+        .split('\x1f')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect();
+    let mut sanitized_encoded = sanitize_flags(&encoded_parts);
+    if !sanitized_encoded
+        .iter()
+        .any(|part| part == TOKIO_UNSTABLE_VALUE)
+    {
+        sanitized_encoded.push(TOKIO_UNSTABLE_FLAG.to_string());
+        sanitized_encoded.push(TOKIO_UNSTABLE_VALUE.to_string());
     }
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", sanitized_encoded.join("\x1f"));
+
+    let rustflags_raw = std::env::var("RUSTFLAGS").unwrap_or_default();
+    let rustflags_words: Vec<String> = rustflags_raw
+        .split_whitespace()
+        .map(|segment| segment.to_string())
+        .collect();
+    let mut sanitized_rustflags = sanitize_flags(&rustflags_words);
+    if !sanitized_rustflags
+        .iter()
+        .any(|part| part == TOKIO_UNSTABLE_VALUE)
+    {
+        sanitized_rustflags.push(TOKIO_UNSTABLE_FLAG.to_string());
+        sanitized_rustflags.push(TOKIO_UNSTABLE_VALUE.to_string());
+    }
+    cmd.env("RUSTFLAGS", sanitized_rustflags.join(" "));
 }
 
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
