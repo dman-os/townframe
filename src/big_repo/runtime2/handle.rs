@@ -468,6 +468,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     ///
     /// Returns `Ok(Ok(value))` on response success, `Ok(Err(Canceled))` on
     /// caller-drop, and `Err(())` on timeout.
+    #[cfg(any(test, feature = "test-support"))]
     async fn race_timeout<T>(
         &self,
         rx: futures::channel::oneshot::Receiver<T>,
