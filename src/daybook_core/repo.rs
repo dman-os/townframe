@@ -818,7 +818,9 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             core_inventory_doc_id,
             docs_inventory_doc_id,
         ),
-        globals::InitState::None => eyre::bail!("clone init: InitState not set"),
+        globals::InitState::None => {
+            eyre::bail!("clone init: InitState not set");
+        }
     };
     let doc_app = parts
         .big_repo
@@ -979,7 +981,9 @@ async fn get_ready_doc(
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            big_repo::DocLookup::Missing => eyre::bail!("document {doc_id} is missing"),
+            big_repo::DocLookup::Missing => {
+                eyre::bail!("document {doc_id} is missing");
+            }
         }
     }
 }

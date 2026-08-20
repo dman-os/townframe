@@ -362,7 +362,7 @@ impl IrohSyncRepo {
 
     fn ensure_repo_live(&self) -> Res<()> {
         if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is shutting down")
+            eyre::bail!("repo is shutting down");
         }
         Ok(())
     }

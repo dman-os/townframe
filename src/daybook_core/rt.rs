@@ -987,7 +987,7 @@ impl Rt {
 
     fn ensure_rt_live(&self) -> Res<()> {
         if self.cancel_token.is_cancelled() {
-            eyre::bail!("rt is shutting down")
+            eyre::bail!("rt is shutting down");
         }
         Ok(())
     }
@@ -2781,7 +2781,7 @@ async fn ensure_bundle_workload_running(
             | Some(wash_runtime::types::WorkloadState::Completed)
             | Some(wash_runtime::types::WorkloadState::Stopping)
             | Some(wash_runtime::types::WorkloadState::Error) => {
-                eyre::bail!("unexpected workload status for {workload_id}: {status:?}")
+                eyre::bail!("unexpected workload status for {workload_id}: {status:?}");
             }
         }
     }

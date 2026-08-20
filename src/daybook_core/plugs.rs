@@ -961,7 +961,9 @@ impl PlugsRepo {
                             eyre::bail!("unsupported static wasm component_url: {url}");
                         }
                         crate::blobs::BLOB_SCHEME => {}
-                        _ => eyre::bail!("unsupported component_url scheme: {url}"),
+                        _ => {
+                            eyre::bail!("unsupported component_url scheme: {url}");
+                        }
                     }
                 }
             }
@@ -1171,7 +1173,7 @@ impl PlugsRepo {
                         Ok((manifest, selected_manifest_sha))
                     }
                     oci_client::manifest::OciManifest::ImageIndex(_) => {
-                        eyre::bail!("nested OCI manifest must resolve to an image manifest")
+                        eyre::bail!("nested OCI manifest must resolve to an image manifest");
                     }
                 }
             }

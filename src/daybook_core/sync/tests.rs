@@ -975,7 +975,9 @@ async fn wait_for_doc_presence_with_activity(
                         Ok(_) => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
-                        Err(crate::repos::RecvError::Closed) => eyre::bail!("sync listener closed while waiting for doc presence"),
+                        Err(crate::repos::RecvError::Closed) => {
+                            eyre::bail!("sync listener closed while waiting for doc presence");
+                        }
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                             eyre::bail!("sync listener dropped events while waiting for doc presence: dropped_count={dropped_count}");
                         }
@@ -986,7 +988,9 @@ async fn wait_for_doc_presence_with_activity(
                         Ok(_) => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
-                        Err(crate::repos::RecvError::Closed) => eyre::bail!("progress listener closed while waiting for doc presence"),
+                        Err(crate::repos::RecvError::Closed) => {
+                            eyre::bail!("progress listener closed while waiting for doc presence");
+                        }
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                             eyre::bail!("progress listener dropped events while waiting for doc presence: dropped_count={dropped_count}");
                         }

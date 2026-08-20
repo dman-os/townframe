@@ -188,7 +188,9 @@ impl DrawerRepo {
                         _ if facet_keys.is_none() => {
                             return eyre::Ok((facets, facet_heads_by_key, to_probe));
                         }
-                        _ => eyre::bail!("facets object not found in content doc"),
+                        _ => {
+                            eyre::bail!("facets object not found in content doc");
+                        }
                     };
 
                 let selected_keys: Vec<FacetKey> = match &facet_keys {
@@ -251,7 +253,9 @@ impl DrawerRepo {
                         match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
                         {
                             Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("facets object not found in content doc"),
+                            _ => {
+                                eyre::bail!("facets object not found in content doc");
+                            }
                         };
                     let mut hydrated = HashMap::new();
                     let mut hydrated_to_cache = Vec::new();

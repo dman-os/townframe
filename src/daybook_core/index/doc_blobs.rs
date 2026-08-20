@@ -788,11 +788,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                         .handle_worker_item(DocBlobsIndexWorkItem::DeleteDoc { doc_id: id.clone() })
                         .await?;
                 }
-                crate::drawer::DrawerEvent::DocAdded {
-                    id,
-                    entry,
-                    ..
-                } => {
+                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPathBuf::from(branch_name.as_str());
                         let Some(_keys) = self
@@ -835,7 +831,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eyre::bail!("timeout waiting for doc blob hash")
+        eyre::bail!("timeout waiting for doc blob hash");
     }
 
     struct TestIndexEnv {

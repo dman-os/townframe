@@ -944,9 +944,11 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
     for (part_id, frontier) in frontier_rows {
         let frontier = match u64::try_from(frontier) {
             Ok(value) => value,
-            Err(_) => eyre::bail!(
-                "invalid negative frontier row in sqlite: part_id={part_id} frontier={frontier}"
-            ),
+            Err(_) => {
+                eyre::bail!(
+                    "invalid negative frontier row in sqlite: part_id={part_id} frontier={frontier}"
+                );
+            }
         };
         state.wflow_partition_frontier.insert(part_id, frontier);
     }

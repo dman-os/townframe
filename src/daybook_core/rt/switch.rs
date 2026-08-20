@@ -715,7 +715,9 @@ impl SwitchWorker {
                         WellKnownFacetTag::Dmeta,
                     )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
-                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                        other => {
+                            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+                        }
                     };
                     let mut keys = HashSet::new();
                     let mut updated_at = HashMap::new();
@@ -757,7 +759,9 @@ impl SwitchWorker {
                         WellKnownFacetTag::Dmeta,
                     )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
-                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                        other => {
+                            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+                        }
                     };
                     let mut keys = HashSet::new();
                     let mut updated_at = HashMap::new();

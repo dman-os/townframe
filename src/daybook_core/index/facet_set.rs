@@ -425,11 +425,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                         })
                         .await?;
                 }
-                crate::drawer::DrawerEvent::DocAdded {
-                    id,
-                    entry,
-                    ..
-                } => {
+                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                     let Some(heads) = entry.branches.get("main") else {
                         return Ok(outcome);
                     };
@@ -474,7 +470,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eyre::bail!("timeout waiting for condition")
+        eyre::bail!("timeout waiting for condition");
     }
 
     #[tokio::test(flavor = "multi_thread")]

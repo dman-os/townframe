@@ -292,7 +292,9 @@ impl DrawerRepo {
 
                 let facets_obj = match tx.get(automerge::ROOT, "facets")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("facets object not found in content doc"),
+                    _ => {
+                        eyre::bail!("facets object not found in content doc");
+                    }
                 };
 
                 for (key, value) in &patch.facets_set {
@@ -511,10 +513,14 @@ impl DrawerRepo {
                                     automerge::Value::Object(automerge::ObjType::Map),
                                     map_id,
                                 )) => map_id,
-                                _ => eyre::bail!("drawer map not found"),
+                                _ => {
+                                    eyre::bail!("drawer map not found");
+                                }
                             }
                         }
-                        _ => eyre::bail!("drawer docs not found"),
+                        _ => {
+                            eyre::bail!("drawer docs not found");
+                        }
                     };
 
                     autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
@@ -715,7 +721,7 @@ impl DrawerRepo {
                         am_doc.transaction_at(automerge::PatchLog::inactive(), &heads_now).expect(ERROR_IMPOSSIBLE);
                     let facets_obj = match tx.get(automerge::ROOT, "facets")? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("facets object not found in content doc"),
+                        _ => { eyre::bail!("facets object not found in content doc"); }
                     };
                     let now = Timestamp::now();
                     let invalidated = dmeta::apply_merge(
@@ -780,11 +786,15 @@ impl DrawerRepo {
             .with_document(|doc| {
                 let docs_id = match doc.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => docs_id,
-                    _ => eyre::bail!("drawer docs not found"),
+                    _ => {
+                        eyre::bail!("drawer docs not found");
+                    }
                 };
                 let map_id = match doc.get(&docs_id, "map")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
-                    _ => eyre::bail!("drawer map not found"),
+                    _ => {
+                        eyre::bail!("drawer map not found");
+                    }
                 };
 
                 let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, &**id)?;
@@ -797,19 +807,20 @@ impl DrawerRepo {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                     _ => tx.put_object(&docs_id, "map_deleted", automerge::ObjType::Map)?,
                 };
-                let mut deleted_tags: Vec<DocDeleteTombstone> = match tx
-                    .get(&map_deleted_id, &**id)?
-                {
-                    Some((automerge::Value::Object(automerge::ObjType::List), _)) => {
-                        autosurgeon::hydrate_prop::<_, Vec<DocDeleteTombstone>, _, _>(
-                            &tx,
-                            &map_deleted_id,
-                            &**id,
-                        )?
-                    }
-                    Some((other, _)) => eyre::bail!("invalid map_deleted entry shape: {other:?}"),
-                    None => Vec::new(),
-                };
+                let mut deleted_tags: Vec<DocDeleteTombstone> =
+                    match tx.get(&map_deleted_id, &**id)? {
+                        Some((automerge::Value::Object(automerge::ObjType::List), _)) => {
+                            autosurgeon::hydrate_prop::<_, Vec<DocDeleteTombstone>, _, _>(
+                                &tx,
+                                &map_deleted_id,
+                                &**id,
+                            )?
+                        }
+                        Some((other, _)) => {
+                            eyre::bail!("invalid map_deleted entry shape: {other:?}");
+                        }
+                        None => Vec::new(),
+                    };
                 deleted_tags.push(DocDeleteTombstone {
                     vtag: VersionTag::update(self.local_actor_id.clone()),
                     branches: deleted_branch_snapshots.clone(),
@@ -1013,10 +1024,14 @@ impl DrawerRepo {
                             Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => {
                                 map_id
                             }
-                            _ => eyre::bail!("drawer map not found"),
+                            _ => {
+                                eyre::bail!("drawer map not found");
+                            }
                         }
                     }
-                    _ => eyre::bail!("drawer docs not found"),
+                    _ => {
+                        eyre::bail!("drawer docs not found");
+                    }
                 };
 
                 autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;

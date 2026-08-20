@@ -300,7 +300,9 @@ impl BlobsRepo {
         };
 
         match meta.mode {
-            BlobMode::OwnedCopy => eyre::bail!("Blob not found: {blob_id}"),
+            BlobMode::OwnedCopy => {
+                eyre::bail!("Blob not found: {blob_id}");
+            }
             BlobMode::Reference => {
                 if meta.source_paths.is_empty() {
                     eyre::bail!("reference metadata missing source_paths");

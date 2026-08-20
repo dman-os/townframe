@@ -616,7 +616,9 @@ fn reference_kind_to_db_value(reference_kind: &FacetReferenceKind) -> &'static s
 fn reference_kind_from_db_value(value: &str) -> Res<FacetReferenceKind> {
     match value {
         "urlFacet" => Ok(FacetReferenceKind::UrlFacet),
-        _ => eyre::bail!("unsupported reference kind '{}'", value),
+        _ => {
+            eyre::bail!("unsupported reference kind '{}'", value);
+        }
     }
 }
 
@@ -768,7 +770,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eyre::bail!("timeout waiting for outgoing references")
+        eyre::bail!("timeout waiting for outgoing references");
     }
 
     #[tokio::test(flavor = "multi_thread")]

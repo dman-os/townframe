@@ -30,7 +30,9 @@ async fn get_dmeta_on_main(repo: &DrawerRepo, doc_id: &DocId) -> Res<daybook_typ
         .ok_or_eyre("dmeta facet missing")?;
     let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta.clone())? {
         WellKnownFacet::Dmeta(dmeta) => dmeta,
-        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+        other => {
+            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+        }
     };
     Ok(dmeta)
 }
@@ -409,7 +411,9 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 added_ids.insert(id.clone());
                 doc_added_heads.push(drawer_heads.clone());
             }
-            other => eyre::bail!("unexpected event: {other:?}"),
+            other => {
+                eyre::bail!("unexpected event: {other:?}");
+            }
         }
     }
 
@@ -2615,11 +2619,15 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
                 let mut tx = doc.transaction();
                 let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("aggregate docs map missing"),
+                    _ => {
+                        eyre::bail!("aggregate docs map missing");
+                    }
                 };
                 let map_obj = match tx.get(&docs_obj, "map")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("aggregate docs.map missing"),
+                    _ => {
+                        eyre::bail!("aggregate docs.map missing");
+                    }
                 };
                 let entry = DocEntry {
                     branches: [(

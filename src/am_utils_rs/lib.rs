@@ -91,7 +91,9 @@ fn patch_obj_actor_is_object_creator_not_latest_change_author() -> Res<()> {
 
     let actor_from_patch_obj = match &patch.obj {
         automerge::ObjId::Id(_, actor_id, _) => actor_id.clone(),
-        automerge::ObjId::Root => eyre::bail!("missing patch actor"),
+        automerge::ObjId::Root => {
+            eyre::bail!("missing patch actor");
+        }
     };
     assert_eq!(actor_from_patch_obj, actor_a);
     assert_ne!(actor_from_patch_obj, actor_b);
@@ -135,7 +137,9 @@ fn patch_conflict_still_uses_object_lineage_actor() -> Res<()> {
 
     let actor_from_patch_obj = match &put_map_patch.obj {
         automerge::ObjId::Id(_, actor_id, _) => actor_id.clone(),
-        automerge::ObjId::Root => eyre::bail!("missing patch actor"),
+        automerge::ObjId::Root => {
+            eyre::bail!("missing patch actor");
+        }
     };
     assert_eq!(actor_from_patch_obj, actor_a);
     assert_ne!(actor_from_patch_obj, actor_b);
