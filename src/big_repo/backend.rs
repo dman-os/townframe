@@ -74,7 +74,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 eyre::bail!("remote doc sync was unauthorized");
             }
             Ok(Err(crate::SyncDocError::Policy(error))) => {
-                eyre::bail!("remote doc sync was rejected by policy: {error}");
+                eyre::bail!("doc sync with peer {peer_id} was rejected by the local policy: {error}");
             }
             Err(_) => {
                 eyre::bail!("timed out syncing doc");

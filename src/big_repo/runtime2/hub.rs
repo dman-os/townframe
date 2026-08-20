@@ -2370,6 +2370,9 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
     pub(crate) child_tasks: R::Tasks,
     pub(crate) machine_tasks: R::Tasks,
+    pub group_part_stop: Option<crate::runtime2::GroupPartWorkerStopToken>,
+    pub causal_checkpoint_stop: Option<crate::runtime2::CausalCheckpointWorkerStopToken>,
+    pub automerge_frontier_stop: Option<crate::runtime2::AutomergeFrontierWorkerStopToken>,
 }
 
 impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
@@ -2383,7 +2386,18 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
     /// Senders that still hold a `cmd_tx` clone treat the closed channel as
     /// the shutdown signal. Only if the drain does not complete within
     /// `timeout` is the machine loop aborted outright.
-    pub async fn stop(self, timeout: std::time::Duration) -> eyre::Result<()> {
+    pub async fn stop(mut self, timeout: std::time::Duration) -> eyre::Result<()> {
+        // Stop construction-time background workers first in reverse order:
+        if let Some(stop) = self.automerge_frontier_stop.take() {
+            stop.cancel();
+        }
+        if let Some(stop) = self.causal_checkpoint_stop.take() {
+            stop.cancel();
+        }
+        if let Some(stop) = self.group_part_stop.take() {
+            stop.cancel();
+        }
+
         // Close the commands channel: no `Stop` message, no ack — the
         // receiver observes the closure after draining buffered commands.
         self.cmd_tx.close();
@@ -2656,6 +2670,9 @@ where
             cmd_tx,
             child_tasks,
             machine_tasks,
+            group_part_stop: None,
+            causal_checkpoint_stop: None,
+            automerge_frontier_stop: None,
         },
     ))
 }

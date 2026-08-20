@@ -47,9 +47,9 @@ pub struct KeyhiveSyncCancelled {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocPolicyError {
-    /// The local or remote policy has no document definition.
+    /// The local policy has no document definition.
     DocumentNotFound,
-    /// The policy knows the document but denies the requested operation.
+    /// The local policy knows the document but denies the requested operation.
     InsufficientAccess,
     /// The policy rejected an identifier as malformed.
     InvalidIdentifier,
@@ -65,7 +65,7 @@ pub enum SyncDocError {
     NotFound,
     /// The remote peer refused the document request.
     Unauthorized,
-    /// The storage policy rejected the sync: {0}
+    /// The local storage policy rejected the document sync: {0}
     Policy(#[source] SyncDocPolicyError),
     /// TransportError
     TransportError,

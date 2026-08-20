@@ -76,6 +76,145 @@ impl PendingSubscription {
     }
 }
 
+pub struct Subscription<T> {
+    pub id: uuid::Uuid,
+    pub sender: big_sync_core::mpsc::Sender<T>,
+    pub pending: Arc<PendingSubscription>,
+}
+
+pub struct ReplayBus<T> {
+    subs: std::sync::RwLock<HashMap<uuid::Uuid, Arc<Subscription<T>>>>,
+    pending: std::sync::RwLock<HashSet<uuid::Uuid>>,
+    live: std::sync::RwLock<HashSet<uuid::Uuid>>,
+    channel_name: Arc<str>,
+}
+
+impl<T> ReplayBus<T> {
+    pub fn new(channel_name: impl Into<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            subs: std::sync::RwLock::new(HashMap::new()),
+            pending: std::sync::RwLock::new(HashSet::new()),
+            live: std::sync::RwLock::new(HashSet::new()),
+            channel_name: channel_name.into(),
+        })
+    }
+
+    pub fn register(&self) -> (Arc<Subscription<T>>, big_sync_core::mpsc::Receiver<T>) {
+        let (tx, rx) =
+            big_sync_core::mpsc::unbounded(Arc::clone(&self.channel_name), "caller".into());
+        let id = uuid::Uuid::new_v4();
+        let sub = Arc::new(Subscription {
+            id,
+            sender: tx,
+            pending: PendingSubscription::new(),
+        });
+        self.subs.write().expect(ERROR_MUTEX).insert(id, Arc::clone(&sub));
+        self.pending.write().expect(ERROR_MUTEX).insert(id);
+        (sub, rx)
+    }
+
+    pub fn remove(&self, id: uuid::Uuid) {
+        self.subs.write().expect(ERROR_MUTEX).remove(&id);
+        self.pending.write().expect(ERROR_MUTEX).remove(&id);
+        self.live.write().expect(ERROR_MUTEX).remove(&id);
+    }
+
+    pub fn promote_to_live(&self, id: uuid::Uuid) {
+        let mut pending = self.pending.write().expect(ERROR_MUTEX);
+        let mut live = self.live.write().expect(ERROR_MUTEX);
+        if pending.remove(&id) {
+            live.insert(id);
+        }
+    }
+}
+
+impl<T: Clone + Send + 'static> ReplayBus<T> {
+    pub fn broadcast(&self, item: T) {
+        let live_ids: Vec<uuid::Uuid> = self
+            .live
+            .read()
+            .expect(ERROR_MUTEX)
+            .iter()
+            .copied()
+            .collect();
+        let mut dead = Vec::new();
+        for id in live_ids {
+            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
+                && sub.sender.try_send(item.clone()).is_err()
+            {
+                dead.push(id);
+            }
+        }
+        let pending_ids: Vec<uuid::Uuid> = self
+            .pending
+            .read()
+            .expect(ERROR_MUTEX)
+            .iter()
+            .copied()
+            .collect();
+        for id in pending_ids {
+            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
+                && sub.pending.mark_dirty()
+                && sub.sender.try_send(item.clone()).is_err()
+            {
+                dead.push(id);
+            }
+        }
+        if !dead.is_empty() {
+            for id in dead {
+                self.remove(id);
+            }
+        }
+    }
+}
+
+pub async fn run_replay_loop<T, C, F, Fut>(
+    bus: Arc<ReplayBus<T>>,
+    sub: Arc<Subscription<T>>,
+    mut cursor: C,
+    mut fetch_page: F,
+) where
+    T: Clone + Send + 'static,
+    C: Copy + Send + 'static,
+    F: FnMut(C) -> Fut,
+    Fut: std::future::Future<Output = eyre::Result<(Vec<T>, Option<C>)>>,
+{
+    loop {
+        sub.pending
+            .state
+            .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
+        let (items, next_cursor) = match fetch_page(cursor).await {
+            Ok(res) => res,
+            Err(_) => {
+                bus.remove(sub.id);
+                return;
+            }
+        };
+        let count = items.len();
+        for item in items {
+            if sub.sender.send(item).await.is_err() {
+                bus.remove(sub.id);
+                return;
+            }
+        }
+        if let Some(nc) = next_cursor {
+            cursor = nc;
+        }
+        if count != 0 {
+            continue;
+        }
+        if sub.pending.begin_finalization() {
+            if sub.pending.become_ready() {
+                bus.promote_to_live(sub.id);
+                return;
+            }
+        } else if sub.pending.become_ready() {
+            bus.promote_to_live(sub.id);
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stable Access encode / decode
 //

@@ -224,23 +224,22 @@ irpc-iroh = "0.17.0"
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
 # leptos_router = { path = "../leptos/router/" }
 # leptos_axum = { path = "../leptos/integrations/axum/" }
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
-# #
-# [patch."https://github.com/dman-os/subduction"]
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
-# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 # [patch."https://github.com/dman-os/keyhive"]
 # keyhive_crypto = { path = "../keyhive/keyhive_crypto" }

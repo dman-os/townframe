@@ -7,10 +7,8 @@ use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 const EVENT_BATCH_SIZE: u32 = 64;
-const IDLE_POLL: Duration = Duration::from_millis(25);
 const AUTOMERGE_OBJ_MASK: [u8; 32] = [0x5A; 32];
 
 pub fn automerge_docs_part_id() -> PartId {
@@ -33,14 +31,67 @@ pub fn automerge_obj_to_doc_id(obj_id: ObjId) -> crate::DocumentId {
     crate::DocumentId::new(bytes)
 }
 
-/// Background worker that maintains the Automerge Frontier partition log by
-/// tailing the Sedimentree partition log for configured source partitions and Keyhive events,
-/// enforcing materialization barriers before publishing decrypted Automerge heads.
-pub(crate) struct AutomergeFrontierWorker {
+#[derive(Clone)]
+pub struct AutomergeFrontierWorkerStopToken {
+    pub(crate) abort: futures::future::AbortHandle,
+}
+
+impl AutomergeFrontierWorkerStopToken {
+    pub fn cancel(&self) {
+        self.abort.abort();
+    }
+}
+
+pub struct SpawnedAutomergeFrontierWorker<F: FutureForm> {
+    pub parts_tx: tokio::sync::mpsc::UnboundedSender<HashSet<PartId>>,
+    pub stop: AutomergeFrontierWorkerStopToken,
+    pub run: F::Future<'static, eyre::Result<()>>,
+}
+
+pub fn spawn_automerge_frontier_worker(
     store: SqliteBigRepoStore,
     big_sync_store: Arc<dyn HostPartStore>,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
-    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    state_generation: Arc<std::sync::atomic::AtomicU64>,
+    initial_source_parts: HashSet<PartId>,
+) -> SpawnedAutomergeFrontierWorker<Sendable> {
+    let (parts_tx, parts_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+    let worker = AutomergeFrontierWorker {
+        store,
+        big_sync_store,
+        runtime,
+        _evt_tx: evt_tx,
+        _state_generation: state_generation,
+        parts_rx,
+        initial_source_parts,
+        automerge_part_id: automerge_docs_part_id(),
+    };
+
+    let run = Sendable::from_future(async move {
+        match futures::future::Abortable::new(worker.run(), abort_registration).await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
+    });
+
+    SpawnedAutomergeFrontierWorker {
+        parts_tx,
+        stop: AutomergeFrontierWorkerStopToken {
+            abort: abort_handle,
+        },
+        run,
+    }
+}
+
+/// Background worker that maintains the Automerge Frontier partition log by
+/// tailing the Sedimentree partition log for configured source partitions and Keyhive events,
+/// enforcing materialization barriers before publishing decrypted Automerge heads.
+struct AutomergeFrontierWorker {
+    store: SqliteBigRepoStore,
+    big_sync_store: Arc<dyn HostPartStore>,
+    runtime: crate::runtime2::Runtime2Handle<Sendable>,
     _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     _state_generation: Arc<std::sync::atomic::AtomicU64>,
     parts_rx: tokio::sync::mpsc::UnboundedReceiver<HashSet<PartId>>,
@@ -49,29 +100,6 @@ pub(crate) struct AutomergeFrontierWorker {
 }
 
 impl AutomergeFrontierWorker {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        store: SqliteBigRepoStore,
-        big_sync_store: Arc<dyn HostPartStore>,
-        runtime: crate::runtime2::Runtime2Handle<Sendable>,
-        timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
-        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        state_generation: Arc<std::sync::atomic::AtomicU64>,
-        parts_rx: tokio::sync::mpsc::UnboundedReceiver<HashSet<PartId>>,
-        initial_source_parts: HashSet<PartId>,
-    ) -> Self {
-        Self {
-            store,
-            big_sync_store,
-            runtime,
-            timer,
-            _evt_tx: evt_tx,
-            _state_generation: state_generation,
-            parts_rx,
-            initial_source_parts,
-            automerge_part_id: automerge_docs_part_id(),
-        }
-    }
 
     async fn subscribe_to_parts(
         big_sync_store: &Arc<dyn HostPartStore>,
@@ -134,6 +162,7 @@ impl AutomergeFrontierWorker {
     pub(crate) async fn run(mut self) -> Res<()> {
         let mut watched_parts = self.initial_source_parts.clone();
         let mut keyhive_cursor = self.store.automerge_keyhive_cursor().await?;
+        let keyhive_listener = self.store.subscribe_keyhive_events(keyhive_cursor).await?;
         let mut part_listener =
             Self::subscribe_to_parts(&self.big_sync_store, &self.store, &watched_parts).await?;
 
@@ -142,63 +171,71 @@ impl AutomergeFrontierWorker {
                 return Ok(());
             }
 
-            // ── 1. Process Keyhive Events ──────────────────────────────────
-            if !watched_parts.is_empty() {
-                let keyhive_events = self
-                    .store
-                    .keyhive_events_after(keyhive_cursor, EVENT_BATCH_SIZE)
-                    .await?;
-
-                if !keyhive_events.is_empty() {
-                    for row in &keyhive_events {
-                        if self.runtime.is_stopped() {
-                            return Ok(());
-                        }
-                        let event: StaticEvent<Vec<u8>> = match bincode::deserialize(&row.bytes) {
-                            Ok(ev) => ev,
-                            Err(err) => {
-                                warn!(
-                                    seq = row.seq,
-                                    ?err,
-                                    "failed to deserialize keyhive event; advancing cursor"
-                                );
-                                keyhive_cursor = row.seq;
-                                continue;
-                            }
-                        };
-                        if let StaticEvent::CgkaOperation(op) = event {
-                            let doc_id = crate::DocumentId::new(*op.payload().doc_id().as_bytes());
-                            let doc_parts = self
-                                .big_sync_store
-                                .obj_parts(doc_id)
-                                .await?;
-                            if doc_parts.iter().any(|part| watched_parts.contains(part)) {
-                                Self::process_materialized_doc(
-                                    doc_id,
-                                    &self.runtime,
-                                    &self.store,
-                                    &self.big_sync_store,
-                                    None,
-                                    self.automerge_part_id,
-                                )
-                                .await?;
-                            }
-                        }
-                        keyhive_cursor = row.seq;
-                    }
-                    self.store
-                        .commit_automerge_keyhive_cursor(keyhive_cursor)
-                        .await?;
-                }
-            }
-
-            // ── 2. Process Dynamic Parts & Partition Events ───────────────
             tokio::select! {
-                biased;
                 Some(new_parts) = self.parts_rx.recv() => {
                     if watched_parts != new_parts {
                         watched_parts = new_parts;
                         part_listener = Self::subscribe_to_parts(&self.big_sync_store, &self.store, &watched_parts).await?;
+                    }
+                }
+                kh_batch = async {
+                    keyhive_listener.recv_many(EVENT_BATCH_SIZE as usize).await.ok()
+                } => {
+                    let Some(keyhive_events) = kh_batch else {
+                        if self.runtime.is_stopped() {
+                            return Ok(());
+                        }
+                        return Err(ferr!("AutomergeFrontierWorker keyhive listener closed"));
+                    };
+
+                    if !watched_parts.is_empty() {
+                        for row in &keyhive_events {
+                            if self.runtime.is_stopped() {
+                                return Ok(());
+                            }
+                            let event: StaticEvent<Vec<u8>> = match bincode::deserialize(&row.bytes) {
+                                Ok(ev) => ev,
+                                Err(err) => {
+                                    warn!(
+                                        seq = row.seq,
+                                        ?err,
+                                        "failed to deserialize keyhive event; advancing cursor"
+                                    );
+                                    keyhive_cursor = row.seq;
+                                    continue;
+                                }
+                            };
+                            if let StaticEvent::CgkaOperation(op) = event {
+                                let doc_id = crate::DocumentId::new(*op.payload().doc_id().as_bytes());
+                                let doc_parts = self
+                                    .big_sync_store
+                                    .obj_parts(doc_id)
+                                    .await?;
+                                if doc_parts.iter().any(|part| watched_parts.contains(part)) {
+                                    Self::process_materialized_doc(
+                                        doc_id,
+                                        &self.runtime,
+                                        &self.store,
+                                        &self.big_sync_store,
+                                        None,
+                                        self.automerge_part_id,
+                                    )
+                                    .await?;
+                                }
+                            }
+                            keyhive_cursor = row.seq;
+                        }
+                        self.store
+                            .commit_automerge_keyhive_cursor(keyhive_cursor)
+                            .await?;
+                    } else {
+                        // TEMP-INSTRUMENTATION: events consumed while nothing is
+                        // watched are dropped without advancing the cursor —
+                        // a later watch can never see them again.
+                        tracing::warn!(
+                            count = keyhive_events.len(),
+                            "frontier worker dropped keyhive events: no watched parts"
+                        );
                     }
                 }
                 part_event = async {
@@ -257,7 +294,6 @@ impl AutomergeFrontierWorker {
                         SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => {}
                     }
                 }
-                _ = self.timer.sleep(IDLE_POLL) => {}
             }
         }
     }

@@ -258,7 +258,7 @@
             # FIXME: why do we need golang for again?
             # did an llm strip comments?
             # go
-            (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
+            # (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
             v4l-utils
             libv4l
             gh

@@ -6,10 +6,11 @@
 // FIXME: KeyhiveStorage requires loading all archives at once instead of
 // by id which is wasteful
 
+use crate::interlude::*;
+
 use crate::sqlite_big_repo_store::SqliteBigRepoStore;
 use std::convert::Infallible;
 use std::io;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{FutureExt, future::BoxFuture};
@@ -278,7 +279,7 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
 
 /// Keyhive storage backend selected by the BigRepo storage mode.
 #[derive(Debug, Clone)]
-pub(crate) enum BigRepoKeyhiveStorage {
+enum BigRepoKeyhiveStorageInner {
     Memory {
         events: SqliteBigRepoStore,
         archives: MemoryKeyhiveStorage,
@@ -290,6 +291,28 @@ pub(crate) enum BigRepoKeyhiveStorage {
         events: SqliteBigRepoStore,
         archives: FsKeyhiveStorage,
     },
+}
+
+/// Callback invoked after an event is newly inserted into keyhive storage.
+pub(crate) type OnEventInserted = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// [`BigRepoKeyhiveStorageInner`] plus a post-insert bump hook.
+///
+/// Every newly inserted event is a keyhive state change, so the hook gives
+/// the sync layer a structural signal to refresh its per-pair projections:
+/// mutation sites no longer have to remember to signal the change themselves.
+/// The hook is registered once by the owner of the protocol handler after
+/// construction (storage clones share it via the interior `Arc<OnceLock>`).
+#[derive(Clone)]
+pub(crate) struct BigRepoKeyhiveStorage {
+    inner: BigRepoKeyhiveStorageInner,
+    on_event_inserted: Arc<std::sync::OnceLock<OnEventInserted>>,
+}
+
+impl std::fmt::Debug for BigRepoKeyhiveStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(formatter)
+    }
 }
 
 /// Error type returned by [`BigRepoKeyhiveStorage`] operations.
@@ -304,38 +327,74 @@ pub(crate) enum BigRepoKeyhiveStorageError {
 }
 
 impl BigRepoKeyhiveStorage {
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn memory() -> Self {
-        Self::MemoryLegacy(MemoryKeyhiveStorage::new())
-    }
-
-    pub(crate) fn memory_sqlite(events: SqliteBigRepoStore) -> Self {
-        Self::Memory {
-            events,
-            archives: MemoryKeyhiveStorage::new(),
+    fn new(inner: BigRepoKeyhiveStorageInner) -> Self {
+        Self {
+            inner,
+            on_event_inserted: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn memory() -> Self {
+        Self::new(BigRepoKeyhiveStorageInner::MemoryLegacy(MemoryKeyhiveStorage::new()))
+    }
+
+    pub(crate) fn memory_sqlite(events: SqliteBigRepoStore) -> Self {
+        Self::new(BigRepoKeyhiveStorageInner::Memory {
+            events,
+            archives: MemoryKeyhiveStorage::new(),
+        })
+    }
+
     pub(crate) fn fs(events: SqliteBigRepoStore, root: PathBuf) -> io::Result<Self> {
-        FsKeyhiveStorage::new(root).map(|archives| Self::Fs { events, archives })
+        FsKeyhiveStorage::new(root)
+            .map(|archives| Self::new(BigRepoKeyhiveStorageInner::Fs { events, archives }))
+    }
+
+    /// Register the post-insert bump hook. Must be called at most once, right
+    /// after the keyhive protocol is constructed over a clone of this storage.
+    pub(crate) fn set_on_event_inserted(&self, hook: OnEventInserted) {
+        if self.on_event_inserted.set(hook).is_err() {
+            panic!("keyhive storage insert hook registered twice");
+        }
+    }
+
+    /// Fire the bump hook when an event was newly inserted.
+    async fn bump_if_inserted(&self, hash: StorageHash, inserted: bool) {
+        if !inserted {
+            return;
+        }
+        match self.on_event_inserted.get() {
+            Some(hook) => {
+                tracing::debug!(
+                    hash = %hash.to_hex(),
+                    "keyhive event inserted; bumping keyhive cache generation"
+                );
+                hook().await;
+            }
+            None => tracing::debug!(
+                hash = %hash.to_hex(),
+                "keyhive event inserted; no bump hook registered"
+            ),
+        }
     }
 
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
-        match self {
-            Self::Memory { .. } | Self::MemoryLegacy(_) => Ok(()),
-            Self::Fs { archives, .. } => archives.save_prekey_secrets(bytes).await,
+        match &self.inner {
+            BigRepoKeyhiveStorageInner::Memory { .. } | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(()),
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.save_prekey_secrets(bytes).await,
         }
     }
 
     pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
-        match self {
-            Self::Memory { .. } | Self::MemoryLegacy(_) => Ok(None),
-            Self::Fs { archives, .. } => archives.load_prekey_secrets().await,
+        match &self.inner {
+            BigRepoKeyhiveStorageInner::Memory { .. } | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(None),
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.load_prekey_secrets().await,
         }
     }
 }
 
-impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
+impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorageInner {
     type Error = BigRepoKeyhiveStorageError;
 
     fn save_archive(
@@ -543,5 +602,73 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
             }
         }
         .boxed()
+    }
+}
+
+impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
+    type Error = BigRepoKeyhiveStorageError;
+
+    fn save_archive(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+        self.inner.save_archive(hash, data)
+    }
+
+    fn load_archives(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        self.inner.load_archives()
+    }
+
+    fn delete_archive(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        self.inner.delete_archive(hash)
+    }
+
+    fn save_event(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        self.save_event_with_source(hash, data, None)
+    }
+
+    fn save_event_with_source(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+        source: Option<subduction_keyhive::KeyhivePeerId>,
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        async move {
+            let inserted = self.inner.save_event_with_source(hash, data, source).await?;
+            self.bump_if_inserted(hash, inserted).await;
+            Ok(inserted)
+        }
+        .boxed()
+    }
+
+    fn load_events(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        self.inner.load_events()
+    }
+
+    fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        self.inner.delete_event(hash)
+    }
+
+    fn save_local_secret(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        self.inner.save_local_secret(hash, data)
+    }
+
+    fn load_local_secrets(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        self.inner.load_local_secrets()
+    }
+
+    fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        self.inner.delete_local_secret(hash)
     }
 }

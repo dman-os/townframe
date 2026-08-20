@@ -30,6 +30,27 @@ impl<T> Receiver<T> {
             from: Arc::clone(&self.from),
         })
     }
+
+    pub fn try_recv(&self) -> Result<T, async_channel::TryRecvError> {
+        self.inner.try_recv()
+    }
+
+    pub async fn recv_many(&self, limit: usize) -> Result<Vec<T>, RecvError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let first = self.recv().await?;
+        let mut batch = Vec::with_capacity(limit.min(64));
+        batch.push(first);
+        while batch.len() < limit {
+            match self.inner.try_recv() {
+                Ok(item) => batch.push(item),
+                Err(async_channel::TryRecvError::Empty) => break,
+                Err(async_channel::TryRecvError::Closed) => break,
+            }
+        }
+        Ok(batch)
+    }
 }
 
 #[derive(Debug)]

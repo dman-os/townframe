@@ -287,6 +287,7 @@ pub struct SqliteBigRepoStore {
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
     keyhive_event_notify: Arc<tokio::sync::Notify>,
+    keyhive_bus: Arc<big_sync::sqlite_core::ReplayBus<KeyhiveEventRow>>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
 }
@@ -495,6 +496,7 @@ impl SqliteBigRepoStore {
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
             keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
+            keyhive_bus: big_sync::sqlite_core::ReplayBus::new("keyhive_events"),
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
@@ -668,20 +670,22 @@ impl SqliteBigRepoStore {
 
         let mut drop_subs = HashSet::new();
         for (sub_id, event, obj_id, principal, sender) in dispatch {
-            let permitted = self
-                .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                .await
-                .unwrap_or(false);
+            let permitted = matches!(event, SubEvent::Removed(_))
+                || self
+                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
+                    .await
+                    .unwrap_or(false);
             if permitted && sender.try_send(event).is_err() {
                 drop_subs.insert(sub_id);
             }
         }
 
         for (sub_id, event, obj_id, principal, sender) in promote {
-            let permitted = self
-                .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                .await
-                .unwrap_or(false);
+            let permitted = matches!(event, SubEvent::Removed(_))
+                || self
+                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
+                    .await
+                    .unwrap_or(false);
             let mut bus = self.bus.write().expect(ERROR_MUTEX);
             let Some(sub) = bus.subs.get(&sub_id).cloned() else {
                 continue;
@@ -1790,10 +1794,11 @@ impl SqliteBigRepoStore {
                             PartEvent::Added(inner) => inner.obj_id,
                             PartEvent::Removed(inner) => inner.obj_id,
                         };
-                        let permitted = store
-                            .is_event_permitted(Some(part_id), obj_id, subscriber)
-                            .await
-                            .unwrap_or(false);
+                        let permitted = matches!(event, PartEvent::Removed(_))
+                            || store
+                                .is_event_permitted(Some(part_id), obj_id, subscriber)
+                                .await
+                                .unwrap_or(false);
                         if !permitted {
                             continue;
                         }
@@ -2623,6 +2628,31 @@ impl SqliteBigRepoStore {
             .collect()
     }
 
+    pub(crate) async fn subscribe_keyhive_events(
+        &self,
+        from_cursor: u64,
+    ) -> Res<big_sync_core::mpsc::Receiver<KeyhiveEventRow>> {
+        let (sub, rx) = self.keyhive_bus.register();
+        let store = self.clone();
+        tokio::spawn(async move {
+            big_sync::sqlite_core::run_replay_loop(
+                Arc::clone(&store.keyhive_bus),
+                sub,
+                from_cursor,
+                move |cursor| {
+                    let store = store.clone();
+                    async move {
+                        let rows = store.keyhive_events_after(cursor, 64).await?;
+                        let next_cursor = rows.last().map(|row| row.seq);
+                        Ok((rows, next_cursor))
+                    }
+                },
+            )
+            .await;
+        });
+        Ok(rx)
+    }
+
     pub(crate) async fn save_keyhive_event(
         &self,
         hash: subduction_keyhive::storage::StorageHash,
@@ -2648,7 +2678,7 @@ impl SqliteBigRepoStore {
         .bind(self.scope_id)
         .bind(next_seq)
         .bind(hash.as_bytes().as_slice())
-        .bind(data)
+        .bind(&data)
         .bind(source.map(|peer| peer.verifying_key().to_vec()))
         .execute(&mut *tx)
         .await?
@@ -2700,6 +2730,10 @@ impl SqliteBigRepoStore {
         }
         tx.commit().await?;
         if inserted {
+            self.keyhive_bus.broadcast(KeyhiveEventRow {
+                seq: Self::u64_from_db(next_seq),
+                bytes: data,
+            });
             self.keyhive_event_notify.notify_waiters();
         }
         Ok(inserted)
@@ -3767,6 +3801,78 @@ mod tests {
 
         HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 2})).await?;
         assert!(matches!(rx.recv().await?, SubEvent::Changed(event) if event.obj_id == obj));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_subscription_delivers_removal_after_policy_revocation() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-policy-removal",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part = PartId(Byte32Id::new([224; 32]));
+        let obj = ObjId(Byte32Id::new([225; 32]));
+        let peer = PeerId(Byte32Id::new([226; 32]));
+        HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 1})).await?;
+        store.ensure_part(part).await?;
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::from([part]),
+                    desired_global: false,
+                }],
+                1,
+                true,
+            )
+            .await?;
+
+        let subscription_request = |cursor| SubPartsRequest {
+            targets: HashSet::from([SubscriptionTarget::Part {
+                part_id: part,
+                cursor,
+            }]),
+        };
+        let rx = HostPartStore::subscribe(&store, subscription_request(0), peer).await??;
+        let added_cursor = match rx.recv().await? {
+            SubEvent::Added(added) => {
+                assert_eq!(added.obj_id, obj);
+                assert_eq!(added.part_id, part);
+                added.cursor
+            }
+            other => panic!("expected initial visible addition, got {other:?}"),
+        };
+        assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
+
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::new(),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::new(),
+                    desired_global: false,
+                }],
+                2,
+                true,
+            )
+            .await?;
+        assert!(matches!(
+            rx.recv().await?,
+            SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
+        ));
+
+        let replay =
+            HostPartStore::subscribe(&store, subscription_request(added_cursor), peer).await??;
+        assert!(matches!(
+            replay.recv().await?,
+            SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
+        ));
+        assert!(matches!(replay.recv().await?, SubEvent::ReplayComplete));
         Ok(())
     }
 

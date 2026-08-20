@@ -416,6 +416,8 @@ where
         staged: crate::runtime2::support::StagedAutomergeIngest,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
+            // TEMP-INSTRUMENTATION: trace initial persistence of created docs.
+            tracing::warn!(sed = %sed_id, "persist_initial_document: begin");
             let (sedimentree, blobs, cgka_ops, local_secrets) =
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
                     .await
@@ -437,6 +439,8 @@ where
                     .note_local_keyhive_changed(&hashes)
                     .await?;
             }
+            // TEMP-INSTRUMENTATION
+            tracing::warn!(sed = %sed_id, "persist_initial_document: stored");
             Ok(())
         })
     }
@@ -597,10 +601,26 @@ where
                 }
                 Err(error) => return Err(error),
             };
-            assert!(
-                update_op.is_none() && local_secret.is_none(),
-                "checkpoint encryption unexpectedly rotated the prepared PCS root"
-            );
+            // A concurrent task may have mutated the document CGKA between our
+            // PCS preparation and this encryption (e.g. an ApplySyncSession
+            // ingesting remote ops). In that case the encryption performs its
+            // own rotation; persist it like any other local CGKA update
+            // instead of treating it as an invariant violation.
+            let mut rotation_hashes = Vec::new();
+            if update_op.is_some() || local_secret.is_some() {
+                debug!(
+                    ?sed_id,
+                    ?covered_frontier,
+                    rotated = update_op.is_some(),
+                    "causal checkpoint encryption rotated the prepared PCS root"
+                );
+                rotation_hashes = persist_cgka_updates_durably(
+                    &self.keyhive_storage,
+                    update_op.into_iter().collect(),
+                    local_secret.into_iter().collect(),
+                )
+                .await?;
+            }
             let (fragment_request, heads_observed) = self
                 .subduction
                 .store_commit(sed_id, head, covered_frontier, encrypted_blob)
@@ -610,6 +630,11 @@ where
                 fragment_request.is_none(),
                 "depth-zero causal checkpoint requested Automerge fragmentation"
             );
+            if !rotation_hashes.is_empty() {
+                self.keyhive_notifier
+                    .note_local_keyhive_changed(&rotation_hashes)
+                    .await?;
+            }
             Ok(Some((head, checkpoint, heads_observed)))
         })
     }
@@ -1962,6 +1987,24 @@ where
         }),
     );
 
+    // Structural cache-generation bump: any event newly inserted into storage
+    // (local persist or remote incorporation) invalidates the protocol's
+    // per-pair projection cache, so advertising/serving can never depend on a
+    // mutation site remembering to signal the change itself.
+    keyhive_storage.set_on_event_inserted(Arc::new({
+        let keyhive_protocol = Arc::clone(&keyhive_protocol);
+        move || {
+            let keyhive_protocol = Arc::clone(&keyhive_protocol);
+            async move {
+                keyhive_protocol
+                    .note_local_keyhive_changed()
+                    .await
+                    .expect("keyhive cache generation bump cannot fail");
+            }
+            .boxed()
+        }
+    }));
+
     // One dispatcher owns the debounced, classified fan-out of keyhive change
     // hints to subscribed peers. It stops when the events channel closes
     // (BigRepo drop).
@@ -2099,13 +2142,13 @@ where
         keyhive_event_notify: Some(group_part_store.keyhive_event_notifier()),
     };
 
-    let (handle, stop_token) =
+    let (handle, mut stop_token) =
         crate::runtime2::spawn_runtime2::<Sendable, crate::runtime2::TokioTaskRuntime>(config)?;
 
     // ── Background tasks (owned by child_tasks for reverse-order shutdown) ─
 
     // Subduction listener.
-    let group_part_worker = crate::runtime2::group_part_worker::GroupPartWorker::new(
+    let spawned_group_part = crate::runtime2::spawn_group_part_worker(
         group_part_store.clone(),
         keyhive.clone(),
         PeerId::new(*local_peer_id.as_bytes()),
@@ -2113,48 +2156,35 @@ where
         evt_tx.clone(),
         Arc::clone(&keyhive_state_generation),
     );
-    stop_token
-        .child_tasks
-        .spawn(Sendable::from_future(async move {
-            group_part_worker.run().await.unwrap();
-            Ok(())
-        }))?;
+    stop_token.group_part_stop = Some(spawned_group_part.stop);
+    stop_token.child_tasks.spawn(spawned_group_part.run)?;
 
-    let causal_checkpoint_worker =
-        crate::runtime2::causal_checkpoint_worker::CausalCheckpointWorker::new(
-            group_part_store.clone(),
-            keyhive.clone(),
-            handle.clone(),
-            Arc::clone(&timer),
-            evt_tx.clone(),
-            Arc::clone(&keyhive_state_generation),
-        );
+    let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
+        group_part_store.clone(),
+        keyhive.clone(),
+        handle.clone(),
+        Arc::clone(&timer),
+        evt_tx.clone(),
+        Arc::clone(&keyhive_state_generation),
+    );
+    stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
     stop_token
         .child_tasks
-        .spawn(Sendable::from_future(async move {
-            causal_checkpoint_worker.run().await.unwrap();
-            Ok(())
-        }))?;
+        .spawn(spawned_causal_checkpoint.run)?;
 
-    let (automerge_frontier_parts_tx, automerge_frontier_parts_rx) =
-        tokio::sync::mpsc::unbounded_channel();
-    let automerge_frontier_worker =
-        crate::runtime2::automerge_frontier_worker::AutomergeFrontierWorker::new(
-            group_part_store.clone(),
-            Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
-            handle.clone(),
-            Arc::clone(&timer),
-            evt_tx.clone(),
-            Arc::clone(&keyhive_state_generation),
-            automerge_frontier_parts_rx,
-            automerge_source_parts,
-        );
+    let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
+        group_part_store.clone(),
+        Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
+        handle.clone(),
+        evt_tx.clone(),
+        Arc::clone(&keyhive_state_generation),
+        automerge_source_parts,
+    );
+    let automerge_frontier_parts_tx = spawned_automerge_frontier.parts_tx;
+    stop_token.automerge_frontier_stop = Some(spawned_automerge_frontier.stop);
     stop_token
         .child_tasks
-        .spawn(Sendable::from_future(async move {
-            automerge_frontier_worker.run().await.unwrap();
-            Ok(())
-        }))?;
+        .spawn(spawned_automerge_frontier.run)?;
 
     stop_token.child_tasks.spawn({
         let listener = listener;

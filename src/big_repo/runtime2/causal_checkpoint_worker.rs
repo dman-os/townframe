@@ -8,10 +8,60 @@ use std::sync::Arc;
 const EVENT_BATCH_SIZE: u32 = 64;
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
+#[derive(Clone)]
+pub struct CausalCheckpointWorkerStopToken {
+    pub(crate) abort: futures::future::AbortHandle,
+}
+
+impl CausalCheckpointWorkerStopToken {
+    pub fn cancel(&self) {
+        self.abort.abort();
+    }
+}
+
+pub struct SpawnedCausalCheckpointWorker<F: FutureForm> {
+    pub stop: CausalCheckpointWorkerStopToken,
+    pub run: F::Future<'static, eyre::Result<()>>,
+}
+
+pub fn spawn_causal_checkpoint_worker(
+    store: SqliteBigRepoStore,
+    keyhive: BigKeyhiveHandle,
+    runtime: crate::runtime2::Runtime2Handle<Sendable>,
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    state_generation: Arc<std::sync::atomic::AtomicU64>,
+) -> SpawnedCausalCheckpointWorker<Sendable> {
+    let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+    let worker = CausalCheckpointWorker {
+        store,
+        _keyhive: keyhive,
+        runtime,
+        timer,
+        evt_tx,
+        state_generation,
+        last_acked_generation: 0,
+    };
+
+    let run = Sendable::from_future(async move {
+        match futures::future::Abortable::new(worker.run(), abort_registration).await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
+    });
+
+    SpawnedCausalCheckpointWorker {
+        stop: CausalCheckpointWorkerStopToken {
+            abort: abort_handle,
+        },
+        run,
+    }
+}
+
 /// Crash-recoverable consumer of Keyhive events that closes every document
 /// key transition with causal content coverage before advancing its own
 /// durable cursor.
-pub(crate) struct CausalCheckpointWorker {
+struct CausalCheckpointWorker {
     store: SqliteBigRepoStore,
     _keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
@@ -22,26 +72,7 @@ pub(crate) struct CausalCheckpointWorker {
 }
 
 impl CausalCheckpointWorker {
-    pub(crate) fn new(
-        store: SqliteBigRepoStore,
-        _keyhive: BigKeyhiveHandle,
-        runtime: crate::runtime2::Runtime2Handle<Sendable>,
-        timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
-        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        state_generation: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Self {
-        Self {
-            store,
-            _keyhive,
-            runtime,
-            timer,
-            evt_tx,
-            state_generation,
-            last_acked_generation: 0,
-        }
-    }
-
-    pub(crate) async fn run(mut self) -> Res<()> {
+    async fn run(mut self) -> Res<()> {
         let mut announced_idle = false;
         loop {
             if self.runtime.is_stopped() {

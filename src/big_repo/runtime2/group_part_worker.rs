@@ -12,12 +12,62 @@ const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 const GENERATION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(10);
 const GENERATION_DEBOUNCE_MAX_EXTENSIONS: usize = 4;
 
+#[derive(Clone)]
+pub struct GroupPartWorkerStopToken {
+    pub(crate) abort: futures::future::AbortHandle,
+}
+
+impl GroupPartWorkerStopToken {
+    pub fn cancel(&self) {
+        self.abort.abort();
+    }
+}
+
+pub struct SpawnedGroupPartWorker<F: FutureForm> {
+    pub stop: GroupPartWorkerStopToken,
+    pub run: F::Future<'static, eyre::Result<()>>,
+}
+
+pub fn spawn_group_part_worker(
+    store: SqliteBigRepoStore,
+    keyhive: BigKeyhiveHandle,
+    local_peer_id: PeerId,
+    timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    state_generation: Arc<std::sync::atomic::AtomicU64>,
+) -> SpawnedGroupPartWorker<future_form::Sendable> {
+    let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+    let worker = GroupPartWorker {
+        store,
+        keyhive,
+        local_peer_id,
+        timer,
+        evt_tx,
+        state_generation,
+        last_acked_generation: 0,
+    };
+
+    let run = future_form::Sendable::from_future(async move {
+        match futures::future::Abortable::new(worker.run(), abort_registration).await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
+    });
+
+    SpawnedGroupPartWorker {
+        stop: GroupPartWorkerStopToken {
+            abort: abort_handle,
+        },
+        run,
+    }
+}
+
 /// Crash-recoverable maintenance for Keyhive-derived policy and partitions.
 ///
 /// The event log is only a durable dirty hint. Every reconciliation queries the
 /// current Keyhive state, so replaying an event is harmless and pending events do
 /// not create speculative policy or partition membership.
-pub(crate) struct GroupPartWorker {
+struct GroupPartWorker {
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
     local_peer_id: PeerId,
@@ -30,26 +80,7 @@ pub(crate) struct GroupPartWorker {
 }
 
 impl GroupPartWorker {
-    pub(crate) fn new(
-        store: SqliteBigRepoStore,
-        keyhive: BigKeyhiveHandle,
-        local_peer_id: PeerId,
-        timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
-        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        state_generation: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Self {
-        Self {
-            store,
-            keyhive,
-            local_peer_id,
-            timer,
-            evt_tx,
-            state_generation,
-            last_acked_generation: 0,
-        }
-    }
-
-    pub(crate) async fn run(mut self) -> Res<()> {
+    async fn run(mut self) -> Res<()> {
         let mut announced_idle = false;
         loop {
             let cursor = self.store.keyhive_group_part_cursor().await?;

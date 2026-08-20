@@ -291,6 +291,16 @@ impl LoadedDocSnapshot {
     }
 }
 
+impl<F: FutureForm> Drop for DocWorker2<F> {
+    fn drop(&mut self) {
+        if let DocState::Live(ref weak_bundle) = self.state
+            && let Some(bundle) = weak_bundle.upgrade()
+        {
+            bundle.mark_broken();
+        }
+    }
+}
+
 impl<F: FutureForm> DocWorker2<F> {
     /// Dispatch a single [`DocWorkerMsg`]. Called by the message loop.
     ///

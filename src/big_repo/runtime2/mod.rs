@@ -1,13 +1,20 @@
 use crate::interlude::*;
 use future_form::FutureForm;
 
-mod group_part_worker;
-pub(crate) use group_part_worker::group_part_id;
 pub(crate) mod automerge_frontier_worker;
-pub use automerge_frontier_worker::{
-    automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id,
-};
 mod causal_checkpoint_worker;
+mod group_part_worker;
+
+pub use automerge_frontier_worker::{
+    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_docs_part_id,
+    automerge_obj_to_doc_id, spawn_automerge_frontier_worker,
+};
+pub(crate) use causal_checkpoint_worker::{
+    CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,
+};
+pub(crate) use group_part_worker::{
+    GroupPartWorkerStopToken, group_part_id, spawn_group_part_worker,
+};
 mod io;
 pub(crate) mod keyhive_dispatcher;
 mod lease;

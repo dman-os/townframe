@@ -102,6 +102,47 @@ impl CursorSyncMachine {
             !job.waiters.is_empty()
         });
     }
+
+    pub(crate) fn supersede_obj_part(
+        &mut self,
+        obj_id: ObjId,
+        part_id: PartId,
+        before_cursor: CursorIndex,
+        out: &mut Vec<CursorMachineCommand>,
+    ) {
+        let mut ready_cursors = Vec::new();
+        let mut empty_waiters = Vec::new();
+        if let Some(job) = self.active_obj_jobs.get_mut(&obj_id) {
+            for (&cursor, waiter) in job.waiters.range_mut(..before_cursor) {
+                if !waiter.parts.contains(&part_id) {
+                    continue;
+                }
+                if waiter.pending_membership && waiter.parts.len() == 1 {
+                    // The already-queued membership mutation still has to finish
+                    // before its cursor can advance, but the later removal makes
+                    // fetching the object's contents unnecessary.
+                    waiter.pending_sync = false;
+                    continue;
+                }
+                waiter.parts.retain(|candidate| *candidate != part_id);
+                ready_cursors.push(cursor);
+                if waiter.parts.is_empty() {
+                    empty_waiters.push(cursor);
+                }
+            }
+            for cursor in empty_waiters {
+                job.waiters.remove(&cursor);
+            }
+            if job.waiters.is_empty() {
+                self.active_obj_jobs.remove(&obj_id);
+            }
+        }
+        for cursor in ready_cursors {
+            let state = self.cursor_state.entry(part_id).or_default();
+            state.slots.insert(cursor, CursorSlotState::Ready);
+            self.drain_ready_cursor_advances(part_id, out);
+        }
+    }
     fn mark_pending_cursor(&mut self, part_id: PartId, cursor: CursorIndex) -> bool {
         let state = self.cursor_state.entry(part_id).or_default();
         if cursor <= state.last_emitted_cursor.unwrap_or_default() {
@@ -192,6 +233,7 @@ impl CursorSyncMachine {
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
                     return;
                 }
+                self.supersede_obj_part(evt.obj_id, evt.part_id, evt.cursor, out);
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
                 let waiter = job.waiters.entry(evt.cursor).or_default();
                 waiter.parts.push(evt.part_id);
