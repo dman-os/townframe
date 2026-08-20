@@ -434,10 +434,8 @@ fn append_tokio_unstable_rustflags(cmd: &mut tokio::process::Command) {
                 continue;
             }
             if flag.starts_with("-Cinstrument-coverage")
-                || flag.starts_with("-C instrument-coverage")
                 || flag.starts_with("--cfg=coverage")
-                || flag == "coverage"
-                || flag == "coverage_nightly"
+                || flag.starts_with("--cfg=coverage_nightly")
             {
                 index += 1;
                 continue;
@@ -448,36 +446,32 @@ fn append_tokio_unstable_rustflags(cmd: &mut tokio::process::Command) {
         result
     }
 
-    let encoded_raw = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    let encoded_parts: Vec<String> = encoded_raw
-        .split('\x1f')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| segment.to_string())
-        .collect();
-    let mut sanitized_encoded = sanitize_flags(&encoded_parts);
-    if !sanitized_encoded
-        .iter()
-        .any(|part| part == TOKIO_UNSTABLE_VALUE)
-    {
-        sanitized_encoded.push(TOKIO_UNSTABLE_FLAG.to_string());
-        sanitized_encoded.push(TOKIO_UNSTABLE_VALUE.to_string());
-    }
-    cmd.env("CARGO_ENCODED_RUSTFLAGS", sanitized_encoded.join("\x1f"));
+    let raw_flags: Vec<String> = if let Ok(encoded) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        encoded
+            .split('\x1f')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.to_string())
+            .collect()
+    } else if let Ok(rustflags) = std::env::var("RUSTFLAGS") {
+        rustflags
+            .split_whitespace()
+            .map(|segment| segment.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let rustflags_raw = std::env::var("RUSTFLAGS").unwrap_or_default();
-    let rustflags_words: Vec<String> = rustflags_raw
-        .split_whitespace()
-        .map(|segment| segment.to_string())
-        .collect();
-    let mut sanitized_rustflags = sanitize_flags(&rustflags_words);
-    if !sanitized_rustflags
+    let mut sanitized = sanitize_flags(&raw_flags);
+    let has_tokio_unstable = sanitized
         .iter()
-        .any(|part| part == TOKIO_UNSTABLE_VALUE)
-    {
-        sanitized_rustflags.push(TOKIO_UNSTABLE_FLAG.to_string());
-        sanitized_rustflags.push(TOKIO_UNSTABLE_VALUE.to_string());
+        .any(|flag| flag == TOKIO_UNSTABLE_VALUE || flag == "--cfg=tokio_unstable");
+    if !has_tokio_unstable {
+        sanitized.push(TOKIO_UNSTABLE_FLAG.to_string());
+        sanitized.push(TOKIO_UNSTABLE_VALUE.to_string());
     }
-    cmd.env("RUSTFLAGS", sanitized_rustflags.join(" "));
+
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", sanitized.join("\x1f"));
+    cmd.env_remove("RUSTFLAGS");
 }
 
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()

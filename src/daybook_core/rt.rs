@@ -2759,13 +2759,13 @@ async fn ensure_bundle_workload_running(
                 workload_id: workload_id.clone(),
             })
             .await
-            .ok();
-        match status.as_ref().map(|st| &st.workload_status.workload_state) {
-            Some(wash_runtime::types::WorkloadState::Running) => break,
-            Some(wash_runtime::types::WorkloadState::Starting) => {
+            .map_err(|err| eyre::eyre!("failed to query workload status: {err:#}"))?;
+        match status.workload_status.workload_state {
+            wash_runtime::types::WorkloadState::Running => break,
+            wash_runtime::types::WorkloadState::Starting => {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            Some(wash_runtime::types::WorkloadState::NotFound) | None => {
+            wash_runtime::types::WorkloadState::NotFound => {
                 start_bundle_workload(
                     wash_host,
                     blobs_repo,
@@ -2777,10 +2777,10 @@ async fn ensure_bundle_workload_running(
                 .await
                 .wrap_err("error starting bundle wflow")?;
             }
-            Some(wash_runtime::types::WorkloadState::Unspecified)
-            | Some(wash_runtime::types::WorkloadState::Completed)
-            | Some(wash_runtime::types::WorkloadState::Stopping)
-            | Some(wash_runtime::types::WorkloadState::Error) => {
+            wash_runtime::types::WorkloadState::Unspecified
+            | wash_runtime::types::WorkloadState::Completed
+            | wash_runtime::types::WorkloadState::Stopping
+            | wash_runtime::types::WorkloadState::Error => {
                 eyre::bail!("unexpected workload status for {workload_id}: {status:?}");
             }
         }

@@ -874,6 +874,15 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
         // Sync may fail entirely because the transport rejects encrypted
         // content from a revoked member, or it may succeed but the owner
         // won't apply the decrypted changes.
+        match sync_result {
+            Ok(())
+            | Err(
+                crate::SyncDocError::Unauthorized
+                | crate::SyncDocError::NotFound
+                | crate::SyncDocError::Policy(_),
+            ) => {}
+            Err(err) => return Err(crate::ferr!("unexpected sync error: {err:?}")),
+        }
         if sync_result.is_ok() {
             pair.left_conn().sync_doc_with_peer(doc_id).await?;
             let owner_handle = pair
@@ -998,6 +1007,15 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
 
     // Sync must not materialise.
     let sync_result = pair.right_conn().sync_doc_with_peer(doc_id).await;
+    match sync_result {
+        Ok(())
+        | Err(
+            crate::SyncDocError::Unauthorized
+            | crate::SyncDocError::NotFound
+            | crate::SyncDocError::Policy(_),
+        ) => {}
+        Err(err) => return Err(crate::ferr!("unexpected sync error: {err:?}")),
+    }
     if sync_result.is_ok() {
         let lookup = pair.right().repo.get_doc(&doc_id).await?;
         assert!(
@@ -1070,6 +1088,15 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
     // Editor tries to sync the offline write. The transport may accept the
     // bytes, but the owner's runtime must not materialise the stale content.
     let sync_result = pair.right_conn().sync_doc_with_peer(doc_id).await;
+    match sync_result {
+        Ok(())
+        | Err(
+            crate::SyncDocError::Unauthorized
+            | crate::SyncDocError::NotFound
+            | crate::SyncDocError::Policy(_),
+        ) => {}
+        Err(err) => return Err(crate::ferr!("unexpected sync error: {err:?}")),
+    }
 
     // Whether the sync returns Ok or Err, the owner must NOT see "stale" = "offline-write".
     if sync_result.is_ok() {

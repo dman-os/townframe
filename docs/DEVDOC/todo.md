@@ -27,6 +27,7 @@
 
 - Top
   - [ ] Built in updater
+  - [ ] Per sink switch/index rebuild
 
 - [ ] Plugs
   - [ ] Change manifest/types module structure for plugs

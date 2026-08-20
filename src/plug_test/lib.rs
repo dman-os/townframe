@@ -57,6 +57,24 @@ mod wit {
     });
 }
 
+pub(crate) mod facet_helper {
+    #[allow(dead_code)]
+    pub(crate) fn facet_key_id(facet_key: &str) -> String {
+        daybook_types::doc::FacetKey::from(facet_key).id
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn facet_key_id_uses_the_key_suffix() {
+            assert_eq!(facet_key_id("org.example.note/custom"), "custom");
+            assert_eq!(facet_key_id("org.example.note"), "main");
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wflows;
 
@@ -1449,7 +1467,7 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
-                                create: true,
+                                create: false,
                                 delete: false,
                             },
                             RoutineFacetAccess {
@@ -1523,7 +1541,7 @@ pub fn plug_manifest() -> PlugManifest {
                     "embed-text".into(),
                     "index-embedding".into(),
                 ],
-                component_urls: vec!["static:plug_test.wasm.zst".parse().unwrap()],
+                component_urls: vec!["build://component/plug_test.wasm".parse().unwrap()],
             }
             .into(),
         )]

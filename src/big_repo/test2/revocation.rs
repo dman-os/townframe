@@ -101,7 +101,15 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
 
     // Sync doc between nodes.
     pair.left_conn().sync_doc_with_peer(doc_id).await?;
-    pair.right_conn().sync_doc_with_peer(doc_id).await.ok();
+    match pair.right_conn().sync_doc_with_peer(doc_id).await {
+        Ok(())
+        | Err(
+            crate::SyncDocError::Unauthorized
+            | crate::SyncDocError::NotFound
+            | crate::SyncDocError::Policy(_),
+        ) => {}
+        Err(err) => return Err(crate::ferr!("unexpected sync error after revocation: {err:?}")),
+    }
 
     // The reader may retain already-held historical plaintext ("before-revoke"),
     // but MUST NOT observe the post-revocation content ("post-revoke-secret").

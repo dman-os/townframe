@@ -133,7 +133,7 @@ impl AutomergeFrontierWorker {
 
     pub(crate) async fn run(mut self) -> Res<()> {
         let mut watched_parts = self.initial_source_parts.clone();
-        let mut keyhive_cursor = self.store.automerge_keyhive_cursor().await.unwrap_or(0);
+        let mut keyhive_cursor = self.store.automerge_keyhive_cursor().await?;
         let mut part_listener =
             Self::subscribe_to_parts(&self.big_sync_store, &self.store, &watched_parts).await?;
 
@@ -171,8 +171,7 @@ impl AutomergeFrontierWorker {
                             let doc_parts = self
                                 .big_sync_store
                                 .obj_parts(doc_id)
-                                .await
-                                .unwrap_or_default();
+                                .await?;
                             if doc_parts.iter().any(|part| watched_parts.contains(part)) {
                                 Self::process_materialized_doc(
                                     doc_id,

@@ -312,7 +312,7 @@ private class SettingsRealRepoFixture(
             closeSafely { blobsRepo.close() }
             closeSafely { ffiCtx.close() }
             closeSafely { appCtx.close() }
-            closeSafely { repoRoot.deleteRecursively() }
+            runCatching { repoRoot.toFile().deleteRecursively() }
         }
 
         if (failures.isNotEmpty()) {

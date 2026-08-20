@@ -726,6 +726,11 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                 }
                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                     let Some(heads) = entry.branches.get("main") else {
+                        self.index_repo
+                            .handle_worker_item(DocFacetRefIndexWorkItem::DeleteDoc {
+                                doc_id: id.clone(),
+                            })
+                            .await?;
                         return Ok(outcome);
                     };
                     let branch_path = BranchPathBuf::from("main");
@@ -734,6 +739,11 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                         .get_facet_keys_if_latest(id, &branch_path, heads)
                         .await?
                     else {
+                        self.index_repo
+                            .handle_worker_item(DocFacetRefIndexWorkItem::DeleteDoc {
+                                doc_id: id.clone(),
+                            })
+                            .await?;
                         return Ok(outcome);
                     };
                     self.index_repo

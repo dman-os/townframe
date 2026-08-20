@@ -831,45 +831,21 @@ impl SwitchWorker {
 
     #[tracing::instrument(skip(self, event))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
-        let mut interested = Vec::new();
         for index in 0..self.prepared_sinks.len() {
             if self.listener_interested_in_event(index, event).await? {
-                interested.push(index);
+                let ctx = SwitchSinkCtx {
+                    rt: Some(&self.rt),
+                    store: Some(&self.store),
+                };
+                let outcome = self.prepared_sinks[index]
+                    .listener
+                    .on_event(event, &ctx)
+                    .await?;
+                if let Some(next_predicate) = outcome.drawer_predicate_update {
+                    self.prepared_sinks[index].drawer_predicate = Some(next_predicate);
+                }
+                debug!(listener = %self.prepared_sinks[index].name, "switch listener handled event");
             }
-        }
-        if interested.is_empty() {
-            return Ok(());
-        }
-
-        let ctx = SwitchSinkCtx {
-            rt: Some(&self.rt),
-            store: Some(&self.store),
-        };
-
-        use futures::StreamExt;
-
-        let mut futures = futures_buffered::FuturesUnordered::new();
-        for (index, sink) in self.prepared_sinks.iter_mut().enumerate() {
-            if interested.contains(&index) {
-                let event = event.clone();
-                futures.push(async move {
-                    let outcome = sink.listener.on_event(&event, &ctx).await?;
-                    eyre::Ok((index, outcome, sink.name.clone()))
-                });
-            }
-        }
-
-        let mut updates = Vec::new();
-        while let Some(res) = futures.next().await {
-            let (index, outcome, listener_name) = res?;
-            if let Some(next_predicate) = outcome.drawer_predicate_update {
-                updates.push((index, next_predicate));
-            }
-            debug!(listener = %listener_name, "switch listener handled event");
-        }
-        drop(futures);
-        for (index, next_predicate) in updates {
-            self.prepared_sinks[index].drawer_predicate = Some(next_predicate);
         }
 
         Ok(())

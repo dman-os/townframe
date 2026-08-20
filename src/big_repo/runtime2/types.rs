@@ -209,6 +209,7 @@ impl LiveDocBundle {
     pub(crate) fn mark_broken(&self) {
         self.broken
             .store(true, std::sync::atomic::Ordering::Release);
+        self.barrier_notify.notify_waiters();
     }
 
     /// Whether some locally stored Sedimentree heads are not represented in
@@ -248,6 +249,9 @@ impl LiveDocBundle {
             {
                 return Ok(());
             }
+            if self.is_broken() {
+                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
+            }
             notified.await;
         }
     }
@@ -263,6 +267,9 @@ impl LiveDocBundle {
                 >= target_seq
             {
                 return Ok(());
+            }
+            if self.is_broken() {
+                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
             }
             notified.await;
         }

@@ -579,8 +579,10 @@ impl crate::rt::switch::SwitchSink for BlobPinsPartTriageListener {
                         .await?;
                 }
                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
+                    let mut retain_branches = Vec::new();
                     for (branch_name, heads) in &entry.branches {
                         let branch_path = BranchPathBuf::from(branch_name.as_str());
+                        retain_branches.push(branch_path.clone());
                         let Some(_keys) = self
                             .drawer_repo
                             .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -596,6 +598,12 @@ impl crate::rt::switch::SwitchSink for BlobPinsPartTriageListener {
                             })
                             .await?;
                     }
+                    self.worker
+                        .handle_worker_item(BlobPinsPartWorkItem::DeleteDocBranchesNotIn {
+                            doc_id: id.clone(),
+                            branch_paths: retain_branches,
+                        })
+                        .await?;
                 }
             },
             _ => {}
