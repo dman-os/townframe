@@ -209,7 +209,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: deno run -A ./x/wit-fetch.ts --clean
       - name: install rust dependencies
         run: |
           sudo apt-get update
@@ -319,7 +324,12 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - uses: denoland/setup-deno@v2
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: deno run -A ./x/wit-fetch.ts --clean
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -428,6 +438,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: denoland/setup-deno@v2
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: deno run -A ./x/wit-fetch.ts --clean
 
       - uses: actions/setup-java@v4
         with:
@@ -572,6 +590,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: denoland/setup-deno@v2
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: deno run -A ./x/wit-fetch.ts --clean
 
       - uses: actions/setup-java@v4
         with:

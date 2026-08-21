@@ -42,11 +42,17 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: install JavaScript dependencies
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
       - name: pre-commit hooks
         run: |
           nix develop .#ci-desktop --command prek --color=always run --all-files
-
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -83,7 +89,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: builds
         run: |
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows --target wasm32-wasip2
@@ -134,11 +145,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
       - name: Resolve pnpm store path
         id: pnpm-store
         run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-
       - name: Cache pnpm store
         uses: actions/cache@v4
         with:
@@ -146,10 +159,10 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-store-${{ runner.os }}-
-
       - name: Install dependencies
         run: nix develop .#default --command pnpm install --frozen-lockfile
-
+      - name: fetch WIT dependencies
+        run: nix develop .#default --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
       - name: Build workloads and host
         run: |
           nix develop .#default --command bash -lc '
