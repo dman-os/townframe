@@ -121,7 +121,7 @@ jobs:
       CI: "true"
       DOCKER_CMD: docker
       SMTP_HOST: 127.0.0.1
-      SMTP_PORT: "2501"
+      SMTP_PORT: "2500"
     steps:
       - uses: actions/checkout@v4
         with:

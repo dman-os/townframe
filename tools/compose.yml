@@ -270,8 +270,8 @@ services:
     profiles: [mail]
     networks: [net-one]
     ports:
-      - "9021:9000" # port for web interface (gursha holds 9020)
-      - "2501:2500" # smtp port (gursha holds 2500)
+      - "9020:9000"
+      - "2500:2500"
     healthcheck:
       test:
         [
