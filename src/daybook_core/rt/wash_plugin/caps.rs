@@ -227,7 +227,7 @@ impl capabilities::HostDocToken for SharedWashCtx {
             None => return Ok(Err(capabilities::AccessError::NotFound)),
         };
         let mut result = Vec::new();
-        for (facet_key, _facet_value) in doc.facets.iter() {
+        for facet_key in doc.facets.keys() {
             let mut rights = capabilities::FacetRights::empty();
             for access in &facet_acl {
                 if access.tag.0 != facet_key.tag.to_string() {
@@ -818,7 +818,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             None => return Ok(Err(capabilities::AccessError::NotFound)),
         };
         let mut result = Vec::new();
-        for (facet_key, _facet_value) in doc.facets.iter() {
+        for facet_key in doc.facets.keys() {
             if facet_key.tag.to_string() != tag {
                 continue;
             }

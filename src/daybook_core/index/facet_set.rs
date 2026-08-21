@@ -398,12 +398,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
             crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
                 self.index_repo.enqueue_delete(id.clone())?;
             }
-            crate::drawer::DrawerEvent::DocAdded {
-                id,
-                entry,
-                drawer_heads: _,
-                ..
-            } => {
+            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(outcome);
                 };
@@ -419,11 +414,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                     .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
             }
             crate::drawer::DrawerEvent::DocUpdated {
-                id,
-                entry,
-                diff,
-                drawer_heads: _,
-                ..
+                id, entry, diff, ..
             } => {
                 if diff
                     .changed_facet_keys

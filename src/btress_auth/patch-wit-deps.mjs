@@ -5,7 +5,7 @@
 // with "interface not found in package". btress_auth doesn't use timezone, so
 // drop that gated import from the fetched wasi-cli package after `wash wit fetch`.
 // Run via `pnpm run fetch:wit` (which calls this after the fetch).
-import { readFile, writeFile, readdir } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const depsDir = "wit/deps";
@@ -23,9 +23,13 @@ for (const dir of await readdir(depsDir)) {
   if (next !== src) {
     await writeFile(p, next);
     patched = true;
-    console.log(`patch-wit-deps: removed gated wasi:clocks/timezone import from ${p}`);
+    console.log(
+      `patch-wit-deps: removed gated wasi:clocks/timezone import from ${p}`,
+    );
   }
 }
 if (!patched) {
-  console.log("patch-wit-deps: no wasi-cli timezone import found (already patched or upstream changed)");
+  console.log(
+    "patch-wit-deps: no wasi-cli timezone import found (already patched or upstream changed)",
+  );
 }

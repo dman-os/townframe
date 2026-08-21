@@ -6,7 +6,6 @@
     "esModuleInterop": true,
     "types": ["./generated/types/wit.d.ts"],
     "allowJs": false,
-    // Type-check only; rolldown handles compilation
     "noEmit": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,

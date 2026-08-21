@@ -26,7 +26,7 @@ pub async fn run(id: String, branch: Option<String>) -> Res<ExitCode> {
         .get_doc_with_facets_at_branch(&id, &branch_path, None)
         .await?
         .expect("document from entry missing");
-    println!("{:#?}", &doc);
+    println!("{:#?}", doc);
     println!("{}", serde_json::to_string_pretty(&*doc)?);
     Ok(ExitCode::SUCCESS)
 }

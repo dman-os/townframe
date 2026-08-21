@@ -237,6 +237,7 @@ world all-guest {
     import capabilities;
     import facet-routine;
     import townframe:api-utils/http-service;
+    import townframe:api-utils/mail;
     import townframe:sqlite/sqlite-connection;
     import mltools-ocr;
     import mltools-embed;

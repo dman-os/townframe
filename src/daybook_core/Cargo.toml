@@ -97,6 +97,10 @@ oci-client = { version = "0.15.0", default-features = false, features = ["rustls
 oci-spec = "0.8.4"
 
 #
+# mail
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+
+#
 # db
 sqlx = { workspace = true, features = ["sqlite"] }
 

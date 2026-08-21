@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::interlude::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,7 +127,7 @@ fn prefers_dark_media() -> bool {
         .match_media("(prefers-color-scheme: dark)")
         .ok()
         .flatten()
-        .map(|m| m.matches())
+        .map(|media_query| media_query.matches())
         .unwrap_or(false)
 }
 

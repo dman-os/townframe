@@ -1,7 +1,10 @@
 // import { log as wasiLog } from "wasi:logging/logging@0.1.0-draft";
-import { configure, getLogger } from "@logtape/logtape";
-import { betterAuth } from "better-auth/minimal";
+
 import { getArgs } from "townframe:api-utils/http-service";
+import { send as mailSend } from "townframe:api-utils/mail";
+import { configure, getLogger } from "@logtape/logtape";
+import { type BetterAuthOptions, betterAuth } from "better-auth";
+import { magicLink } from "better-auth/plugins";
 
 import { getConfig } from "./config.js";
 import { switchMap } from "./utils.js";
@@ -34,19 +37,36 @@ async function buildAuth(
     conn.queryBatch(AUTH_SCHEMA_DDL);
 
     const dialect = new WitsqlDialect(conn);
-    return betterAuth({
+    const options: BetterAuthOptions = {
       baseURL: config.$BETTER_AUTH_URL,
+      // The magic-link callbackURL must be allowed to point at the sysadmin
+      // (localhost:3000); the default trusted origin is only the baseURL.
+      trustedOrigins: ["http://localhost:3000"],
       secret: config.$BETTER_AUTH_SECRET,
       database: {
         dialect,
         type: "sqlite",
       },
+      plugins: [
+        magicLink({
+          sendMagicLink: async ({ email, url }) => {
+            mailSend({
+              to: email,
+              subject: "Login Link",
+              html: `<a href="${url}">LOGIN LINK</a>`,
+              fromAddress: undefined,
+              replyTo: undefined,
+            });
+          },
+        }),
+      ],
       logger: {
         log(lvl, msg) {
           betterAuthLog[lvl](msg);
         },
       },
-    });
+    };
+    return betterAuth(options);
   })();
   return authPromise;
 }

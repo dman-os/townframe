@@ -27,3 +27,19 @@ interface http-service {
     /// Acquire service args (capabilities) for an http-service component.
     get-args: func() -> service-args;
 }
+
+interface mail {
+    record email-message {
+        to: string,
+        subject: string,
+        html: string,
+        from-address: option<string>,
+        reply-to: option<string>,
+    }
+
+    variant mail-error {
+        send-failed(string),
+    }
+
+    send: func(message: email-message) -> result<_, mail-error>;
+}

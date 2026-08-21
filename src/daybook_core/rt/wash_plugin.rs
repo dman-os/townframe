@@ -2,6 +2,7 @@ use crate::interlude::*;
 use crate::rt::dispatch;
 use daybook_types::doc::BranchPath;
 use daybook_types::doc::{self as root_doc};
+use lettre::AsyncTransport;
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
@@ -330,6 +331,8 @@ mod stateless_view_host;
 
 pub(crate) use binds_guest::AllGuestPre;
 pub(crate) use binds_guest::exports::townframe::daybook::stateless_view;
+pub use binds_guest::townframe::api_utils::http_service;
+pub use binds_guest::townframe::api_utils::mail;
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
@@ -337,9 +340,8 @@ pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_image_tools;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
-pub use binds_guest::townframe::sqlite::sqlite_connection;
-pub use binds_guest::townframe::api_utils::http_service;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
+pub use binds_guest::townframe::sqlite::sqlite_connection;
 pub(crate) use stateless_view_host::StatelessViewPlugin;
 
 use daybook_types::doc::ChangeHashSet;
@@ -683,7 +685,7 @@ pub(crate) async fn build_doc_facet_tokens(
     // Build facet tokens: for every existing facet that matches any ACL entry,
     // aggregate rights from all matching entries (tag-wide + key-specific).
     let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
-    for (facet_key, _) in doc.facets.iter() {
+    for facet_key in doc.facets.keys() {
         let mut rights = capabilities::FacetRights::empty();
         for access in &doc_tokens.facet_acl {
             if access.tag.0 != facet_key.tag.to_string() {
@@ -1002,9 +1004,9 @@ impl wash_runtime::plugin::HostPlugin for ServicePlugin {
     fn world(&self) -> WitWorld {
         WitWorld {
             exports: std::collections::HashSet::new(),
-            imports: std::collections::HashSet::from([
-                WitInterface::from("townframe:api-utils/http-service"),
-            ]),
+            imports: std::collections::HashSet::from([WitInterface::from(
+                "townframe:api-utils/http-service",
+            )]),
         }
     }
 
@@ -1027,13 +1029,15 @@ impl wash_runtime::plugin::HostPlugin for ServicePlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "api-utils"
-                && iface.interfaces.contains("http-service") {
-                    http_service::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "api-utils"
+                && iface.interfaces.contains("http-service")
+            {
+                http_service::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    item.linker(),
+                    |ctx| ctx,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1073,5 +1077,168 @@ impl http_service::Host for SharedWashCtx {
         Ok(http_service::ServiceArgs {
             sqlite_connections: vec![("auth-db".to_string(), handle)],
         })
+    }
+}
+
+/// Host plugin for `townframe:api-utils/mail`.
+///
+/// Native SMTP transport (lettre) for the btress auth service. Config comes
+/// from env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`,
+/// `SMTP_TLS`, `MAIL_FROM`); the transport is built lazily and cached.
+pub struct MailPlugin {
+    smtp: tokio::sync::RwLock<Option<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>>>,
+    from: String,
+}
+
+impl Default for MailPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MailPlugin {
+    pub const ID: &str = "townframe:api-utils/mail";
+
+    pub fn new() -> Self {
+        Self {
+            smtp: default(),
+            from: std::env::var("MAIL_FROM").unwrap_or_else(|_| "btress@localhost".into()),
+        }
+    }
+
+    fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
+    }
+
+    async fn transport(&self) -> Res<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>> {
+        if let Some(smtp) = self.smtp.read().await.clone() {
+            return Ok(smtp);
+        }
+        let host = std::env::var("SMTP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+        let port = std::env::var("SMTP_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(2500);
+        let user = std::env::var("SMTP_USER").unwrap_or_default();
+        let pass = std::env::var("SMTP_PASS").unwrap_or_default();
+        let tls = std::env::var("SMTP_TLS").unwrap_or_else(|_| "plain".into());
+
+        let mut builder = match tls.as_str() {
+            "starttls" => {
+                lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::starttls_relay(&host)?
+            }
+            "tls" => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(&host)?,
+            _ => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&host),
+        };
+        builder = builder.port(port);
+        if !user.is_empty() {
+            builder = builder.credentials(
+                lettre::transport::smtp::authentication::Credentials::new(user, pass),
+            );
+        }
+        let smtp = builder.build();
+        let mut slot = self.smtp.write().await;
+        *slot = Some(smtp.clone());
+        Ok(smtp)
+    }
+
+    async fn send(&self, message: mail::EmailMessage) -> Res<()> {
+        let transport = self.transport().await?;
+        let from = message
+            .from_address
+            .clone()
+            .unwrap_or_else(|| self.from.clone());
+        let mut builder = lettre::Message::builder()
+            .from(from.parse()?)
+            .to(message.to.parse()?)
+            .subject(message.subject.clone())
+            .header(lettre::message::header::ContentType::TEXT_HTML);
+        if let Some(reply_to) = &message.reply_to {
+            builder = builder.reply_to(reply_to.parse()?);
+        }
+        let email = builder.body(message.html)?;
+        transport.send(email).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl wash_runtime::plugin::HostPlugin for MailPlugin {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            exports: std::collections::HashSet::new(),
+            imports: std::collections::HashSet::from([WitInterface::from(
+                "townframe:api-utils/mail",
+            )]),
+        }
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_bind(
+        &self,
+        _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
+        _interface_configs: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_item_bind<'a>(
+        &self,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        let world = item.world();
+        for iface in world.imports {
+            if iface.namespace == "townframe"
+                && iface.package == "api-utils"
+                && iface.interfaces.contains("mail")
+            {
+                mail::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    item.linker(),
+                    |ctx| ctx,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_workload_resolved(
+        &self,
+        _resolved: &wash_runtime::engine::workload::ResolvedWorkload,
+        _component_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_unbind(
+        &self,
+        _workload_id: &str,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl mail::Host for SharedWashCtx {
+    async fn send(
+        &mut self,
+        message: mail::EmailMessage,
+    ) -> wasmtime::Result<Result<(), mail::MailError>> {
+        let plugin = MailPlugin::from_ctx(self);
+        match plugin.send(message).await {
+            Ok(()) => Ok(Ok(())),
+            Err(err) => Ok(Err(mail::MailError::SendFailed(err.to_string()))),
+        }
     }
 }

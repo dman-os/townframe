@@ -143,7 +143,7 @@ pub async fn try_into_outgoing(
             let chunks = buf.chunks(CHUNK_BYTE_SIZE);
             for chunk in chunks {
                 output_stream
-                    .blocking_write_and_flush(chunk.into())
+                    .blocking_write_and_flush(chunk)
                     .wrap_err("error writing wasi response stream")?;
             }
         }

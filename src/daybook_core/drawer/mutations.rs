@@ -26,7 +26,7 @@ struct PreparedAddDoc {
 impl DrawerRepo {
     async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
         if args.branch_path != "main" {
-            return Err(ferr!("new docs must be created on main"))?;
+            Err(ferr!("new docs must be created on main"))?;
         }
         let mut doc_am = automerge::Automerge::new();
         {
@@ -119,7 +119,7 @@ impl DrawerRepo {
 
     pub async fn batch_add(&self, args_batch: Vec<AddDocArgs>) -> Result<Vec<DocId>, DrawerError> {
         if self.cancel_token.is_cancelled() {
-            return Err(ferr!("repo is stopped"))?;
+            Err(ferr!("repo is stopped"))?;
         }
 
         if args_batch.is_empty() {
@@ -218,7 +218,7 @@ impl DrawerRepo {
     pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
         let mut created = self.batch_add(vec![args]).await?;
         if created.len() != 1 {
-            return Err(ferr!(
+            Err(ferr!(
                 "batch_add returned invalid result for single add call"
             ))?;
         }
@@ -233,7 +233,7 @@ impl DrawerRepo {
         heads: Option<ChangeHashSet>,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
-            return Err(ferr!("repo is stopped"))?;
+            Err(ferr!("repo is stopped"))?;
         }
         if patch.is_empty() {
             return Ok(());

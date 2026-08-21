@@ -1,5 +1,6 @@
 packages:
   - ./src/btress_auth/
+  - ./src/btress_sysadmin/
   - .
 
 # nodeLinker: hoisted

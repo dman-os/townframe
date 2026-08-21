@@ -5,6 +5,7 @@ world btress-auth-http {
   import wasi:cli/environment@0.2.6;
 
   import townframe:api-utils/http-service;
+  import townframe:api-utils/mail;
   import townframe:sqlite/sqlite-connection;
 
   export wasi:http/incoming-handler@0.2.6;

@@ -632,7 +632,7 @@ impl WflowPlugin {
             wflow_key: journal.wflow.key.clone(),
             args_json: journal.init_args_json.to_string(),
         };
-        let ctx_id: Arc<str> = store.data().active_ctx.id.clone().into();
+        let ctx_id = Arc::clone(&store.data().active_ctx.id);
         let (yield_tx, yield_rx) = mpsc::unbounded_channel();
         let (resume_tx, resume_rx) = mpsc::unbounded_channel();
         let pause_cancel = CancellationToken::new();

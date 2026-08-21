@@ -16,6 +16,10 @@ crate-type = ["cdylib"]
 utils_rs = { workspace = true, default-features = false, features = ["wasm"] }
 
 getrandom = "0.4.3"
+# getrandom 0.3.x is pulled in transitively (ahash/irpc-iroh/jobserver) and
+# needs the wasm_js backend for the hydrate (wasm32-unknown-unknown) build.
+# Renamed dep so the feature can be gated to the `hydrate` feature only.
+getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"], optional = true }
 serde.workspace = true
 
 #
@@ -34,12 +38,6 @@ wasm-bindgen-futures = { version = "0.4.76", optional = true }
 # http
 axum = { workspace = true, optional = true }
 axum-extra = { workspace = true, optional = true, features = ["cookie", "cookie-signed"] }
-leptos_axum = { version = "0.8.10", optional = true, default-features = false, 
-    # FIXME: this is a dud, "wasm" assumes running in a js wasm environment
-    # enabled since pre setting any_spawner::tokio makes it harmless 
-    # and to stop eprintln warnings they've added 
-    # but might break in the future if they do more gating around "wasm"
-    features = ["wasm"] }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, features = ["util", "sensitive-headers", "trace"], optional = true }
 http.workspace = true
@@ -52,7 +50,17 @@ leptos_router = "0.8.15"
 leptos_wasi = { version = "0.3.1", optional = true }
 wasip2 = { version = "1.0.4", optional = true }
 any_spawner = { version = "0.3.0", features = ["tracing", "tokio"], optional = true }
-web-sys = { version = "0.3.103", features = ["Storage", "MediaQueryList"] }
+web-sys = { version = "0.3.103", features = ["Storage", "MediaQueryList", "Window", "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "SubmitEvent", "Event", "EventTarget", "HtmlFormElement", "FormData"] }
+
+[dependencies.leptos_axum]
+version = "0.8.10"
+optional = true
+default-features = false
+# FIXME: this is a dud, "wasm" assumes running in a js wasm environment
+# enabled since pre setting any_spawner::tokio makes it harmless
+# and to stop eprintln warnings they've added
+# but might break in the future if they do more gating around "wasm"
+features = ["wasm"]
 
 [features]
 default = [
@@ -61,6 +69,7 @@ default = [
 ]
 hydrate = [
     "getrandom/wasm_js",
+    "dep:getrandom-03",
     "leptos/hydrate",
     "dep:console_error_panic_hook",
     "dep:wasm-bindgen",

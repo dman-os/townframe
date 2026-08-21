@@ -71,7 +71,7 @@ repos:
       - id: check-tsc
         name: check tsc
         language: system
-        entry: deno run -A ./x/check-tsc.js
+        entry: deno run -A ./x/check-tsc.ts
         pass_filenames: false
       - id: biome-fmt
         name: biome format

@@ -1,6 +1,6 @@
 import {
-  fire,
   incomingHandler as adapter,
+  fire,
 } from "@bytecodealliance/jco-std/wasi/0.2.x/http/adapters/hono/server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -33,6 +33,7 @@ async function setup() {
   // cors must come before routes
   const allowedAuthOrigins = new Set<string>([
     "http://localhost:8071",
+    "http://localhost:3000", // btress_sysadmin origin (login page)
     "daybook-app://",
   ]);
   app.use(
@@ -55,7 +56,10 @@ async function setup() {
     }),
   );
   app.on(["POST", "GET"], "/api/auth/*", (c) => {
-    return cx.auth.handler(c.req.raw);
+    // auth is always built by the time requests arrive (setup() awaits appCx())
+    const auth = cx.auth;
+    if (!auth) throw new Error("auth context was not initialized");
+    return auth.handler(c.req.raw);
   });
 
   app.get("/healthz", (c) => c.text("ok", 200));

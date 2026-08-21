@@ -114,7 +114,8 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
     async fn begin_transaction(
         &mut self,
         handle: Resource<sqlite_connection::Connection>,
-    ) -> wasmtime::Result<Result<Resource<sqlite_connection::Transaction>, sql_types::QueryError>> {
+    ) -> wasmtime::Result<Result<Resource<sqlite_connection::Transaction>, sql_types::QueryError>>
+    {
         let sql = {
             let token = self
                 .table
@@ -135,10 +136,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
         Ok(Ok(handle))
     }
 
-    async fn drop(
-        &mut self,
-        rep: Resource<sqlite_connection::Connection>,
-    ) -> wasmtime::Result<()> {
+    async fn drop(&mut self, rep: Resource<sqlite_connection::Connection>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
     }
@@ -400,13 +398,15 @@ impl HostPlugin for SqlPlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "sqlite"
-                && iface.interfaces.contains("sqlite-connection") {
-                    sqlite_connection::add_to_linker::<_, HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "sqlite"
+                && iface.interfaces.contains("sqlite-connection")
+            {
+                sqlite_connection::add_to_linker::<_, HasSelf<SharedWashCtx>>(
+                    item.linker(),
+                    |ctx| ctx,
+                )?;
+            }
         }
         Ok(())
     }

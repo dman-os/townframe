@@ -765,7 +765,9 @@ fn row_opt_text(
             return None;
         }
         match &entry.value {
-            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => Some(Some(value.clone())),
+            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => {
+                Some(Some(value.clone()))
+            }
             crate::wit::townframe::sqlite::types::SqlValue::Null => Some(None),
             _ => None,
         }
@@ -774,7 +776,9 @@ fn row_opt_text(
 
 fn row_real(row: &crate::wit::townframe::sqlite::types::ResultRow, name: &str) -> Option<f64> {
     row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sqlite::types::SqlValue::Real(value) if entry.column_name == name => {
+        crate::wit::townframe::sqlite::types::SqlValue::Real(value)
+            if entry.column_name == name =>
+        {
             Some(*value)
         }
         crate::wit::townframe::sqlite::types::SqlValue::Integer(value)

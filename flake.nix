@@ -51,6 +51,8 @@
             KANIDM_SKIP_HOSTNAME_VERIFICATION = "true";
             KANIDM_ACCEPT_INVALID_CERTS = "true";
             WASMCLOUD_OCI_ALLOWED_INSECURE = "localhost:5000";
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           };
 
           # Android SDK/NDK without Studio (for CI)
@@ -196,6 +198,8 @@
             pnpm
             nodejs_24
             biome
+            playwright-driver
+            playwright-driver.browsers
 
             libarchive
             prek

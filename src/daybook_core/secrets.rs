@@ -41,32 +41,26 @@ impl SecretRepo {
             } else {
                 tokio::task::spawn_blocking(move || {
                 cfg_select! {
-                    target_os = "linux" => {
-                        match zbus_secret_service_keyring_store::Store::new() {
-                            Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
-                            Err(_) => {
-                                tracing::warn!(
-                                    "secret-service keyring unavailable, \
+                    target_os = "linux" => match zbus_secret_service_keyring_store::Store::new() {
+                        Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
+                        Err(_) => {
+                            tracing::warn!(
+                                "secret-service keyring unavailable, \
                                     falling back to kernel keyring"
-                                );
-                                linux_keyutils_keyring_store::Store::new()
-                                    .map(|sec| sec as Arc<keyring_core::CredentialStore>)
-                                    .map_err(|err| {
-                                        eyre::eyre!(err).wrap_err("kernel keyring unavailable")
-                                    })
-                            }
+                            );
+                            linux_keyutils_keyring_store::Store::new()
+                                .map(|sec| sec as Arc<keyring_core::CredentialStore>)
+                                .map_err(|err| {
+                                    eyre::eyre!(err).wrap_err("kernel keyring unavailable")
+                                })
                         }
-                    }
-                    target_os = "android" => {
-                        android_native_keyring_store::Store::new()
-                            .map(|sec| sec as Arc<keyring_core::CredentialStore>)
-                            .map_err(|err| eyre::eyre!(err).wrap_err("android keyring unavailable"))
-                    }
-                    target_os = "windows" => {
-                        windows_native_keyring_store::Store::new()
-                            .map(|sec| sec as Arc<keyring_core::CredentialStore>)
-                            .map_err(|err| eyre::eyre!(err).wrap_err("windows keyring unavailable"))
-                    }
+                    },
+                    target_os = "android" => android_native_keyring_store::Store::new()
+                        .map(|sec| sec as Arc<keyring_core::CredentialStore>)
+                        .map_err(|err| eyre::eyre!(err).wrap_err("android keyring unavailable")),
+                    target_os = "windows" => windows_native_keyring_store::Store::new()
+                        .map(|sec| sec as Arc<keyring_core::CredentialStore>)
+                        .map_err(|err| eyre::eyre!(err).wrap_err("windows keyring unavailable")),
                     any(target_os = "macos", target_os = "ios") => {
                         apple_native_keyring_store::keychain::Store::new()
                             .map(|sec| sec as Arc<keyring_core::CredentialStore>)

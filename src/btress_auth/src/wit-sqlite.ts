@@ -11,23 +11,23 @@
 // read, so no further conversion is needed. Integer params map to
 // `sql-value.integer` and integer result columns come back as JS numbers.
 
-import {
-  type Kysely,
-  SqliteAdapter,
-  SqliteIntrospector,
-  SqliteQueryCompiler,
-  type CompiledQuery,
-  type DatabaseConnection,
-  type DatabaseIntrospector,
-  type Dialect,
-  type Driver,
-  type QueryResult,
-} from "kysely";
 import type {
   Connection,
   Transaction,
 } from "townframe:sqlite/sqlite-connection";
 import type { ResultRow, SqlValue } from "townframe:sqlite/types";
+import {
+  type CompiledQuery,
+  type DatabaseConnection,
+  type DatabaseIntrospector,
+  type Dialect,
+  type Driver,
+  type Kysely,
+  type QueryResult,
+  SqliteAdapter,
+  SqliteIntrospector,
+  SqliteQueryCompiler,
+} from "kysely";
 
 /** Convert a Kysely parameter into a `townframe:sqlite` sql-value. */
 function toSqlValue(value: unknown): SqlValue {

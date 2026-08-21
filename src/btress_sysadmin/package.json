@@ -1,0 +1,12 @@
+{
+  "name": "@townframe/btress_sysadmin",
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "25.5.0"
+  },
+  "private": true,
+  "scripts": {
+    "e2e": "playwright test"
+  },
+  "type": "module"
+}
