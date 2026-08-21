@@ -112,3 +112,107 @@ jobs:
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
           OLLAMA_MODEL: gemma3
+
+  e2e-sysadmin-chromium:
+    name: E2E (sysadmin / chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      DOCKER_CMD: docker
+      SMTP_HOST: 127.0.0.1
+      SMTP_PORT: "2501"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: nix develop .#default --command pnpm install --frozen-lockfile
+
+      - name: Build workloads and host
+        run: |
+          nix develop .#default --command bash -lc '
+            set -euo pipefail
+            pnpm -C src/btress_auth run build
+            cd src/btress_sysadmin
+            cargo leptos build --release
+            cd ../..
+            cargo build --locked -p daybook_cli
+          '
+
+      - name: Run sysadmin e2e
+        run: |
+          nix develop .#default --command bash -lc '
+            set -euo pipefail
+
+            server_pid=""
+            static_pid=""
+            cleanup() {
+              status=$?
+              set +e
+              if [ -n "$static_pid" ]; then kill "$static_pid" 2>/dev/null || true; fi
+              if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
+              docker compose -f tools/compose.yml --profile mail down -v
+              exit "$status"
+            }
+            trap cleanup EXIT
+
+            ./x/compose-up.ts mail
+            setsid env SMTP_HOST="$SMTP_HOST" SMTP_PORT="$SMTP_PORT" ./target/debug/daybook_cli server \
+              >/tmp/btress-server.log 2>&1 </dev/null &
+            server_pid=$!
+            setsid deno run --allow-all x/dev-btress-static.ts \
+              >/tmp/btress-static.log 2>&1 </dev/null &
+            static_pid=$!
+
+            wait_for() {
+              name="$1"
+              url="$2"
+              for _ in $(seq 1 90); do
+                if curl -fsS --max-time 5 -o /dev/null "$url"; then return 0; fi
+                sleep 2
+              done
+              echo "Timed out waiting for $name at $url"
+              tail -100 /tmp/btress-server.log /tmp/btress-static.log 2>/dev/null || true
+              return 1
+            }
+
+            wait_for Inbucket http://localhost:9021/
+            wait_for btress-auth http://localhost:8071/healthz
+            wait_for btress-sysadmin http://localhost:3000/
+            wait_for static-assets http://localhost:3001/pkg/btress_sysadmin.js
+            pnpm -C src/btress_sysadmin run e2e -- --project=chromium
+          '
+
+      - name: Upload e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: btress-sysadmin-e2e-artifacts
+          path: |
+            src/btress_sysadmin/test-results/
+            src/btress_sysadmin/playwright-report/
+            /tmp/btress-server.log
+            /tmp/btress-static.log
+          retention-days: 14
