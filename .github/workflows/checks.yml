@@ -105,15 +105,6 @@ jobs:
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
 
-      - name: kotlin tests
-        run: |
-          nix develop .#ci-desktop --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
-
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: gradle-test-reports
-          path: src/daybook_compose/composeApp/build/reports/tests/
 
       - name: rust tests
         run: |
@@ -123,6 +114,56 @@ jobs:
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
           OLLAMA_MODEL: gemma3
+
+  kotlin-tests:
+    name: Kotlin tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Setup tmate session
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+
+      - name: remove unused files
+        run: |
+          sudo rm -rf /usr/lib/jvm
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /opt/microsoft /opt/google
+          sudo rm -rf /opt/az
+          sudo rm -rf /usr/local/share/powershell
+          # sudo rm -rf /opt/hostedtoolcache
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - name: kotlin tests
+        run: |
+          nix develop .#ci-desktop --command bash -lc '
+            export PROTOC="$(command -v protoc)"
+            cd src/daybook_compose
+            ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache
+          '
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: gradle-test-reports
+          path: src/daybook_compose/composeApp/build/reports/tests/
 
   e2e-sysadmin-chromium:
     name: E2E (sysadmin / chromium)
@@ -152,8 +193,9 @@ jobs:
       - name: Resolve pnpm store path
         id: pnpm-store
         run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Cache pnpm store
-        uses: actions/cache@v4
+      - name: Restore pnpm store
+        id: pnpm-store-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -163,6 +205,12 @@ jobs:
         run: nix develop .#default --command pnpm install --frozen-lockfile
       - name: fetch WIT dependencies
         run: nix develop .#default --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
+      - name: Save pnpm store
+        if: github.ref == 'refs/heads/main' && steps.pnpm-store-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Build workloads and host
         run: |
           nix develop .#default --command bash -lc '

@@ -189,6 +189,10 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
@@ -294,6 +298,7 @@ jobs:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
       DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
       DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
+      DAYBOOK_CLEAN_ORT_ANDROID_BUILD: "1"
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
@@ -319,6 +324,10 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
@@ -343,6 +352,17 @@ jobs:
         run: |
           command -v bsdtar
 
+      - name: Restore ONNX Runtime cache
+        id: ort-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/ort-cache.tar.xz
+          key: ort-android-${{ runner.os }}-${{ env.DAYBOOK_COMPOSE_PROFILE }}-${{ hashFiles('x/build-a-dayb.ts', 'flake.nix') }}
+      - name: Extract ONNX Runtime cache
+        if: steps.ort-cache.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p target
+          bsdtar -xf target/ort-cache.tar.xz -C target
       - name: materialize android release keystore
         if: env.DAYBOOK_COMPOSE_PROFILE == 'release'
         shell: bash
@@ -368,6 +388,17 @@ jobs:
       - name: build android apk
         run: |
           nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; deno run -A ./x/build-a-dayb.ts'
+
+      - name: Package ONNX Runtime cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          bsdtar -a -cf target/ort-cache.tar.xz -C target ort
+      - name: Save ONNX Runtime cache
+        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/ort-cache.tar.xz
+          key: ort-android-${{ runner.os }}-${{ env.DAYBOOK_COMPOSE_PROFILE }}-${{ hashFiles('x/build-a-dayb.ts', 'flake.nix') }}
 
       - id: archive-android
         name: archive android artifacts
@@ -438,6 +469,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
       - name: Setup wash CLI
@@ -590,6 +625,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
       - name: Setup wash CLI
