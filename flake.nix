@@ -192,6 +192,7 @@
             openssl
             dbus
             protobuf
+            curl
             mold
             deno
 

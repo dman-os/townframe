@@ -68,7 +68,7 @@ struct CacheEmbeddingRow<'a> {
 }
 
 pub struct LabelRequest<'a> {
-    pub sqlite_connection: &'a crate::wit::townframe::daybook::sqlite_connection::Connection,
+    pub sqlite_connection: &'a crate::wit::townframe::sqlite::sqlite_connection::Connection,
     pub rw_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
     pub ro_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
     pub working_facet_target: super::FacetWriteTarget<'a>,
@@ -664,7 +664,7 @@ fn null_anchor_prompts() -> &'static [&'static str] {
 }
 
 fn insert_cache_embedding_row(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     row: CacheEmbeddingRow<'_>,
 ) -> Result<i64, JobErrorX> {
     use crate::wit::townframe::sqlite::types::SqlValue;
@@ -727,7 +727,7 @@ fn insert_cache_embedding_row(
 }
 
 fn sqlite_vec_rowid_cosine_similarity(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     left_rowid: i64,
     right_rowid: i64,
 ) -> Result<f64, JobErrorX> {
