@@ -1,6 +1,6 @@
 import { type APIRequestContext, expect, test } from "@playwright/test";
 
-const inbucketURL = "http://localhost:9021";
+const inbucketURL = "http://localhost:9020";
 
 async function readMagicLink(
   request: APIRequestContext,

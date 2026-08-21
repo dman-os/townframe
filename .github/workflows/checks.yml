@@ -156,6 +156,16 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
+      - name: build plug OCI artifacts
+        run: |
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+
       - name: kotlin tests
         run: |
           nix develop .#ci-desktop --command bash -lc '
@@ -264,7 +274,7 @@ jobs:
               return 1
             }
 
-            wait_for Inbucket http://localhost:9021/
+            wait_for Inbucket http://localhost:9020/
             wait_for btress-auth http://localhost:8071/healthz
             wait_for btress-sysadmin http://localhost:3000/
             wait_for static-assets http://localhost:3001/pkg/btress_sysadmin.js
