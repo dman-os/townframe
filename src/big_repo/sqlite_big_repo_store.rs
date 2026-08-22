@@ -576,7 +576,7 @@ impl SqliteBigRepoStore {
         self.core.bucket_summary_for_path(part_id, path).await
     }
 
-    async fn publish(&self, events: Vec<SubEvent>) {
+    async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
         let mut promote = Vec::new();
         let mut dispatch = Vec::new();
         {
@@ -670,11 +670,12 @@ impl SqliteBigRepoStore {
 
         let mut drop_subs = HashSet::new();
         for (sub_id, event, obj_id, principal, sender) in dispatch {
+            // A policy-check failure must not masquerade as a denial: that
+            // would silently drop a deliverable event from a live subscriber.
             let permitted = matches!(event, SubEvent::Removed(_))
                 || self
                     .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await
-                    .unwrap_or(false);
+                    .await?;
             if permitted && sender.try_send(event).is_err() {
                 drop_subs.insert(sub_id);
             }
@@ -684,8 +685,7 @@ impl SqliteBigRepoStore {
             let permitted = matches!(event, SubEvent::Removed(_))
                 || self
                     .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await
-                    .unwrap_or(false);
+                    .await?;
             let mut bus = self.bus.write().expect(ERROR_MUTEX);
             let Some(sub) = bus.subs.get(&sub_id).cloned() else {
                 continue;
@@ -708,6 +708,7 @@ impl SqliteBigRepoStore {
                 bus.remove(sub_id);
             }
         }
+        Ok(())
     }
 
     pub(crate) async fn is_event_permitted(
@@ -858,7 +859,7 @@ impl HostPartStore for SqliteBigRepoStore {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let events = self.set_obj_payload_in_tx(&mut tx, obj_id, payload).await?;
         tx.commit().await?;
-        self.publish(events).await;
+        self.publish(events).await?;
         Ok(())
     }
 
@@ -1261,7 +1262,7 @@ impl HostPartStore for SqliteBigRepoStore {
             }));
         }
         tx.commit().await?;
-        self.publish(events).await;
+        self.publish(events).await?;
         Ok(())
     }
 
@@ -1364,7 +1365,7 @@ impl HostPartStore for SqliteBigRepoStore {
                 obj_id,
             },
         )])
-        .await;
+        .await?;
         Ok(())
     }
 
@@ -1630,7 +1631,31 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(encode_access(&access))
         .execute(&mut *tx)
         .await?;
+        let payload_json: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM big_sync_objs
+             WHERE scope_id = ?1 AND obj_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(&doc_blob)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+        // Re-emit the current object payload as a Changed event in the same
+        // transaction as the grant. Delivery-time policy filtering denies
+        // events for not-yet-authorized subscribers while cursors keep
+        // advancing, so without this resurrection event a peer granted later
+        // could never learn an already-advertised object exists.
+        let events = match payload_json
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| serde_json::from_str::<ObjPayload>(value).wrap_err(ERROR_JSON))
+            .transpose()?
+        {
+            Some(payload) => self.set_obj_payload_in_tx(&mut tx, doc, payload).await?,
+            None => Vec::new(),
+        };
         tx.commit().await?;
+        self.publish(events).await?;
         Ok(())
     }
 
@@ -1794,11 +1819,15 @@ impl SqliteBigRepoStore {
                             PartEvent::Added(inner) => inner.obj_id,
                             PartEvent::Removed(inner) => inner.obj_id,
                         };
+                        // A policy-check failure must not masquerade as a
+                        // denial: this spawned task cannot propagate errors,
+                        // so fail loudly instead of silently skipping a
+                        // deliverable event.
                         let permitted = matches!(event, PartEvent::Removed(_))
                             || store
                                 .is_event_permitted(Some(part_id), obj_id, subscriber)
                                 .await
-                                .unwrap_or(false);
+                                .expect(ERROR_IMPOSSIBLE);
                         if !permitted {
                             continue;
                         }
@@ -1833,7 +1862,7 @@ impl SqliteBigRepoStore {
                         let permitted = store
                             .is_event_permitted(None, *obj_id, subscriber)
                             .await
-                            .unwrap_or(false);
+                            .expect(ERROR_IMPOSSIBLE);
                         if permitted
                             && let Some(payload) =
                                 store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
@@ -2243,6 +2272,16 @@ impl SqliteBigRepoStore {
             .execute(&mut *tx)
             .await?;
 
+            let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar(
+                "SELECT principal_id FROM big_sync_syncable
+                 WHERE scope_id = ?1 AND obj_id = ?2",
+            )
+            .bind(self.scope_id)
+            .bind(&doc_blob)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
             sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
                 .bind(self.scope_id)
                 .bind(&doc_blob)
@@ -2338,6 +2377,50 @@ impl SqliteBigRepoStore {
                     if !matches!(old, MemberState::Absent) {
                         transitions.push((part_id, mutation.doc, old, MemberState::Dead));
                     }
+                }
+            }
+
+            // A principal granted here (absent before, present now) may have
+            // missed earlier Added events that delivery-time policy filtering
+            // denied while subscription cursors advanced past them. Re-emit a
+            // Live→Live transition for the parts the doc is already live in so
+            // the subscriber's existing subscription delivers a fresh event it
+            // is now permitted to receive. Every persisted access level grants
+            // fetch, so only absence→presence changes deliverability.
+            if mutation
+                .agents
+                .keys()
+                .any(|principal| !prior_agent_ids.contains(&Self::peer_blob(*principal)))
+                && let Some(payload) = event_payload.clone()
+            {
+                let live_part_rows = sqlx::query_scalar(
+                    "SELECT part_id FROM big_sync_members
+                     WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
+                )
+                .bind(self.scope_id)
+                .bind(&doc_blob)
+                .fetch_all(&mut *tx)
+                .await?;
+                for part_blob in live_part_rows {
+                    let part_id = Self::part_from_blob(part_blob);
+                    if !desired_parts.contains(&part_id)
+                        || transitions
+                            .iter()
+                            .any(|(p, d, _, _)| *p == part_id && *d == mutation.doc)
+                    {
+                        continue;
+                    }
+                    let old = self
+                        .load_member_state(&mut tx, part_id, mutation.doc)
+                        .await?;
+                    transition_event_payloads
+                        .insert((part_id, mutation.doc), payload.clone());
+                    transitions.push((
+                        part_id,
+                        mutation.doc,
+                        old,
+                        MemberState::Live(payload.clone()),
+                    ));
                 }
             }
         }
@@ -2450,7 +2533,7 @@ impl SqliteBigRepoStore {
         tx.commit().await?;
 
         if !events.is_empty() {
-            self.publish(events).await;
+            self.publish(events).await?;
         }
         Ok(())
     }
@@ -2602,7 +2685,7 @@ impl SqliteBigRepoStore {
         cursor: u64,
         limit: u32,
     ) -> Res<Vec<KeyhiveEventRow>> {
-        let rows = match sqlx::query(
+        let rows = sqlx::query(
             "SELECT seq, event_bytes
              FROM big_repo_keyhive_event_log
              WHERE scope_id = ?1 AND seq > ?2
@@ -2613,11 +2696,7 @@ impl SqliteBigRepoStore {
         .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .bind(i64::from(limit))
         .fetch_all(&self.sql.read_pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return Ok(Vec::new()),
-        };
+        .await?;
         rows.into_iter()
             .map(|row| {
                 Ok(KeyhiveEventRow {
@@ -3511,7 +3590,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3582,7 +3661,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3595,7 +3674,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3613,7 +3692,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3678,7 +3757,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3691,7 +3770,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
                 .await?;
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -3724,7 +3803,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             };
             tx.commit().await?;
             guard.disarm();
-            self.publish(events).await;
+            self.publish(events).await?;
             Ok(count)
         })
     }
@@ -3873,6 +3952,176 @@ mod tests {
             SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
         ));
         assert!(matches!(replay.recv().await?, SubEvent::ReplayComplete));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grant_resurrects_denied_added_on_live_subscription() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-grant-resurrect",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part = PartId(Byte32Id::new([227; 32]));
+        let obj = ObjId(Byte32Id::new([228; 32]));
+        let peer = PeerId(Byte32Id::new([229; 32]));
+        let other = PeerId(Byte32Id::new([230; 32]));
+        HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 1})).await?;
+        store.ensure_part(part).await?;
+        // Make the doc live in the part without granting `peer`: its Added
+        // event must be denied for `peer` at delivery time.
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::from([(other, keyhive_core::access::Access::Read)]),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::from([part]),
+                    desired_global: false,
+                }],
+                1,
+                true,
+            )
+            .await?;
+
+        let rx = HostPartStore::subscribe(
+            &store,
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                }]),
+            },
+            peer,
+        )
+        .await??;
+        // Replay must deliver nothing but the marker: the Added is denied
+        // while `peer` has no syncable row.
+        assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
+
+        // Granting the row must resurrect visibility on the existing
+        // subscription via a fresh Changed event.
+        HostPartStore::add_obj_member(
+            &store,
+            obj,
+            peer,
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+        assert!(matches!(
+            rx.recv().await?,
+            SubEvent::Changed(changed) if changed.obj_id == obj
+        ));
+
+        // A fresh replay from cursor 0 now delivers the previously buried
+        // Added, since delivery-time permission passes.
+        let replay = HostPartStore::subscribe(
+            &store,
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                }]),
+            },
+            peer,
+        )
+        .await??;
+        assert!(matches!(
+            replay.recv().await?,
+            SubEvent::Added(added) if added.obj_id == obj && added.part_id == part
+        ));
+        // The grant's resurrection Changed is part of the log as well.
+        assert!(matches!(
+            replay.recv().await?,
+            SubEvent::Changed(changed) if changed.obj_id == obj
+        ));
+        assert!(matches!(replay.recv().await?, SubEvent::ReplayComplete));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-reconcile-grant",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part = PartId(Byte32Id::new([231; 32]));
+        let obj = ObjId(Byte32Id::new([232; 32]));
+        let peer = PeerId(Byte32Id::new([233; 32]));
+        HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 1})).await?;
+        store.ensure_part(part).await?;
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::new(),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::from([part]),
+                    desired_global: false,
+                }],
+                1,
+                true,
+            )
+            .await?;
+
+        let rx = HostPartStore::subscribe(
+            &store,
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                }]),
+            },
+            peer,
+        )
+        .await??;
+        assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
+
+        // Granting through the group-part reconciliation path (absent →
+        // present principal) re-emits an event for the already-live doc so a
+        // subscriber whose earlier Added was denied learns it exists.
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::from([part]),
+                    desired_global: false,
+                }],
+                2,
+                true,
+            )
+            .await?;
+        assert!(matches!(
+            rx.recv().await?,
+            SubEvent::Added(added) if added.obj_id == obj && added.part_id == part
+        ));
+
+        // Reconciling again with unchanged agents grants nobody and must not
+        // emit anything further.
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                    managed_group_parts: HashSet::from([part]),
+                    desired_group_parts: HashSet::from([part]),
+                    desired_global: false,
+                }],
+                3,
+                true,
+            )
+            .await?;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv()
+        )
+        .await
+        .is_err());
         Ok(())
     }
 

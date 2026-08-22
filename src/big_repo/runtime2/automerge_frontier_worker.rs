@@ -188,55 +188,43 @@ impl AutomergeFrontierWorker {
                         return Err(ferr!("AutomergeFrontierWorker keyhive listener closed"));
                     };
 
-                    if !watched_parts.is_empty() {
-                        for row in &keyhive_events {
-                            if self.runtime.is_stopped() {
-                                return Ok(());
-                            }
-                            let event: StaticEvent<Vec<u8>> = match bincode::deserialize(&row.bytes) {
-                                Ok(ev) => ev,
-                                Err(err) => {
-                                    warn!(
-                                        seq = row.seq,
-                                        ?err,
-                                        "failed to deserialize keyhive event; advancing cursor"
-                                    );
-                                    keyhive_cursor = row.seq;
-                                    continue;
-                                }
-                            };
-                            if let StaticEvent::CgkaOperation(op) = event {
-                                let doc_id = crate::DocumentId::new(*op.payload().doc_id().as_bytes());
-                                let doc_parts = self
-                                    .big_sync_store
-                                    .obj_parts(doc_id)
-                                    .await?;
-                                if doc_parts.iter().any(|part| watched_parts.contains(part)) {
-                                    Self::process_materialized_doc(
-                                        doc_id,
-                                        &self.runtime,
-                                        &self.store,
-                                        &self.big_sync_store,
-                                        None,
-                                        self.automerge_part_id,
-                                    )
-                                    .await?;
-                                }
-                            }
-                            keyhive_cursor = row.seq;
+                    // Keyhive events are processed unconditionally: they are
+                    // global crypto ops and skipping or discarding any of them
+                    // (e.g. while no parts are watched) would lose decryption
+                    // material that later watches can never recover.
+                    for row in &keyhive_events {
+                        if self.runtime.is_stopped() {
+                            return Ok(());
                         }
-                        self.store
-                            .commit_automerge_keyhive_cursor(keyhive_cursor)
+                        let event: StaticEvent<Vec<u8>> = match bincode::deserialize(&row.bytes) {
+                            Ok(ev) => ev,
+                            Err(err) => {
+                                warn!(
+                                    seq = row.seq,
+                                    ?err,
+                                    "failed to deserialize keyhive event; advancing cursor"
+                                );
+                                keyhive_cursor = row.seq;
+                                continue;
+                            }
+                        };
+                        if let StaticEvent::CgkaOperation(op) = event {
+                            let doc_id = crate::DocumentId::new(*op.payload().doc_id().as_bytes());
+                            Self::process_materialized_doc(
+                                doc_id,
+                                &self.runtime,
+                                &self.store,
+                                &self.big_sync_store,
+                                None,
+                                self.automerge_part_id,
+                            )
                             .await?;
-                    } else {
-                        // TEMP-INSTRUMENTATION: events consumed while nothing is
-                        // watched are dropped without advancing the cursor —
-                        // a later watch can never see them again.
-                        tracing::warn!(
-                            count = keyhive_events.len(),
-                            "frontier worker dropped keyhive events: no watched parts"
-                        );
+                        }
+                        keyhive_cursor = row.seq;
                     }
+                    self.store
+                        .commit_automerge_keyhive_cursor(keyhive_cursor)
+                        .await?;
                 }
                 part_event = async {
                     match &mut part_listener {

@@ -29,6 +29,10 @@ mod bucket;
 use bucket::*;
 mod cursor;
 use cursor::*;
+/// New-generation stream abstractions (see module docs). Additive only:
+/// existing machines migrate onto these in the upcoming swap, nothing is
+/// rewired yet.
+pub mod outbox;
 mod fingerprint;
 mod ids;
 use bucket::BucketMachine;
@@ -37,6 +41,8 @@ pub mod part_store;
 use part_store::*;
 pub mod rpc;
 use rpc::*;
+pub mod scheduler;
+pub mod watermark;
 mod tasks;
 use crate::tasks::leaf_buckets::*;
 use crate::tasks::list_bucket::*;
