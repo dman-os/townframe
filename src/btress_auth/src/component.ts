@@ -62,8 +62,6 @@ async function setup() {
     return auth.handler(c.req.raw);
   });
 
-  app.get("/healthz", (c) => c.text("ok", 200));
-
   fire(app);
 }
 

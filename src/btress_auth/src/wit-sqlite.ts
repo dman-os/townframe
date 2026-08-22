@@ -167,7 +167,13 @@ export class WitsqlDialect implements Dialect {
   }
 }
 
-/** better-auth's core tables for SQLite (TEXT dates as ISO-8601, booleans as 0/1). */
+/** better-auth's core tables for SQLite (TEXT dates as ISO-8601, booleans as 0/1).
+ *
+ * STRICT tables (SQLite 3.37+) enforce column types at write time; all
+ * columns use TEXT/INTEGER per better-auth's schema. Indices mirror the
+ * `index: true` fields in better-auth's core schema (session.userId,
+ * account.userId, verification.identifier).
+ */
 export const AUTH_SCHEMA_DDL = `
 CREATE TABLE IF NOT EXISTS user (
   id TEXT PRIMARY KEY NOT NULL,
@@ -177,7 +183,7 @@ CREATE TABLE IF NOT EXISTS user (
   image TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
-);
+) STRICT;
 CREATE TABLE IF NOT EXISTS session (
   id TEXT PRIMARY KEY NOT NULL,
   expiresAt TEXT NOT NULL,
@@ -187,7 +193,8 @@ CREATE TABLE IF NOT EXISTS session (
   ipAddress TEXT,
   userAgent TEXT,
   userId TEXT NOT NULL
-);
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_session_user_id ON session (userId);
 CREATE TABLE IF NOT EXISTS account (
   id TEXT PRIMARY KEY NOT NULL,
   accountId TEXT NOT NULL,
@@ -202,7 +209,8 @@ CREATE TABLE IF NOT EXISTS account (
   password TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
-);
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_account_user_id ON account (userId);
 CREATE TABLE IF NOT EXISTS verification (
   id TEXT PRIMARY KEY NOT NULL,
   identifier TEXT NOT NULL,
@@ -210,5 +218,6 @@ CREATE TABLE IF NOT EXISTS verification (
   expiresAt TEXT NOT NULL,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
-);
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_verification_identifier ON verification (identifier);
 `;

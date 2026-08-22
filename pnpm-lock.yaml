@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@bytecodealliance/jco-std@0.1.3': 2142e44e6bcd3b6b8d85802ef0336c25d6ba07ee659fce1185d2beac69a1a493
+
 importers:
 
   .:
@@ -19,7 +22,7 @@ importers:
     dependencies:
       '@bytecodealliance/jco-std':
         specifier: ^0.1.0
-        version: 0.1.3
+        version: 0.1.3(patch_hash=2142e44e6bcd3b6b8d85802ef0336c25d6ba07ee659fce1185d2beac69a1a493)
       '@logtape/logtape':
         specifier: ^2.3.0
         version: 2.3.0
@@ -1843,7 +1846,7 @@ snapshots:
       es-module-lexer: 1.7.0
       oxc-parser: 0.76.0
 
-  '@bytecodealliance/jco-std@0.1.3': {}
+  '@bytecodealliance/jco-std@0.1.3(patch_hash=2142e44e6bcd3b6b8d85802ef0336c25d6ba07ee659fce1185d2beac69a1a493)': {}
 
   '@bytecodealliance/jco-transpile@0.5.2':
     dependencies:

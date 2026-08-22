@@ -19,7 +19,7 @@
   "scripts": {
     "build": "pnpm run build:ts && pnpm run build:component",
     "build:component": "jco componentize -w wit -o dist/btress_auth.wasm dist/component.js",
-    "build:ts": "node patch-jco-std.mjs && rolldown -c rolldown.config.mjs",
+    "build:ts": "rolldown -c rolldown.config.mjs",
     "dev": "nodemon",
     "fetch:wit": "wash wit fetch && node patch-wit-deps.mjs",
     "generate:types": "rimraf generated/types && jco guest-types wit/ -o generated/types",

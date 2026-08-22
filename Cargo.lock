@@ -2944,6 +2944,7 @@ name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
  "am_utils_rs",
+ "anyhow",
  "autosurgeon",
  "big_sync_core",
  "clap",
@@ -2952,14 +2953,18 @@ dependencies = [
  "daybook_core",
  "daybook_types",
  "directories",
+ "lettre",
  "qrcode",
  "serde",
  "serde_json",
+ "sqlx_utils_rs",
  "surelock",
  "tokio",
+ "tracing",
  "utils_rs",
  "wash-runtime",
  "wash_plugin_sqlite",
+ "wasmtime",
 ]
 
 [[package]]
@@ -2998,7 +3003,6 @@ dependencies = [
  "irpc-iroh",
  "jsonschema",
  "keyring-core",
- "lettre",
  "linux-keyutils-keyring-store",
  "loom",
  "mltools",

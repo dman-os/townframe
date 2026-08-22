@@ -2,5 +2,7 @@ packages:
   - ./src/btress_auth/
   - ./src/btress_sysadmin/
   - .
+patchedDependencies:
+  '@bytecodealliance/jco-std@0.1.3': patches/@bytecodealliance__jco-std@0.1.3.patch
 
 # nodeLinker: hoisted

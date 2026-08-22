@@ -2,7 +2,8 @@ use crate::interlude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use daybook_core::rt::wash_plugin::{MailPlugin, ServicePlugin};
+mod plugins;
+use plugins::{MailPlugin, ServicePlugin};
 use wash_plugin_sqlite::SqlPlugin;
 use wash_runtime::{
     engine::Engine,
