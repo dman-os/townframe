@@ -14,6 +14,7 @@
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
+use crate::sqlite_big_repo_store::KeyhiveIncorporationSink;
 use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::runtime2::{
     CausalDecryptResult, DocIo, KeyhiveSyncOutcome, MaterializationBlocker, RuntimeIo,
@@ -75,16 +76,20 @@ pub(crate) struct KeyhiveChangeNotifier {
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Dispatcher handle — classification + debounced fan-out to subscribers.
     dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
+    /// Durable incorporation sink for locally accepted events.
+    incorporation_sink: KeyhiveIncorporationSink,
 }
 
 impl KeyhiveChangeNotifier {
     pub(crate) fn new(
         keyhive_protocol: BigRepoKeyhiveProtocol,
         dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
+        incorporation_sink: KeyhiveIncorporationSink,
     ) -> Self {
         Self {
             keyhive_protocol,
             dispatcher,
+            incorporation_sink,
         }
     }
 
@@ -110,8 +115,12 @@ impl KeyhiveChangeNotifier {
         if let Err(err) = self.keyhive_protocol.note_local_keyhive_changed().await {
             tracing::debug!(%err, "keyhive network local-change notification deferred/best-effort");
         }
-        // Delivery is intentionally best effort; the event is only a wake-up
-        // hint and is not the source of Keyhive state.
+        // Local mutations bypass protocol ingestion, so record their accepted
+        // operation hashes at the same durable incorporation boundary as
+        // remote exchanges. The dispatcher remains only a wake-up hint.
+        self.incorporation_sink
+            .append(hashes.to_vec(), None)
+            .await?;
         self.dispatcher.report(hashes.to_vec(), None);
         Ok(())
     }
@@ -416,8 +425,6 @@ where
         staged: crate::runtime2::support::StagedAutomergeIngest,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            // TEMP-INSTRUMENTATION: trace initial persistence of created docs.
-            tracing::warn!(sed = %sed_id, "persist_initial_document: begin");
             let (sedimentree, blobs, cgka_ops, local_secrets) =
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
                     .await
@@ -439,8 +446,6 @@ where
                     .note_local_keyhive_changed(&hashes)
                     .await?;
             }
-            // TEMP-INSTRUMENTATION
-            tracing::warn!(sed = %sed_id, "persist_initial_document: stored");
             Ok(())
         })
     }
@@ -1960,13 +1965,17 @@ where
     ));
 
     // ── Keyhive protocol and handler ──────────────────────────────────────
-    // The change reporter feeds the notification dispatcher: every sync
-    // exchange that inserts new events reports (hashes, source) post
-    // ingestion. The dispatcher classifies and debounces the fan-out.
+    // The incorporation hook is awaited inline: the exchange cannot complete
+    // until the durable incorporation record commits.
     let (keyhive_events_tx, keyhive_events_rx) = tokio::sync::mpsc::channel(1024);
     let keyhive_reporter_weak = keyhive_events_tx.downgrade();
     let keyhive_overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reporter_overflow = Arc::clone(&keyhive_overflow);
+    let incorporation_sink = KeyhiveIncorporationSink::new(
+        group_part_store.clone(),
+        evt_tx.clone(),
+    );
+    let reporter_sink = incorporation_sink.clone();
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -1975,35 +1984,26 @@ where
             keyhive.contact_card().clone(),
         )
         .with_storage_recovery()
-        .with_change_reporter(move |hashes, source| {
-            if let Some(tx) = keyhive_reporter_weak.upgrade() {
-                crate::runtime2::keyhive_dispatcher::try_send_change_event(
-                    &tx,
-                    &reporter_overflow,
-                    hashes,
-                    source,
-                );
-            }
+        .with_durable_incorporation_hook(move |hashes, source| {
+            let sink = reporter_sink.clone();
+            let dispatcher_tx = keyhive_reporter_weak.clone();
+            let overflow = Arc::clone(&reporter_overflow);
+            Sendable::from_future(async move {
+                sink.append(hashes.clone(), source.clone())
+                    .await
+                    .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
+                if let Some(tx) = dispatcher_tx.upgrade() {
+                    crate::runtime2::keyhive_dispatcher::try_send_change_event(
+                        &tx,
+                        &overflow,
+                        hashes,
+                        source,
+                    );
+                }
+                Ok(())
+            })
         }),
     );
-
-    // Structural cache-generation bump: any event newly inserted into storage
-    // (local persist or remote incorporation) invalidates the protocol's
-    // per-pair projection cache, so advertising/serving can never depend on a
-    // mutation site remembering to signal the change itself.
-    keyhive_storage.set_on_event_inserted(Arc::new({
-        let keyhive_protocol = Arc::clone(&keyhive_protocol);
-        move || {
-            let keyhive_protocol = Arc::clone(&keyhive_protocol);
-            async move {
-                keyhive_protocol
-                    .note_local_keyhive_changed()
-                    .await
-                    .expect("keyhive cache generation bump cannot fail");
-            }
-            .boxed()
-        }
-    }));
 
     // One dispatcher owns the debounced, classified fan-out of keyhive change
     // hints to subscribed peers. It stops when the events channel closes
@@ -2025,6 +2025,7 @@ where
     let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
         Arc::clone(&keyhive_protocol),
         keyhive_dispatcher,
+        incorporation_sink.clone(),
     );
 
     let mut keyhive_handler = BigRepoKeyhiveHandler::new(
@@ -2126,7 +2127,6 @@ where
         Arc::new(subduction_ephemeral::clock::std_clock::StdClock);
 
     // ── Spawn runtime2 ───────────────────────────────────────────────────
-    let keyhive_state_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let config = crate::runtime2::Runtime2Config {
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
         runtime_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
@@ -2137,7 +2137,6 @@ where
         timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
-        keyhive_state_generation: Arc::clone(&keyhive_state_generation),
         event_channel: Some((evt_tx.clone(), evt_rx)),
         keyhive_event_notify: Some(group_part_store.keyhive_event_notifier()),
     };
@@ -2154,7 +2153,6 @@ where
         PeerId::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
-        Arc::clone(&keyhive_state_generation),
     );
     stop_token.group_part_stop = Some(spawned_group_part.stop);
     stop_token.child_tasks.spawn(spawned_group_part.run)?;
@@ -2165,7 +2163,6 @@ where
         handle.clone(),
         Arc::clone(&timer),
         evt_tx.clone(),
-        Arc::clone(&keyhive_state_generation),
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
     stop_token
@@ -2177,7 +2174,6 @@ where
         Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
         handle.clone(),
         evt_tx.clone(),
-        Arc::clone(&keyhive_state_generation),
         automerge_source_parts,
     );
     let automerge_frontier_parts_tx = spawned_automerge_frontier.parts_tx;

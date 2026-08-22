@@ -29,6 +29,7 @@
   - [ ] Built in updater
   - [ ] Per sink switch/index rebuild
 
+- [ ] Replace sqlx with seaorm
 - [ ] Plugs
   - [ ] Change manifest/types module structure for plugs
   - [ ] Better SDK

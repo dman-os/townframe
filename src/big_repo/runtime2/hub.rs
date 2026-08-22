@@ -62,17 +62,13 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     keyhive_notif_pending: HashSet<PeerId>,
     keyhive_round_ids: u64,
     keyhive_reconciliation_waiters: Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>,
-    /// Shared Keyhive state-generation counter. Bumped on every state advance
-    /// (KeyhiveSyncDone{changed:true}, delegation, revocation, cgka); the
-    /// group-part worker full-rebuilds on advance and acks the generation it
-    /// covered via `GroupPartWorkerAdvanced`.
-    keyhive_state_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Highest Keyhive state generation the group-part projection has
-    /// reconciled (from worker acks).
-    group_part_generation: u64,
-    /// Highest Keyhive state generation the causal-checkpoint worker has
-    /// covered into causal checkpoints (from worker acks).
-    causal_checkpoint_generation: u64,
+    /// Highest admission-log seq the group-part projection has settled
+    /// (from worker announcements).
+    group_part_settled_seq: u64,
+    /// Highest admission-log seq known incorporated (from the admission
+    /// writer). `WaitForKeyhiveReconciliation` captures this and resolves
+    /// once `group_part_settled_seq` covers it.
+    admitted_head: u64,
     /// Notifier for Keyhive event log changes.
     keyhive_event_notify: Arc<tokio::sync::Notify>,
 
@@ -146,8 +142,7 @@ struct QuiescenceProbe {
     barrier_id: u64,
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
-    group_part_generation: u64,
-    causal_checkpoint_generation: u64,
+    group_part_settled_seq: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -311,26 +306,21 @@ where
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
         let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
-        let group_part_generation = self
-            .keyhive_state_generation
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let causal_checkpoint_generation = group_part_generation;
+        let group_part_settled_seq = self.group_part_settled_seq;
         debug!(
             barrier_id,
             local_peer_id = %self.local_peer_id,
             activity_generation = generation,
             doc_workers = doc_ids.len(),
             pending_materialization = self.pending_materialization.len(),
-            group_part_generation,
-            causal_checkpoint_generation,
+            group_part_settled_seq,
             "runtime2 quiescence probe started",
         );
         self.quiescence_probe = Some(QuiescenceProbe {
             barrier_id,
             activity_generation: generation,
             pending_docs: doc_ids.iter().copied().collect(),
-            group_part_generation,
-            causal_checkpoint_generation,
+            group_part_settled_seq,
         });
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
@@ -374,8 +364,7 @@ where
             || self.tracked_in_flight > 0
             || !self.active_keyhive_syncs.is_empty()
             || !self.keyhive_waiters.is_empty()
-            || self.group_part_generation < probe.group_part_generation
-            || self.causal_checkpoint_generation < probe.causal_checkpoint_generation
+            || self.group_part_settled_seq < probe.group_part_settled_seq
         {
             return Ok(());
         }
@@ -658,10 +647,8 @@ where
                 }
             }
             Runtime2Cmd::WaitForKeyhiveReconciliation { resp } => {
-                let captured = self
-                    .keyhive_state_generation
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if self.group_part_generation >= captured {
+                let captured = self.admitted_head;
+                if self.group_part_settled_seq >= captured {
                     resp.send(Ok(()))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
@@ -1428,8 +1415,8 @@ where
             &evt,
             Runtime2Evt::DocWorkerFenced { .. }
                 | Runtime2Evt::TrackedWorkDone { .. }
-                | Runtime2Evt::GroupPartWorkerAdvanced { .. }
-                | Runtime2Evt::CausalCheckpointWorkerAdvanced { .. }
+                | Runtime2Evt::GroupPartWorkerSettled { .. }
+                | Runtime2Evt::KeyhiveAdmissionAdvanced { .. }
                 | Runtime2Evt::ConnEstablished { .. }
                 | Runtime2Evt::ConnLost { .. }
                 | Runtime2Evt::KeyhiveSyncDone { .. }
@@ -1466,9 +1453,6 @@ where
                 changed,
             } => {
                 self.finish_keyhive_sync(peer_id, request_id)?;
-                if changed {
-                    self.bump_keyhive_state_generation("keyhive sync exchange");
-                }
             }
             Runtime2Evt::KeyhiveSyncFailed {
                 peer_id,
@@ -1480,11 +1464,15 @@ where
             Runtime2Evt::KeyhiveChangeNotif { peer_id } => {
                 self.handle_keyhive_change_notif(peer_id)?;
             }
-            Runtime2Evt::GroupPartWorkerAdvanced { generation } => {
-                self.group_part_generation = self.group_part_generation.max(generation);
+            Runtime2Evt::KeyhiveAdmissionAdvanced { seq } => {
+                self.admitted_head = self.admitted_head.max(seq);
+                self.try_resolve_quiescence()?;
+            }
+            Runtime2Evt::GroupPartWorkerSettled { seq } => {
+                self.group_part_settled_seq = self.group_part_settled_seq.max(seq);
                 let mut pending = Vec::new();
                 for (captured, waiter) in std::mem::take(&mut self.keyhive_reconciliation_waiters) {
-                    if self.group_part_generation >= captured {
+                    if self.group_part_settled_seq >= captured {
                         waiter
                             .send(Ok(()))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1494,11 +1482,6 @@ where
                     }
                 }
                 self.keyhive_reconciliation_waiters = pending;
-                self.try_resolve_quiescence()?;
-            }
-            Runtime2Evt::CausalCheckpointWorkerAdvanced { generation } => {
-                self.causal_checkpoint_generation =
-                    self.causal_checkpoint_generation.max(generation);
                 self.try_resolve_quiescence()?;
             }
             Runtime2Evt::DocWorkerStopped { doc_id, error } => {
@@ -1532,12 +1515,9 @@ where
                 );
             }
             Runtime2Evt::DocWorkerMaterializationRetryCompleted { doc_id, status } => {
-                let start_generation = self.materialization_retries_in_flight.remove(&doc_id);
-                let stale = start_generation.is_some_and(|start| {
-                    self.keyhive_state_generation
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        > start
-                });
+                let start_seq = self.materialization_retries_in_flight.remove(&doc_id);
+                let stale = start_seq
+                    .is_some_and(|start| self.admitted_head > start);
                 match &status {
                     crate::runtime2::MaterializationStatus::Pending(blockers) => {
                         self.pending_materialization.insert(doc_id);
@@ -1593,7 +1573,6 @@ where
                     pending_count = self.pending_materialization.len(),
                     "processing CGKA operation; retrying pending materialization after key update"
                 );
-                self.bump_keyhive_state_generation("cgka op");
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1605,7 +1584,6 @@ where
                 }
             }
             Runtime2Evt::DelegationReceived { target, data } => {
-                self.bump_keyhive_state_generation("delegation received");
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
                 let member_is_document = matches!(
                     data.payload().delegate(),
@@ -1629,7 +1607,6 @@ where
                 }
             }
             Runtime2Evt::RevocationReceived { target, data } => {
-                self.bump_keyhive_state_generation("revocation received");
                 let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
                 let member_is_document = matches!(
                     data.payload().revoked().payload().delegate(),
@@ -2054,14 +2031,12 @@ where
                 return Ok(());
             }
         };
-        let generation = self
-            .keyhive_state_generation
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let start_seq = self.admitted_head;
         self.materialization_retries_in_flight
-            .insert(doc_id, generation);
+            .insert(doc_id, start_seq);
         debug!(
             %doc_id,
-            generation,
+            start_seq,
             "requesting targeted materialization retry from document worker"
         );
         let (resp, result) = futures::channel::oneshot::channel();
@@ -2098,24 +2073,6 @@ where
     }
 
     /// Cancel all pending keyhive syncs for a peer.
-    /// Bump the shared Keyhive state generation. The group-part worker
-    /// observes the advance, full-rebuilds its projection from current
-    /// Keyhive state, and acks the generation; reconciliation waiters and
-    /// quiescence probes resolve once the acked generation covers their
-    /// captured one.
-    fn bump_keyhive_state_generation(&self, cause: &'static str) {
-        let generation = self
-            .keyhive_state_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        self.keyhive_event_notify.notify_waiters();
-        debug!(
-            local_peer_id = %self.local_peer_id,
-            generation,
-            cause,
-            "Keyhive state generation advanced"
-        );
-    }
 
     fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerId, reason: &'static str) {
         self.active_keyhive_syncs.remove(peer_id);
@@ -2585,7 +2542,6 @@ where
         timer,
         clock,
         connect,
-        keyhive_state_generation: keyhive_state_generation_config,
         event_channel,
         keyhive_event_notify,
     } = config;
@@ -2624,9 +2580,8 @@ where
         active_keyhive_syncs: HashMap::new(),
         keyhive_notif_pending: HashSet::new(),
         keyhive_round_ids: 0,
-        keyhive_state_generation: keyhive_state_generation_config,
-        group_part_generation: 0,
-        causal_checkpoint_generation: 0,
+        group_part_settled_seq: 0,
+        admitted_head: 0,
         keyhive_event_notify,
         keyhive_reconciliation_waiters: Vec::new(),
         pending_doc_syncs: HashMap::new(),

@@ -222,6 +222,21 @@ where
         }
         waiter.streams
     }
+    /// Settle EVERY waiter keyed under `job`, regardless of cursor. This
+    /// codifies the batch-gate pattern where one scheduler job (e.g. a
+    /// reconciliation sweep gate) covers many cursors and finishes them all
+    /// at once when the job completes. Returns each freed cursor with the
+    /// streams it gated, so the caller can mark those streams finished.
+    pub fn settle_job(&mut self, job: JobKey) -> Vec<(Cursor, Vec<StreamId>)> {
+        let Some(entry) = self.jobs.remove(&job) else {
+            return Vec::new();
+        };
+        entry
+            .into_iter()
+            .map(|(cursor, waiter)| (cursor, waiter.streams))
+            .collect()
+    }
+
 
     /// Supersede in-flight work for `job` on `stream` below `bound`: for
     /// every waiter with `cursor < bound` referencing `stream`, drop the
@@ -373,6 +388,30 @@ where
                 (stream, book.drain())
             })
             .collect()
+    }
+
+    /// Settle every cursor gated by `job` (see [`JobBoard::settle_job`]).
+    /// Each referenced stream is force-finished per freed cursor and
+    /// re-drained; the aggregated new watermarks are returned so the caller
+    /// can persist them via its own commands.
+    pub fn settle_job(&mut self, job: JobKey) -> Vec<(StreamId, Option<Cursor>)> {
+        let mut out: Vec<(StreamId, Option<Cursor>)> = Vec::new();
+        for (cursor, streams) in self.jobs.settle_job(job) {
+            for stream in streams {
+                let book = self.stream_book_mut(stream);
+                book.force_finish(cursor);
+                let reached = book.drain();
+                match out.iter_mut().find(|(candidate, _)| candidate == &stream) {
+                    Some((_, slot)) => {
+                        if reached.is_some() {
+                            *slot = reached;
+                        }
+                    }
+                    None => out.push((stream, reached)),
+                }
+            }
+        }
+        out
     }
 
     /// Supersede pending work for `job` on `stream` below `bound_cursor`.
@@ -588,4 +627,45 @@ mod tests {
         assert!(m.is_settled(&"alpha"));
         assert!(m.is_settled(&"beta"));
     }
+    #[test]
+    fn settle_job_frees_every_cursor_gated_by_the_job() {
+        // The batch-gate pattern: one scheduler job covers many cursors;
+        // settle_job finishes them all at once and re-drains each stream.
+        let mut m = Machine::default();
+        m.admit("p", 1);
+        m.track("p", 9, 1, [Lane::Sync], ());
+        m.admit("p", 2);
+        m.track("p", 9, 2, [Lane::Sync], ());
+        m.admit("q", 5);
+        m.track("q", 9, 5, [Lane::Sync], ());
+
+        let reached = m.settle_job(9);
+        // p advances to 2 (both its cursors freed), q to 5, in one call.
+        assert_eq!(reached, vec![("p", Some(2)), ("q", Some(5))]);
+        assert!(m.is_settled(&"p"));
+        assert!(m.is_settled(&"q"));
+
+        // Unknown job: no-op.
+        assert_eq!(m.settle_job(404), Vec::<(&str, Option<u64>)>::new());
+    }
+
+    #[test]
+    fn settle_job_leaves_other_jobs_waiting() {
+        let mut m = Machine::default();
+        m.admit("p", 1);
+        m.track("p", 9, 1, [Lane::Sync], ());
+        m.admit("p", 2);
+        m.track("p", 10, 2, [Lane::Sync], ());
+
+        let reached = m.settle_job(9);
+        // cursor 1 is terminal and contiguous, so the watermark reaches it;
+        // cursor 2 (job 10) is still pending and gates nothing yet.
+        assert_eq!(reached, vec![("p", Some(1))]);
+        assert_eq!(m.watermark(&"p"), Some(1));
+        assert!(!m.is_settled(&"p"));
+        // Job 10 still pending: settling it advances past both.
+        assert_eq!(m.settle_job(10), vec![("p", Some(2))]);
+        assert!(m.is_settled(&"p"));
+    }
 }
+

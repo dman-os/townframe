@@ -354,11 +354,11 @@ pub(crate) async fn persist_cgka_update_op(
     update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
 ) -> Res<Vec<EventHash>> {
     let event = StaticEvent::CgkaOperation(Box::new(update_op));
-    let (hash, _) =
+    let (hash, inserted) =
         subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event, None)
             .await
             .map_err(|err| ferr!("failed to save keyhive cgka update op: {err}"))?;
-    Ok(vec![hash.0])
+    Ok(inserted.then_some(hash.0).into_iter().collect())
 }
 
 pub(crate) async fn persist_cgka_updates_durably(

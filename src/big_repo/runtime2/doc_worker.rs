@@ -1716,12 +1716,10 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Live(weak) => weak.upgrade(),
             _ => None,
         };
-        tracing::debug!(%self.doc_id, "passed point R1: retry_materialization entry");
         // A live doc never needs a coarse rewalk: precisely retry the held
         // blocked refs — a keyhive round or an earlier session may have
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
-            tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point R1b: live precise retry");
             let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");

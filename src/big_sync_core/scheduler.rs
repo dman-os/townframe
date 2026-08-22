@@ -63,6 +63,10 @@ pub struct Scheduler<Seed> {
     delayed: BTreeMap<TaskId, (Seed, Instant)>,
     spawn_queue: Vec<SpawnedTask<Seed>>,
     stop_queue: HashSet<TaskId>,
+    /// Ids that were legitimately stopped and may still be respawned once.
+    /// Consumed by `respawn_delayed`, which refuses to resurrect a task that
+    /// never went through `stop`.
+    stopped: HashSet<TaskId>,
 }
 
 impl<Seed: Clone> Default for Scheduler<Seed> {
@@ -74,6 +78,7 @@ impl<Seed: Clone> Default for Scheduler<Seed> {
             delayed: Default::default(),
             spawn_queue: Default::default(),
             stop_queue: Default::default(),
+            stopped: Default::default(),
         }
     }
 }
@@ -114,6 +119,8 @@ impl<Seed: Clone> Scheduler<Seed> {
     /// id enters the stop queue so the driver cancels the running work.
     /// Mirrors `Tasks::stop_task` exactly.
     pub fn stop(&mut self, id: TaskId) -> Option<Retry> {
+        // A stop always licenses one later respawn, whichever branch takes.
+        self.stopped.insert(id);
         let old = self.live.remove(&id);
         if self.delayed.remove(&id).is_some() {
             return old;
@@ -129,16 +136,24 @@ impl<Seed: Clone> Scheduler<Seed> {
     /// (floored by `min_delay`, capped by `max_backoff`; a zero cap falls
     /// back to one minute).
     ///
-    /// Contract: the caller must have [`Self::stop`]ped the predecessor
-    /// first — the real machine always pairs them (`handle_evt(SyncFailed)`
-    /// runs `stop_task(task_id)` before respawning with the saved retry).
+    /// Contract, made unrepresentable-to-violate: `prev_id` must have been
+    /// [`Self::stop`]ped first — the real machine always pairs them
+    /// (`handle_evt(SyncFailed)` runs `stop_task(task_id)` before respawning
+    /// with the saved retry). Respawning a task that was never stopped is an
+    /// invariant violation and panics. Each stop licenses exactly one
+    /// respawn; a second respawn from the same stop panics too.
     pub fn respawn_delayed(
         &mut self,
+        prev_id: TaskId,
         seed: Seed,
         prev_retry: Retry,
         min_delay: Duration,
         now: Instant,
     ) -> TaskId {
+        assert!(
+            self.stopped.remove(&prev_id),
+            "respawn_delayed for task {prev_id} without a prior stop"
+        );
         let max_backoff = if self.max_backoff.is_zero() {
             Duration::from_secs(60)
         } else {
@@ -242,7 +257,7 @@ mod tests {
         // the exact pairing in BigSyncMachine::handle_evt(SyncFailed).
         s.stop(id);
         assert_eq!(s.counts().stop_queue, 1);
-        let id2 = s.respawn_delayed(Seed::Diff, retry, Duration::from_secs(5), now);
+        let id2 = s.respawn_delayed(id, Seed::Diff, retry, Duration::from_secs(5), now);
         assert_eq!(s.counts().delayed, 1);
         assert_eq!(s.retry_of(id2).unwrap().backoff, Duration::from_secs(5));
 
@@ -265,7 +280,7 @@ mod tests {
         // handle_evt(SyncFailed): stop_task then respawn with saved retry.
         let retry1 = s.retry_of(id).unwrap();
         s.stop(id);
-        let id2 = s.respawn_delayed(Seed::Sync(1), retry1, Duration::from_secs(3), t0);
+        let id2 = s.respawn_delayed(id, Seed::Sync(1), retry1, Duration::from_secs(3), t0);
         // first retry: min_delay capped by max_backoff
         assert_eq!(s.retry_of(id2).unwrap().backoff, Duration::from_secs(3));
 
@@ -277,22 +292,22 @@ mod tests {
         // second retry doubles: 6s
         let retry2 = s.retry_of(id2).unwrap();
         s.stop(id2);
-        let id3 = s.respawn_delayed(Seed::Sync(1), retry2, Duration::from_secs(3), t0);
+        let id3 = s.respawn_delayed(id2, Seed::Sync(1), retry2, Duration::from_secs(3), t0);
         assert_eq!(s.retry_of(id3).unwrap().backoff, Duration::from_secs(6));
 
         // ... doubling continues: 24s ...
         let retry3 = s.retry_of(id3).unwrap();
         s.stop(id3);
-        let id4 = s.respawn_delayed(Seed::Sync(1), retry3, Duration::from_secs(3), t0);
+        let id4 = s.respawn_delayed(id3, Seed::Sync(1), retry3, Duration::from_secs(3), t0);
         let retry4 = s.retry_of(id4).unwrap();
         s.stop(id4);
-        let id5 = s.respawn_delayed(Seed::Sync(1), retry4, Duration::from_secs(3), t0);
+        let id5 = s.respawn_delayed(id4, Seed::Sync(1), retry4, Duration::from_secs(3), t0);
         assert_eq!(s.retry_of(id5).unwrap().backoff, Duration::from_secs(24));
 
         // ... until it hits the cap: 30s
         let retry5 = s.retry_of(id5).unwrap();
         s.stop(id5);
-        let id6 = s.respawn_delayed(Seed::Sync(1), retry5, Duration::from_secs(3), t0);
+        let id6 = s.respawn_delayed(id5, Seed::Sync(1), retry5, Duration::from_secs(3), t0);
         assert_eq!(s.retry_of(id6).unwrap().backoff, Duration::from_secs(30));
 
         // not due yet: nothing spawns
@@ -310,7 +325,35 @@ mod tests {
         let id = s.spawn(t0, Seed::Diff);
         s.drain_spawn_queue();
         let retry = s.retry_of(id).unwrap();
-        let id2 = s.respawn_delayed(Seed::Diff, retry, Duration::from_secs(120), t0);
+        s.stop(id);
+        let id2 = s.respawn_delayed(id, Seed::Diff, retry, Duration::from_secs(120), t0);
         assert_eq!(s.retry_of(id2).unwrap().backoff, Duration::from_secs(60));
+    }
+
+    #[test]
+    #[should_panic(expected = "without a prior stop")]
+    fn respawning_a_task_that_was_never_stopped_panics() {
+        let t0 = t(0);
+        let mut s = Scheduler::<Seed>::default();
+        let id = s.spawn(t0, Seed::Diff);
+        s.drain_spawn_queue();
+        let retry = s.retry_of(id).expect("live");
+        // No stop(): the predecessor is still live — resurrection must be
+        // impossible.
+        s.respawn_delayed(id, Seed::Diff, retry, Duration::from_secs(1), t0);
+    }
+
+    #[test]
+    #[should_panic(expected = "without a prior stop")]
+    fn one_stop_licenses_exactly_one_respawn() {
+        let t0 = t(0);
+        let mut s = Scheduler::<Seed>::default();
+        let id = s.spawn(t0, Seed::Diff);
+        s.drain_spawn_queue();
+        let retry = s.retry_of(id).expect("live");
+        s.stop(id);
+        let _id2 = s.respawn_delayed(id, Seed::Diff, retry, Duration::from_secs(1), t0);
+        // The single stop was already consumed by the first respawn.
+        s.respawn_delayed(id, Seed::Diff, retry, Duration::from_secs(1), t0);
     }
 }

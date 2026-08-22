@@ -68,6 +68,27 @@ impl<Cmd, Meta> Outbox<Cmd, Meta> {
         self.queue.is_empty()
     }
 
+    /// Iterate the queued commands in order without touching the queue.
+    /// Introspection for tests and diagnostics — execution still goes
+    /// through `front`/`complete` and stays strictly serial.
+    pub fn iter(&self) -> impl Iterator<Item = (PendingCmd, &Cmd, &Meta)> {
+        self.queue
+            .iter()
+            .map(|(pending, cmd, meta)| (*pending, cmd, meta))
+    }
+
+    /// The queued commands in order (test/diagnostic view).
+    pub fn queued(&self) -> impl Iterator<Item = &Cmd> {
+        self.queue.iter().map(|(_, cmd, _)| cmd)
+    }
+
+    /// Drain every queued command in order (test helper: asserts the exact
+    /// command sequence a reducer emitted).
+    #[cfg(test)]
+    pub fn drain(&mut self) -> Vec<(PendingCmd, Cmd, Meta)> {
+        self.queue.drain(..).collect()
+    }
+
     /// Report successful execution of the front command. Returns the command
     /// and its metadata for completion routing.
     ///
@@ -86,10 +107,35 @@ impl<Cmd, Meta> Outbox<Cmd, Meta> {
         (cmd, meta)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn introspection_views_do_not_disturb_the_queue() {
+        let mut outbox: Outbox<Cmd, ()> = Outbox::new();
+        outbox.push(
+            Cmd::PersistCursor {
+                part: "a",
+                cursor: 1,
+            },
+            (),
+        );
+        outbox.push(Cmd::WriteStore, ());
+
+        // queued()/iter() observe without mutating; front is untouched.
+        assert_eq!(outbox.queued().count(), 2);
+        assert_eq!(outbox.iter().count(), 2);
+        assert!(matches!(outbox.front(), Some((_, Cmd::PersistCursor { .. }))));
+        assert_eq!(outbox.len(), 2);
+
+        // drain() yields the exact ordered command sequence.
+        let drained = outbox.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(drained[0].1, Cmd::PersistCursor { .. }));
+        assert!(matches!(drained[1].1, Cmd::WriteStore));
+        assert!(outbox.is_empty());
+    }
 
     #[derive(Debug, Clone, PartialEq)]
     enum Cmd {

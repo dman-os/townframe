@@ -28,7 +28,6 @@ use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
 use utils_rs::lru::KeyedLruPool;
 
-const KEYHIVE_EVENT_LOG_MAX_ENTRIES: i64 = 200_000;
 
 /// Metadata-weighted capacity of the tree projection cache, in metadata
 /// items (one per loose commit or fragment). SQLite remains authoritative;
@@ -287,7 +286,6 @@ pub struct SqliteBigRepoStore {
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
     keyhive_event_notify: Arc<tokio::sync::Notify>,
-    keyhive_bus: Arc<big_sync::sqlite_core::ReplayBus<KeyhiveEventRow>>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
 }
@@ -464,6 +462,67 @@ pub(crate) struct KeyhiveEventRow {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// Durable record of keyhive event *incorporation*.
+///
+/// Unlike [`KeyhiveEventRow`] (raw arrivals, some of whose effects may
+/// still be pending), a row here means the event's effects are applied to
+/// the keyhive projection. Fed exclusively by the durable incorporation hook;
+/// workers tail this instead of the raw arrival log.
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionEventRow {
+    pub(crate) seq: u64,
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// Inline sink for durable Keyhive incorporation records.
+#[derive(Clone)]
+pub(crate) struct KeyhiveIncorporationSink {
+    store: SqliteBigRepoStore,
+    runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+}
+
+impl KeyhiveIncorporationSink {
+    pub(crate) fn new(
+        store: SqliteBigRepoStore,
+        runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    ) -> Self {
+        Self {
+            store,
+            runtime_events,
+        }
+    }
+
+    pub(crate) async fn append(
+        &self,
+        hashes: Vec<[u8; 32]>,
+        source: Option<subduction_keyhive::KeyhivePeerId>,
+    ) -> Res<()> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let hashes = hashes
+            .into_iter()
+            .map(subduction_keyhive::storage::StorageHash::new)
+            .collect();
+        let seq = self.store.append_admitted_events(hashes, source).await?;
+        if let Err(error) = self
+            .runtime_events
+            .send(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced { seq })
+            .await
+        {
+            // The durable incorporation is already committed. Runtime events
+            // are only wake-up hints, and a closed channel is expected during
+            // shutdown; never turn that into a failed protocol exchange.
+            tracing::debug!(
+                ?error,
+                seq,
+                "runtime event channel closed after incorporation commit"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for SqliteBigRepoStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -496,7 +555,6 @@ impl SqliteBigRepoStore {
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
             keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
-            keyhive_bus: big_sync::sqlite_core::ReplayBus::new("keyhive_events"),
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
@@ -2144,6 +2202,15 @@ impl SqliteBigRepoStore {
                 FOREIGN KEY(scope_id, event_hash)
                     REFERENCES big_repo_keyhive_event_log(scope_id, event_hash)
             ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_admission_log (
+                scope_id INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                event_hash BLOB NOT NULL,
+                event_bytes BLOB NOT NULL,
+                source_id BLOB,
+                PRIMARY KEY(scope_id, seq),
+                UNIQUE(scope_id, event_hash)
+            ) STRICT",
             // FIXME: let's just have a single table for all cursor wtf
             "CREATE TABLE IF NOT EXISTS big_repo_group_part_cursor (
                 scope_id INTEGER PRIMARY KEY,
@@ -2680,58 +2747,6 @@ impl SqliteBigRepoStore {
         Ok(cursor.flatten().map(Self::u64_from_db).unwrap_or(0))
     }
 
-    pub(crate) async fn keyhive_events_after(
-        &self,
-        cursor: u64,
-        limit: u32,
-    ) -> Res<Vec<KeyhiveEventRow>> {
-        let rows = sqlx::query(
-            "SELECT seq, event_bytes
-             FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?1 AND seq > ?2
-             ORDER BY seq
-             LIMIT ?3",
-        )
-        .bind(self.scope_id)
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .bind(i64::from(limit))
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(KeyhiveEventRow {
-                    seq: Self::u64_from_db(row.try_get("seq")?),
-                    bytes: row.try_get("event_bytes")?,
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) async fn subscribe_keyhive_events(
-        &self,
-        from_cursor: u64,
-    ) -> Res<big_sync_core::mpsc::Receiver<KeyhiveEventRow>> {
-        let (sub, rx) = self.keyhive_bus.register();
-        let store = self.clone();
-        tokio::spawn(async move {
-            big_sync::sqlite_core::run_replay_loop(
-                Arc::clone(&store.keyhive_bus),
-                sub,
-                from_cursor,
-                move |cursor| {
-                    let store = store.clone();
-                    async move {
-                        let rows = store.keyhive_events_after(cursor, 64).await?;
-                        let next_cursor = rows.last().map(|row| row.seq);
-                        Ok((rows, next_cursor))
-                    }
-                },
-            )
-            .await;
-        });
-        Ok(rx)
-    }
-
     pub(crate) async fn save_keyhive_event(
         &self,
         hash: subduction_keyhive::storage::StorageHash,
@@ -2772,50 +2787,161 @@ impl SqliteBigRepoStore {
         .bind(hash.as_bytes().as_slice())
         .execute(&mut *tx)
         .await?;
-        // This log is a durable dirty-hint history, not an archive. Bound its
-        // rows while keeping sequence numbers monotonic. A worker that starts
-        // before the retained window detects the gap and reconciles current state.
-        let prune_before: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(seq) - ?1
-             FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?2",
-        )
-        .bind(KEYHIVE_EVENT_LOG_MAX_ENTRIES)
-        .bind(self.scope_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if let Some(prune_before) = prune_before.filter(|cursor| *cursor > 0) {
-            sqlx::query(
-                "DELETE FROM big_repo_keyhive_replay_tail
-                 WHERE scope_id = ?1
-                   AND event_hash IN (
-                       SELECT event_hash
-                       FROM big_repo_keyhive_event_log
-                       WHERE scope_id = ?1 AND seq <= ?2
-                   )",
-            )
-            .bind(self.scope_id)
-            .bind(prune_before)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "DELETE FROM big_repo_keyhive_event_log
-                 WHERE scope_id = ?1 AND seq <= ?2",
-            )
-            .bind(self.scope_id)
-            .bind(prune_before)
-            .execute(&mut *tx)
-            .await?;
-        }
+        // This log retains EVERY event forever: keyhive recovery replays it
+        // wholesale (`ingest_from_storage` → `load_events`), and no snapshot-
+        // boundary marker exists that would make any subset safely prunable.
+        // Workers never consume this log — they tail the separate admission
+        // log, which records events after their effects are applied.
         tx.commit().await?;
         if inserted {
-            self.keyhive_bus.broadcast(KeyhiveEventRow {
-                seq: Self::u64_from_db(next_seq),
-                bytes: data,
-            });
             self.keyhive_event_notify.notify_waiters();
         }
         Ok(inserted)
+    }
+
+    /// Append fully incorporated hashes to the durable incorporation log
+    /// inside one transaction.
+    ///
+    /// Every hash must exist in the arrival log — the reporter only fires
+    /// after those rows are committed, so a miss is an invariant break. A
+    /// hash admits at most once (`ON CONFLICT DO NOTHING`); re-reports are
+    /// no-ops. Admission seqs are monotonic but not gap-free by construction:
+    /// gaps are impossible within one scope since each insert allocates
+    /// MAX(seq)+1 under the write transaction.
+    pub(crate) async fn append_admitted_events(
+        &self,
+        mut hashes: Vec<subduction_keyhive::storage::StorageHash>,
+        source: Option<subduction_keyhive::KeyhivePeerId>,
+    ) -> Res<u64> {
+        if hashes.is_empty() {
+            return Ok(self.admission_head().await?);
+        }
+        hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        hashes.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
+        let source_id = source.map(|peer| peer.verifying_key().to_vec());
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let mut payloads = HashMap::with_capacity(hashes.len());
+        for chunk in hashes.chunks(400) {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT event_hash, event_bytes FROM big_repo_keyhive_event_log \
+                 WHERE scope_id = ",
+            );
+            query.push_bind(self.scope_id).push(" AND event_hash IN (");
+            for (index, hash) in chunk.iter().enumerate() {
+                if index != 0 {
+                    query.push(", ");
+                }
+                query.push_bind(hash.as_bytes().as_slice());
+            }
+            query.push(")");
+            for row in query.build().fetch_all(&mut *tx).await? {
+                let hash: Vec<u8> = row.try_get("event_hash")?;
+                let bytes: Vec<u8> = row.try_get("event_bytes")?;
+                payloads.insert(hash, bytes);
+            }
+        }
+        if payloads.len() != hashes.len() {
+            return Err(ferr!(
+                "reported incorporated hash missing from raw event log"
+            ));
+        }
+
+        let mut existing = HashSet::new();
+        for chunk in hashes.chunks(400) {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT event_hash FROM big_repo_keyhive_admission_log \
+                 WHERE scope_id = ",
+            );
+            query.push_bind(self.scope_id).push(" AND event_hash IN (");
+            for (index, hash) in chunk.iter().enumerate() {
+                if index != 0 {
+                    query.push(", ");
+                }
+                query.push_bind(hash.as_bytes().as_slice());
+            }
+            query.push(")");
+            for row in query.build().fetch_all(&mut *tx).await? {
+                existing.insert(row.try_get::<Vec<u8>, _>("event_hash")?);
+            }
+        }
+        let missing: Vec<_> = hashes
+            .into_iter()
+            .filter(|hash| !existing.contains(hash.as_bytes().as_slice()))
+            .collect();
+        let head: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admission_log WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        for chunk in missing.chunks(160) {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "INSERT INTO big_repo_keyhive_admission_log(\
+                 scope_id, seq, event_hash, event_bytes, source_id) VALUES ",
+            );
+            for (offset, hash) in chunk.iter().enumerate() {
+                if offset != 0 {
+                    query.push(", ");
+                }
+                query
+                    .push("(")
+                    .push_bind(self.scope_id)
+                    .push(", ")
+                    .push_bind(head + i64::try_from(offset).expect(ERROR_IMPOSSIBLE) + 1)
+                    .push(", ")
+                    .push_bind(hash.as_bytes().as_slice())
+                    .push(", ")
+                    .push_bind(payloads.get(hash.as_bytes().as_slice()).expect(ERROR_IMPOSSIBLE))
+                    .push(", ")
+                    .push_bind(&source_id)
+                    .push(")");
+            }
+            query.push(" ON CONFLICT(scope_id, event_hash) DO NOTHING");
+            query.build().execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE)))
+    }
+
+    /// Current admission-log head (0 when empty).
+    pub(crate) async fn admission_head(&self) -> Res<u64> {
+        let head: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admission_log WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_one(&self.sql.read_pool)
+        .await?;
+        Ok(Self::u64_from_db(head))
+    }
+
+    /// Replay admitted events past `cursor`, oldest first. No error
+    /// swallowing: consumers must never silently skip incorporations.
+    pub(crate) async fn admission_events_after(
+        &self,
+        cursor: u64,
+        limit: u32,
+    ) -> Res<Vec<AdmissionEventRow>> {
+        let rows = sqlx::query(
+            "SELECT seq, event_bytes
+             FROM big_repo_keyhive_admission_log
+             WHERE scope_id = ?1 AND seq > ?2
+             ORDER BY seq
+             LIMIT ?3",
+        )
+        .bind(self.scope_id)
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+        .bind(i64::from(limit))
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AdmissionEventRow {
+                    seq: Self::u64_from_db(row.try_get("seq")?),
+                    bytes: row.try_get("event_bytes")?,
+                })
+            })
+            .collect()
     }
 
     pub(crate) async fn load_keyhive_events(
@@ -5304,37 +5430,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_big_repo_keyhive_event_log_is_bounded() -> Res<()> {
+    async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
+        // The arrival log is keyhive's recovery source: `ingest_from_storage`
+        // replays it wholesale and no snapshot-boundary marker exists, so no
+        // row may ever be pruned. Workers consume the admission log instead.
         let sql = SqlCtx::memory().await?;
         let store =
             SqliteBigRepoStore::new(sql, "keyhive-event-retention", BuckId::MAX_LEVEL).await?;
-        sqlx::query(
-            "WITH RECURSIVE numbers(n) AS (
-                 SELECT 1
-                 UNION ALL
-                 SELECT n + 1 FROM numbers WHERE n < 200000
-             )
-             INSERT INTO big_repo_keyhive_event_log(
-                 scope_id, seq, event_hash, event_bytes
-             )
-             SELECT ?1, n, CAST(printf('%064x', n) AS BLOB), zeroblob(1)
-             FROM numbers",
-        )
-        .bind(store.scope_id)
-        .execute(&store.sql.write_pool)
-        .await?;
-        let hash = subduction_keyhive::storage::StorageHash::new([9; 32]);
-        store
-            .save_keyhive_event(hash, b"new".to_vec(), None)
-            .await?;
+        for n in 0..5u8 {
+            store
+                .save_keyhive_event(
+                    subduction_keyhive::storage::StorageHash::new([n; 32]),
+                    vec![n],
+                    None,
+                )
+                .await?;
+        }
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
         )
         .bind(store.scope_id)
         .fetch_one(&store.sql.read_pool)
         .await?;
-        assert_eq!(count, 200_000);
-        assert_eq!(store.keyhive_event_log_cursor().await?, 200_001);
+        assert_eq!(count, 5, "arrival log must never prune rows");
+        assert_eq!(store.keyhive_event_log_cursor().await?, 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_big_repo_admission_log_appends_dedups_and_replays() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-admission", BuckId::MAX_LEVEL).await?;
+        let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
+        let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
+        store
+            .save_keyhive_event(first, b"first".to_vec(), None)
+            .await?;
+        store
+            .save_keyhive_event(second, b"second".to_vec(), None)
+            .await?;
+
+        store
+            .append_admitted_events(vec![second, first], None)
+            .await
+            .expect("admission of known hashes must succeed");
+        // Re-reporting an admitted hash is a no-op.
+        store
+            .append_admitted_events(vec![first], None)
+            .await
+            .expect("re-admission must be a no-op, not an error");
+
+        let rows = store.admission_events_after(0, 100).await?;
+        assert_eq!(rows.len(), 2, "duplicate admission must not add a row");
+        // Intra-batch order follows the reporter's hash iteration, which is
+        // deliberately unspecified — only cross-batch monotonicity holds.
+        let mut admitted_bytes: Vec<Vec<u8>> =
+            rows.iter().map(|row| row.bytes.clone()).collect();
+        admitted_bytes.sort();
+        assert_eq!(
+            admitted_bytes,
+            vec![b"first".to_vec(), b"second".to_vec()],
+            "both reported hashes must be admitted exactly once"
+        );
+        assert!(rows[0].seq < rows[1].seq, "seqs must be monotonic");
+        let tail = store.admission_events_after(rows[0].seq, 100).await?;
+        assert_eq!(tail.len(), 1, "cursor replay resumes after cursor");
+        assert_eq!(tail[0].seq, rows[1].seq);
+        assert_eq!(tail[0].bytes, rows[1].bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-admission-missing", BuckId::MAX_LEVEL).await?;
+        let unknown = subduction_keyhive::storage::StorageHash::new([42; 32]);
+        let result = store.append_admitted_events(vec![unknown], None).await;
+        assert!(result.is_err(), "admitting an unarrived hash must fail loudly");
         Ok(())
     }
 
