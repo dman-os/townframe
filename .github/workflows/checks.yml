@@ -89,7 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Setup wash CLI
+      - name: setup wash CLI
         uses: wasmCloud/setup-wash-action@v2.1.0
         with:
           wash-version: v2.6.1
@@ -159,6 +159,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
       - name: fetch WIT dependencies
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: build plug OCI artifacts

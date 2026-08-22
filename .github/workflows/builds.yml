@@ -213,7 +213,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: denoland/setup-deno@v2
-      - name: Setup wash CLI
+      - name: setup wash CLI
         uses: wasmCloud/setup-wash-action@v2.1.0
         with:
           wash-version: v2.6.1

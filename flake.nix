@@ -234,8 +234,6 @@
             libv4l
           ];
 
-          washBuildInputs = with pkgs; [ ];
-
           devTools = with pkgs; [
             rogcat
             opentofu
@@ -296,7 +294,6 @@
             ++ dioxusBuildInputs
             ++ androidBuildInputs
             ++ desktopBuildInputs
-            ++ washBuildInputs
             ++ devTools
             ++ kotliLintTools
             ++ devOnlyInputs
