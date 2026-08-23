@@ -40,7 +40,7 @@
     - [ ] Redo IR
     - [ ] https://json-render.dev/ based display
 - [ ] Sync
-  - [ ] Keyhive
+  - [x] Keyhive
   - [ ] Figure out key mgmt
   - [ ] P2P
     - [x] iroh
@@ -166,6 +166,7 @@
   - [x] write vs read pool
   - [x] Begin immediate
   - [x] STRICT
+  - [ ] JSONB
 - [x] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection

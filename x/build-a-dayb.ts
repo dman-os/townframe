@@ -2,8 +2,8 @@
 
 // FIXME: provide a devshell for building onnxcore (python and so on)
 
-import { $ } from "./utils.ts";
 import { walk } from "jsr:@std/fs@1.0.23/walk";
+import { $ } from "./utils.ts";
 
 async function removeTreeIfExists(targetPath: string) {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -63,8 +63,7 @@ const gradleTask = composeProfile === "release"
   : "assembleDebug";
 const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
-const androidBuildToolsVersion = $.env.ANDROID_BUILD_TOOLS_VERSION ??
-  "36.0.0";
+const androidBuildToolsVersion = $.env.ANDROID_BUILD_TOOLS_VERSION ?? "36.0.0";
 const androidSdkRoot = $.env.ANDROID_SDK_ROOT ?? $.env.ANDROID_HOME;
 if (!androidSdkRoot) {
   throw new Error("ANDROID_SDK_ROOT or ANDROID_HOME must be set");

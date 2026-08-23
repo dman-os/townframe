@@ -173,7 +173,7 @@ pub fn setup_tracing() -> Res<()> {
         color_eyre::config::HookBuilder::default().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
-        tracing::error!("{report}");
+        println!("{report}");
 
         // - Tokio does not exit the process when a task panics, so we define a custom
         //   panic hook to implement this behaviour.

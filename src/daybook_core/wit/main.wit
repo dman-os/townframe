@@ -129,7 +129,7 @@ interface facet-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
     use capabilities.{command-invoke-token, doc-token, facet-token, facet-tag-token};
-    use sqlite-connection.{connection as sqlite-connection-token};
+    use townframe:sqlite/sqlite-connection.{connection as sqlite-connection-token};
 
     record processor-invocation {
         trigger-doc-id: doc-id,
@@ -191,25 +191,6 @@ interface stateless-view {
     ) -> result<render-view-response, render-view-error>;
 }
 
-// FIXME: rename to local-state-sqlite
-interface sqlite-connection {
-    use townframe:sql/types.{sql-value, result-row, query-error};
-
-    resource transaction {
-        query: func(query: string, params: list<sql-value>) -> result<list<result-row>, query-error>;
-        query-batch: func(query: string) -> result<_, query-error>;
-        commit: func() -> result<_, query-error>;
-        rollback: func() -> result<_, query-error>;
-    }
-
-    resource connection {
-        query: func(query: string, params: list<sql-value>) -> result<list<result-row>, query-error>;
-        query-batch: func(query: string) -> result<_, query-error>;
-        sqlite-file-path: func() -> string;
-        begin-transaction: func() -> result<transaction, query-error>;
-    }
-}
-
 interface mltools-ocr {
     use capabilities.{facet-token};
     use townframe:mltools/ocr.{ocr-result};
@@ -255,7 +236,7 @@ world all-guest {
     import drawer;
     import capabilities;
     import facet-routine;
-    import sqlite-connection;
+    import townframe:sqlite/sqlite-connection;
     import mltools-ocr;
     import mltools-embed;
     import mltools-image-tools;

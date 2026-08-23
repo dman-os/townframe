@@ -28,7 +28,7 @@ pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
     let sql = match config.database_path {
         Some(database_path) => {
             if let Some(parent) = database_path.parent() {
-                std::fs::create_dir_all(parent).wrap_err_with(|| {
+                tokio::fs::create_dir_all(parent).await.wrap_err_with(|| {
                     format!("Failed to create database directory: {}", parent.display())
                 })?;
             }

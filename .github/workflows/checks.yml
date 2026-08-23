@@ -42,11 +42,17 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
-
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: install JavaScript dependencies
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
       - name: pre-commit hooks
         run: |
           nix develop .#ci-desktop --command prek --color=always run --all-files
-
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -83,7 +89,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
+      - name: setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: builds
         run: |
           nix develop .#ci-rust --command cargo --color=always build -p test_wflows --target wasm32-wasip2
@@ -94,15 +105,6 @@ jobs:
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
 
-      - name: kotlin tests
-        run: |
-          nix develop .#ci-desktop --command bash -lc 'export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache'
-
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: gradle-test-reports
-          path: src/daybook_compose/composeApp/build/reports/tests/
 
       - name: rust tests
         run: |
@@ -112,3 +114,185 @@ jobs:
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
           OLLAMA_MODEL: gemma3
+
+  kotlin-tests:
+    name: Kotlin tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Setup tmate session
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+
+      - name: remove unused files
+        run: |
+          sudo rm -rf /usr/lib/jvm
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /opt/microsoft /opt/google
+          sudo rm -rf /opt/az
+          sudo rm -rf /usr/local/share/powershell
+          # sudo rm -rf /opt/hostedtoolcache
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
+      - name: build plug OCI artifacts
+        run: |
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+
+      - name: kotlin tests
+        run: |
+          nix develop .#ci-desktop --command bash -lc '
+            export PROTOC="$(command -v protoc)"
+            cd src/daybook_compose
+            ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache
+          '
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: gradle-test-reports
+          path: src/daybook_compose/composeApp/build/reports/tests/
+
+  e2e-sysadmin-chromium:
+    name: E2E (sysadmin / chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      DOCKER_CMD: docker
+      SMTP_HOST: 127.0.0.1
+      SMTP_PORT: "2500"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store
+        id: pnpm-store-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+      - name: Install dependencies
+        run: nix develop .#default --command pnpm install --frozen-lockfile
+      - name: fetch WIT dependencies
+        run: nix develop .#default --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
+      - name: Save pnpm store
+        if: github.ref == 'refs/heads/main' && steps.pnpm-store-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Build workloads and host
+        run: |
+          nix develop .#default --command bash -lc '
+            set -euo pipefail
+            pnpm -C src/btress_auth run build
+            cd src/btress_sysadmin
+            cargo leptos build --release
+            cd ../..
+            cargo build --locked -p daybook_cli
+          '
+
+      - name: Run sysadmin e2e
+        run: |
+          nix develop .#default --command bash -lc '
+            set -euo pipefail
+
+            server_pid=""
+            static_pid=""
+            cleanup() {
+              status=$?
+              set +e
+              if [ -n "$static_pid" ]; then kill "$static_pid" 2>/dev/null || true; fi
+              if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
+              docker compose -f tools/compose.yml --profile mail down -v
+              exit "$status"
+            }
+            trap cleanup EXIT
+
+            ./x/compose-up.ts mail
+            setsid env SMTP_HOST="$SMTP_HOST" SMTP_PORT="$SMTP_PORT" ./target/debug/daybook_cli server \
+              >/tmp/btress-server.log 2>&1 </dev/null &
+            server_pid=$!
+            setsid deno run --allow-all x/dev-btress-static.ts \
+              >/tmp/btress-static.log 2>&1 </dev/null &
+            static_pid=$!
+
+            wait_for() {
+              name="$1"
+              url="$2"
+              for _ in $(seq 1 90); do
+                if curl -fsS --max-time 5 -o /dev/null "$url"; then return 0; fi
+                sleep 2
+              done
+              echo "Timed out waiting for $name at $url"
+              tail -100 /tmp/btress-server.log /tmp/btress-static.log 2>/dev/null || true
+              return 1
+            }
+
+            wait_for Inbucket http://localhost:9020/
+            wait_for btress-auth http://localhost:8071/healthz
+            wait_for btress-sysadmin http://localhost:3000/
+            wait_for static-assets http://localhost:3001/pkg/btress_sysadmin.js
+            pnpm -C src/btress_sysadmin run e2e -- --project=chromium
+          '
+
+      - name: Upload e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: btress-sysadmin-e2e-artifacts
+          path: |
+            src/btress_sysadmin/test-results/
+            src/btress_sysadmin/playwright-report/
+            /tmp/btress-server.log
+            /tmp/btress-static.log
+          retention-days: 14

@@ -13,8 +13,9 @@ import { $ } from "./utils.ts";
  */
 
 const composeRoot = $.relativeDir("../src/daybook_compose/");
-const composeProfileRaw = ($.env.DAYBOOK_COMPOSE_PROFILE ?? "debug")
-  .toLowerCase();
+const composeProfileRaw = (
+  $.env.DAYBOOK_COMPOSE_PROFILE ?? "debug"
+).toLowerCase();
 if (!(composeProfileRaw === "debug" || composeProfileRaw === "release")) {
   throw new Error(
     `Unsupported DAYBOOK_COMPOSE_PROFILE=${composeProfileRaw}; expected debug or release`,

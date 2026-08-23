@@ -298,7 +298,7 @@ pub async fn test_cx_with_options(
         marker_path: repo_root.join("db.repo.txt"),
         lock_path: repo_root.join("repo.lock"),
     };
-    let lock_guard = crate::repo::RepoLockGuard::acquire(&layout.lock_path)?;
+    let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
     let secret_repo = crate::secrets::SecretRepo::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
@@ -478,6 +478,9 @@ pub async fn boot_disk_repo(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
     let (repo, stop) = BigRepo::boot(big_repo::Config {
         node_identity_seed: [7_u8; 32],
         storage: big_repo::StorageConfig::Disk { path },

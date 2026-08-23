@@ -2959,7 +2959,8 @@ impl SyncRepoNode {
     #[tracing::instrument(skip(path), fields(seed, accept_incoming))]
     async fn boot(path: PathBuf, seed: u8, accept_incoming: bool) -> Res<Self> {
         tracing::info!(path = %path.display(), "booting sync repo node");
-        std::fs::create_dir_all(&path)
+        tokio::fs::create_dir_all(&path)
+            .await
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
         let node_identity_seed = [seed; 32];
         let (repo, stop_token) = BigRepo::boot(Config {

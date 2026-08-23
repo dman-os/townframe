@@ -1,0 +1,39 @@
+[package]
+name = "wash_plugin_sqlite"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["tracing"]
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+utils_rs.workspace = true
+sqlx_utils_rs.workspace = true
+
+#
+# error
+anyhow.workspace = true
+
+#
+# wasm
+wasmtime.workspace = true
+wash-runtime.workspace = true
+
+# host plugin trait
+async-trait.workspace = true
+
+#
+# db
+sqlx = { workspace = true, features = ["sqlite"] }
+
+#
+# log
+tracing.workspace = true

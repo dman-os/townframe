@@ -857,12 +857,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
             crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
                 self.index_repo.enqueue_delete(id.clone())?;
             }
-            crate::drawer::DrawerEvent::DocAdded {
-                id,
-                entry,
-                drawer_heads: _,
-                ..
-            } => {
+            crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
                 for (branch_name, heads) in &entry.branches {
                     let branch_path = BranchPathBuf::from(branch_name.as_str());
                     let Some(_keys) = self
@@ -876,12 +871,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                         .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
                 }
             }
-            crate::drawer::DrawerEvent::DocUpdated {
-                id,
-                entry,
-                drawer_heads: _,
-                ..
-            } => {
+            crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
                 let branch_paths: Vec<BranchPathBuf> = entry
                     .branches
                     .keys()

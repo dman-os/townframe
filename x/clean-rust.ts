@@ -28,5 +28,7 @@ if (workspacePackages.length === 0) {
 }
 
 await $.raw`cargo clean ${
-  workspacePackages.map((name) => `-p ${name}`).join(" ")
+  workspacePackages
+    .map((name) => `-p ${name}`)
+    .join(" ")
 }`;

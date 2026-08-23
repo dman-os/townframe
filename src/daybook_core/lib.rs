@@ -90,18 +90,6 @@ uniffi::custom_type!(VersionTag, String, {
     }
 });
 
-pub fn init_sqlite_vec() {
-    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| unsafe {
-        let entry_point: unsafe extern "C" fn(
-            *mut libsqlite3_sys::sqlite3,
-            *mut *mut std::ffi::c_char,
-            *const libsqlite3_sys::sqlite3_api_routines,
-        ) -> i32 = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
-        libsqlite3_sys::sqlite3_auto_extension(Some(entry_point));
-    });
-}
-
 pub(crate) fn peer_id_from_label(label: &str) -> PeerId {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();

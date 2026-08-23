@@ -1,0 +1,106 @@
+[package]
+name = "btress_sysadmin"
+version.workspace = true
+edition.workspace = true
+
+# needed to fool cargo-leptos
+[[bin]]
+name = "fake"
+path = "main.rs"
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+utils_rs = { workspace = true, default-features = false, features = ["wasm"] }
+
+getrandom = "0.4.3"
+# getrandom 0.3.x is pulled in transitively (ahash/irpc-iroh/jobserver) and
+# needs the wasm_js backend for the hydrate (wasm32-unknown-unknown) build.
+# Renamed dep so the feature can be gated to the `hydrate` feature only.
+getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"], optional = true }
+serde.workspace = true
+
+#
+# errors
+thiserror.workspace = true
+
+#
+# wasm
+wit-bindgen = { workspace = true, features = ["async-spawn"], optional = true }
+console_error_panic_hook = { version = "0.1.7", optional = true}
+wasm-bindgen = { version = "0.2.126", optional = true }
+wasm-bindgen-futures = { version = "0.4.76", optional = true }
+# wstd = { workspace = true, optional = true }
+
+#
+# http
+axum = { workspace = true, optional = true }
+axum-extra = { workspace = true, optional = true, features = ["cookie", "cookie-signed"] }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, features = ["util", "sensitive-headers", "trace"], optional = true }
+http.workspace = true
+
+#
+# web
+leptos = { version = "0.8.20" }
+leptos_meta = "0.8.6"
+leptos_router = "0.8.15"
+leptos_wasi = { version = "0.3.1", optional = true }
+wasip2 = { version = "1.0.4", optional = true }
+any_spawner = { version = "0.3.0", features = ["tracing", "tokio"], optional = true }
+web-sys = { version = "0.3.103", features = ["Storage", "MediaQueryList", "Window", "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "SubmitEvent", "Event", "EventTarget", "HtmlFormElement", "FormData"] }
+
+[dependencies.leptos_axum]
+version = "0.8.10"
+optional = true
+default-features = false
+# FIXME: this is a dud, "wasm" assumes running in a js wasm environment
+# enabled since pre setting any_spawner::tokio makes it harmless
+# and to stop eprintln warnings they've added
+# but might break in the future if they do more gating around "wasm"
+features = ["wasm"]
+
+[features]
+default = [
+    "ssr",
+    "hydrate",
+]
+hydrate = [
+    "getrandom/wasm_js",
+    "dep:getrandom-03",
+    "leptos/hydrate",
+    "dep:console_error_panic_hook",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+]
+ssr = [
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:leptos_axum",
+    "dep:wit-bindgen",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:wasip2",
+    # "dep:leptos_wasi",
+    "dep:any_spawner",
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+]
+
+[package.metadata.leptos]
+tailwind-input-file = "./styles/tailwind.css"
+site-root = "target/site"
+
+lib-profile-release = "wasm-release"
+lib-features = ["hydrate"]
+front-target-dir = "target/front"
+
+#
+# SSR
+bin-profile-release = "wasm-release"
+bin-target-triple = "wasm32-wasip2"
+bin-target-dir = "target/wasm"
+bin-features = ["ssr"]

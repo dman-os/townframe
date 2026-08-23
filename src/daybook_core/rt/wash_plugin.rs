@@ -24,8 +24,8 @@ mod binds_guest {
             "townframe:daybook/capabilities.facet-create-token": super::caps::FacetCreateToken,
             "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
             "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
-            "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
-            "townframe:daybook/sqlite-connection.transaction": super::local_state_sql::SqliteTransactionToken,
+            "townframe:sqlite/sqlite-connection.connection": wash_plugin_sqlite::SqliteConnectionToken,
+            "townframe:sqlite/sqlite-connection.transaction": wash_plugin_sqlite::SqliteTransactionToken,
         }
     });
 
@@ -325,7 +325,6 @@ mod binds_guest {
 }
 
 mod caps;
-mod local_state_sql;
 mod mltools;
 mod stateless_view_host;
 
@@ -338,14 +337,15 @@ pub use binds_guest::townframe::daybook::mltools_embed;
 pub use binds_guest::townframe::daybook::mltools_image_tools;
 pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
-pub use binds_guest::townframe::daybook::sqlite_connection;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
+pub use binds_guest::townframe::sqlite::sqlite_connection;
 pub(crate) use stateless_view_host::StatelessViewPlugin;
 
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
+use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 pub struct DaybookPlugin {
@@ -381,10 +381,7 @@ impl DaybookPlugin {
     pub const ID: &str = "townframe:daybook";
 
     fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
-        let Some(this) = wcx.active_ctx.get_plugin::<Self>(Self::ID) else {
-            panic!("plugin not on ctx");
-        };
-        this
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
     }
 
     async fn get_doc(
@@ -440,7 +437,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                 WitInterface::from("townframe:utils/types"),
                 WitInterface::from("townframe:api-utils/utils"),
                 WitInterface::from(
-                    "townframe:daybook/drawer,capabilities,facet-routine,sqlite-connection,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
+                    "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
                 ),
             ]),
         }
@@ -453,7 +450,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_bind(
         &self,
         _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
-        _interface_configs: std::collections::HashSet<WitInterface>,
+        _interface_configs: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -461,7 +458,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_item_bind<'a>(
         &self,
         item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
-        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
@@ -483,12 +480,6 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
                         item.linker(),
                         |ctx| ctx,
                     )?;
-                }
-                if iface.interfaces.contains("sqlite-connection") {
-                    sqlite_connection::add_to_linker::<
-                        _,
-                        wasmtime::component::HasSelf<SharedWashCtx>,
-                    >(item.linker(), |ctx| ctx)?;
                 }
                 if iface.interfaces.contains("mltools-ocr") {
                     mltools_ocr::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
@@ -531,7 +522,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_unbind(
         &self,
         workload_id: &str,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let _workload_id = workload_id;
         Ok(())
@@ -691,7 +682,7 @@ pub(crate) async fn build_doc_facet_tokens(
     // Build facet tokens: for every existing facet that matches any ACL entry,
     // aggregate rights from all matching entries (tag-wide + key-specific).
     let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
-    for (facet_key, _) in doc.facets.iter() {
+    for facet_key in doc.facets.keys() {
         let mut rights = capabilities::FacetRights::empty();
         for access in &doc_tokens.facet_acl {
             if access.tag.0 != facet_key.tag.to_string() {
@@ -861,11 +852,34 @@ impl facet_routine::Host for SharedWashCtx {
                 &local_state_access.plug_id,
                 &local_state_access.local_state_key.0,
             );
-            let handle = self.table.push(local_state_sql::SqliteConnectionToken {
-                local_state_id,
-                sqlite_file_path: None,
-                sql: None,
-            })?;
+            // Eagerly resolve the sqlite ctx + file path here (the orchestrator),
+            // then hand a fully-resolved token to the sqlite plugin which only
+            // manages the wasm resource table + query execution.
+            let sqlite_file_path = dayook_plugin
+                .sqlite_local_state_repo
+                .get_sqlite_file_path(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error resolving sqlite file path for {local_state_id}: {err}"
+                    ))
+                })?;
+            let sql = dayook_plugin
+                .sqlite_local_state_repo
+                .ensure_sqlite_ctx(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error initializing sqlite ctx for {local_state_id}: {err}"
+                    ))
+                })?;
+            let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
+                self,
+                wash_plugin_sqlite::SqliteConnectionToken {
+                    sqlite_file_path: sqlite_file_path.to_string_lossy().to_string(),
+                    sql,
+                },
+            )?;
             sqlite_connections.push((
                 format!(
                     "{}/{}",

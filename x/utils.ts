@@ -1,4 +1,4 @@
-import { $ as old$, CommandBuilder, Path } from "jsr:@david/dax@0.45.0";
+import { $ as old$, CommandBuilder, type Path } from "jsr:@david/dax@0.45.0";
 
 /**
  * This assumes that the script is run from the x/ directory or via deno run

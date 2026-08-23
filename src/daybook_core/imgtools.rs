@@ -8,6 +8,8 @@ pub struct DownsizeImageJpegResult {
     pub height: u32,
 }
 
+/// I am compute expensive, run me in a
+/// blocking task.
 pub fn downsize_image_jpeg(
     bytes: &[u8],
     max_side: u32,

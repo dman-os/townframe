@@ -1,0 +1,13 @@
+{
+  "devDependencies": {
+    "syncpack": "^13.0.4",
+    "typescript": "~5.9.3"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "check": "biome check . --fix",
+    "format": "biome format --fix",
+    "lint": "biome lint ."
+  },
+  "type": "module"
+}

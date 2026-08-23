@@ -1,3 +1,5 @@
+use crate::interlude::*;
+
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{
@@ -194,15 +196,19 @@ impl mltools_image_tools::Host for SharedWashCtx {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };
-        let image_bytes = match std::fs::read(&image_path) {
+        let image_bytes = match tokio::fs::read(&image_path).await {
             Ok(value) => value,
             Err(err) => return Ok(Err(format!("error reading blob bytes: {err}"))),
         };
-        let downsized =
-            match crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality) {
-                Ok(value) => value,
-                Err(err) => return Ok(Err(err.to_string())),
-            };
+        let downsized = match tokio::task::spawn_blocking(move || {
+            crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality)
+        })
+        .await
+        .expect(ERROR_TOKIO)
+        {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
 
         Ok(Ok(mltools_image_tools::ImageBytesResult {
             bytes: downsized.bytes,

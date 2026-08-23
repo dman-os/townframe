@@ -881,12 +881,7 @@ impl SwitchWorker {
                     &self.predicate_resolved,
                 ))
             }
-            DrawerEvent::DocAdded {
-                id,
-                entry,
-                drawer_heads: _,
-                ..
-            } => {
+            DrawerEvent::DocAdded { id, entry, .. } => {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(false);
                 };
@@ -914,11 +909,7 @@ impl SwitchWorker {
                 ))
             }
             DrawerEvent::DocUpdated {
-                id,
-                entry,
-                diff,
-                drawer_heads: _,
-                ..
+                id, entry, diff, ..
             } => {
                 if !diff
                     .moved_branch_names

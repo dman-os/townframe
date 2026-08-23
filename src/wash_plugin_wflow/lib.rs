@@ -10,8 +10,11 @@ use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
 use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
+use wash_runtime::engine::workload::WorkloadItem;
+use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
+use wasmtime::component::HasSelf;
 use wflow_core::r#gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
 use wflow_core::metastore::MetdataStore;
 use wflow_core::partition::{effects, job_events, state};
@@ -516,14 +519,11 @@ impl WflowPlugin {
     const ID: &str = "townframe:wflow";
 
     pub fn try_from_ctx(wcx: &SharedWashCtx) -> Option<Arc<Self>> {
-        wcx.active_ctx.get_plugin::<Self>(Self::ID)
+        wcx.active_ctx.try_get_plugin::<Self>(Self::ID).ok()
     }
 
     fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
-        let Some(this) = wcx.active_ctx.get_plugin::<Self>(Self::ID) else {
-            panic!("plugin not on ctx");
-        };
-        this
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
     }
 
     pub fn job_id_of_ctx(&self, wcx: &SharedWashCtx) -> Option<Arc<str>> {
@@ -632,7 +632,7 @@ impl WflowPlugin {
             wflow_key: journal.wflow.key.clone(),
             args_json: journal.init_args_json.to_string(),
         };
-        let ctx_id: Arc<str> = store.data().active_ctx.id.clone().into();
+        let ctx_id = Arc::clone(&store.data().active_ctx.id);
         let (yield_tx, yield_rx) = mpsc::unbounded_channel();
         let (resume_tx, resume_rx) = mpsc::unbounded_channel();
         let pause_cancel = CancellationToken::new();
@@ -755,7 +755,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
     async fn on_workload_bind(
         &self,
         workload: &wash_runtime::engine::workload::UnresolvedWorkload,
-        interface_configs: std::collections::HashSet<WitInterface>,
+        interface_configs: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let Some(iface) = interface_configs
             .iter()
@@ -803,29 +803,25 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
 
     async fn on_workload_item_bind<'a>(
         &self,
-        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
-        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        item: &mut WorkloadItem<'a>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
             if iface.namespace == "townframe" && iface.package == "wflow" {
                 if iface.interfaces.contains("host") {
-                    host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
+                    host::add_to_linker::<_, HasSelf<SharedWashCtx>>(item.linker(), |ctx| ctx)?;
                 }
                 if iface.interfaces.contains("partition-host") {
-                    partition_host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    partition_host::add_to_linker::<_, HasSelf<SharedWashCtx>>(
                         item.linker(),
                         |ctx| ctx,
                     )?;
                 }
                 if iface.interfaces.contains("metadata-store") {
-                    metastore::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
+                    metastore::add_to_linker::<_, HasSelf<SharedWashCtx>>(item.linker(), |ctx| {
+                        ctx
+                    })?;
                 }
             }
         }
@@ -886,7 +882,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
     async fn on_workload_unbind(
         &self,
         workload_id: &str,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         if let Some(wflow) = self
             .active_workloads

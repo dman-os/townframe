@@ -49,6 +49,7 @@
 - To type check the ./src/daybook_compose multiplatform app, use `./x/check-dayb.ts`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
+- `./x/disk-watch.ts` is a non-LLM daemon (5s loop) that auto-runs `./x/clean-rust.ts` when free space on the repo FS drops below 4 GiB (skips if a `cargo`/`rustc`/`clippy` build is running), removes `<cargo target>/debug` if clean-rust doesn't recover to ≥10 GiB, and errors out (non-zero exit) if still <10 GiB. Run it in the background: `setsid deno run --allow-all x/disk-watch.ts >/tmp/disk-watch.log 2>&1 </dev/null & disown`. `./x/clean-rust.ts` runs `cargo clean -p <each workspace pkg>` to free target-dir space.
 
 ## Comments
 
@@ -79,6 +80,17 @@
   - In most machine's you're working on, `jj` is being used and the safest looking git commands could mess up the `jj` state destroying work.
   - Even if on other machines, git mutation commands are too destructive and unsafe.
 
+### Resolving conflicts
+
+- `jj st` shows unresolved conflicts in the working copy; `jj log` marks conflicted commits with `(conflict)`.
+- For each conflicted commit on the branch:
+  1. `jj edit <commit>` — move the working copy onto the conflicted commit.
+  2. `jj new` — create a fresh empty commit on top. The conflict is inherited into it.
+  3. Fix the conflicts in the new commit (edit the conflict markers directly, or `jj resolve`).
+  4. `jj squash -m "<message>"` — fold the resolution back into the conflicted commit.
+- The intermediate `jj new` commit gives clear visibility onto exactly what changed to resolve the conflict, and keeps the resolution out of the conflicted commit's own diff until squashed.
+- `jj squash` opens an editor by default; pass `-m "<message>"` to skip it (e.g. keep the parent's message).
+- After squashing, verify with `jj st` that no conflicts remain, and check `jj log` for rebased descendants that may have picked up new conflicts.
 ## Performance
 
 Flag code that is doing:

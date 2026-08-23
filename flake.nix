@@ -35,9 +35,9 @@
             };
           };
 
-          androidBuildToolsVersion = "36.0.0";
+          androidBuildToolsVersion = "37.0.0";
           androidApiLevel = "31";
-          rustVersion = "2026-04-16";
+          rustVersion = "2026-08-16";
 
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
@@ -51,18 +51,20 @@
             KANIDM_SKIP_HOSTNAME_VERIFICATION = "true";
             KANIDM_ACCEPT_INVALID_CERTS = "true";
             WASMCLOUD_OCI_ALLOWED_INSECURE = "localhost:5000";
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           };
 
           # Android SDK/NDK without Studio (for CI)
           androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
             includeNDK = true;
-            platformToolsVersion = "36.0.0";
-            buildToolsVersions = [ androidBuildToolsVersion ];
+            platformToolsVersion = "37.0.1";
+            buildToolsVersions = [ androidBuildToolsVersion "36.0.0" ];
             platformVersions = [ "35" "36" ];
           };
 
           # Android SDK/NDK with Studio (for dev)
-          androidComposition = pkgs.android-studio.withSdk androidSdkOnly.androidsdk;
+          # androidComposition = pkgs.android-studio.withSdk androidSdkOnly.androidsdk;
 
           # Rust toolchain for CI (wasm32 + native Linux targets)
           rustRust = pkgs.rust-bin.nightly.${rustVersion}.default.override {
@@ -190,8 +192,16 @@
             openssl
             dbus
             protobuf
+            curl
             mold
             deno
+
+            pnpm
+            nodejs_24
+            biome
+            playwright-driver
+            playwright-driver.browsers
+
             libarchive
             prek
           ];
@@ -224,8 +234,6 @@
             libv4l
           ];
 
-          washBuildInputs = with pkgs; [ ];
-
           devTools = with pkgs; [
             rogcat
             opentofu
@@ -233,11 +241,16 @@
             tokio-console
             infisical
             cargo-ndk
+
+            wasm-bindgen-cli_0_2_126
+            binaryen
             wac-cli
             wasmtime
             wasm-tools
             cargo-leptos
             trunk
+            tailwindcss_4
+            watchexec
 
             # maestro
           ];
@@ -246,7 +259,7 @@
             # FIXME: why do we need golang for again?
             # did an llm strip comments?
             # go
-            androidComposition
+            (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
             v4l-utils
             libv4l
             gh
@@ -281,7 +294,6 @@
             ++ dioxusBuildInputs
             ++ androidBuildInputs
             ++ desktopBuildInputs
-            ++ washBuildInputs
             ++ devTools
             ++ kotliLintTools
             ++ devOnlyInputs
@@ -357,7 +369,7 @@
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi
               '';
-            } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidComposition; }));
+            } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; }));
 
         in
         {

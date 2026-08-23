@@ -68,7 +68,7 @@ struct CacheEmbeddingRow<'a> {
 }
 
 pub struct LabelRequest<'a> {
-    pub sqlite_connection: &'a crate::wit::townframe::daybook::sqlite_connection::Connection,
+    pub sqlite_connection: &'a crate::wit::townframe::sqlite::sqlite_connection::Connection,
     pub rw_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
     pub ro_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
     pub working_facet_target: super::FacetWriteTarget<'a>,
@@ -161,7 +161,7 @@ pub fn default_label_set() -> PseudoLabelCandidatesFacet {
 
 pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
 
     #[derive(Default)]
     struct LabelAgg {
@@ -664,10 +664,10 @@ fn null_anchor_prompts() -> &'static [&'static str] {
 }
 
 fn insert_cache_embedding_row(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     row: CacheEmbeddingRow<'_>,
 ) -> Result<i64, JobErrorX> {
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
     let embedding_json = embedding_vec_to_json(row.vector)
         .map_err(|err| JobErrorX::Terminal(err.wrap_err("error serializing cached embedding")))?;
 
@@ -727,11 +727,11 @@ fn insert_cache_embedding_row(
 }
 
 fn sqlite_vec_rowid_cosine_similarity(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     left_rowid: i64,
     right_rowid: i64,
 ) -> Result<f64, JobErrorX> {
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
     let rows = sqlite_connection
         .query(
             "SELECT (1.0 - vec_distance_cosine(v1.embedding, v2.embedding)) AS score \
@@ -757,7 +757,7 @@ fn sqlite_vec_rowid_cosine_similarity(
 }
 
 fn row_opt_text(
-    row: &crate::wit::townframe::sql::types::ResultRow,
+    row: &crate::wit::townframe::sqlite::types::ResultRow,
     name: &str,
 ) -> Option<Option<String>> {
     row.iter().find_map(|entry| {
@@ -765,19 +765,23 @@ fn row_opt_text(
             return None;
         }
         match &entry.value {
-            crate::wit::townframe::sql::types::SqlValue::Text(value) => Some(Some(value.clone())),
-            crate::wit::townframe::sql::types::SqlValue::Null => Some(None),
+            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => {
+                Some(Some(value.clone()))
+            }
+            crate::wit::townframe::sqlite::types::SqlValue::Null => Some(None),
             _ => None,
         }
     })
 }
 
-fn row_real(row: &crate::wit::townframe::sql::types::ResultRow, name: &str) -> Option<f64> {
+fn row_real(row: &crate::wit::townframe::sqlite::types::ResultRow, name: &str) -> Option<f64> {
     row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sql::types::SqlValue::Real(value) if entry.column_name == name => {
+        crate::wit::townframe::sqlite::types::SqlValue::Real(value)
+            if entry.column_name == name =>
+        {
             Some(*value)
         }
-        crate::wit::townframe::sql::types::SqlValue::Integer(value)
+        crate::wit::townframe::sqlite::types::SqlValue::Integer(value)
             if entry.column_name == name =>
         {
             Some(*value as f64)

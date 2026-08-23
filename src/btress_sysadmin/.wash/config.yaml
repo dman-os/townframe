@@ -1,0 +1,18 @@
+version: 2.6.1
+
+build:
+  command: cargo leptos build --release
+  component_path: ../../target/wasm/wasm32-wasip2/wasm-release/btress_sysadmin.wasm 
+
+dev:
+  address: 127.0.0.1:3000
+  volumes:
+    - host_path: ../../target/site/
+      guest_path: /public/
+
+workload:
+  environment:
+    config:
+      LEPTOS_OUTPUT_NAME: btress_sysadmin
+      LEPTOS_SITE_ADDR: 127.0.0.1:3000
+      RUST_BACKTRACE: "1"

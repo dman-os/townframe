@@ -41,14 +41,14 @@ mod wit {
             "townframe:wflow/bundle": generate,
             "townframe:mltools/ocr": generate,
             "townframe:mltools/embed": generate,
-            "townframe:sql/types": generate,
+            "townframe:sqlite/types": generate,
 
             "townframe:daybook-types/doc": generate,
             "townframe:daybook/types": generate,
             "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/facet-routine": generate,
-            "townframe:daybook/sqlite-connection": generate,
+            "townframe:sqlite/sqlite-connection": generate,
             "townframe:daybook/mltools-ocr": generate,
             "townframe:daybook/mltools-embed": generate,
             "townframe:daybook/mltools-image-tools": generate,
@@ -140,7 +140,7 @@ mod wasm_runtime {
         test_name: &str,
         summary: &serde_json::Value,
     ) -> Result<(), JobErrorX> {
-        use crate::wit::townframe::sql::types::SqlValue;
+        use crate::wit::townframe::sqlite::types::SqlValue;
         let local_state_key = "@daybook/test/capability-report";
         let sqlite_connection = args
             .sqlite_connections
@@ -510,7 +510,7 @@ mod wasm_runtime {
 
     fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         use crate::wit::townframe::daybook::facet_routine;
-        use crate::wit::townframe::sql::types::SqlValue;
+        use crate::wit::townframe::sqlite::types::SqlValue;
 
         let args = facet_routine::get_args();
 

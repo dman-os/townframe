@@ -1,0 +1,30 @@
+{
+  "name": "@townframe/btress_auth",
+  "dependencies": {
+    "@bytecodealliance/jco-std": "^0.1.0",
+    "@logtape/logtape": "^2.3.0",
+    "better-auth": "^1.6.25",
+    "hono": "^4.12.25",
+    "kysely": "^0.29.4"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.27.0",
+    "nodemon": "^3.1.9",
+    "rimraf": "^6.1.2",
+    "rolldown": "1.2.3",
+    "typescript": "~5.9.3"
+  },
+  "main": "dist/component.js",
+  "private": true,
+  "scripts": {
+    "build": "pnpm run build:ts && pnpm run build:component",
+    "build:component": "jco componentize -w wit -o dist/btress_auth.wasm dist/component.js",
+    "build:ts": "rolldown -c rolldown.config.mjs",
+    "dev": "nodemon",
+    "fetch:wit": "wash wit fetch && node patch-wit-deps.mjs",
+    "generate:types": "rimraf generated/types && jco guest-types wit/ -o generated/types",
+    "serve": "jco serve dist/http_logging_handler_hono.wasm",
+    "setup:wit": "pnpm run fetch:wit && pnpm run generate:types"
+  },
+  "type": "module"
+}

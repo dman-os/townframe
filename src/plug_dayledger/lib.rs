@@ -31,7 +31,7 @@ mod wit {
             "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
 
-            "townframe:sql/types": generate,
+            "townframe:sqlite/types": generate,
 
             "townframe:daybook-types/doc": generate,
 
@@ -39,7 +39,7 @@ mod wit {
             "townframe:daybook/drawer": generate,
             "townframe:daybook/capabilities": generate,
             "townframe:daybook/facet-routine": generate,
-            "townframe:daybook/sqlite-connection": generate,
+            "townframe:sqlite/sqlite-connection": generate,
         }
     });
 }

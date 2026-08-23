@@ -1,0 +1,9 @@
+package townframe:btress-sysadmin@0.1.0;
+
+world btress-sysadmin-web {
+  import wasi:logging/logging@0.1.0-draft;
+  import wasi:cli/environment@0.2.6;
+  import wasi:filesystem/preopens@0.2.6;
+
+  export wasi:http/incoming-handler@0.2.6;
+}

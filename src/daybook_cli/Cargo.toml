@@ -20,6 +20,9 @@ utils_rs = { workspace = true, features = ["native"] }
 am_utils_rs.workspace = true
 daybook_core = { workspace = true }
 daybook_types = { workspace = true }
+wash-runtime = { workspace = true }
+wash_plugin_sqlite.workspace = true
+sqlx_utils_rs.workspace = true
 
 #
 # cli
@@ -29,7 +32,24 @@ comfy-table = "7.2"
 
 #
 # async 
-tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "tracing"] }
+
+#
+# mail
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+
+#
+# wasm
+wasmtime.workspace = true
+
+#
+# error
+anyhow.workspace = true
+
+#
+# log
+tracing.workspace = true
+
 
 #
 # encoding
@@ -39,10 +59,6 @@ serde_json.workspace = true
 #
 # automerge
 autosurgeon = { workspace = true, features = ["uuid"] }
-
-# parking_lot = "0.12"
-# libc = "0.2"
-# struct-patch = "0.10"
 
 #
 # fs

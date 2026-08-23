@@ -103,7 +103,7 @@ impl SqliteLocalStateRepo {
         let sqlite_file_path = self.get_sqlite_file_path(local_state_id).await?;
         let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
 
-        crate::init_sqlite_vec();
+        sqlx_utils_rs::init_sqlite_vec();
         let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
             .await
             .wrap_err("error initializing sqlite local state connection")?;

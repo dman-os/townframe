@@ -1,0 +1,29 @@
+diff --git a/dist/0.2.x/http/types/response.js b/dist/0.2.x/http/types/response.js
+index 2d69bf6783087664cbf67d1f7d285fc443c4b772..4a68adcebf6de2da5fa5e1299199f75317ae629b 100644
+--- a/dist/0.2.x/http/types/response.js
++++ b/dist/0.2.x/http/types/response.js
+@@ -24,11 +24,13 @@ export function genWriteWebResponseFn(args) {
+         // Build the outgoing response body
+         const outgoingBody = outgoingResponse.body();
+         {
++            if (resp.body === null) {
++                // Redirect/204/304 responses legitimately have no body: never
++                // open the write stream, just finish the body directly (the
++                // canonical wasi-http way to express an empty response).
++            } else {
+             // Create a stream for the response body
+             const outputStream = outgoingBody.write();
+-            if (resp.body === null) {
+-                throw new Error("unexpectedly missing resp.body");
+-            }
+             const pollable = outputStream.subscribe();
+             // Create a reader for the body we'll be writing out
+             const reader = resp.body.getReader();
+@@ -69,6 +71,7 @@ export function genWriteWebResponseFn(args) {
+             // Clean up pollable & stream
+             pollable[Symbol.dispose]();
+             outputStream[Symbol.dispose]();
++            }
+         }
+         // Set the outgoing response body w/ no trailers
+         OutgoingBody.finish(outgoingBody, undefined);

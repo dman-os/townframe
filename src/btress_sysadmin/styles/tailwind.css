@@ -1,0 +1,27 @@
+@import "tailwindcss";
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+/* @import "./material.css"; */
+/**/
+/* @layer base { */
+/*   :root { */
+/*     color-scheme: light; */
+/*   } */
+/**/
+/*   .dark { */
+/*     color-scheme: dark; */
+/*   } */
+/**/
+/*   * { */
+/*     @apply border-border; */
+/*   } */
+/**/
+/*   body { */
+/*     @apply bg-background text-foreground antialiased; */
+/*   } */
+/* } */
+/**/
+/* h1 { */
+/*   @apply font-bold text-4xl; */
+/* } */

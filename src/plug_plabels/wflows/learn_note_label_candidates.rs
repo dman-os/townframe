@@ -206,7 +206,7 @@ fn load_or_init_proposal_set(
 }
 
 fn ensure_embedding_cache_schema(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
 ) -> Result<(), JobErrorX> {
     sqlite_connection
         .query_batch(
@@ -226,7 +226,7 @@ fn ensure_embedding_cache_schema(
 }
 
 fn proposal_centroid(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     prompts: &[String],
 ) -> Result<Vec<f32>, JobErrorX> {
     let mut vectors = Vec::with_capacity(prompts.len());
@@ -238,11 +238,11 @@ fn proposal_centroid(
 }
 
 fn get_or_compute_text_embedding(
-    sqlite_connection: &crate::wit::townframe::daybook::sqlite_connection::Connection,
+    sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     query_text: &str,
 ) -> Result<Vec<f32>, JobErrorX> {
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::sql::types::SqlValue;
+    use crate::wit::townframe::sqlite::types::SqlValue;
 
     let cache_rows = sqlite_connection
         .query(

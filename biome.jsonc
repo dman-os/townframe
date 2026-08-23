@@ -1,0 +1,60 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.8/schema.json",
+  "root": true,
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "**",
+      // Build artifacts
+      "!node_modules",
+      "!**/.expo",
+      "!**/dist",
+      "!**/.next",
+      "!**/build",
+      "!**/messages.ts",
+      "!symlinks",
+      "!x",
+      "!play.ts"
+    ]
+  },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+      // "suspicious": {
+      // 	"noUnknownAtRules": "off"
+      // },
+      // "style": {
+      // 	"noNonNullAssertion": "off"
+      // }
+    },
+    "domains": {
+      "next": "recommended",
+      "react": "recommended"
+    },
+    "includes": ["**"]
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+  //"name": "projName"
+}
