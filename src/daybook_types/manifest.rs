@@ -23,6 +23,7 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 }
 
 #[derive(Debug, Validate, Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
@@ -70,6 +71,7 @@ uniffi::custom_newtype!(ManifestFacetTag, String);
     Reconcile,
     Hydrate,
 )]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
@@ -118,6 +120,7 @@ uniffi::custom_newtype!(KeyGeneric, String);
 
 /// Versions work lik @foo/bar@1.2.3
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PlugManifest {
     #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
@@ -162,6 +165,7 @@ impl PlugManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetManifest {
     /// Must be reverse domain notation
@@ -178,6 +182,7 @@ pub struct FacetManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(tag = "ty", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FacetReferenceManifest {
     UrlString {
@@ -250,6 +255,7 @@ pub enum FacetReferenceKind {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PlugDependencyManifest {
     #[garde(dive)]
@@ -261,6 +267,7 @@ pub struct PlugDependencyManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetDependencyManifest {
     #[garde(dive)]
@@ -270,6 +277,7 @@ pub struct FacetDependencyManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewManifest {
     #[garde(length(min = 1))]
@@ -281,6 +289,7 @@ pub struct ViewManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ViewProviderManifest {
     StatelessWasm {
@@ -294,6 +303,7 @@ pub enum ViewProviderManifest {
 #[derive(Debug, Serialize, Deserialize, Default, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FacetDisplayHint {
     #[serde(default)]
     #[garde(skip)]
@@ -309,6 +319,7 @@ pub struct FacetDisplayHint {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Reconcile, Hydrate)]
 pub enum FacetDisplayDeets {
     #[default]
@@ -330,6 +341,7 @@ pub enum FacetDisplayDeets {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Reconcile, Hydrate)]
 pub struct ViewRef {
     #[serde(default)]
@@ -340,6 +352,7 @@ pub struct ViewRef {
 #[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Reconcile, Hydrate)]
 pub enum FacetViewMode {
     #[default]
@@ -351,6 +364,7 @@ pub enum FacetViewMode {
 #[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Reconcile, Hydrate)]
 pub enum DateTimeFacetDisplayType {
     #[default]
@@ -361,6 +375,7 @@ pub enum DateTimeFacetDisplayType {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WflowBundleManifest {
     #[garde(dive)]
@@ -370,6 +385,7 @@ pub struct WflowBundleManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineDocAcl {
     #[garde(dive)]
@@ -380,6 +396,7 @@ pub struct RoutineDocAcl {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineManifest {
     #[garde(dive)]
@@ -470,6 +487,7 @@ impl RoutineManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum RoutineImpl {
     Wflow {
@@ -481,6 +499,7 @@ pub enum RoutineImpl {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineFacetAccess {
     /// Required for config_facet_acl entries to disambiguate owner config doc.
@@ -508,6 +527,7 @@ pub struct RoutineFacetAccess {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineLocalStateAccess {
     #[garde(length(min = 1))]
@@ -517,6 +537,7 @@ pub struct RoutineLocalStateAccess {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandManifest {
     #[garde(length(min = 1))]
@@ -529,6 +550,7 @@ pub struct CommandManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CommandDeets {
     DocCommand {
@@ -538,6 +560,7 @@ pub enum CommandDeets {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InitManifest {
     #[garde(length(min = 1))]
@@ -549,6 +572,7 @@ pub struct InitManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 #[derive(Reconcile, Hydrate)]
 pub enum InitRunMode {
@@ -558,6 +582,7 @@ pub enum InitRunMode {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum InitDeets {
     InvokeRoutine {
@@ -567,6 +592,7 @@ pub enum InitDeets {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessorManifest {
     #[garde(length(min = 1))]
@@ -576,6 +602,7 @@ pub struct ProcessorManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ProcessorDeets {
     /// Tests `predicate` whenever a doc changes and
@@ -594,6 +621,7 @@ pub enum ProcessorDeets {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessorEventPredicate {
     #[serde(default)]
@@ -605,6 +633,7 @@ pub struct ProcessorEventPredicate {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum NodePredicate {
     ChangeOrigin(#[garde(dive)] ChangeOriginDeets),
@@ -617,6 +646,7 @@ impl Default for NodePredicate {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeOriginDeets {
     #[default]
@@ -624,6 +654,7 @@ pub enum ChangeOriginDeets {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum DocChangePredicate {
     #[default]
@@ -736,6 +767,7 @@ impl DocChangePredicate {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DocPredicateClause {
     HasTag(#[garde(dive)] FacetTag),
@@ -761,6 +793,7 @@ pub enum DocPredicateClause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CompareOp {
     Eq,
@@ -1130,12 +1163,14 @@ fn compare_json_numbers_ordering(
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum LocalStateManifest {
     SqliteFile {},
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LocalStateDependencyManifest {
     #[garde(dive)]
@@ -1701,5 +1736,17 @@ mod tests {
         assert_eq!(manifest.query_acls.len(), 1);
         assert_eq!(manifest.config_facet_acl.len(), 1);
         assert_eq!(manifest.local_state_acl.len(), 0);
+    }
+
+    #[test]
+    fn plug_manifest_json_schema_generates() {
+        // ADR 007 §1: the plugManifest facet's value schema is schema_for!(PlugManifest).
+        let root = schemars::schema_for!(PlugManifest);
+        let json = serde_json::to_value(&root).expect("schema serializes");
+        assert!(json.is_object());
+        assert!(
+            serde_json::to_string(&root).expect("schema to string").len() > 100,
+            "generated schema should be non-trivial"
+        );
     }
 }

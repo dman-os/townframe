@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 
 use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
-use crate::rt::Rt;
 use crate::rt::dispatch::DispatchEvent;
 use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
@@ -241,8 +240,6 @@ pub struct SwitchSinkOutcome {
 
 #[derive(Clone, Copy)]
 pub struct SwitchSinkCtx<'a> {
-    // FIXME: why are these optional?
-    pub rt: Option<&'a Arc<Rt>>,
     pub store: Option<&'a SwitchStore>,
 }
 
@@ -268,7 +265,13 @@ struct PreparedSwitchSink {
 }
 
 pub async fn spawn_switch_worker(
-    rt: Arc<Rt>,
+    drawer: Arc<crate::drawer::DrawerRepo>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    config_repo: Arc<crate::config::ConfigRepo>,
+    dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    registry: Arc<crate::repos::ListenersRegistry>,
+    part_store: big_repo::SharedPartStore,
+    rt_cancel_token: tokio_util::sync::CancellationToken,
     repo_sql: SqlCtx,
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
 ) -> Res<SwitchWorkerHandle> {
@@ -276,22 +279,23 @@ pub async fn spawn_switch_worker(
 
     let store = SwitchStore::load(repo_sql).await?;
 
-    let drawer_listener = rt
-        .drawer
+    let drawer_listener = drawer
         .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let plug_listener = rt
-        .plugs_repo
+    let plug_listener = plugs_repo
         .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let config_listener = rt
-        .config_repo
+    let config_listener = config_repo
         .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let dispatch_listener = rt
-        .dispatch_repo
+    let dispatch_listener = dispatch_repo
         .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
 
     let mut worker = SwitchWorker {
         store,
-        rt,
+        drawer,
+        plugs_repo,
+        config_repo,
+        dispatch_repo,
+        registry,
+        part_store,
         prepared_sinks: prepare_sinks(sinks),
         predicate_requirements: HashSet::new(),
         predicate_resolved: HashMap::new(),
@@ -299,13 +303,12 @@ pub async fn spawn_switch_worker(
     };
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    let rt_cancel_token = worker.rt.cancel_token.clone();
     let fut = {
         let cancel_token = cancel_token.clone();
         let rt_cancel_token = rt_cancel_token.clone();
         async move {
             worker.refresh_branch_index().await?;
-            let events = worker.rt.plugs_repo.events_for_init().await?;
+            let events = worker.plugs_repo.events_for_init().await?;
             for event in events {
                 let event = Arc::new(event);
                 worker
@@ -316,7 +319,7 @@ pub async fn spawn_switch_worker(
                     .await?;
             }
 
-            let events = worker.rt.drawer.events_for_init().await?;
+            let events = worker.drawer.events_for_init().await?;
             for event in events {
                 let event = Arc::new(event);
                 worker
@@ -327,7 +330,7 @@ pub async fn spawn_switch_worker(
                     .await?;
             }
 
-            let events = worker.rt.dispatch_repo.events_for_init().await?;
+            let events = worker.dispatch_repo.events_for_init().await?;
             for event in events {
                 let event = Arc::new(event);
                 worker
@@ -338,7 +341,7 @@ pub async fn spawn_switch_worker(
                     .await?;
             }
 
-            let events = worker.rt.config_repo.events_for_init().await?;
+            let events = worker.config_repo.events_for_init().await?;
             for event in events {
                 let event = Arc::new(event);
                 worker
@@ -518,8 +521,13 @@ fn prepare_sinks(
 }
 
 struct SwitchWorker {
-    rt: Arc<Rt>,
     store: SwitchStore,
+    drawer: Arc<crate::drawer::DrawerRepo>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    config_repo: Arc<crate::config::ConfigRepo>,
+    dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    registry: Arc<crate::repos::ListenersRegistry>,
+    part_store: big_repo::SharedPartStore,
     prepared_sinks: Vec<PreparedSwitchSink>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
@@ -528,11 +536,11 @@ struct SwitchWorker {
 
 impl SwitchWorker {
     async fn refresh_branch_index(&mut self) -> Res<()> {
-        let (_, doc_ids) = self.rt.drawer.list_just_ids().await?;
+        let (_, doc_ids) = self.drawer.list_just_ids().await?;
         let mut out = HashMap::new();
         for raw_doc_id in doc_ids {
             let doc_id = DocId::from(raw_doc_id);
-            let Some(entry) = self.rt.drawer.get_entry(&doc_id).await? else {
+            let Some(entry) = self.drawer.get_entry(&doc_id).await? else {
                 continue;
             };
             for (branch_name, branch_ref) in entry.branches {
@@ -597,7 +605,6 @@ impl SwitchWorker {
         match event {
             SubEvent::Added(_) | SubEvent::Changed(_) => {
                 let Some(handle) = self
-                    .rt
                     .drawer
                     .get_handle_by_branch_doc_id(branch_doc_id.parse()?)
                     .await?
@@ -642,7 +649,7 @@ impl SwitchWorker {
                 let switch_evt = SwitchEvent::Doc(Arc::clone(&doc_evt));
                 self.track_event_heads(&switch_evt).await?;
                 self.dispatch_to_listeners(&switch_evt).await?;
-                self.rt.registry.notify([doc_evt]);
+                self.registry.notify([doc_evt]);
                 next_state.present = true;
                 next_state.last_heads = Some(new_heads);
             }
@@ -662,7 +669,7 @@ impl SwitchWorker {
                 let evt = Arc::new(DrawerEvent::DocDeleted {
                     id: doc_id.clone(),
                     deleted_facet_keys,
-                    entry: self.rt.drawer.get_entry(&doc_id).await?,
+                    entry: self.drawer.get_entry(&doc_id).await?,
                     drawer_heads: ChangeHashSet::default(),
                     origin,
                 });
@@ -692,7 +699,6 @@ impl SwitchWorker {
         let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
         let (old_keys, old_updated_at) = if let Some(heads) = prev_heads {
             if let Some(doc) = self
-                .rt
                 .drawer
                 .get_doc_with_facets_at_branch_heads(
                     doc_id,
@@ -736,7 +742,6 @@ impl SwitchWorker {
         };
         let (new_keys, new_updated_at) = if let Some(heads) = next_heads {
             if let Some(doc) = self
-                .rt
                 .drawer
                 .get_doc_with_facets_at_branch_heads(
                     doc_id,
@@ -787,12 +792,10 @@ impl SwitchWorker {
                     changed.push(key.clone());
                 } else {
                     let old_h = self
-                        .rt
                         .drawer
                         .get_facet_heads_at_branch_heads(doc_id, branch_path, prev, key)
                         .await?;
                     let new_h = self
-                        .rt
                         .drawer
                         .get_facet_heads_at_branch_heads(doc_id, branch_path, next, key)
                         .await?;
@@ -827,7 +830,6 @@ impl SwitchWorker {
         for index in 0..self.prepared_sinks.len() {
             if self.listener_interested_in_event(index, event).await? {
                 let ctx = SwitchSinkCtx {
-                    rt: Some(&self.rt),
                     store: Some(&self.store),
                 };
                 let outcome = self.prepared_sinks[index]
@@ -900,7 +902,6 @@ impl SwitchWorker {
         }
         let branch_path = BranchPathBuf::from(event.branch_name.as_str());
         let Some(facet_keys_set) = self
-            .rt
             .drawer
             .get_facet_keys_if_latest(&event.doc_id, &branch_path, &event.new_heads)
             .await?
@@ -990,7 +991,6 @@ impl SwitchWorker {
                 };
                 let branch_path = BranchPathBuf::from(branch_name.as_str());
                 let Some(facet_keys_set) = self
-                    .rt
                     .drawer
                     .get_facet_keys_if_latest(id, &branch_path, heads)
                     .await?
@@ -1137,10 +1137,10 @@ mod tests {
                     | DrawerEvent::DocDeleted { origin, .. } => origin.clone(),
                 },
                 SwitchEvent::Plugs(event) => match &**event {
-                    PlugsEvent::PlugAdded { origin, .. }
-                    | PlugsEvent::PlugChanged { origin, .. }
-                    | PlugsEvent::PlugDeleted { origin, .. }
-                    | PlugsEvent::ConfigDocsChanged { origin, .. } => origin.clone(),
+                    PlugsEvent::PlugEnabled { origin, .. }
+                    | PlugsEvent::PlugDisabled { origin, .. }
+                    | PlugsEvent::PlugUpdated { origin, .. }
+                    | PlugsEvent::PlugsConfigChanged { origin, .. } => origin.clone(),
                 },
                 SwitchEvent::Dispatch(event) => match &**event {
                     DispatchEvent::DispatchAdded { origin, .. }
@@ -1182,7 +1182,6 @@ mod tests {
                 .on_event(
                     event,
                     &SwitchSinkCtx {
-                        rt: None,
                         store: None,
                     },
                 )
@@ -1213,7 +1212,7 @@ mod tests {
     async fn test_switch_worker_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_smoke").await?;
-        crate::test_support::import_test_plug_oci(&ctx).await?;
+        crate::test_support::import_and_enable_test_plug(&ctx).await?;
 
         // Add a doc that should trigger the test-label processor
         let _doc_id = ctx
@@ -1257,7 +1256,7 @@ mod tests {
     async fn test_switch_skip_when_no_processor_read_set_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_skip_unrelated").await?;
-        crate::test_support::import_test_plug_oci(&ctx).await?;
+        crate::test_support::import_and_enable_test_plug(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1343,7 +1342,7 @@ mod tests {
     async fn test_switch_doc_added_facet_key_matching() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_doc_added").await?;
-        crate::test_support::import_test_plug_oci(&ctx).await?;
+        crate::test_support::import_and_enable_test_plug(&ctx).await?;
 
         let _doc_id = ctx
             .drawer_repo
@@ -1360,11 +1359,15 @@ mod tests {
 
         let mut dispatch_id: Option<String> = None;
         for _ in 0..300 {
-            if let Some((id, _dispatch)) =
-                ctx.dispatch_repo.get_any_by_wflow_key("test-label").await
-            {
+            let found = ctx.dispatch_repo.get_any_by_wflow_key("test-label").await;
+            if let Some((id, _dispatch)) = found {
                 dispatch_id = Some(id.clone());
                 break;
+            }
+            let all = ctx.dispatch_repo.list().await;
+            eprintln!("PROBE no test-label; dispatch count={}", all.len());
+            for (id, d) in all.iter().take(6) {
+                eprintln!("  PROBE id={} deets={:?} status={:?}", id, d.deets, d.status);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -1383,7 +1386,7 @@ mod tests {
     async fn test_switch_doc_updated_on_custom_branch_triggers_event() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_custom_branch").await?;
-        crate::test_support::import_test_plug_oci(&ctx).await?;
+        crate::test_support::import_and_enable_test_plug(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1462,7 +1465,7 @@ mod tests {
     async fn test_switch_persists_cursor_and_doc_state() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_cursor_resume").await?;
-        crate::test_support::import_test_plug_oci(&ctx).await?;
+        crate::test_support::import_and_enable_test_plug(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1681,7 +1684,7 @@ mod tests {
         let mut runtime_listeners = prepare_sinks(listeners);
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugAdded {
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugEnabled {
                 id: "id".into(),
                 heads: ChangeHashSet(Vec::new().into()),
                 origin: crate::event_origin::SwitchEventOrigin::Local {
@@ -1727,7 +1730,7 @@ mod tests {
         .await?;
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Plugs(Arc::new(PlugsEvent::ConfigDocsChanged {
+            &SwitchEvent::Plugs(Arc::new(PlugsEvent::PlugsConfigChanged {
                 heads: ChangeHashSet(Vec::new().into()),
                 origin: crate::event_origin::SwitchEventOrigin::Bootstrap,
             })),

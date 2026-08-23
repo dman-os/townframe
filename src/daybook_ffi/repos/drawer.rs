@@ -114,18 +114,15 @@ impl DrawerRepoFfi {
     }
 
     #[tracing::instrument(err, skip(self))]
-    async fn get_or_init_plug_config_doc_id(
+    async fn get_plug_config_doc_id(
         self: Arc<Self>,
         plug_id: String,
-    ) -> Result<String, FfiError> {
+    ) -> Result<Option<String>, FfiError> {
         let this = Arc::clone(&self);
         Ok(self
             .fcx
             .do_on_rt(async move {
-                this._plugs_repo
-                    .repo
-                    .get_or_init_plug_config_doc_id(&plug_id, &this.repo)
-                    .await
+                this._plugs_repo.repo.get_plug_config_doc_id(&plug_id).await
             })
             .await?)
     }

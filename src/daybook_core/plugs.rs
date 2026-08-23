@@ -1,20 +1,44 @@
 use crate::interlude::*;
+use crate::repos::Repo;
 use tokio_util::sync::CancellationToken;
 
 use daybook_types::manifest;
 
+#[cfg(test)]
+mod tests;
+
 pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
-    use manifest::*;
+    use manifest::{
+        FacetDisplayDeets, FacetDisplayHint, FacetManifest, FacetReferenceManifest, LocalStateManifest,
+    };
 
     let plugs = vec![
-        PlugManifest {
+        manifest::PlugManifest {
             namespace: "daybook".into(),
             name: "core".into(),
             version: "0.0.1".parse().unwrap(),
             title: "Daybook Core".into(),
             desc: "Core keys and routines".into(),
-            local_states: default(),
+            local_states: [
+                (
+                    "doc-facet-set-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "doc-blobs-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "doc-facet-ref-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+                (
+                    "doc-blob-pins-index".into(),
+                    Arc::new(LocalStateManifest::SqliteFile {}),
+                ),
+            ]
+            .into(),
             dependencies: default(),
             views: default(),
             routines: default(),
@@ -23,6 +47,18 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             inits: default(),
             processors: default(),
             facets: vec![
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::PlugManifest.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::PlugManifestFacet),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
+                    key_tag: WellKnownFacetTag::PlugsConfig.into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::PlugsConfig),
+                    display_config: default(),
+                    references: default(),
+                },
                 FacetManifest {
                     key_tag: WellKnownFacetTag::Dmeta.into(),
                     value_schema: schemars::schema_for!(serde_json::Value),
@@ -119,207 +155,126 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 },
             ],
         },
-        PlugManifest {
-            namespace: "daybook".into(),
-            name: "wip".into(),
-            version: "0.0.1".parse().unwrap(),
-            title: "Daybook WIP".into(),
-            desc: "Experiment bed for WIP features".into(),
-            local_states: default(),
-            dependencies: [(
-                "@daybook/core@v0.0.1".into(),
-                PlugDependencyManifest {
-                    keys: vec![
-                        FacetDependencyManifest {
-                            key_tag: WellKnownFacetTag::Note.into(),
-                            value_schema: schemars::schema_for!(Note),
-                        },
-                        FacetDependencyManifest {
-                            key_tag: WellKnownFacetTag::LabelGeneric.into(),
-                            value_schema: schemars::schema_for!(String),
-                        },
-                        FacetDependencyManifest {
-                            key_tag: WellKnownFacetTag::Blob.into(),
-                            value_schema: schemars::schema_for!(Blob),
-                        },
-                        FacetDependencyManifest {
-                            key_tag: WellKnownFacetTag::Embedding.into(),
-                            value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
-                        },
-                    ],
-                    local_states: vec![],
-                }
-                .into(),
-            )]
-            .into(),
-            views: default(),
-            routines: default(),
-            commands: default(),
-            inits: default(),
-            processors: default(),
-            wflow_bundles: default(),
-            facets: vec![],
-        },
     ];
 
     plugs
 }
 
-#[derive(Reconcile, Hydrate)]
-pub struct PlugsStore {
-    pub manifests: HashMap<String, Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>,
-    pub manifests_deleted: HashMap<String, Vec<VersionTag>>,
-    pub plug_config_doc_ids: Versioned<ThroughJson<HashMap<String, String>>>,
+/// ADR 007 §3: `@daybook/core` cannot be disabled. The guard lives in the
+/// plugg config facet mutation, not in the runtime.
+pub const CORE_PLUG_ID: &str = "@daybook/core";
 
-    /// Index: property tag -> plug id (@ns/name)
-    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
-    pub tag_to_plug: HashMap<String, String>,
-    /// Index: property tag -> facet manifest
-    #[autosurgeon(with = "am_utils_rs::codecs::skip")]
-    pub facet_manifests: HashMap<String, manifest::FacetManifest>,
-}
+/// ADR 007 §1: the plugg config facet value.
+pub type PlugsConfig = daybook_types::doc::PlugsConfig;
 
-impl Default for PlugsStore {
-    fn default() -> Self {
-        Self {
-            manifests: default(),
-            manifests_deleted: default(),
-            plug_config_doc_ids: Versioned {
-                vtag: VersionTag::nil(),
-                val: ThroughJson(default()),
-            },
-            tag_to_plug: default(),
-            facet_manifests: default(),
+impl crate::stores::FacetStore for PlugsConfig {
+    fn facet_key() -> daybook_types::doc::FacetKey {
+        daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugsConfig)
+    }
+
+    fn seed() -> Self {
+        PlugsConfig {
+            enabled: HashMap::new(),
+            known_manifests: HashMap::new(),
+            plug_config_doc_ids: HashMap::new(),
         }
     }
 }
 
-impl PlugsStore {
-    pub fn rebuild_indices(&mut self) {
-        self.tag_to_plug.clear();
-        self.facet_manifests.clear();
-
-        for (plug_id, versioned) in &self.manifests {
-            for facet in &versioned.facets {
-                self.tag_to_plug
-                    .insert(facet.key_tag.to_string(), plug_id.clone());
-                self.facet_manifests
-                    .insert(facet.key_tag.to_string(), facet.clone());
-            }
-        }
-    }
+/// ADR 007 §5: known plugs are a derived read cache over the config facet's
+/// known_manifests (manifest docs), not a replicated AmStore. The app-doc
+/// `PlugsStore` is retired; existing data is ignored (no migration).
+/// ADR 007 §5: derived read cache. `enabled` / `plug_config_doc_ids` live in
+/// the config `FacetStore`; only manifest-derived state is cached here.
+#[derive(Default)]
+struct PlugsCache {
+    /// plug id -> manifest at heads (known plugs).
+    manifests: HashMap<String, Arc<manifest::PlugManifest>>,
+    /// Index: property tag -> plug id (@ns/name).
+    tag_to_plug: HashMap<String, String>,
+    /// Index: property tag -> facet manifest.
+    facet_manifests: HashMap<String, manifest::FacetManifest>,
+    /// Active plugs: enabled + readable at pinned heads (plug id -> heads + manifest).
+    active_manifests: HashMap<String, (ChangeHashSet, Arc<manifest::PlugManifest>)>,
 }
 
-#[async_trait]
-impl crate::stores::AmStore for PlugsStore {
-    fn prop() -> Cow<'static, str> {
-        "plugs".into()
-    }
+/// ADR 007 §7: a doc change forwarded from the switch sink to the notif loop.
+#[derive(Debug, Clone)]
+pub(crate) enum PlugsNotif {
+    DocChanged {
+        doc_id: daybook_types::doc::DocId,
+        heads: ChangeHashSet,
+        origin: crate::event_origin::SwitchEventOrigin,
+        config_changed: bool,
+        manifest_changed: bool,
+    },
 }
 
-pub mod version_updates {
-    use super::*;
-    use automerge::{ROOT, transaction::Transactable};
-    use autosurgeon::reconcile_prop;
-
-    pub fn version_latest() -> Res<Vec<u8>> {
-        let mut doc = automerge::Automerge::new();
-        doc.transact(|tx| {
-            tx.put(ROOT, "version", "0")?;
-            tx.put(ROOT, "$schema", "daybook.plugs")?;
-            reconcile_prop(
-                tx,
-                ROOT,
-                super::PlugsStore::prop().as_ref(),
-                super::PlugsStore::default(),
-            )
-            .map_err(|_| automerge::AutomergeError::Fail)?;
-            Ok::<_, automerge::AutomergeError>(())
-        })
-        .map_err(|err| ferr!("{err:?}"))?;
-        Ok(doc.save_nocompress())
-    }
+/// ADR 007 §6: drawer facet validation consults active plugs only, with a
+/// distinct "plug disabled" vs "unknown tag" error.
+#[derive(Debug, Clone)]
+pub enum FacetManifestLookup {
+    Found(manifest::FacetManifest),
+    PlugDisabled { plug_id: String },
+    UnknownTag,
 }
 
 pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    app_doc_handle: big_repo::BigDocHandle,
-    store: crate::stores::AmStoreHandle<PlugsStore>,
+    big_repo: SharedBigRepo,
     blobs: Arc<crate::blobs::BlobsRepo>,
+    /// ADR 007 §2: the repo config doc (third core doc).
+    doc_config_id: daybook_types::doc::DocId,
+
+    drawer: tokio::sync::OnceCell<Arc<crate::drawer::DrawerRepo>>,
+    /// ADR 007 §2: the plugg config facet as a `FacetStore` — the in-memory
+    /// projection kept live by `FacetStoreSink` (registered in rt).
+    config_store: tokio::sync::OnceCell<crate::stores::FacetStoreHandle<PlugsConfig>>,
+
     mutation_mutex: tokio::sync::Mutex<()>,
-    plug_config_doc_init_lock: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
-    local_peer_id: PeerId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
+    cache: tokio::sync::Mutex<PlugsCache>,
+
+    /// ADR 007 §7: fed by the switch sink; the notif loop keeps the derived
+    /// cache fresh and emits enabled-only events (like the old notifs_loop).
+    notif_tx: tokio::sync::mpsc::UnboundedSender<PlugsNotif>,
 }
 
-// Granular event enum for specific changes
+// Granular event enum for specific changes (ADR 007 §7: enabled-only).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PlugsEvent {
-    // ListChanged { heads: ChangeHashSet },
-    PlugAdded {
+    /// Config entry added, or pending -> active (ADR 007 §6).
+    PlugEnabled {
         id: String,
         heads: ChangeHashSet,
         origin: crate::event_origin::SwitchEventOrigin,
     },
-    PlugChanged {
+    /// Config entry removed.
+    PlugDisabled {
+        id: String,
+        origin: crate::event_origin::SwitchEventOrigin,
+    },
+    /// Explicit re-pin only.
+    PlugUpdated {
         id: String,
         heads: ChangeHashSet,
         origin: crate::event_origin::SwitchEventOrigin,
     },
-    PlugDeleted {
-        id: String,
+    /// The plugg config facet moved.
+    PlugsConfigChanged {
         heads: ChangeHashSet,
         origin: crate::event_origin::SwitchEventOrigin,
     },
-    ConfigDocsChanged {
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-}
-
-pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
-pub const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str =
-    "application/vnd.daybook.plug.manifest.v1+json";
-
-fn parse_dep_base_id(dep_id: &str) -> Res<String> {
-    if dep_id.starts_with('@') {
-        let without_prefix = dep_id
-            .strip_prefix('@')
-            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
-        let base = without_prefix
-            .split('@')
-            .next()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
-        Ok(format!("@{base}"))
-    } else {
-        let base = dep_id
-            .split('@')
-            .next()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id}"))?;
-        Ok(base.to_string())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct OciImportOptions {
-    pub strict: bool,
-}
-
-impl Default for OciImportOptions {
-    fn default() -> Self {
-        Self { strict: true }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportedPlug {
     pub plug_id: String,
     pub version: semver::Version,
+    /// Doc id of the authored manifest doc (authoring imports only).
+    pub doc_id: Option<daybook_types::doc::DocId>,
     pub imported_blob_hashes: Vec<String>,
     pub source_digest: Option<String>,
 }
@@ -344,53 +299,39 @@ impl PlugsRepo {
     pub async fn load(
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
-        app_doc_id: DocumentId,
+        doc_config_id: DocumentId,
         local_user_path: daybook_types::doc::UserPathBuf,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
-
-        let app_doc_handle = big_repo
-            .get_doc(&app_doc_id)
-            .await?
-            .into_ready(app_doc_id)?;
-
-        let store_val = PlugsStore::load(&app_doc_handle).await?;
-        let store = crate::stores::AmStoreHandle::new(
-            store_val,
-            app_doc_handle.clone(),
-            local_actor_id.clone(),
-        );
-
-        store.mutate_sync(|store| store.rebuild_indices()).await?;
-
         let cancel_token = CancellationToken::new();
-        let (ticket, notif_rx) =
-            PlugsStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
+        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let repo = Self {
-            app_doc_handle,
-            store,
+        let repo = Arc::new(Self {
+            big_repo: Arc::clone(&big_repo),
             blobs,
-            local_actor_id,
-            local_peer_id: big_repo.local_peer_id(),
-            registry: Arc::clone(&registry),
+            doc_config_id: daybook_types::doc::DocId::from(doc_config_id.to_string()),
+            drawer: tokio::sync::OnceCell::new(),
+            config_store: tokio::sync::OnceCell::new(),
             mutation_mutex: tokio::sync::Mutex::new(()),
-            plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
+            local_actor_id,
+            registry: Arc::clone(&registry),
             cancel_token: cancel_token.clone(),
-            _change_listener_tickets: vec![ticket],
-        };
-        let repo = Arc::new(repo);
+            cache: tokio::sync::Mutex::new(PlugsCache::default()),
+            notif_tx,
+        });
 
+        // ADR 007 §7: the notif loop maintains the derived cache and emits
+        // enabled-only events; fed by the switch sink (PlugsSwitchSink).
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             let cancel_token = cancel_token.child_token();
             async move {
-                repo.notifs_loop(notif_rx, cancel_token)
+                repo.notif_loop(notif_rx, cancel_token)
                     .await
-                    .expect("error handling notifs")
+                    .expect("error handling plugs notifs")
             }
         });
 
@@ -403,188 +344,501 @@ impl PlugsRepo {
         ))
     }
 
-    pub async fn get_plugs_heads(&self) -> ChangeHashSet {
-        self.app_doc_handle
-            .with_document_read(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
-            .await
+    /// ADR 007 §2: the drawer is loaded after the plugs repo (the drawer needs
+    /// the plugs repo for facet validation). Attach it here so the plugs repo
+    /// can read manifest docs and write the plugg config facet through it.
+    pub async fn attach_drawer(&self, drawer: Arc<crate::drawer::DrawerRepo>) -> Res<()> {
+        if self.drawer.set(drawer).is_err() {
+            eyre::bail!("drawer already attached to plugs repo");
+        }
+        let store = crate::stores::FacetStoreHandle::load(
+            Arc::clone(self.drawer.get().expect("just set")),
+            self.doc_config_id.clone(),
+            daybook_types::doc::BranchPathBuf::from("main"),
+        )
+        .await?;
+        if self.config_store.set(store).is_err() {
+            eyre::bail!("plugs config store already attached");
+        }
+        Ok(())
     }
 
-    async fn latest_manifest_delete_actor(
+    fn config_store(&self) -> Res<&crate::stores::FacetStoreHandle<PlugsConfig>> {
+        self.config_store
+            .get()
+            .ok_or_eyre("plugs config store not attached")
+    }
+
+    /// The `FacetStoreSink` that keeps the config store's projection live
+    /// (registered in the rt switch sinks map).
+    pub fn config_store_sink(&self) -> Option<crate::stores::FacetStoreSink<PlugsConfig>> {
+        self.config_store.get().map(|store| store.sink())
+    }
+
+    fn plug_config_facet_key() -> daybook_types::doc::FacetKey {
+        daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugsConfig)
+    }
+
+    fn plug_manifest_facet_key() -> daybook_types::doc::FacetKey {
+        daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugManifest)
+    }
+
+    async fn read_manifest_doc(
         &self,
-        plug_id: &str,
-        heads: &Arc<[automerge::ChangeHash]>,
-    ) -> Res<Option<ActorId>> {
-        let Some(tags) = self
-            .app_doc_handle
-            .hydrate_path_at_heads::<Vec<VersionTag>>(
+        doc_id: &daybook_types::doc::DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<Arc<manifest::PlugManifest>>> {
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch_heads(
+                doc_id,
+                daybook_types::doc::BranchPath::new("main"),
                 heads,
-                automerge::ROOT,
-                vec![
-                    PlugsStore::prop().into(),
-                    "manifests_deleted".into(),
-                    autosurgeon::Prop::Key(plug_id.to_string().into()),
-                ],
+                Some(vec![Self::plug_manifest_facet_key()]),
             )
             .await?
         else {
             return Ok(None);
         };
-        Ok(tags.last().map(|tag| tag.actor_id.clone()))
+        let Some(raw) = doc.facets.get(&Self::plug_manifest_facet_key()) else {
+            return Ok(None);
+        };
+        let manifest = serde_json::from_value::<manifest::PlugManifest>(raw.clone())?;
+        Ok(Some(Arc::new(manifest)))
     }
 
-    async fn notifs_loop(
+    fn parse_enabled_ref(url: &url::Url) -> Res<daybook_types::url::FacetRef> {
+        let parsed = daybook_types::url::parse_facet_ref(url)?;
+        if parsed.facet_key.tag
+            != daybook_types::doc::FacetTag::WellKnown(
+                daybook_types::doc::WellKnownFacetTag::PlugManifest,
+            )
+            || parsed.facet_key.id != "main"
+        {
+            eyre::bail!(
+                "enabled ref must point at org.example.daybook.plugManifest/main: {url}"
+            );
+        }
+        Ok(parsed)
+    }
+
+    /// Read the manifest pointed at by a full facet ref (doc id + branch +
+    /// pinned heads, or current branch heads when unpinned). Returns None when
+    /// the doc/heads are not locally readable (ADR 007 §6: pending). Used for
+    /// enabled refs and for pending resolution alike.
+    async fn read_manifest_at_ref(
         &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<big_repo::BigRepoChangeNotification>,
-        >,
+        ref_url: &url::Url,
+    ) -> Res<Option<(ChangeHashSet, Arc<manifest::PlugManifest>)>> {
+        let parsed = Self::parse_enabled_ref(ref_url)?;
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let branch_path =
+            daybook_types::doc::BranchPath::new(parsed.branch.as_deref().unwrap_or("main"));
+        let heads = if let Some(at) = &parsed.at {
+            ChangeHashSet(am_utils_rs::parse_commit_heads(at)?)
+        } else {
+            let Some(heads) = drawer
+                .get_branch_heads_for_path(&parsed.doc_id, branch_path)
+                .await?
+            else {
+                return Ok(None);
+            };
+            heads
+        };
+        let Some(manifest) = self.read_manifest_doc(&parsed.doc_id, &heads).await? else {
+            return Ok(None);
+        };
+        Ok(Some((heads, manifest)))
+    }
+
+    fn build_enabled_ref(doc_id: &str, branch: &str, heads: &ChangeHashSet) -> Res<url::Url> {
+        let at = am_utils_rs::serialize_commit_heads(heads.as_ref()).join("|");
+        let url = format!(
+            "db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch={branch}&at={at}"
+        );
+        Ok(url.parse()?)
+    }
+
+    /// Rebuild the derived cache from the config facet (known + enabled) and the plugg
+    /// config facet (enabled + active at pinned heads).
+    async fn refresh_cache(&self) -> Res<()> {
+        let mut manifests: HashMap<String, Arc<manifest::PlugManifest>> = HashMap::new();
+        let mut tag_to_plug: HashMap<String, String> = HashMap::new();
+        let mut facet_manifests: HashMap<String, manifest::FacetManifest> = HashMap::new();
+        // ADR 007 §5: known plugs come from the config store, not the
+        // facet-set index. Each known ref pins the manifest doc + heads.
+        let (enabled, known_manifests) = self
+            .config_store()?
+            .query_sync(|config| (config.enabled.clone(), config.known_manifests.clone()))
+            .await;
+        for ref_url in known_manifests.values() {
+            let parsed = match Self::parse_enabled_ref(ref_url) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+            let Some(at) = &parsed.at else {
+                continue;
+            };
+            let heads = ChangeHashSet(am_utils_rs::parse_commit_heads(at)?);
+            let Some(manifest) = self.read_manifest_doc(&parsed.doc_id, &heads).await? else {
+                continue;
+            };
+            let plug_id = manifest.id();
+            manifests.insert(plug_id.clone(), Arc::clone(&manifest));
+            for facet in &manifest.facets {
+                tag_to_plug.insert(facet.key_tag.to_string(), plug_id.clone());
+                facet_manifests.insert(facet.key_tag.to_string(), facet.clone());
+            }
+        }
+        let mut active_manifests: HashMap<String, (ChangeHashSet, Arc<manifest::PlugManifest>)> =
+            HashMap::new();
+        for (id, ref_url) in &enabled {
+            if let Some((heads, manifest)) = self.read_manifest_at_ref(ref_url).await? {
+                if manifest.id() == *id {
+                    active_manifests.insert(id.clone(), (heads, manifest));
+                } else {
+                    warn!(
+                        plug_id = %id,
+                        manifest_id = %manifest.id(),
+                        "enabled ref manifest id mismatch; treating as pending"
+                    );
+                }
+            }
+        }
+        let mut cache = self.cache.lock().await;
+        cache.manifests = manifests;
+        cache.tag_to_plug = tag_to_plug;
+        cache.facet_manifests = facet_manifests;
+        cache.active_manifests = active_manifests;
+        Ok(())
+    }
+
+    /// ADR 007 §4: idempotent ensure-on-open. Ensures the core manifest doc
+    /// exists (creating it via the single unchecked internal doc-create) and
+    /// the plugg config facet exists with `@daybook/core` enabled at the core
+    /// doc's initial heads.
+    pub async fn ensure_core_plug(&self) -> Res<()> {
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        // Register the repo config doc in the drawer (idempotent) so the plugg
+        // config facet writes go through the drawer like any facet write.
+        drawer
+            .register_existing_doc(
+                &self.doc_config_id,
+                self.doc_config_id
+                    .parse()
+                    .map_err(|err| ferr!("invalid doc_config id: {err}"))?,
+                daybook_types::doc::BranchPath::new("main"),
+            )
+            .await?;
+
+        if self
+            .config_store()?
+            .query_sync(|config| config.enabled.contains_key(CORE_PLUG_ID))
+            .await
+        {
+            return Ok(());
+        }
+
+        // Create the core manifest doc if missing (unchecked: nothing is
+        // registered yet — the single write that skips facet validation).
+        let core_manifest = system_plugs()
+            .into_iter()
+            .find(|manifest| manifest.id() == CORE_PLUG_ID)
+            .ok_or_eyre("core plug manifest missing from system_plugs")?;
+        let core_doc_id = drawer
+            .add_unchecked(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    Self::plug_manifest_facet_key(),
+                    daybook_types::doc::WellKnownFacet::PlugManifest(core_manifest).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        let core_doc_id = daybook_types::doc::DocId::from(core_doc_id);
+
+        // Read the core manifest back at its initial heads and seed the derived
+        // cache so the config facet write below validates normally.
+        let core_heads = drawer
+            .get_doc_branches(&core_doc_id)
+            .await?
+            .and_then(|entry| entry.branches.get("main").cloned())
+            .ok_or_eyre("core manifest doc missing main branch")?;
+        let core_manifest = self
+            .read_manifest_doc(&core_doc_id, &core_heads)
+            .await?
+            .ok_or_eyre("core manifest doc unreadable at initial heads")?;
+        let ref_url = Self::build_enabled_ref(&core_doc_id, "main", &core_heads)?;
+        {
+            let mut cache = self.cache.lock().await;
+            cache
+                .manifests
+                .insert(CORE_PLUG_ID.to_string(), Arc::clone(&core_manifest));
+            // Core is being enabled by the config write below; seed the
+            // manifest maps + active so that write validates normally (the
+            // plugConfig facet is owned by core itself).
+            cache
+                .active_manifests
+                .insert(CORE_PLUG_ID.to_string(), (core_heads.clone(), Arc::clone(&core_manifest)));
+            for facet in &core_manifest.facets {
+                cache
+                    .tag_to_plug
+                    .insert(facet.key_tag.to_string(), CORE_PLUG_ID.to_string());
+                cache
+                    .facet_manifests
+                    .insert(facet.key_tag.to_string(), facet.clone());
+            }
+        }
+
+        // Write the plugg config facet with core enabled at the core doc's
+        // initial heads (validated against core's own plugConfig facet).
+        let (_, heads) = self.config_store()?.mutate_sync(|config| {
+            config.enabled.insert(CORE_PLUG_ID.to_string(), ref_url.clone());
+            config
+                .known_manifests
+                .insert(CORE_PLUG_ID.to_string(), ref_url);
+        }).await?;
+        self.process_config_change(&heads, &self.local_origin()).await?;
+        Ok(())
+    }
+
+    /// Diff two active-set snapshots into enabled-only events (ADR 007 §7).
+    fn diff_active_manifests(
+        old: &HashMap<String, (ChangeHashSet, Arc<manifest::PlugManifest>)>,
+        new: &HashMap<String, (ChangeHashSet, Arc<manifest::PlugManifest>)>,
+        origin: &crate::event_origin::SwitchEventOrigin,
+    ) -> Vec<PlugsEvent> {
+        let mut events = vec![];
+        for (id, (heads, _)) in new {
+            match old.get(id) {
+                None => events.push(PlugsEvent::PlugEnabled {
+                    id: id.clone(),
+                    heads: heads.clone(),
+                    origin: origin.clone(),
+                }),
+                Some((old_heads, _)) if old_heads != heads => events.push(PlugsEvent::PlugUpdated {
+                    id: id.clone(),
+                    heads: heads.clone(),
+                    origin: origin.clone(),
+                }),
+                _ => {}
+            }
+        }
+        for id in old.keys() {
+            if !new.contains_key(id) {
+                events.push(PlugsEvent::PlugDisabled {
+                    id: id.clone(),
+                    origin: origin.clone(),
+                });
+            }
+        }
+        events
+    }
+
+    /// ADR 007 §7: a config facet change (local write or remote notif).
+    /// Rebuild the derived cache from the store, diff the active set, and
+    /// emit enabled-only events.
+    async fn process_config_change(
+        &self,
+        heads: &ChangeHashSet,
+        origin: &crate::event_origin::SwitchEventOrigin,
+    ) -> Res<()> {
+        let old_active = self.cache.lock().await.active_manifests.clone();
+        self.refresh_cache().await?;
+        let new_active = self.cache.lock().await.active_manifests.clone();
+        let mut events = Self::diff_active_manifests(&old_active, &new_active, origin);
+        events.push(PlugsEvent::PlugsConfigChanged {
+            heads: heads.clone(),
+            origin: origin.clone(),
+        });
+        self.registry.notify(events);
+        Ok(())
+    }
+
+    /// ADR 007 §7: a manifest doc changed (a pending plug's doc may have
+    /// landed). Rebuild the cache and diff the active set; no
+    /// `PlugsConfigChanged` (the config facet did not move).
+    async fn process_manifest_change(
+        &self,
+        origin: &crate::event_origin::SwitchEventOrigin,
+    ) -> Res<()> {
+        let old_active = self.cache.lock().await.active_manifests.clone();
+        self.refresh_cache().await?;
+        let new_active = self.cache.lock().await.active_manifests.clone();
+        let events = Self::diff_active_manifests(&old_active, &new_active, origin);
+        self.registry.notify(events);
+        Ok(())
+    }
+
+    /// ADR 007 §7: the notif loop, fed by the switch sink. Maintains the
+    /// derived cache and emits enabled-only events, mirroring the old
+    /// notifs_loop. Reloads the config store first so the refresh below
+    /// reads fresh (the FacetStoreSink is a separate async path).
+    async fn notif_loop(
+        &self,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<PlugsNotif>,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        let mut events = vec![];
         loop {
-            let notifs = tokio::select! {
+            let notif = tokio::select! {
                 biased;
-                _ = cancel_token.cancelled() => {
-                    break;
-                }
-                msg = notif_rx.recv() => {
-                    match msg {
-                        Some(notifs) => notifs,
-                        None => break,
-                    }
-                }
+                _ = cancel_token.cancelled() => break,
+                msg = notif_rx.recv() => match msg {
+                    Some(notif) => notif,
+                    None => break,
+                },
             };
-
-            events.clear();
-            for notif in notifs {
-                let big_repo::BigRepoChangeNotification::DocChanged {
-                    patch,
-                    heads,
-                    origin,
-                    ..
-                } = notif
-                else {
-                    continue;
-                };
-                // 3. Call events_for_patch (pure-ish).
-                self.events_for_patch(
-                    &patch,
-                    &heads,
-                    &mut events,
-                    Some(&origin),
-                    Some(&self.local_peer_id),
-                )
-                .await?;
+            let PlugsNotif::DocChanged {
+                doc_id,
+                heads,
+                origin,
+                config_changed,
+                manifest_changed,
+            } = notif;
+            self.config_store()?.reload().await?;
+            if manifest_changed {
+                self.record_known_manifest_doc(&doc_id, &heads).await?;
             }
-
-            let mut delivered_events = Vec::with_capacity(events.len());
-            for event in events.drain(..) {
-                let is_added = matches!(event, PlugsEvent::PlugAdded { .. });
-                match event {
-                    PlugsEvent::PlugAdded { id, heads, origin }
-                    | PlugsEvent::PlugChanged { id, heads, origin } => {
-                        let Some(new_versioned) = self
-                            .app_doc_handle
-                            .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
-                                &heads.0,
-                                automerge::ROOT,
-                                vec![
-                                    "manifests".into(),
-                                    autosurgeon::Prop::Key(id.clone().into()),
-                                ],
-                            )
-                            .await?
-                        else {
-                            warn!(plug_id = id, "ignoring stale plug patch: entry missing at heads");
-                            continue;
-                        };
-                        self.store
-                            .mutate_sync(|store| {
-                                store.manifests.insert(id.clone(), new_versioned);
-                                store.rebuild_indices();
-                            })
-                            .await?;
-                        delivered_events.push(if is_added {
-                            PlugsEvent::PlugAdded { id, heads, origin }
-                        } else {
-                            PlugsEvent::PlugChanged { id, heads, origin }
-                        });
-                    }
-                    PlugsEvent::PlugDeleted { id, heads, origin } => {
-                        self.store
-                            .mutate_sync(|store| {
-                                store.manifests.remove(&id);
-                                store.rebuild_indices();
-                            })
-                            .await?;
-                        delivered_events.push(PlugsEvent::PlugDeleted { id, heads, origin });
-                    }
-                    PlugsEvent::ConfigDocsChanged { heads, origin } => {
-                        let Some(new_versioned) = self
-                            .app_doc_handle
-                            .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
-                                &heads.0,
-                                automerge::ROOT,
-                                vec![PlugsStore::prop().into(), "plug_config_doc_ids".into()],
-                            )
-                            .await?
-                        else {
-                            warn!("ignoring stale config-docs patch: value missing at heads");
-                            continue;
-                        };
-                        self.store
-                            .mutate_sync(|store| {
-                                store.plug_config_doc_ids = new_versioned;
-                            })
-                            .await?;
-                        delivered_events.push(PlugsEvent::ConfigDocsChanged { heads, origin });
-                    }
-                }
+            if config_changed {
+                self.process_config_change(&heads, &origin).await?;
+            } else if manifest_changed {
+                self.process_manifest_change(&origin).await?;
             }
-            self.registry.notify(delivered_events.drain(..));
         }
         Ok(())
     }
 
-    pub async fn diff_events(
-        &self,
-        from: ChangeHashSet,
-        to: Option<ChangeHashSet>,
-    ) -> Res<Vec<PlugsEvent>> {
-        let (patches, heads) = self
-            .app_doc_handle
-            .with_document_read(|am_doc| {
-                let heads = if let Some(ref to_set) = to {
-                    to_set.clone()
-                } else {
-                    ChangeHashSet(am_doc.get_heads().into())
-                };
-                let patches = am_doc
-                    .diff_obj(&automerge::ROOT, &from, &heads, true)
-                    .wrap_err("diff_obj failed")?;
-                eyre::Ok((patches, heads))
-            })
-            .await?;
-        let heads = heads.0;
-        let mut events = vec![];
-        for patch in patches {
-            // Replay path: do not apply live-origin filtering.
-            self.events_for_patch(&patch, &heads, &mut events, None, None)
-                .await?;
+    /// ADR 007 §3: enable a plug by pinning a full ref. The ref must point at a
+    /// readable `plugManifest/main` facet; the manifest id becomes the key.
+    pub async fn enable_plug(&self, ref_url: &url::Url) -> Res<ChangeHashSet> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
         }
-        Ok(events)
+        let parsed = Self::parse_enabled_ref(ref_url)?;
+        let Some((heads, manifest)) = self.read_manifest_at_ref(ref_url).await? else {
+            eyre::bail!("manifest not readable at ref heads: {ref_url}");
+        };
+        let plug_id = manifest.id();
+        let ref_url = if parsed.at.is_none() {
+            Self::build_enabled_ref(&parsed.doc_id, "main", &heads)?
+        } else {
+            ref_url.clone()
+        };
+        let _guard = self.mutation_mutex.lock().await;
+        // ADR 007 §2: the plug's config doc is created at enablement and the
+        // mapping recorded in the config facet, so an enabled plug always has
+        // a config doc. The mapping is retained across disablement (disable
+        // only removes the enabled entry). The doc creation is async, so it
+        // happens before the store mutate; the closure re-checks under the
+        // store lock.
+        let needs_config_doc = !self
+            .config_store()?
+            .query_sync(|config| config.plug_config_doc_ids.contains_key(&plug_id))
+            .await;
+        let config_doc_id = if needs_config_doc {
+            let drawer = self
+                .drawer
+                .get()
+                .ok_or_eyre("plugs repo drawer not attached")?;
+            Some(
+                drawer
+                    .add(daybook_types::doc::AddDocArgs {
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        facets: HashMap::new(),
+                        user_path: None,
+                    })
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let (_, new_heads) = self.config_store()?.mutate_sync(|config| {
+            config.enabled.insert(plug_id.clone(), ref_url);
+            if let Some(doc_id) = config_doc_id {
+                config
+                    .plug_config_doc_ids
+                    .entry(plug_id.clone())
+                    .or_insert(doc_id);
+            }
+        }).await?;
+        self.process_config_change(&new_heads, &self.local_origin()).await?;
+        Ok(new_heads)
     }
 
+    /// ADR 007 §3: disable a plug by removing its config entry. `@daybook/core`
+    /// cannot be disabled — the guard lives in this config mutation.
+    pub async fn disable_plug(&self, plug_id: &str) -> Res<ChangeHashSet> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        if plug_id == CORE_PLUG_ID {
+            eyre::bail!("@daybook/core cannot be disabled");
+        }
+        let _guard = self.mutation_mutex.lock().await;
+        let (_, new_heads) = self.config_store()?.mutate_sync(|config| {
+            config.enabled.remove(plug_id);
+        }).await?;
+        self.process_config_change(&new_heads, &self.local_origin()).await?;
+        Ok(new_heads)
+    }
+
+    /// ADR 007 §3: explicit re-pin to the latest main-branch heads. Fails if
+    /// the manifest is not readable at the new heads.
+    pub async fn update_plug(&self, plug_id: &str) -> Res<ChangeHashSet> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let _guard = self.mutation_mutex.lock().await;
+        let Some(old_ref) = self
+            .config_store()?
+            .query_sync(|config| config.enabled.get(plug_id).cloned())
+            .await
+        else {
+            eyre::bail!("plug not enabled: {plug_id}");
+        };
+        let parsed = Self::parse_enabled_ref(old_ref)?;
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let heads = drawer
+            .get_branch_heads_for_path(&parsed.doc_id, daybook_types::doc::BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("doc has no main branch heads")?;
+        let new_ref = Self::build_enabled_ref(&parsed.doc_id, "main", &heads)?;
+        let Some((_, manifest)) = self.read_manifest_at_ref(&new_ref).await? else {
+            eyre::bail!("manifest not readable at latest heads for {plug_id}");
+        };
+        if manifest.id() != plug_id {
+            eyre::bail!("manifest id mismatch at latest heads for {plug_id}");
+        }
+        let (_, new_heads) = self.config_store()?.mutate_sync(|config| {
+            config.enabled.insert(plug_id.to_string(), new_ref);
+        }).await?;
+        self.process_config_change(&new_heads, &self.local_origin()).await?;
+        Ok(new_heads)
+    }
+
+    /// ADR 007 §7: init snapshot synthesized from the plugg config facet —
+    /// `PlugEnabled` for the active set only (pending plugs emit on
+    /// resolution, §6 — the notif loop's active-set diff covers it).
     pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
-        // Init snapshot is synthesized from current local store state.
-        let heads = self.get_plugs_heads().await;
-        let plug_ids = self
-            .store
-            .query_sync(|store| store.manifests.keys().cloned().collect::<Vec<_>>())
-            .await;
-        let mut events = Vec::with_capacity(plug_ids.len());
-        for id in plug_ids {
-            events.push(PlugsEvent::PlugAdded {
-                id,
+        self.refresh_cache().await?;
+        let cache = self.cache.lock().await;
+        let mut events = Vec::with_capacity(cache.active_manifests.len());
+        for (id, (heads, _)) in &cache.active_manifests {
+            events.push(PlugsEvent::PlugEnabled {
+                id: id.clone(),
                 heads: heads.clone(),
                 origin: self.local_origin(),
             });
@@ -592,338 +846,162 @@ impl PlugsRepo {
         Ok(events)
     }
 
-    async fn events_for_patch(
-        &self,
-        patch: &automerge::Patch,
-        patch_heads: &Arc<[automerge::ChangeHash]>,
-        out: &mut Vec<PlugsEvent>,
-        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
-    ) -> Res<()> {
-        let is_config_docs_vtag_patch = matches!(
-            &patch.action,
-            automerge::PatchAction::PutMap {
-                key,
-                value: (_val, _),
-                ..
-            } if patch.path.len() == 2
-                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
-                && key == "vtag"
-        );
-        // Live notification path: local writes are emitted by mutators.
-        // Replay/diff paths pass `live_origin = None`.
-        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id)
-            && !is_config_docs_vtag_patch
-        {
-            return Ok(());
-        }
-        let heads = ChangeHashSet(Arc::clone(patch_heads));
-        match &patch.action {
-            automerge::PatchAction::PutMap {
-                key,
-                value: (val, _),
-                ..
-            } if key == "vtag"
-                && patch.path.len() == 3
-                && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
-            {
-                let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
-                    return Ok(());
-                };
-
-                let automerge::Value::Scalar(scalar) = val else {
-                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
-                    return Ok(());
-                };
-                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
-                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
-                    return Ok(());
-                };
-                let Some(vtag) =
-                    VersionTag::hydrate_bytes_or_warn(vtag_bytes, &patch.path, key, "plug")
-                else {
-                    return Ok(());
-                };
-                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
-                    &self.local_actor_id,
-                    &vtag.actor_id,
-                    live_origin,
-                );
-                if vtag.version.is_nil() {
-                    out.push(PlugsEvent::PlugAdded {
-                        id: plug_id.clone(),
-                        heads: heads.clone(),
-                        origin: event_origin.clone(),
-                    });
-                } else {
-                    out.push(PlugsEvent::PlugChanged {
-                        id: plug_id.clone(),
-                        heads: heads.clone(),
-                        origin: event_origin.clone(),
-                    });
-                }
-            }
-            automerge::PatchAction::DeleteMap { key }
-                if patch.path.len() == 2
-                    && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
-            {
-                // Delete patches have no vtag; use delete tombstones at these heads when replaying.
-                let tombstone_actor_id =
-                    self.latest_manifest_delete_actor(key, patch_heads).await?;
-                let event_origin = crate::repos::resolve_origin_for_delete(
-                    &self.local_actor_id,
-                    live_origin,
-                    tombstone_actor_id.as_ref(),
-                );
-                out.push(PlugsEvent::PlugDeleted {
-                    id: key.clone(),
-                    heads,
-                    origin: event_origin,
-                });
-            }
-            automerge::PatchAction::PutMap {
-                key,
-                value: (val, _),
-                ..
-            } if patch.path.len() == 2
-                && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
-                && key == "vtag" =>
-            {
-                let automerge::Value::Scalar(scalar) = val else {
-                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
-                    return Ok(());
-                };
-                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
-                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
-                    return Ok(());
-                };
-                let Some(vtag) = VersionTag::hydrate_bytes_or_warn(
-                    vtag_bytes,
-                    &patch.path,
-                    key,
-                    "plug_config_docs",
-                ) else {
-                    return Ok(());
-                };
-                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
-                    &self.local_actor_id,
-                    &vtag.actor_id,
-                    live_origin,
-                );
-                out.push(PlugsEvent::ConfigDocsChanged {
-                    heads,
-                    origin: event_origin,
-                });
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    pub async fn ensure_system_plugs(&self) -> Res<()> {
-        let is_empty = self
-            .store
-            .query_sync(|store| store.manifests.is_empty())
-            .await;
-        if is_empty {
-            for plug in system_plugs() {
-                self.add(plug).await?;
-            }
-        }
-
-        Ok(())
-    }
-
+    /// Active plug manifest (enabled + readable at pinned heads). Known-but-
+    /// disabled plugs return None; commands and inits resolve through active
+    /// plugs only (ADR 007 §6).
     pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
-        self.store
-            .query_sync(|store| store.manifests.get(id).map(|man| Arc::clone(&man.val)))
-            .await
+        let cache = self.cache.lock().await;
+        cache
+            .active_manifests
+            .get(id)
+            .map(|(_, manifest)| Arc::clone(manifest))
+    }
+
+    /// Known plug manifest (from the facet-set index), regardless of enablement.
+    pub async fn get_known(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
+        let cache = self.cache.lock().await;
+        cache.manifests.get(id).cloned()
     }
 
     pub async fn get_plug_config_doc_id(&self, plug_id: &str) -> Option<String> {
-        let plug_id = plug_id.to_string();
-        self.store
-            .query_sync(move |store| store.plug_config_doc_ids.val.0.get(&plug_id).cloned())
+        let store = self.config_store.get()?;
+        store
+            .query_sync(|config| config.plug_config_doc_ids.get(plug_id).cloned())
             .await
-    }
-
-    pub async fn set_plug_config_doc_id(&self, plug_id: &str, doc_id: String) -> Res<()> {
-        if self.cancel_token.is_cancelled() {
-            eyre::bail!("repo is stopped");
-        }
-        let plug_id = plug_id.to_string();
-        self.store
-            .mutate_sync(move |store| {
-                let mut config_doc_ids = store.plug_config_doc_ids.val.0.clone();
-                config_doc_ids.insert(plug_id, doc_id);
-                store
-                    .plug_config_doc_ids
-                    .replace(self.local_actor_id.clone(), ThroughJson(config_doc_ids));
-            })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_or_init_plug_config_doc_id(
-        &self,
-        plug_id: &str,
-        drawer_repo: &crate::drawer::DrawerRepo,
-    ) -> Res<String> {
-        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
-            return Ok(doc_id);
-        }
-        let _guard = self.plug_config_doc_init_lock.lock().await;
-        if let Some(doc_id) = self.get_plug_config_doc_id(plug_id).await {
-            return Ok(doc_id);
-        }
-        let doc_id = drawer_repo
-            .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                facets: HashMap::new(),
-                user_path: None,
-            })
-            .await?;
-        self.set_plug_config_doc_id(plug_id, doc_id.clone()).await?;
-        Ok(doc_id)
     }
 
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
-        self.store
-            .query_sync(|store| {
-                store
-                    .facet_manifests
-                    .get(prop_tag)
-                    .map(|facet_manifest| facet_manifest.display_config.clone())
-            })
-            .await
+        let cache = self.cache.lock().await;
+        cache
+            .facet_manifests
+            .get(prop_tag)
+            .map(|facet_manifest| facet_manifest.display_config.clone())
     }
 
+    /// ADR 007 §6: drawer facet validation consults active plugs only, with a
+    /// distinct "plug disabled" vs "unknown tag" error.
     pub async fn get_facet_manifest_by_tag(
         &self,
         facet_tag: &str,
-    ) -> Option<manifest::FacetManifest> {
-        self.store
-            .query_sync(|store| store.facet_manifests.get(facet_tag).cloned())
-            .await
+    ) -> FacetManifestLookup {
+        let (plug_id, facet_manifest) = {
+            let cache = self.cache.lock().await;
+            let Some(plug_id) = cache.tag_to_plug.get(facet_tag) else {
+                return FacetManifestLookup::UnknownTag;
+            };
+            (plug_id.clone(), cache.facet_manifests.get(facet_tag).cloned())
+        };
+        let enabled = match self.config_store.get() {
+            Some(store) => {
+                store
+                    .query_sync(|config| config.enabled.contains_key(&plug_id))
+                    .await
+            }
+            None => false,
+        };
+        if !enabled {
+            return FacetManifestLookup::PlugDisabled { plug_id };
+        }
+        match facet_manifest {
+            Some(facet_manifest) => FacetManifestLookup::Found(facet_manifest.clone()),
+            None => FacetManifestLookup::UnknownTag,
+        }
     }
 
     pub async fn get_owner_plug_id_by_facet_tag(&self, facet_tag: &str) -> Option<String> {
-        self.store
-            .query_sync(|store| store.tag_to_plug.get(facet_tag).cloned())
-            .await
+        let plug_id = {
+            let cache = self.cache.lock().await;
+            cache.tag_to_plug.get(facet_tag)?.clone()
+        };
+        let enabled = match self.config_store.get() {
+            Some(store) => {
+                store
+                    .query_sync(|config| config.enabled.contains_key(&plug_id))
+                    .await
+            }
+            None => false,
+        };
+        if !enabled {
+            return None;
+        }
+        Some(plug_id)
     }
 
     pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetDisplayHint)> {
-        self.store
-            .query_sync(|store| {
-                store
-                    .manifests
-                    .values()
-                    .flat_map(|versioned| {
-                        versioned
-                            .val
-                            .facets
-                            .iter()
-                            .map(|facet| (facet.key_tag.to_string(), facet.display_config.clone()))
-                    })
-                    .collect()
-            })
-            .await
+        let cache = self.cache.lock().await;
+        cache
+            .facet_manifests
+            .iter()
+            .map(|(tag, facet_manifest)| (tag.clone(), facet_manifest.display_config.clone()))
+            .collect()
     }
 
+    /// Known plugs (all manifest docs catalogued by the facet-set index).
     pub async fn list_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
-        self.store
-            .query_sync(|store| {
-                store
-                    .manifests
-                    .values()
-                    .map(|man| Arc::clone(&man.val))
-                    .collect()
-            })
-            .await
+        let cache = self.cache.lock().await;
+        cache.manifests.values().cloned().collect()
     }
 
-    pub async fn import_from_oci_layout(
-        &self,
-        layout_root: &std::path::Path,
-        opts: OciImportOptions,
-    ) -> Res<ImportedPlug> {
-        let (image_manifest, selected_manifest_sha) =
-            Self::load_oci_layout_image_manifest(layout_root).await?;
+    /// Active plugs only (enabled + readable at pinned heads).
+    pub async fn list_active_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
+        let cache = self.cache.lock().await;
+        cache
+            .active_manifests
+            .values()
+            .map(|(_, manifest)| Arc::clone(manifest))
+            .collect()
+    }
 
-        self.import_from_oci_image_manifest(
-            image_manifest,
-            Some(selected_manifest_sha),
-            opts,
-            |digest| async move {
-                let sha = Self::sha256_hex_from_digest_str(&digest)?;
-                Self::read_oci_layout_blob_by_sha(layout_root, &sha).await
-            },
+    /// ADR 007 §8: import a plug from an existing manifest doc. Reads the
+    /// manifest facet at the given heads, validates, grants core-docs-group
+    /// access so the doc replicates in the core partition, and enables at
+    /// those heads.
+    pub async fn import_from_doc_id(
+        &self,
+        doc_id: &daybook_types::doc::DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<ImportedPlug> {
+        let manifest = self
+            .read_manifest_doc(doc_id, heads)
+            .await?
+            .ok_or_eyre("no plugManifest facet at given heads")?;
+        self.validate_incoming_plug(&manifest).await?;
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let branch_ref = drawer
+            .get_branch_ref(doc_id, daybook_types::doc::BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("manifest doc missing main branch")?;
+        let authority = crate::authority::ensure(
+            &self.big_repo,
+            drawer.meta_store_sql(),
+            None,
         )
-        .await
-    }
-
-    pub async fn inspect_oci_layout(
-        &self,
-        layout_root: &std::path::Path,
-    ) -> Res<manifest::PlugManifest> {
-        let (image_manifest, _) = Self::load_oci_layout_image_manifest(layout_root).await?;
-        Self::inspect_oci_image_manifest(&image_manifest, |digest| async move {
-            let sha = Self::sha256_hex_from_digest_str(&digest)?;
-            Self::read_oci_layout_blob_by_sha(layout_root, &sha).await
+        .await?;
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.core_docs,
+            [branch_ref.branch_doc_id],
+        )
+        .await?;
+        let ref_url = Self::build_enabled_ref(doc_id, "main", heads)?;
+        self.record_known_manifest_doc(doc_id, heads).await?;
+        self.enable_plug(&ref_url).await?;
+        Ok(ImportedPlug {
+            plug_id: manifest.id(),
+            version: manifest.version.clone(),
+            doc_id: Some(doc_id.clone()),
+            imported_blob_hashes: vec![],
+            source_digest: None,
         })
-        .await
     }
 
-    pub async fn import_from_oci_registry(
-        &self,
-        reference: &str,
-        auth: oci_client::secrets::RegistryAuth,
-        opts: OciImportOptions,
-    ) -> Res<ImportedPlug> {
-        let reference: oci_client::Reference = reference.parse()?;
-        let client_config = oci_client::client::ClientConfig {
-            connect_timeout: Some(std::time::Duration::from_secs(15)),
-            read_timeout: Some(std::time::Duration::from_secs(300)),
-            ..Default::default()
-        };
-        let client = oci_client::Client::new(client_config);
-        let (manifest, source_digest) = client.pull_manifest(&reference, &auth).await?;
-        let (target_manifest, target_ref) = match manifest {
-            oci_client::manifest::OciManifest::Image(manifest) => (manifest, reference.clone()),
-            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
-                let desc = index_manifest
-                    .manifests
-                    .first()
-                    .ok_or_eyre("oci image index has no manifests")?;
-                let target_ref = reference.clone_with_digest(desc.digest.clone());
-                let (nested, _) = client.pull_manifest(&target_ref, &auth).await?;
-                let oci_client::manifest::OciManifest::Image(manifest) = nested else {
-                    eyre::bail!("nested OCI manifest must resolve to an image manifest");
-                };
-                (manifest, target_ref)
-            }
-        };
-
-        self.import_from_oci_image_manifest(target_manifest, Some(source_digest), opts, |digest| {
-            let client = &client;
-            let target_ref = &target_ref;
-            async move {
-                let mut out = Vec::new();
-                client
-                    .pull_blob(target_ref, digest.as_str(), &mut out)
-                    .await?;
-                eyre::Ok(out)
-            }
-        })
-        .await
-    }
-
-    /// Add a new plug to the repo after validating it.
-    ///
-    /// This method follows a literate programming approach to clearly document
-    /// the validation and reconciliation steps.
-    pub async fn add(&self, mut manifest: manifest::PlugManifest) -> Res<()> {
+    /// Add a new plug to the repo after validating it (ADR 007 §8: authoring).
+    /// Writes a manifest doc through the drawer; the manifest facet is
+    /// validated like any other facet write.
+    pub async fn add(&self, mut manifest: manifest::PlugManifest) -> Res<daybook_types::doc::DocId> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -938,2006 +1016,190 @@ impl PlugsRepo {
 
         // 1.5 Convert file:// URLs to db+blob:// URLs
         // This ensures that all components are stored in the BlobsRepo for portability.
-        if true {
-            for bundle in manifest.wflow_bundles.values_mut() {
-                let bundle = Arc::make_mut(bundle);
-                for url in bundle.component_urls.iter_mut() {
-                    match url.scheme() {
-                        "file" => {
-                            let path = url.to_file_path().map_err(|err| {
-                                eyre::eyre!("invalid path in url {url:?} {err:?}")
-                            })?;
-                            let data = tokio::fs::read(&path).await.wrap_err_with(|| {
-                                format!("failed to read component file: {}", path.display())
-                            })?;
-                            let hash = self.blobs.put(&data).await?;
-                            *url = url::Url::parse(&format!(
-                                "{}:///{}",
-                                crate::blobs::BLOB_SCHEME,
-                                hash
-                            ))?;
-                        }
-                        "static" => {
-                            eyre::bail!("unsupported static wasm component_url: {url}");
-                        }
-                        crate::blobs::BLOB_SCHEME => {}
-                        _ => {
-                            eyre::bail!("unsupported component_url scheme: {url}");
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Perform Automerge reconciliation
-        // Once validated, we update the Automerge store.
-        // We use the plug's identity (@namespace/name) as the key in the manifests map
-        // to simplify lookups and ensure uniqueness.
-        let plug_id = manifest.id();
-
-        let ((plug_id, is_update), hash) = self
-            .store
-            .mutate_sync(move |store| {
-                let manifest = manifest;
-                let is_update = store.manifests.contains_key(&plug_id);
-
-                let versioned = Versioned {
-                    vtag: VersionTag {
-                        actor_id: self.local_actor_id.clone(),
-                        version: if is_update {
-                            Uuid::new_v4()
-                        } else {
-                            Uuid::nil()
-                        },
-                    },
-                    val: Arc::new(manifest).into(),
-                };
-
-                // Update the manifest in the store
-                store.manifests.insert(plug_id.clone(), versioned);
-
-                // 3. Rebuild indices
-                // Indices are in-memory caches (marked with #[autosurgeon(skip)])
-                // used to hyper-accelerate validation and routing logic.
-                // We rebuild them here so they're immediately available for subsequent calls.
-                store.rebuild_indices();
-
-                (plug_id, is_update)
-            })
-            .await?;
-        let heads = ChangeHashSet(hash.into_iter().collect());
-        // Notify listeners that the plug list or a specific plug has changed
-        self.registry.notify([if is_update {
-            PlugsEvent::PlugChanged {
-                id: plug_id,
-                heads,
-                origin: self.local_origin(),
-            }
-        } else {
-            PlugsEvent::PlugAdded {
-                id: plug_id,
-                heads,
-                origin: self.local_origin(),
-            }
-        }]);
-
-        Ok(())
-    }
-
-    async fn import_from_oci_image_manifest<F, Fut>(
-        &self,
-        image_manifest: oci_client::manifest::OciImageManifest,
-        source_digest: Option<String>,
-        opts: OciImportOptions,
-        mut pull_blob_by_digest: F,
-    ) -> Res<ImportedPlug>
-    where
-        F: FnMut(String) -> Fut,
-        Fut: std::future::Future<Output = Res<Vec<u8>>>,
-    {
-        let mut manifest_layer: Option<Vec<u8>> = None;
-        let mut oci_digest_to_repo_hash: HashMap<String, String> = HashMap::new();
-        let mut imported_blob_hashes = vec![];
-
-        for layer in &image_manifest.layers {
-            let layer_bytes = pull_blob_by_digest(layer.digest.clone())
-                .await
-                .wrap_err_with(|| format!("error pulling OCI layer blob '{}'", layer.digest))?;
-            if opts.strict {
-                Self::validate_sha256_digest(&layer.digest, &layer_bytes)?;
-            }
-            let repo_hash = self.blobs.put(&layer_bytes).await?;
-            let repo_hash_str = crate::blobs::blob_hash_from_id(repo_hash);
-            oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash_str.clone());
-            imported_blob_hashes.push(repo_hash_str);
-            if layer.media_type == OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE {
-                if manifest_layer.is_some() {
-                    eyre::bail!(
-                        "OCI artifact contains multiple '{}' layers",
-                        OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
-                    );
-                }
-                manifest_layer = Some(layer_bytes);
-            }
-        }
-
-        let manifest_layer = manifest_layer.ok_or_eyre(format!(
-            "missing required '{}' layer",
-            OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
-        ))?;
-
-        let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_layer)
-            .wrap_err("error parsing plug manifest layer JSON")?;
-        let rewritten_manifest_json =
-            Self::rewrite_oci_component_urls(manifest_json, &oci_digest_to_repo_hash)?;
-        let plug_manifest: manifest::PlugManifest = serde_json::from_value(rewritten_manifest_json)
-            .wrap_err("error parsing rewritten plug manifest JSON into PlugManifest")?;
-        let plug_id = plug_manifest.id();
-        let plug_version = plug_manifest.version.clone();
-
-        self.add(plug_manifest).await?;
-
-        Ok(ImportedPlug {
-            plug_id,
-            version: plug_version,
-            imported_blob_hashes,
-            source_digest,
-        })
-    }
-
-    async fn inspect_oci_image_manifest<F, Fut>(
-        image_manifest: &oci_client::manifest::OciImageManifest,
-        mut pull_blob_by_digest: F,
-    ) -> Res<manifest::PlugManifest>
-    where
-        F: FnMut(String) -> Fut,
-        Fut: std::future::Future<Output = Res<Vec<u8>>>,
-    {
-        let Some(manifest_layer) = image_manifest
-            .layers
-            .iter()
-            .find(|layer| layer.media_type == OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE)
-        else {
-            eyre::bail!(
-                "missing required '{}' layer",
-                OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
-            );
-        };
-        let layer_bytes = pull_blob_by_digest(manifest_layer.digest.clone())
-            .await
-            .wrap_err_with(|| {
-                format!("error pulling OCI layer blob '{}'", manifest_layer.digest)
-            })?;
-        let manifest_json: serde_json::Value = serde_json::from_slice(&layer_bytes)
-            .wrap_err("error parsing plug manifest layer JSON")?;
-        let manifest_json = Self::scrub_oci_preview_manifest(manifest_json);
-        let plug_manifest: manifest::PlugManifest = serde_json::from_value(manifest_json)
-            .wrap_err("error parsing plug manifest JSON into PlugManifest")?;
-        Ok(plug_manifest)
-    }
-
-    fn scrub_oci_preview_manifest(mut manifest_json: serde_json::Value) -> serde_json::Value {
-        let Some(wflow_bundles) = manifest_json
-            .get_mut("wflowBundles")
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            return manifest_json;
-        };
-        for bundle in wflow_bundles.values_mut() {
-            let Some(bundle_object) = bundle.as_object_mut() else {
-                continue;
-            };
-            bundle_object.insert(
-                "componentUrls".to_string(),
-                serde_json::Value::Array(vec![]),
-            );
-        }
-        manifest_json
-    }
-
-    async fn load_oci_layout_image_manifest(
-        layout_root: &std::path::Path,
-    ) -> Res<(oci_client::manifest::OciImageManifest, String)> {
-        let _oci_layout = oci_spec::image::OciLayout::from_file(layout_root.join("oci-layout"))?;
-        let index = oci_spec::image::ImageIndex::from_file(layout_root.join("index.json"))?;
-        let selected_manifest_descriptor = index
-            .manifests()
-            .first()
-            .cloned()
-            .ok_or_eyre("oci index has no manifests")?;
-        let selected_manifest_sha = selected_manifest_descriptor
-            .as_digest_sha256()
-            .ok_or_eyre("oci index manifest descriptor must use sha256 digest")?
-            .to_string();
-        let manifest_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &selected_manifest_sha)
-            .await
-            .wrap_err("error reading selected OCI manifest blob from layout")?;
-        let oci_manifest: oci_client::manifest::OciManifest =
-            serde_json::from_slice(&manifest_bytes)?;
-
-        match oci_manifest {
-            oci_client::manifest::OciManifest::Image(manifest) => {
-                Ok((manifest, selected_manifest_sha))
-            }
-            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
-                let nested_descriptor = index_manifest
-                    .manifests
-                    .first()
-                    .ok_or_eyre("nested OCI image index has no manifests")?;
-                let nested_sha = Self::sha256_hex_from_digest_str(&nested_descriptor.digest)?;
-                let nested_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &nested_sha)
-                    .await
-                    .wrap_err("error reading nested OCI manifest blob from layout")?;
-                match serde_json::from_slice::<oci_client::manifest::OciManifest>(&nested_bytes)? {
-                    oci_client::manifest::OciManifest::Image(manifest) => {
-                        Ok((manifest, selected_manifest_sha))
-                    }
-                    oci_client::manifest::OciManifest::ImageIndex(_) => {
-                        eyre::bail!("nested OCI manifest must resolve to an image manifest");
-                    }
-                }
-            }
-        }
-    }
-
-    fn rewrite_oci_component_urls(
-        mut manifest_json: serde_json::Value,
-        oci_digest_to_repo_hash: &HashMap<String, String>,
-    ) -> Res<serde_json::Value> {
-        let bundles = manifest_json
-            .get_mut("wflowBundles")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_eyre("plug manifest JSON missing object at 'wflowBundles'")?;
-
-        for bundle in bundles.values_mut() {
-            let component_urls = bundle
-                .get_mut("componentUrls")
-                .and_then(serde_json::Value::as_array_mut)
-                .ok_or_eyre("plug manifest JSON bundle missing array at 'componentUrls'")?;
-
-            for url_value in component_urls.iter_mut() {
-                let Some(url_str) = url_value.as_str() else {
-                    eyre::bail!("componentUrls entries must be strings");
-                };
-                if !url_str.starts_with("oci://sha256:") {
-                    eyre::bail!("componentUrls entries must be OCI digests: '{url_str}'");
-                }
-                let digest_hex = url_str.trim_start_matches("oci://sha256:");
-                if digest_hex.is_empty() {
-                    eyre::bail!("empty digest in OCI URL '{url_str}'");
-                }
-                let digest_key = format!("sha256:{digest_hex}");
-                let Some(repo_hash) = oci_digest_to_repo_hash.get(&digest_key) else {
-                    eyre::bail!(
-                        "OCI URL '{url_str}' references missing layer digest '{digest_key}'"
-                    );
-                };
-                *url_value = serde_json::Value::String(format!(
-                    "{}:///{repo_hash}",
-                    crate::blobs::BLOB_SCHEME
-                ));
-            }
-        }
-
-        Ok(manifest_json)
-    }
-
-    fn sha256_hex_from_digest_str(digest: &str) -> Res<String> {
-        let Some((algo, hex)) = digest.split_once(':') else {
-            eyre::bail!("invalid OCI digest '{digest}'");
-        };
-        eyre::ensure!(
-            algo == "sha256",
-            "unsupported OCI digest algorithm '{algo}'"
-        );
-        eyre::ensure!(!hex.is_empty(), "empty OCI digest hex");
-        Ok(hex.to_string())
-    }
-
-    fn validate_sha256_digest(digest: &str, bytes: &[u8]) -> Res<()> {
-        use sha2::{Digest as _, Sha256};
-        let expected_hex = Self::sha256_hex_from_digest_str(digest)?;
-        let actual_hex = format!("{:x}", Sha256::digest(bytes));
-        eyre::ensure!(
-            expected_hex.eq_ignore_ascii_case(&actual_hex),
-            "OCI blob digest mismatch for '{digest}'"
-        );
-        Ok(())
-    }
-
-    async fn read_oci_layout_blob_by_sha(
-        layout_root: &std::path::Path,
-        sha_hex: &str,
-    ) -> Res<Vec<u8>> {
-        let path = layout_root.join("blobs").join("sha256").join(sha_hex);
-        tokio::fs::read(&path)
-            .await
-            .wrap_err_with(|| format!("error reading OCI layout blob '{}'", path.display()))
-    }
-
-    /// Comprehensive validation for an incoming plug.
-    ///
-    /// This method checks for:
-    /// - Structural validity (via garde).
-    /// - Property tag clashes with other plugs.
-    /// - Dependency resolution (existence and schema compatibility).
-    /// - Internal consistency (commands referencing existing routines).
-    /// - ACL scope restrictions.
-    /// - Versioning rules (no breaking changes in non-major updates).
-    pub async fn validate_incoming_plug(&self, manifest: &manifest::PlugManifest) -> Res<()> {
-        use garde::Validate;
-
-        // -- Structural Validation --
-        // Use the 'garde' crate to perform basic field-level validations (regex, length, etc.)
-        // defined in the manifest structs.
-        manifest
-            .validate()
-            .map_err(|err| eyre::eyre!("validation error: {err}"))?;
-
-        let mut seen_facet_tags = HashSet::new();
-        for facet_manifest in &manifest.facets {
-            let facet_tag = facet_manifest.key_tag.to_string();
-            if !seen_facet_tags.insert(facet_tag.clone()) {
-                eyre::bail!("duplicate facet tag '{}' in plug manifest", facet_tag);
-            }
-
-            validate_facet_reference_manifests(
-                &facet_manifest.key_tag.to_string(),
-                &facet_manifest.value_schema,
-                &facet_manifest.references,
-            )?;
-        }
-
-        let plug_id = manifest.id();
-        let existing = self.get(&plug_id).await;
-        let dependency_base_ids: HashSet<String> = manifest
-            .dependencies
-            .keys()
-            .map(|dep_id_full| parse_dep_base_id(dep_id_full))
-            .collect::<Res<HashSet<_>>>()?;
-        let mut cached_view_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
-            HashMap::new();
-
-        // -- Versioning and Breaking Change Protection --
-        // To maintain stability, we don't allow breaking changes (like removing commands
-        // or changing their parameters) in minor or patch updates.
-        if let Some(old) = &existing {
-            if manifest.version <= old.version {
-                eyre::bail!(
-                    "Version must be greater than existing version (current: {}, incoming: {})",
-                    old.version,
-                    manifest.version
-                );
-            }
-
-            let is_major = manifest.version.major > old.version.major
-                || (old.version.major == 0 && manifest.version.minor > old.version.minor);
-
-            if !is_major {
-                // In non-major updates, we must ensure existing commands are preserved
-                // to avoid breaking integrations or automated workflows.
-                for (old_cmd_name, old_cmd) in &old.commands {
-                    let new_cmd = manifest.commands.get(old_cmd_name);
-                    if let Some(new_cmd) = new_cmd {
-                        // Deets define the routine and parameters; changing them breaks callers.
-                        // FIXME: we need a better comparison for CommandDeets if it's complex
-                        if format!("{:?}", new_cmd.deets) != format!("{:?}", old_cmd.deets) {
-                            eyre::bail!(
-                                "Breaking change: command '{}' deets cannot change in non-major version update",
-                                old_cmd_name
-                            );
-                        }
-                    } else {
-                        eyre::bail!(
-                            "Breaking change: command '{}' cannot be removed in non-major version update",
-                            old_cmd_name
-                        );
-                    }
-                }
-            }
-
-            // We also check that property keys aren't removed or their schemas don't become incompatible.
-            for old_prop in &old.facets {
-                if let Some(new_prop) = manifest
-                    .facets
-                    .iter()
-                    .find(|prop| prop.key_tag == old_prop.key_tag)
-                    && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema)
-                {
-                    eyre::bail!(
-                        "Incompatible schema for property tag '{}'",
-                        old_prop.key_tag
-                    );
-                }
-            }
-        }
-
-        // -- Property Tag Clash Detection --
-        // Many parts of the system rely on property tags being unique identifiers.
-        // We use an index to quickly check if any of the tags this plug wants to declare
-        // are already owned by another plug.
-        self.store
-            .query_sync(|store| {
-                for prop in &manifest.facets {
-                    if let Some(owner) = store.tag_to_plug.get(&prop.key_tag.to_string())
-                        && owner != &plug_id
-                    {
-                        return Err(eyre::eyre!(
-                            "Tag clash: tag '{}' is already owned by plug '{}'",
-                            prop.key_tag,
-                            owner
-                        ));
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-
-        // -- Dependency Verification --
-        // Plugs can declare dependencies on other plugs to reuse their property keys.
-        // We verify that:
-        // 1. The depended-on plug exists.
-        // 2. The specific keys being requested are actually defined by that plug.
-        // 3. The requested schema is compatible with what the provider offers.
-        for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = parse_dep_base_id(dep_id_full)?;
-            let provider = self
-                .get(&dep_base_id)
-                .await
-                .ok_or_eyre(format!("Dependency not found: '{}'", dep_base_id))?;
-
-            for key_dep in &dep_manifest.keys {
-                let provider_prop = provider
-                    .facets
-                    .iter()
-                    .find(|prop| prop.key_tag == key_dep.key_tag)
-                    .ok_or_eyre(format!(
-                        "Dependency error: plug '{}' does not define tag '{}'",
-                        dep_base_id, key_dep.key_tag
-                    ))?;
-
-                if !is_schema_compatible(&provider_prop.value_schema, &key_dep.value_schema) {
-                    eyre::bail!(
-                        "Dependency error: incompatible schema for tag '{}' from plug '{}'",
-                        key_dep.key_tag,
-                        dep_base_id
-                    );
-                }
-            }
-
-            for local_state_dep in &dep_manifest.local_states {
-                let provider_state_kind = provider
-                    .local_states
-                    .get(&local_state_dep.local_state_key)
-                    .ok_or_eyre(format!(
-                        "Dependency error: plug '{}' does not define local_state '{}'",
-                        dep_base_id, local_state_dep.local_state_key
-                    ))?;
-                if **provider_state_kind != local_state_dep.state_kind {
-                    eyre::bail!(
-                        "Dependency error: incompatible local_state kind for '{}' from plug '{}'",
-                        local_state_dep.local_state_key,
-                        dep_base_id
-                    );
-                }
-            }
-        }
-
-        // -- Internal Routine Integrity --
-        // Commands act as triggers for routines. If a command points to a non-existent
-        // routine, it will fail at runtime. We catch these early.
-        for (routine_name, routine) in &manifest.routines {
-            let manifest::RoutineImpl::Wflow { bundle, key } = &routine.r#impl;
-            let Some(bundle_manifest) = manifest.wflow_bundles.get(bundle) else {
-                eyre::bail!(
-                    "Invalid routine '{}': wflow bundle '{}' not found in manifest",
-                    routine_name,
-                    bundle
-                );
-            };
-            if !bundle_manifest.keys.contains(key) {
-                eyre::bail!(
-                    "Invalid routine '{}': key '{}' not found in wflow bundle '{}'",
-                    routine_name,
-                    key,
-                    bundle
-                );
-            }
-        }
-
-        for (cmd_name, cmd) in &manifest.commands {
-            match &cmd.deets {
-                manifest::CommandDeets::DocCommand { routine_name } => {
-                    if !manifest.routines.contains_key(routine_name) {
-                        eyre::bail!(
-                            "Invalid command deets: routine '{}' not found in plug (command='{}')",
-                            routine_name,
-                            cmd_name
-                        );
-                    }
-                }
-            }
-        }
-        for (init_name, init_manifest) in &manifest.inits {
-            match &init_manifest.deets {
-                manifest::InitDeets::InvokeRoutine { routine_name } => {
-                    if !manifest.routines.contains_key(routine_name) {
-                        eyre::bail!(
-                            "Invalid init deets: routine '{}' not found in plug (init='{}')",
-                            routine_name,
-                            init_name
-                        );
-                    }
-                }
-            }
-        }
-
-        for (processor_name, processor_manifest) in &manifest.processors {
-            match &processor_manifest.deets {
-                manifest::ProcessorDeets::DocProcessor {
-                    routine_name,
-                    predicate: _,
-                    event_predicate: _,
-                } => {
-                    if !manifest.routines.contains_key(routine_name) {
-                        eyre::bail!(
-                            "Invalid processor deets: routine '{}' not found in plug (processor='{}')",
-                            routine_name,
-                            processor_name
-                        );
-                    }
-                }
-            }
-        }
-
-        // -- Component URL Validation --
-        for (bundle_name, bundle) in &manifest.wflow_bundles {
-            for url in &bundle.component_urls {
+        for bundle in manifest.wflow_bundles.values_mut() {
+            let bundle = Arc::make_mut(bundle);
+            for url in bundle.component_urls.iter_mut() {
                 match url.scheme() {
                     "file" => {
-                        let path = url
-                            .to_file_path()
-                            .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
-                        if !path.exists() {
-                            eyre::bail!(
-                                "Component file not found for bundle '{}': {}",
-                                bundle_name,
-                                path.display()
-                            );
-                        }
+                        let path = url.to_file_path().map_err(|err| {
+                            eyre::eyre!("invalid path in url {url:?} {err:?}")
+                        })?;
+                        let data = tokio::fs::read(&path).await.wrap_err_with(|| {
+                            format!("failed to read component file: {}", path.display())
+                        })?;
+                        let hash = self.blobs.put(&data).await?;
+                        *url = url::Url::parse(&format!(
+                            "{}:///{}",
+                            crate::blobs::BLOB_SCHEME,
+                            hash
+                        ))?;
                     }
                     "static" => {
-                        eyre::bail!("Unrecognized static component_url: {url}");
+                        eyre::bail!("unsupported static wasm component_url: {url}");
                     }
-                    scheme if scheme == crate::blobs::BLOB_SCHEME => {
-                        let hash = url.path().trim_start_matches('/');
-                        let blob_id = match hash.parse::<crate::blobs::BlobId>() {
-                            Ok(value) => value,
-                            Err(_) => {
-                                eyre::bail!(
-                                    "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
-                                );
-                            }
-                        };
-                        if self.blobs.get_path(blob_id).await.is_err() {
-                            eyre::bail!(
-                                "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
-                            );
-                        }
-                    }
+                    crate::blobs::BLOB_SCHEME => {}
                     _ => {
-                        eyre::bail!(
-                            "Unsupported URL scheme for bundle {bundle_name:?}: {}",
-                            url.scheme()
-                        );
+                        eyre::bail!("unsupported component_url scheme: {url}");
                     }
                 }
             }
         }
 
-        // -- View Validation --
-        // Stateless wasm views must point at a declared wflow bundle and export the canonical
-        // stateless-view entrypoint (`render-facet-view`). Otherwise the plug imports cleanly but
-        // fails later at render time (see rt::render_facet_view).
-        for (view_name, view_manifest) in &manifest.views {
-            let manifest::ViewProviderManifest::StatelessWasm { bundle, export } =
-                &view_manifest.provider;
-            let Some(_) = manifest.wflow_bundles.get(bundle.as_str()) else {
-                eyre::bail!(
-                    "Invalid view '{}': wflow bundle '{}' not found in manifest",
-                    view_name,
-                    bundle
-                );
-            };
-            if export.as_str() != "render-facet-view" {
-                eyre::bail!(
-                    "Invalid view '{}': stateless wasm export '{}' is not the supported 'render-facet-view' entrypoint",
-                    view_name,
-                    export
-                );
-            }
-        }
-
-        // -- ACL Scope Restriction --
-        // Routines must explicitly declare which properties they need access to.
-        // To prevent security leaks, a routine can only specify tags that
-        // the plug itself declares or explicitly depends on.
-        let mut available_tags: HashSet<String> = manifest
-            .facets
-            .iter()
-            .map(|prop| prop.key_tag.to_string())
-            .collect();
-        for dep in manifest.dependencies.values() {
-            for key in &dep.keys {
-                available_tags.insert(key.key_tag.to_string());
-            }
-        }
-        let mut cached_command_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
-            HashMap::new();
-        let mut available_local_states: HashSet<(String, String)> = manifest
-            .local_states
-            .keys()
-            .map(|key| (plug_id.clone(), key.to_string()))
-            .collect();
-        for (dep_id_full, dep_manifest) in &manifest.dependencies {
-            let dep_base_id = parse_dep_base_id(dep_id_full)?;
-            for local_state in &dep_manifest.local_states {
-                available_local_states
-                    .insert((dep_base_id.clone(), local_state.local_state_key.to_string()));
-            }
-        }
-
-        for facet_manifest in &manifest.facets {
-            let facet_name = facet_manifest.key_tag.to_string();
-            if let manifest::FacetDisplayDeets::CustomView { view, .. } =
-                &facet_manifest.display_config.deets
-            {
-                match view.plug_id.as_deref() {
-                    None => {
-                        if !manifest.views.contains_key(view.view_key.as_str()) {
-                            eyre::bail!(
-                                "Invalid display_config in facet '{}': view '{}' not found in this plug",
-                                facet_name,
-                                view.view_key
-                            );
-                        }
-                    }
-                    // An explicit self-reference (the plug's own id) is equivalent to `None`:
-                    // validate against the incoming manifest rather than treating the plug as one
-                    // of its own dependencies and resolving it through the stored copy.
-                    Some(view_plug_id) if view_plug_id == plug_id.as_str() => {
-                        if !manifest.views.contains_key(view.view_key.as_str()) {
-                            eyre::bail!(
-                                "Invalid display_config in facet '{}': view '{}' not found in this plug",
-                                facet_name,
-                                view.view_key
-                            );
-                        }
-                    }
-                    Some(view_plug_id) => {
-                        if !dependency_base_ids.contains(view_plug_id) {
-                            eyre::bail!(
-                                "Invalid display_config in facet '{}': view provider plug '{}' is neither this plug nor a declared dependency",
-                                facet_name,
-                                view_plug_id
-                            );
-                        }
-                        let target_manifest = if let Some(cached) =
-                            cached_view_target_manifests.get(view_plug_id)
-                        {
-                            Arc::clone(cached)
-                        } else {
-                            let loaded = self.get(view_plug_id).await.ok_or_else(|| {
-                                    ferr!(
-                                        "Invalid display_config in facet '{}': view provider plug '{}' not found",
-                                        facet_name,
-                                        view_plug_id
-                                    )
-                                })?;
-                            cached_view_target_manifests
-                                .insert(view_plug_id.to_string(), Arc::clone(&loaded));
-                            loaded
-                        };
-                        if !target_manifest.views.contains_key(view.view_key.as_str()) {
-                            eyre::bail!(
-                                "Invalid display_config in facet '{}': view '{}' not found in view provider plug '{}'",
-                                facet_name,
-                                view.view_key,
-                                view_plug_id
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        for (routine_name, routine) in &manifest.routines {
-            for access in routine.facet_acl() {
-                if !available_tags.contains(&access.tag.to_string()) {
-                    eyre::bail!(
-                        "Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                        routine_name,
-                        access.tag
-                    );
-                }
-            }
-            for access in routine.config_facet_acl() {
-                let owner_plug_id = access.owner_plug_id.as_deref().unwrap_or(&plug_id);
-                if owner_plug_id != plug_id && !dependency_base_ids.contains(owner_plug_id) {
-                    eyre::bail!(
-                        "Invalid config_facet_acl in routine '{}': owner plug '{}' is neither this plug nor a declared dependency",
-                        routine_name,
-                        owner_plug_id
-                    );
-                }
-                if !available_tags.contains(&access.tag.to_string()) {
-                    eyre::bail!(
-                        "Invalid config_facet_acl in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                        routine_name,
-                        access.tag
-                    );
-                }
-            }
-            for access in &routine.local_state_acl {
-                if !available_local_states
-                    .contains(&(access.plug_id.clone(), access.local_state_key.to_string()))
-                {
-                    eyre::bail!(
-                        "Invalid local_state ACL in routine '{}': '{}:{}' is neither declared nor depended on by this plug",
-                        routine_name,
-                        access.plug_id,
-                        access.local_state_key
-                    );
-                }
-            }
-            for target_command_url in routine.command_invoke_acl() {
-                let parsed_target =
-                    daybook_pdk::parse_command_url(target_command_url).map_err(|err| {
-                        eyre::eyre!(
-                            "Invalid command_invoke_acl in routine '{}': url '{}' is invalid: {}",
-                            routine_name,
-                            target_command_url,
-                            err
-                        )
-                    })?;
-                if parsed_target.plug_id != plug_id
-                    && !dependency_base_ids.contains(&parsed_target.plug_id)
-                {
-                    eyre::bail!(
-                        "Invalid command_invoke_acl in routine '{}': target plug '{}' is neither this plug nor a declared dependency",
-                        routine_name,
-                        parsed_target.plug_id
-                    );
-                }
-                let command_exists = if parsed_target.plug_id == plug_id {
-                    manifest
-                        .commands
-                        .contains_key(parsed_target.command_name.as_str())
-                } else {
-                    let target_manifest = if let Some(cached) =
-                        cached_command_target_manifests.get(&parsed_target.plug_id)
-                    {
-                        Arc::clone(cached)
-                    } else {
-                        let loaded = self
-                            .get(&parsed_target.plug_id)
-                            .await
-                            .ok_or_else(|| {
-                                ferr!(
-                                    "Invalid command_invoke_acl in routine '{}': target plug '{}' not found",
-                                    routine_name,
-                                    parsed_target.plug_id
-                                )
-                            })?;
-                        cached_command_target_manifests
-                            .insert(parsed_target.plug_id.clone(), Arc::clone(&loaded));
-                        loaded
-                    };
-                    target_manifest
-                        .commands
-                        .contains_key(parsed_target.command_name.as_str())
-                };
-                if !command_exists {
-                    eyre::bail!(
-                        "Invalid command_invoke_acl in routine '{}': target command '{}/{}' not found",
-                        routine_name,
-                        parsed_target.plug_id,
-                        parsed_target.command_name
-                    );
-                }
-            }
-
-            // Validate all tags referenced by doc_acls are in scope.
-            for tag in routine.referenced_tags() {
-                if !available_tags.contains(&tag.to_string()) {
-                    eyre::bail!(
-                        "Invalid routine ACL for '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                        routine_name,
-                        tag
-                    );
-                }
-            }
-        }
-
-        for (processor_name, processor_manifest) in &manifest.processors {
-            match &processor_manifest.deets {
-                manifest::ProcessorDeets::DocProcessor {
-                    predicate,
-                    event_predicate,
-                    routine_name: _,
-                } => {
-                    for referenced_tag in predicate.referenced_tags() {
-                        if !available_tags.contains(&referenced_tag.to_string()) {
-                            eyre::bail!(
-                                "Invalid processor predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                                processor_name,
-                                referenced_tag
-                            );
-                        }
-                    }
-                    let mut read_tags = HashSet::new();
-                    let mut read_keys = HashSet::new();
-                    event_predicate
-                        .doc_change_predicate
-                        .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
-                    for referenced_tag in read_tags {
-                        if !available_tags.contains(&referenced_tag) {
-                            eyre::bail!(
-                                "Invalid processor event predicate in '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                                processor_name,
-                                referenced_tag
-                            );
-                        }
-                    }
-                    for referenced_key in read_keys {
-                        let referenced_tag = referenced_key.tag.to_string();
-                        if !available_tags.contains(&referenced_tag) {
-                            eyre::bail!(
-                                "Invalid processor event predicate in '{}': tag '{}' (from key '{}') is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
-                                processor_name,
-                                referenced_tag,
-                                referenced_key
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Helper to check JSON Schema compatibility.
-///
-/// In this context, 'compatible' means that the 'new' schema can accept data
-/// validated by the 'old' schema without breaking (forward compatibility).
-fn is_schema_compatible(old: &schemars::Schema, new: &schemars::Schema) -> bool {
-    // If they are exactly the same, they are definitely compatible.
-    if old == new {
-        return true;
-    }
-
-    // Treat them as JSON values for a pragmatic compatibility check.
-    // In schemars 1.0, Schema is a wrapper around serde_json::Value.
-    let old_json = serde_json::to_value(old).unwrap_or(serde_json::Value::Null);
-    let new_json = serde_json::to_value(new).unwrap_or(serde_json::Value::Null);
-
-    is_json_schema_compatible(&old_json, &new_json)
-}
-
-fn is_json_schema_compatible(old: &serde_json::Value, new: &serde_json::Value) -> bool {
-    if old == new {
-        return true;
-    }
-
-    match (old, new) {
-        (serde_json::Value::Object(old_obj), serde_json::Value::Object(new_obj)) => {
-            // Check basic type matching
-            if old_obj.get("type") != new_obj.get("type") {
-                return false;
-            }
-
-            // If it's an object, check properties
-            if old_obj.get("type") == Some(&serde_json::json!("object")) {
-                let old_props = old_obj
-                    .get("properties")
-                    .and_then(|value| value.as_object());
-                let new_props = new_obj
-                    .get("properties")
-                    .and_then(|value| value.as_object());
-
-                if let (Some(old_props), Some(new_props)) = (old_props, new_props) {
-                    // All properties in old must be present and compatible in new
-                    for (name, old_val) in old_props {
-                        if let Some(new_val) = new_props.get(name) {
-                            if !is_json_schema_compatible(old_val, new_val) {
-                                return false;
-                            }
-                        } else {
-                            // Property removed -> breaking change
-                            return false;
-                        }
-                    }
-                }
-
-                // Check required fields: new cannot require something that was not required in old
-                let old_required = old_obj.get("required").and_then(|value| value.as_array());
-                let new_required = new_obj.get("required").and_then(|value| value.as_array());
-                if let Some(new_req) = new_required {
-                    let old_req_set: HashSet<_> = old_required
-                        .map(|array| array.iter().collect())
-                        .unwrap_or_default();
-                    for req in new_req {
-                        if !old_req_set.contains(req) {
-                            // New required field -> breaking change
-                            // Unless it has a default? But JSON Schema's 'default' doesn't satisfy 'required'.
-                            return false;
-                        }
-                    }
-                }
-            }
-
-            // FIXME: Add more checks for arrays, enums, etc.
-            true
-        }
-        _ => false,
-    }
-}
-
-fn validate_facet_reference_manifests(
-    facet_tag: &str,
-    value_schema: &schemars::Schema,
-    references: &[manifest::FacetReferenceManifest],
-) -> Res<()> {
-    let schema_json = serde_json::to_value(value_schema)?;
-    for reference_manifest in references {
-        let reference_path = reference_manifest.json_path();
-        let Some(reference_node) =
-            daybook_types::reference::schema_node_for_json_path(&schema_json, reference_path)?
-        else {
-            eyre::bail!(
-                "invalid reference json_path '{}' for facet tag '{}': path does not exist in schema",
-                reference_path,
-                facet_tag
-            );
-        };
-
-        match reference_manifest {
-            manifest::FacetReferenceManifest::UrlString { .. }
-            | manifest::FacetReferenceManifest::UrlStringSplit { .. } => {
-                if !daybook_types::reference::schema_allows_string(reference_node) {
-                    eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string",
-                        reference_path,
-                        facet_tag
-                    );
-                }
-            }
-            manifest::FacetReferenceManifest::UrlStringMany { .. } => {
-                if !daybook_types::reference::schema_allows_array_of_strings(reference_node) {
-                    eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow an array of URL strings",
-                        reference_path,
-                        facet_tag
-                    );
-                }
-            }
-            manifest::FacetReferenceManifest::UrlObject { .. }
-            | manifest::FacetReferenceManifest::UrlObjectMany { .. } => {
-                if !daybook_types::reference::schema_allows_reference_object(reference_node) {
-                    eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a reference object",
-                        reference_path,
-                        facet_tag
-                    );
-                }
-            }
-        }
-
-        if let Some(at_commit_json_path) = reference_manifest.at_commit_json_path() {
-            let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
-                &schema_json,
-                at_commit_json_path,
-            )?
-            else {
-                eyre::bail!(
-                    "invalid at_commit_json_path '{}' for facet tag '{}': path does not exist in schema",
-                    at_commit_json_path,
-                    facet_tag
-                );
-            };
-            if !daybook_types::reference::schema_allows_array_of_strings(at_commit_node) {
-                eyre::bail!(
-                    "invalid at_commit_json_path '{}' for facet tag '{}': schema node must allow an array of commit hashes",
-                    at_commit_json_path,
-                    facet_tag
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use big_repo::SharedPartStore;
-
-    use super::*;
-    use crate::repos::{Repo, SubscribeOpts, TryRecvError};
-
-    /// Boot a repo + plugs registry for tests.
-    ///
-    /// The first tuple element is the stop callback for the booted repository:
-    /// calling it invokes shutdown, while cancellation occurs through any
-    /// captured owning guard rather than by dropping the closure itself unless
-    /// `boot_repo` confirms that ownership. Tests bind it as `_acx`.
-    async fn setup_repo() -> Res<(
-        Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
-        SharedPartStore,
-        Arc<PlugsRepo>,
-        DocumentId,
-        tempfile::TempDir,
-    )> {
-        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_sync_host, acx_stop) = crate::test_support::boot_repo().await?;
-
-        let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
-        let handle = big_repo.create_doc(doc).await?;
-        let doc_id = handle.document_id();
-
-        let temp_dir = tempfile::tempdir()?;
-        let blobs =
-            crate::blobs::BlobsRepo::new(temp_dir.path().to_path_buf(), "/test-user".into())
-                .await?;
-
-        let (repo, _repo_stop) =
-            PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
-        Ok((acx_stop, big_sync_host.store, repo, doc_id, temp_dir))
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn inspect_test_plug_oci_layout() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/oci")
-            .join("@daybook/test");
-        eyre::ensure!(
-            artifact_path.exists(),
-            "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
-            artifact_path.display()
-        );
-
-        let manifest = repo.inspect_oci_layout(&artifact_path).await?;
-        assert_eq!(manifest.id(), "@daybook/test");
-        assert_eq!(manifest.title, "Daybook Test Plug");
-        assert_eq!(
-            manifest.desc,
-            "Internal e2e test plug for command invocation"
-        );
-        assert_eq!(manifest.version.to_string(), "0.0.1");
-        assert!(!manifest.commands.is_empty());
-        assert!(!manifest.facets.is_empty());
-        assert!(!manifest.views.is_empty());
-        assert!(!manifest.routines.is_empty());
-        assert!(!manifest.processors.is_empty());
-        Ok(())
-    }
-
-    fn mock_plug(name: &str) -> manifest::PlugManifest {
-        manifest::PlugManifest {
-            namespace: "test".into(),
-            name: name.into(),
-            version: "0.1.0".parse().unwrap(),
-            title: format!("Test Plug {}", name),
-            desc: "A test plug".into(),
-            facets: vec![],
-            local_states: default(),
-            dependencies: default(),
-            views: default(),
-            routines: default(),
-            wflow_bundles: default(),
-            commands: default(),
-            inits: default(),
-            processors: default(),
-        }
-    }
-
-    async fn temp_component_url() -> Res<(tempfile::TempDir, url::Url)> {
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-        Ok((temp_dir, file_url))
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_add_success() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let plug = mock_plug("plug1");
-
-        repo.add(plug).await?;
-
-        let saved = repo.get("@test/plug1").await.unwrap();
-        assert_eq!(saved.name, "plug1");
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_add_emits_single_local_event() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let listener = repo.subscribe(SubscribeOpts::new(16));
-
-        repo.add(mock_plug("plug-single-event")).await?;
-
-        let first: Arc<PlugsEvent> = listener
-            .recv_async()
-            .await
-            .map_err(|err| ferr!("listener recv failed: {err:?}"))?;
-        assert!(
-            matches!(&*first, PlugsEvent::PlugAdded { id, .. } if id == "@test/plug-single-event"),
-            "expected PlugAdded event, got: {first:?}"
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            matches!(listener.try_recv(), Err(TryRecvError::Empty)),
-            "expected no duplicate local listener event"
-        );
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_tag_clash() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Add first plug with a tag
-        let mut p1 = mock_plug("plug1");
-        p1.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.tag".into(),
-            value_schema: schemars::schema_for!(String),
-            display_config: default(),
-            references: default(),
-        });
-        repo.add(p1).await?;
-
-        // Try to add second plug with same tag
-        let mut p2 = mock_plug("plug2");
-        p2.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.tag".into(),
-            value_schema: schemars::schema_for!(String),
-            display_config: default(),
-            references: default(),
-        });
-
-        let res = repo.add(p2).await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Tag clash"));
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_dependency_resolution() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Add provider plug
-        let mut provider = mock_plug("provider");
-        provider.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.shared".into(),
-            value_schema: schemars::schema_for!(String),
-            display_config: default(),
-            references: default(),
-        });
-        repo.add(provider).await?;
-
-        // Add consumer plug that depends on provider
-        let mut consumer = mock_plug("consumer");
-        consumer.dependencies.insert(
-            "@test/provider".into(),
-            manifest::PlugDependencyManifest {
-                keys: vec![manifest::FacetDependencyManifest {
-                    key_tag: "org.test.shared".into(),
-                    value_schema: schemars::schema_for!(String),
-                }],
-                local_states: vec![],
-            }
-            .into(),
-        );
-
-        repo.add(consumer).await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_missing_dependency() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut consumer = mock_plug("consumer");
-        consumer.dependencies.insert(
-            "@test/missing".into(),
-            manifest::PlugDependencyManifest {
-                keys: vec![],
-                local_states: vec![],
-            }
-            .into(),
-        );
-
-        let res = repo.add(consumer).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Dependency not found")
-        );
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_version_breaking_change() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Create a temporary file for the component (keep it alive)
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm content").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        // Initial version
-        let mut p1_v1 = mock_plug("plug1");
-        p1_v1.version = "0.1.0".parse().unwrap();
-        p1_v1.commands.insert(
-            "cmd1".into(),
-            manifest::CommandManifest {
-                desc: "First command".into(),
-                deets: manifest::CommandDeets::DocCommand {
-                    routine_name: "routine1".into(),
-                },
-            }
-            .into(),
-        );
-        p1_v1.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        p1_v1.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-        repo.add(p1_v1).await?;
-
-        // Update version (patch) with command removed -> should fail
-        let mut p1_v2 = mock_plug("plug1");
-        p1_v2.version = "0.1.1".parse().unwrap();
-        // cmd1 is missing
-
-        let res = repo.add(p1_v2).await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Breaking change"));
-
-        // Update version (major) with command removed -> should succeed
-        let mut p1_v3 = mock_plug("plug1");
-        p1_v3.version = "1.0.0".parse().unwrap(); // major bump from 0.1 to 1.0 (in standard semver terms)
-
-        repo.add(p1_v3).await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_version_must_increase() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Add initial version
-        let mut p1_v1 = mock_plug("plug1");
-        p1_v1.version = "0.1.0".parse().unwrap();
-        repo.add(p1_v1).await?;
-
-        // Try to add same version -> should fail
-        let mut p1_same = mock_plug("plug1");
-        p1_same.version = "0.1.0".parse().unwrap();
-        let res = repo.add(p1_same).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Version must be greater")
-        );
-
-        // Try to add lower version -> should fail
-        let mut p1_lower = mock_plug("plug1");
-        p1_lower.version = "0.0.9".parse().unwrap();
-        let res = repo.add(p1_lower).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Version must be greater")
-        );
-
-        // Add higher version -> should succeed
-        let mut p1_v2 = mock_plug("plug1");
-        p1_v2.version = "0.1.1".parse().unwrap();
-        repo.add(p1_v2).await?;
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_bundle_key_validation() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let (_temp_dir, file_url) = temp_component_url().await?;
-
-        // Create plug with routine referencing non-existent bundle
-        let mut plug = mock_plug("plug1");
-        plug.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "missing_bundle".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url.clone()],
-            }
-            .into(),
-        );
-
-        let res = repo.add(plug).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("wflow bundle 'missing_bundle' not found")
-        );
-
-        // Create plug with routine referencing non-existent key in bundle
-        let mut plug2 = mock_plug("plug2");
-        plug2.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "missing_key".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        plug2.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-
-        let res = repo.add(plug2).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("key 'missing_key' not found")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_view_provider_bundle_must_exist() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut plug = mock_plug("missing-view-bundle");
-        plug.views.insert(
-            "summary".into(),
-            Arc::new(manifest::ViewManifest {
-                title: "Summary".into(),
-                desc: "Summary view".into(),
-                provider: manifest::ViewProviderManifest::StatelessWasm {
-                    bundle: "missing-bundle".into(),
-                    export: "render-facet-view".into(),
-                },
-            }),
-        );
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("wflow bundle 'missing-bundle' not found")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_custom_view_local_reference_must_exist() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let (_view_temp_dir, file_url) = temp_component_url().await?;
-
-        let mut plug = mock_plug("custom-view-local");
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-        plug.views.insert(
-            "present-view".into(),
-            Arc::new(manifest::ViewManifest {
-                title: "Present".into(),
-                desc: "Present view".into(),
-                provider: manifest::ViewProviderManifest::StatelessWasm {
-                    bundle: "bundle1".into(),
-                    export: "render-facet-view".into(),
-                },
-            }),
-        );
-        plug.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.customview".into(),
-            value_schema: schemars::schema_for!(serde_json::Value),
-            display_config: manifest::FacetDisplayHint {
-                deets: manifest::FacetDisplayDeets::CustomView {
-                    view: manifest::ViewRef {
-                        plug_id: None,
-                        view_key: "missing-view".into(),
-                    },
-                    mode: manifest::FacetViewMode::Display,
-                    priority: 0,
-                },
-                ..default()
-            },
-            references: vec![],
-        });
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("view 'missing-view' not found in this plug")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_custom_view_dependency_requires_declared_dependency() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut plug = mock_plug("custom-view-dependency-missing");
-        plug.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.customview".into(),
-            value_schema: schemars::schema_for!(serde_json::Value),
-            display_config: manifest::FacetDisplayHint {
-                deets: manifest::FacetDisplayDeets::CustomView {
-                    view: manifest::ViewRef {
-                        plug_id: Some("@test/provider".into()),
-                        view_key: "provider-view".into(),
-                    },
-                    mode: manifest::FacetViewMode::Display,
-                    priority: 0,
-                },
-                ..default()
-            },
-            references: vec![],
-        });
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("neither this plug nor a declared dependency")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_custom_view_dependency_requires_target_view() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let (_provider_temp_dir, file_url) = temp_component_url().await?;
-
-        let mut provider = mock_plug("provider");
-        provider.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec![file_url.clone()],
-            }
-            .into(),
-        );
-        provider.views.insert(
-            "provider-view".into(),
-            Arc::new(manifest::ViewManifest {
-                title: "Provider".into(),
-                desc: "Provider view".into(),
-                provider: manifest::ViewProviderManifest::StatelessWasm {
-                    bundle: "bundle1".into(),
-                    export: "render-facet-view".into(),
-                },
-            }),
-        );
-        repo.add(provider).await?;
-
-        let mut caller = mock_plug("custom-view-dependency-missing-view");
-        caller.dependencies.insert(
-            "@test/provider".into(),
-            manifest::PlugDependencyManifest {
-                keys: vec![],
-                local_states: vec![],
-            }
-            .into(),
-        );
-        caller.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.customview".into(),
-            value_schema: schemars::schema_for!(serde_json::Value),
-            display_config: manifest::FacetDisplayHint {
-                deets: manifest::FacetDisplayDeets::CustomView {
-                    view: manifest::ViewRef {
-                        plug_id: Some("@test/provider".into()),
-                        view_key: "missing-view".into(),
-                    },
-                    mode: manifest::FacetViewMode::Display,
-                    priority: 0,
-                },
-                ..default()
-            },
-            references: vec![],
-        });
-
-        let result = repo.add(caller).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in view provider plug '@test/provider'")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_component_url_validation() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Test with non-existent file URL
-        let mut plug = mock_plug("plug1");
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec!["file:///nonexistent/path".parse().unwrap()],
-            }
-            .into(),
-        );
-
-        let res = repo.add(plug).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Component file not found")
-        );
-
-        // Test with non-existent blob URL
-        let mut plug2 = mock_plug("plug2");
-        plug2.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec![
-                    format!("{}:///nonexistent_hash", crate::blobs::BLOB_SCHEME)
-                        .parse()
-                        .unwrap(),
-                ],
-            }
-            .into(),
-        );
-
-        let res = repo.add(plug2).await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Blob not found"));
-
-        // Test with unsupported scheme
-        let mut plug3 = mock_plug("plug3");
-        plug3.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec!["http://example.com/wasm.wasm".parse().unwrap()],
-            }
-            .into(),
-        );
-
-        let res = repo.add(plug3).await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Unsupported URL scheme")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut plug = mock_plug("ref-path");
-        plug.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.image".into(),
-            value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
-            display_config: default(),
-            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
-                json_path: "/doesNotExist".into(),
-                at_commit_json_path: "/refHeads".into(),
-            }],
-        });
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("path does not exist in schema")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_at_commit_json_path_type_must_be_array_of_strings() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut plug = mock_plug("bad-at-commit");
-        plug.facets.push(manifest::FacetManifest {
-            key_tag: "org.test.image".into(),
-            value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
-            display_config: default(),
-            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
-                json_path: "/facetRef".into(),
-                at_commit_json_path: "/mime".into(),
-            }],
-        });
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must allow an array of commit hashes")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_processor_routine_must_exist() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let mut plug = mock_plug("processor-routine");
-        plug.processors.insert(
-            "proc1".into(),
-            manifest::ProcessorManifest {
-                desc: "Processor".into(),
-                deets: manifest::ProcessorDeets::DocProcessor {
-                    event_predicate: default(),
-                    predicate: manifest::DocPredicateClause::HasTag("org.test.tag".into()),
-                    routine_name: "missing-routine".into(),
-                },
-            }
-            .into(),
-        );
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid processor deets")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        let mut plug = mock_plug("processor-predicate-scope");
-        plug.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-        plug.processors.insert(
-            "proc1".into(),
-            manifest::ProcessorManifest {
-                desc: "Processor".into(),
-                deets: manifest::ProcessorDeets::DocProcessor {
-                    event_predicate: default(),
-                    predicate: manifest::DocPredicateClause::HasTag("org.test.missing".into()),
-                    routine_name: "routine1".into(),
-                },
-            }
-            .into(),
-        );
-
-        let result = repo.add(plug).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid processor predicate")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        let mut target = mock_plug("target");
-        target.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        target.commands.insert(
-            "cmd1".into(),
-            manifest::CommandManifest {
-                desc: "target command".into(),
-                deets: manifest::CommandDeets::DocCommand {
-                    routine_name: "routine1".into(),
-                },
-            }
-            .into(),
-        );
-        target.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url.clone()],
-            }
-            .into(),
-        );
-        repo.add(target).await?;
-
-        let mut caller = mock_plug("caller");
-        caller.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec!["db+command:///@test/target/cmd1".parse().unwrap()],
-            }
-            .into(),
-        );
-        caller.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url.clone()],
-            }
-            .into(),
-        );
-
-        let result = repo.add(caller).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("declared dependency")
-        );
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_command_invoke_acl_rejects_missing_command() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        let mut provider = mock_plug("provider");
-        provider.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec![],
-            }
-            .into(),
-        );
-        provider.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url.clone()],
-            }
-            .into(),
-        );
-        repo.add(provider).await?;
-
-        let mut caller = mock_plug("caller");
-        caller.dependencies.insert(
-            "@test/provider".into(),
-            manifest::PlugDependencyManifest {
-                keys: vec![],
-                local_states: vec![],
-            }
-            .into(),
-        );
-        caller.routines.insert(
-            "routine1".into(),
-            manifest::RoutineManifest {
-                r#impl: manifest::RoutineImpl::Wflow {
-                    key: "wflow1".into(),
-                    bundle: "bundle1".into(),
-                },
-                doc_acls: vec![],
-                query_acls: vec![],
-                config_facet_acl: vec![],
-                local_state_acl: vec![],
-                command_invoke_acl: vec!["db+command:///@test/provider/nope".parse().unwrap()],
-            }
-            .into(),
-        );
-        caller.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec!["wflow1".into()],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-
-        let result = repo.add(caller).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("target command"));
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_plug_file_to_blob_conversion() -> Res<()> {
-        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-
-        // Create a temporary file with wasm content (keep it alive)
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        let wasm_content = b"fake wasm binary content";
-        tokio::fs::write(&temp_path, wasm_content).await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
-
-        // Create plug with file:// URL
-        let mut plug = mock_plug("plug1");
-        plug.wflow_bundles.insert(
-            "bundle1".into(),
-            manifest::WflowBundleManifest {
-                keys: vec![],
-                component_urls: vec![file_url],
-            }
-            .into(),
-        );
-
-        // Add plug - should convert file:// to db+blob://
-        repo.add(plug.clone()).await?;
-
-        // Retrieve the plug and verify URL was converted
-        let saved = repo.get("@test/plug1").await.unwrap();
-        let bundle = saved.wflow_bundles.get("bundle1").unwrap();
-        assert_eq!(bundle.component_urls.len(), 1);
-        let converted_url = &bundle.component_urls[0];
-        assert_eq!(converted_url.scheme(), crate::blobs::BLOB_SCHEME);
-
-        // Verify the blob exists and contains the correct content
-        let hash = converted_url.path().trim_start_matches('/');
-        let blob_path = repo
-            .blobs
-            .get_path(hash.parse::<crate::blobs::BlobId>()?)
+        // 2. Write a manifest doc through the drawer (validated).
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let doc_id = drawer
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    Self::plug_manifest_facet_key(),
+                    daybook_types::doc::WellKnownFacet::PlugManifest(manifest).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
             .await?;
-        let blob_content = tokio::fs::read(&blob_path).await?;
-        assert_eq!(blob_content, wasm_content);
 
+        // 3. Grant core-docs-group access so the manifest doc replicates in the
+        // core partition.
+        let branch_ref = drawer
+            .get_branch_ref(&doc_id, daybook_types::doc::BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("manifest doc missing main branch")?;
+        let authority = crate::authority::ensure(
+            &self.big_repo,
+            drawer.meta_store_sql(),
+            None,
+        )
+        .await?;
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.core_docs,
+            [branch_ref.branch_doc_id],
+        )
+        .await?;
+
+        // ADR 007 §5: record the new manifest doc in the config facet's
+        // known_manifests so the derived cache sees it (authoring validations
+        // like tag clashes and version checks run against the cache). The
+        // config write takes the mutation mutex itself.
+        drop(_guard);
+        let heads = drawer
+            .get_doc_branches(&doc_id)
+            .await?
+            .and_then(|entry| entry.branches.get("main").cloned())
+            .ok_or_eyre("manifest doc missing main branch")?;
+        self.record_known_manifest_doc(&doc_id, &heads).await?;
+        self.refresh_cache().await?;
+
+        Ok(doc_id)
+    }
+
+    /// ADR 007 §7: the config facet moved (local or remote write). Read the
+    /// current config and diff enabled/active, emitting enabled-only events.
+    /// Called inline by the switch sink.
+    /// ADR 007 §5: ensure a manifest doc is recorded in the config facet's
+    /// known_manifests (plug id -> full ref at the given heads). Called by
+    /// the switch sink and by the authoring/import paths.
+    async fn record_known_manifest_doc(
+        &self,
+        doc_id: &daybook_types::doc::DocId,
+        heads: &ChangeHashSet,
+    ) -> Res<()> {
+        let _guard = self.mutation_mutex.lock().await;
+        let Some(manifest) = self.read_manifest_doc(doc_id, heads).await? else {
+            return Ok(());
+        };
+        let ref_url = Self::build_enabled_ref(doc_id, "main", heads)?;
+        // Known-manifests changes do not affect enabled/active; callers
+        // refresh the derived cache themselves. No PlugsEvent is emitted
+        // here (ADR 007 §7: events are enabled-only).
+        self.config_store()?
+            .mutate_sync(|config| {
+                if config.known_manifests.get(&manifest.id()) != Some(&ref_url) {
+                    config.known_manifests.insert(manifest.id(), ref_url);
+                }
+            })
+            .await?;
         Ok(())
+    }
+
+}
+
+/// ADR 007 §7: switch sink that drives the plugs repo inline. The switch's
+/// drawer predicate filters Doc events to the plug facets (plugsConfig +
+/// plugManifest); on_event calls the repo's private methods directly. The
+/// plugs repo no longer subscribes to big_repo and has no worker loop.
+pub(crate) struct PlugsSwitchSink {
+    repo: Arc<PlugsRepo>,
+}
+
+impl PlugsSwitchSink {
+    pub(crate) fn new(repo: Arc<PlugsRepo>) -> Self {
+        Self { repo }
+    }
+}
+
+#[async_trait]
+impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
+    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
+        use daybook_types::manifest::DocPredicateClause;
+        use daybook_types::doc::FacetTag;
+        crate::rt::switch::SwtchSinkInterest {
+            consume_doc: true,
+            consume_drawer: false,
+            consume_plugs: false,
+            consume_dispatch: false,
+            consume_config: false,
+            // Only docs whose diff touches the plug facets reach on_event.
+            drawer_predicate: Some(DocPredicateClause::Or(vec![
+                DocPredicateClause::HasTag(FacetTag::WellKnown(
+                    daybook_types::doc::WellKnownFacetTag::PlugsConfig,
+                )),
+                DocPredicateClause::HasTag(FacetTag::WellKnown(
+                    daybook_types::doc::WellKnownFacetTag::PlugManifest,
+                )),
+            ])),
+        }
+    }
+
+    async fn on_event(
+        &mut self,
+        event: &crate::rt::switch::SwitchEvent,
+        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
+    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
+        let crate::rt::switch::SwitchEvent::Doc(evt) = event else {
+            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
+        };
+        let Some(diff) = &evt.diff else {
+            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
+        };
+        // Forward to the notif loop (which reloads the store, refreshes the
+        // cache, and emits events). Cheap — no reads in the sink.
+        let changed: Vec<&daybook_types::doc::FacetKey> = diff
+            .changed_facet_keys
+            .iter()
+            .chain(diff.added_facet_keys.iter())
+            .chain(diff.removed_facet_keys.iter())
+            .collect();
+        let plugs_config_tag = daybook_types::doc::FacetTag::WellKnown(
+            daybook_types::doc::WellKnownFacetTag::PlugsConfig,
+        );
+        let plug_manifest_tag = daybook_types::doc::FacetTag::WellKnown(
+            daybook_types::doc::WellKnownFacetTag::PlugManifest,
+        );
+        self.repo
+            .notif_tx
+            .send(PlugsNotif::DocChanged {
+                doc_id: evt.doc_id.clone(),
+                heads: evt.new_heads.clone(),
+                origin: evt.origin.clone(),
+                config_changed: changed.iter().any(|key| key.tag == plugs_config_tag),
+                manifest_changed: changed.iter().any(|key| key.tag == plug_manifest_tag),
+            })
+            .map_err(|_| ferr!("plugs notif channel closed"))?;
+        Ok(crate::rt::switch::SwitchSinkOutcome::default())
     }
 }

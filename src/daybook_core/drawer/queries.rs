@@ -594,4 +594,38 @@ impl DrawerRepo {
         }
         Ok(out)
     }
+
+
+    /// ADR 007 §7: the write points (heads + author) of a facet between two
+    /// head sets, oldest first. Each write's facet content and dmeta marker
+    /// live in the same change, so hydrating at a write point's heads yields
+    /// a consistent snapshot; the author enables local-change filtering.
+    pub(crate) async fn get_facet_write_points(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        facet_key: &FacetKey,
+        from: &[automerge::ChangeHash],
+        to: &[automerge::ChangeHash],
+    ) -> Res<Vec<(ChangeHashSet, ActorId)>> {
+        let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            return Ok(vec![]);
+        };
+        let Some(handle) = self
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
+            .await?
+        else {
+            return Ok(vec![]);
+        };
+        handle
+            .with_document_read(|am_doc| {
+                crate::drawer::facet_recovery::facet_write_points(
+                    am_doc,
+                    facet_key,
+                    from,
+                    to,
+                )
+            })
+            .await
+    }
 }

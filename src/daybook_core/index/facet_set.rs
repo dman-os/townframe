@@ -5,7 +5,7 @@ use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, WellKnownFacetTag}
 use sqlx::{Sqlite, Transaction};
 use tokio_util::sync::CancellationToken;
 
-const FACET_SET_LOCAL_STATE_ID: &str = "@daybook/wip/doc-facet-set-index";
+const FACET_SET_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-set-index";
 
 #[derive(Debug, Clone)]
 pub struct DocFacetTagMembership {
@@ -72,7 +72,7 @@ impl DocFacetSetIndexRepo {
             registry,
             cancel_token: cancel_token.child_token(),
             drawer_repo: Arc::clone(&drawer_repo),
-            work_tx,
+            work_tx: work_tx.clone(),
             sql,
         });
 

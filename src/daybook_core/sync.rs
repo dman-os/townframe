@@ -801,6 +801,7 @@ impl IrohSyncRepo {
             repo_name: self.rcx.repo_name.clone(),
             app_doc_id: self.rcx.doc_app.document_id().to_string(),
             drawer_doc_id: self.rcx.doc_drawer.document_id().to_string(),
+            config_doc_id: Some(self.rcx.doc_config.document_id().to_string()),
             device_name: Some(device_name),
             repo_agents_group: self.authority.ids().repo_agents,
             core_docs_group: self.authority.ids().core_docs,

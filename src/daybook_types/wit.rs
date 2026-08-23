@@ -76,6 +76,17 @@ pub mod doc {
         Note(Note),
         Blob(Blob),
         BlobPin(BlobPin),
+        // ADR 007 §1: JSON-string manifest + the plug config facet.
+        PlugManifest(String),
+        PlugsConfig(PlugsConfig),
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PlugsConfig {
+        pub enabled: Vec<(String, String)>,
+        pub known_manifests: Vec<(String, String)>,
+        pub plug_config_doc_ids: Vec<(String, String)>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -312,6 +323,22 @@ pub mod doc {
                 }),
                 root_doc::WellKnownFacet::Blob(blob) => Self::Blob(blob),
                 root_doc::WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
+                root_doc::WellKnownFacet::PlugManifest(val) => {
+                    Self::PlugManifest(serde_json::to_string(&val).expect(ERROR_JSON))
+                }
+                root_doc::WellKnownFacet::PlugsConfig(val) => Self::PlugsConfig(PlugsConfig {
+                    enabled: val
+                        .enabled
+                        .into_iter()
+                        .map(|(key, url)| (key, url.to_string()))
+                        .collect(),
+                    known_manifests: val
+                        .known_manifests
+                        .into_iter()
+                        .map(|(key, url)| (key, url.to_string()))
+                        .collect(),
+                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
+                }),
             }
         }
     }
@@ -433,6 +460,23 @@ pub mod doc {
                 }),
                 WellKnownFacet::Blob(blob) => Self::Blob(blob),
                 WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
+                WellKnownFacet::PlugManifest(json) => Self::PlugManifest(
+                    serde_json::from_str(&json)
+                        .wrap_err_with(|| "error parsing plugManifest facet json")?,
+                ),
+                WellKnownFacet::PlugsConfig(val) => Self::PlugsConfig(crate::doc::PlugsConfig {
+                    enabled: val
+                        .enabled
+                        .into_iter()
+                        .map(|(key, url)| Ok((key, url.parse()?)))
+                        .collect::<Result<_, eyre::Report>>()?,
+                    known_manifests: val
+                        .known_manifests
+                        .into_iter()
+                        .map(|(key, url)| Ok((key, url.parse()?)))
+                        .collect::<Result<_, eyre::Report>>()?,
+                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
+                }),
             })
         }
     }

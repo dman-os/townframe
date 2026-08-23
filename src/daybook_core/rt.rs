@@ -524,9 +524,10 @@ impl Rt {
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
         // Ensure init routines are queued at boot according to each init run mode.
+        // ADR 007 §6: boot queues inits for the active set only.
         let mut plug_ids = rt
             .plugs_repo
-            .list_plugs()
+            .list_active_plugs()
             .await
             .into_iter()
             .map(|plug| plug.id())
@@ -557,7 +558,7 @@ impl Rt {
                 // FIXME: rename the methods to switch sinks
                 (
                     "doc_processor".to_string(),
-                    crate::rt::triage::doc_processor_triage_listener(),
+                    crate::rt::triage::doc_processor_triage_listener(Arc::clone(&rt)),
                 ),
                 ("blob_pins".to_string(), blob_pin_worker.triage_listener()),
                 (
@@ -576,10 +577,29 @@ impl Rt {
                     "facet_ref".to_string(),
                     doc_facet_ref_index_repo.triage_listener(),
                 ),
+                (
+                    "plugs".to_string(),
+                    crate::plugs::PlugsSwitchSink::new(Arc::clone(&rt.plugs_repo)),
+                ),
+                (
+                    "plugs_config_store".to_string(),
+                    crate::stores::FacetStoreSink::new(
+                        rt.plugs_repo
+                            .config_store()
+                            .expect("plugs config store must be attached")
+                            .clone(),
+                    ),
+                ),
             ]
             .into();
         let switch_worker = crate::rt::switch::spawn_switch_worker(
-            Arc::clone(&rt),
+            Arc::clone(&rt.drawer),
+            Arc::clone(&rt.plugs_repo),
+            Arc::clone(&rt.config_repo),
+            Arc::clone(&rt.dispatch_repo),
+            Arc::clone(&rt.registry),
+            Arc::clone(&rt.rcx.part_store),
+            rt.cancel_token.clone(),
             rt.rcx.sql.clone(),
             switch_sinks,
         )
@@ -862,11 +882,26 @@ impl Rt {
             };
             (view_ref, owner_plug_id)
         } else {
-            let facet_manifest = self
+            let facet_manifest = match self
                 .plugs_repo
                 .get_facet_manifest_by_tag(&facet_tag)
                 .await
-                .ok_or_else(|| ferr!("facet manifest not found for tag '{}'", facet_tag))?;
+            {
+                crate::plugs::FacetManifestLookup::Found(facet_manifest) => facet_manifest,
+                crate::plugs::FacetManifestLookup::PlugDisabled { plug_id } => {
+                    return Err(ferr!(
+                        "facet '{}' is owned by disabled plug '{}'",
+                        facet_tag,
+                        plug_id
+                    ));
+                }
+                crate::plugs::FacetManifestLookup::UnknownTag => {
+                    return Err(ferr!(
+                        "facet manifest not found for tag '{}'",
+                        facet_tag
+                    ));
+                }
+            };
             match facet_manifest.display_config.deets {
                 manifest::FacetDisplayDeets::CustomView { view, .. } => {
                     let owner_plug_id = self
@@ -1118,10 +1153,16 @@ impl Rt {
                 }
                 let daybook_types::manifest::InitDeets::InvokeRoutine { routine_name } =
                     &init_manifest.deets;
+                // ADR 007 §2: the config doc is created at enablement and the
+                // mapping retained across disablement; an enabled plug always
+                // has one.
                 let config_doc_id = self
                     .plugs_repo
-                    .get_or_init_plug_config_doc_id(&plug_id, &self.drawer)
-                    .await?;
+                    .get_plug_config_doc_id(&plug_id)
+                    .await
+                    .ok_or_eyre(format!(
+                        "plug {plug_id} has no config doc; expected one at enablement"
+                    ))?;
                 let config_heads = self
                     .drawer
                     .get_doc_branches(&config_doc_id)

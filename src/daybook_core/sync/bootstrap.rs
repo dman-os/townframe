@@ -19,6 +19,8 @@ pub struct SyncBootstrapState {
     pub repo_name: String,
     pub app_doc_id: DocumentId,
     pub drawer_doc_id: DocumentId,
+    /// ADR 007 §2: the repo config doc (third core doc).
+    pub config_doc_id: Option<DocumentId>,
     pub device_name: Option<String>,
     pub(crate) authority_ids: crate::authority::RepoAuthorityIds,
 }
@@ -82,6 +84,10 @@ pub struct CloneProvisionResponse {
     pub repo_name: String,
     pub app_doc_id: String,
     pub drawer_doc_id: String,
+    /// ADR 007 §2: the repo config doc (third core doc). Serde-default so
+    /// older peers (pre-config-doc) still deserialize.
+    #[serde(default)]
+    pub config_doc_id: Option<String>,
     pub device_name: Option<String>,
     pub repo_agents_group: [u8; 32],
     pub core_docs_group: [u8; 32],
@@ -135,6 +141,12 @@ impl CloneProvisionResponse {
                 .wrap_err("invalid app_doc_id in clone response")?,
             drawer_doc_id: DocumentId::from_str(&self.drawer_doc_id)
                 .wrap_err("invalid drawer_doc_id in clone response")?,
+            config_doc_id: self
+                .config_doc_id
+                .as_deref()
+                .map(DocumentId::from_str)
+                .transpose()
+                .wrap_err("invalid config_doc_id in clone response")?,
             device_name: self.device_name.clone(),
             authority_ids: crate::authority::RepoAuthorityIds {
                 repo_agents: self.repo_agents_group,
@@ -434,7 +446,9 @@ async fn pull_required_partitions_via_big_sync_worker(
             .wait_for_full_sync(vec![peer_id], required_partitions)
             .await?;
 
-        for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id] {
+        for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id]
+            .into_iter()
+            .chain(bootstrap.config_doc_id) {
             big_repo.sync_doc_with_peer(doc_id, peer_id).await?;
         }
         Ok(())
@@ -606,6 +620,7 @@ pub async fn clone_repo_init_from_url(
             &crate::repo::globals::InitState::Created {
                 doc_id_app: bootstrap.app_doc_id,
                 doc_id_drawer: bootstrap.drawer_doc_id,
+                doc_id_config: bootstrap.config_doc_id,
                 core_inventory_doc_id: None,
                 docs_inventory_doc_id: None,
             },
