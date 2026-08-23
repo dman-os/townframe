@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 use tokio::io::AsyncWriteExt;
 
+pub mod encrypt;
 pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
 pub mod pin_worker;
