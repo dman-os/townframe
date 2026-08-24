@@ -257,11 +257,7 @@ impl DrawerRepo {
             .add_admin_member_to_doc(branch_doc_id, self.drawer_group.clone())
             .await?;
         let entry = DocEntry {
-            branches: [(
-                branch_path.to_string(),
-                StoredBranchRef { branch_doc_id },
-            )]
-            .into(),
+            branches: [(branch_path.to_string(), StoredBranchRef { branch_doc_id })].into(),
             branches_deleted: HashMap::new(),
             vtag: VersionTag::mint(self.local_actor_id.clone()),
             previous_version_heads: None,
@@ -459,7 +455,6 @@ impl DrawerRepo {
                 eyre::Ok((ChangeHashSet(Arc::from([heads])), invalidated_uuids))
             })
             .await??;
-
         // 2. Update partition store
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &new_heads)
             .await?;

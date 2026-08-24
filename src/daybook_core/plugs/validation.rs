@@ -59,6 +59,7 @@ impl PlugsRepo {
             )?;
         }
 
+        let plug_id = manifest.id();
         let dependency_base_ids: HashSet<String> = manifest
             .dependencies
             .keys()
@@ -71,8 +72,8 @@ impl PlugsRepo {
         // Many parts of the system rely on property tags being unique identifiers.
         // We use an index to quickly check if any of the tags this plug wants to declare
         // are already owned by another plug.
-        {
-            let cache = self.cache.lock().await;
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
             for prop in &manifest.facets {
                 if let Some(owner) = cache.tag_to_plug.get(&prop.key_tag.to_string())
                     && owner != &plug_id
@@ -84,7 +85,8 @@ impl PlugsRepo {
                     ));
                 }
             }
-        }
+            Ok(())
+        })?;
 
         // -- Dependency Verification --
         // Plugs can declare dependencies on other plugs to reuse their property keys.

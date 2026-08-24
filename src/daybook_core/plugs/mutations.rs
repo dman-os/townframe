@@ -80,14 +80,14 @@ impl PlugsRepo {
             .await?
             .ok_or_eyre("core manifest doc unreadable at initial heads")?;
         let ref_url = Self::build_enabled_ref(&core_doc_id, "main", &core_heads)?;
-        {
-            let mut cache = self.cache.lock().await;
+        surelock::key::lock_scope(|key| {
+            let (mut cache, _key) = key.lock(&self.cache);
             cache.upsert_known(CORE_PLUG_ID, &core_manifest);
             // Core is being enabled by the config write below; seed active
             // so that write validates normally (the plugConfig facet is
             // owned by core itself).
             cache.set_active(CORE_PLUG_ID, core_heads.clone(), Arc::clone(&core_manifest));
-        }
+        });
 
         // Write the plugg config facet with core enabled at the core doc's
         // initial heads (validated against core's own plugConfig facet).
@@ -227,7 +227,12 @@ impl PlugsRepo {
         let mut events = vec![];
         if already_enabled.as_ref() != Some(&ref_url) {
             if let Some(event) = self
-                .activate_from_ref(&plug_id, &ref_url, already_enabled.is_none(), &self.local_origin())
+                .activate_from_ref(
+                    &plug_id,
+                    &ref_url,
+                    already_enabled.is_none(),
+                    &self.local_origin(),
+                )
                 .await?
             {
                 events.push(event);
@@ -260,7 +265,10 @@ impl PlugsRepo {
         // Config-delta event: the enabled entry was removed → `PlugDisabled`
         // (regardless of whether it was materialized). The cache is only the
         // side effect.
-        self.cache.lock().await.clear_active(plug_id);
+        surelock::key::lock_scope(|key| {
+            let (mut cache, _key) = key.lock(&self.cache);
+            cache.clear_active(plug_id);
+        });
         let mut events = vec![PlugsEvent::PlugDisabled {
             id: plug_id.to_string(),
             origin: self.local_origin(),
@@ -287,7 +295,7 @@ impl PlugsRepo {
         else {
             eyre::bail!("plug not enabled: {plug_id}");
         };
-        let parsed = Self::parse_enabled_ref(old_ref)?;
+        let parsed = Self::parse_enabled_ref(&old_ref)?;
         let drawer = self
             .drawer
             .get()
@@ -540,7 +548,10 @@ impl PlugsRepo {
             && track.latest == ref_url
         {
             // Already recorded at these heads — idempotent replay.
-            self.cache.lock().await.upsert_known(&plug_id, &manifest);
+            surelock::key::lock_scope(|key| {
+                let (mut cache, _key) = key.lock(&self.cache);
+                cache.upsert_known(&plug_id, &manifest);
+            });
             return Ok(RecordKnownOutcome::Recorded { plug_id });
         }
         let mut reason = None;
@@ -605,7 +616,10 @@ impl PlugsRepo {
             .await?;
         match reason {
             None => {
-                self.cache.lock().await.upsert_known(&plug_id, &manifest);
+                surelock::key::lock_scope(|key| {
+                    let (mut cache, _key) = key.lock(&self.cache);
+                    cache.upsert_known(&plug_id, &manifest);
+                });
                 Ok(RecordKnownOutcome::Recorded { plug_id })
             }
             Some(reason) => Ok(RecordKnownOutcome::Rejected {

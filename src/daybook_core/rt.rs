@@ -579,15 +579,16 @@ impl Rt {
                 ),
                 (
                     "plugs".to_string(),
-                    crate::plugs::PlugsSwitchSink::new(Arc::clone(&rt.plugs_repo)),
+                    Box::new(crate::plugs::PlugsSwitchSink::new(Arc::clone(
+                        &rt.plugs_repo,
+                    ))),
                 ),
                 (
                     "plugs_config_store".to_string(),
-                    crate::stores::FacetStoreSink::new(
+                    Box::new(
                         rt.plugs_repo
-                            .config_store()
-                            .expect("plugs config store must be attached")
-                            .clone(),
+                            .config_store_sink()
+                            .expect("plugs config store must be attached"),
                     ),
                 ),
             ]
@@ -882,11 +883,7 @@ impl Rt {
             };
             (view_ref, owner_plug_id)
         } else {
-            let facet_manifest = match self
-                .plugs_repo
-                .get_facet_manifest_by_tag(&facet_tag)
-                .await
-            {
+            let facet_manifest = match self.plugs_repo.get_facet_manifest_by_tag(&facet_tag).await {
                 crate::plugs::FacetManifestLookup::Found(facet_manifest) => facet_manifest,
                 crate::plugs::FacetManifestLookup::PlugDisabled { plug_id } => {
                     return Err(ferr!(
@@ -896,10 +893,7 @@ impl Rt {
                     ));
                 }
                 crate::plugs::FacetManifestLookup::UnknownTag => {
-                    return Err(ferr!(
-                        "facet manifest not found for tag '{}'",
-                        facet_tag
-                    ));
+                    return Err(ferr!("facet manifest not found for tag '{}'", facet_tag));
                 }
             };
             match facet_manifest.display_config.deets {

@@ -138,11 +138,13 @@ impl PlugsRepo {
                 }
             }
         }
-        let mut cache = self.cache.lock().await;
-        cache.manifests = manifests;
-        cache.tag_to_plug = tag_to_plug;
-        cache.facet_manifests = facet_manifests;
-        cache.active_manifests = active_manifests;
+        surelock::key::lock_scope(|key| {
+            let (mut cache, _key) = key.lock(&self.cache);
+            cache.manifests = manifests;
+            cache.tag_to_plug = tag_to_plug;
+            cache.facet_manifests = facet_manifests;
+            cache.active_manifests = active_manifests;
+        });
         Ok(())
     }
 }

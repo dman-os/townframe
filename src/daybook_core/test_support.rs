@@ -193,7 +193,8 @@ pub async fn test_cx_with_options(
     // ADR 007 §2: the repo config doc (third core doc) hosting the plugg
     // config facet.
     let config_doc_id = {
-        let doc = automerge::Automerge::load(&crate::drawer::doc_version_updates::version_latest()?)?;
+        let doc =
+            automerge::Automerge::load(&crate::drawer::doc_version_updates::version_latest()?)?;
         let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
@@ -471,9 +472,7 @@ pub async fn test_cx_with_options(
 }
 
 #[cfg(test)]
-pub async fn import_test_plug_oci(
-    test_cx: &DaybookTestContext,
-) -> Res<crate::plugs::ImportedPlug> {
+pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<crate::plugs::ImportedPlug> {
     let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/oci")
         .join("@daybook/test");
@@ -498,10 +497,9 @@ pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()
     let doc_id = imported
         .doc_id
         .ok_or_eyre("imported test plug missing manifest doc id")?;
-    let ref_url: url::Url = format!(
-        "db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main"
-    )
-    .parse()?;
+    let ref_url: url::Url =
+        format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+            .parse()?;
     test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
     Ok(())
 }

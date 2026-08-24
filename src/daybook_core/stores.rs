@@ -351,17 +351,14 @@ pub(crate) enum FacetStoreNotif {
 /// the in-memory projection is kept live by a notif loop fed by
 /// `FacetStoreSink` (which forwards switch Doc events for the store's doc).
 #[async_trait]
-pub trait FacetStore: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static {
+pub trait FacetStore:
+    serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
+{
     /// The facet key (tag + id) the store lives at.
     fn facet_key() -> daybook_types::doc::FacetKey;
 
     /// Seed used when the facet is absent.
-    fn seed() -> Self
-    where
-        Self: Default,
-    {
-        Self::default()
-    }
+    fn seed() -> Self;
 }
 
 /// One write version of a store's facet: the heads after the write, the
@@ -402,8 +399,10 @@ impl<S: FacetStore> Clone for FacetStoreHandle<S> {
 impl<S: FacetStore> Drop for FacetStoreHandle<S> {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        if let Some(handle) = self.notif_handle.get_mut().take() {
-            handle.abort();
+        if let Ok(mut guard) = self.notif_handle.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
         }
     }
 }
@@ -475,18 +474,16 @@ impl<S: FacetStore> FacetStoreHandle<S> {
     /// this store makes. Resolved lazily (the doc may not be registered in
     /// the drawer at load time); None until resolvable.
     pub async fn local_writer_actor(&self) -> Option<ActorId> {
-        if let Some(actor) = self.inner.read().await.local_writer_actor {
+        if let Some(actor) = self.inner.read().await.local_writer_actor.clone() {
             return Some(actor);
         }
         let (drawer, branch) = {
             let guard = self.inner.read().await;
             (Arc::clone(&guard.drawer), guard.branch.clone())
         };
-        let actor = drawer
-            .resolve_content_actor(&self.doc_id, &branch)
-            .await;
-        if let Some(actor) = actor {
-            self.inner.write().await.local_writer_actor = Some(actor);
+        let actor = drawer.resolve_content_actor(&self.doc_id, &branch).await;
+        if let Some(actor) = &actor {
+            self.inner.write().await.local_writer_actor = Some(actor.clone());
         }
         actor
     }
@@ -496,7 +493,11 @@ impl<S: FacetStore> FacetStoreHandle<S> {
     pub async fn at(&self, heads: &ChangeHashSet) -> Res<Option<S>> {
         let (drawer, branch, facet_key) = {
             let guard = self.inner.read().await;
-            (Arc::clone(&guard.drawer), guard.branch.clone(), S::facet_key())
+            (
+                Arc::clone(&guard.drawer),
+                guard.branch.clone(),
+                S::facet_key(),
+            )
         };
         let Some(doc) = drawer
             .get_doc_with_facets_at_branch_heads(
@@ -525,20 +526,18 @@ impl<S: FacetStore> FacetStoreHandle<S> {
     ) -> Res<Vec<FacetStoreVersion<S>>> {
         let (drawer, branch, facet_key) = {
             let guard = self.inner.read().await;
-            (Arc::clone(&guard.drawer), guard.branch.clone(), S::facet_key())
+            (
+                Arc::clone(&guard.drawer),
+                guard.branch.clone(),
+                S::facet_key(),
+            )
         };
         let from_heads: Vec<automerge::ChangeHash> = from
             .map(|heads| heads.as_ref().to_vec())
             .unwrap_or_default();
         let to_heads: Vec<automerge::ChangeHash> = to.as_ref().to_vec();
         let points = drawer
-            .get_facet_write_points(
-                &self.doc_id,
-                &branch,
-                &facet_key,
-                &from_heads,
-                &to_heads,
-            )
+            .get_facet_write_points(&self.doc_id, &branch, &facet_key, &from_heads, &to_heads)
             .await?;
         let mut versions = Vec::with_capacity(points.len());
         for (heads, actor_id) in points {
@@ -604,24 +603,36 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         Ok((store, heads))
     }
 
-    async fn flush(&self, inner: &mut FacetStoreInner<S>) -> Res<ChangeHashSet> {
-        let patch = daybook_types::doc::DocPatch {
+    fn build_patch(&self, store: &S) -> Res<daybook_types::doc::DocPatch> {
+        Ok(daybook_types::doc::DocPatch {
             id: self.doc_id.clone(),
-            facets_set: [(S::facet_key(), serde_json::to_value(&inner.store)?)].into(),
+            facets_set: [(S::facet_key(), serde_json::to_value(store)?)].into(),
             facets_remove: vec![],
             user_path: None,
+        })
+    }
+
+    /// Write a patch through the drawer and advance the loaded heads. No
+    /// store lock is held here: the drawer write runs facet validation,
+    /// which re-enters the store (and the drawer notif feeds the switch,
+    /// whose sinks read the store) — holding the write lock across it would
+    /// self-deadlock.
+    async fn flush_patch(&self, patch: daybook_types::doc::DocPatch) -> Res<ChangeHashSet> {
+        let (drawer, branch, loaded_heads) = {
+            let guard = self.inner.read().await;
+            (
+                Arc::clone(&guard.drawer),
+                guard.branch.clone(),
+                guard.loaded_heads.clone(),
+            )
         };
-        inner
-            .drawer
-            .update_at_heads(patch, &inner.branch, inner.loaded_heads.clone())
-            .await?;
-        let heads = inner
-            .drawer
+        drawer.update_at_heads(patch, &branch, loaded_heads).await?;
+        let heads = drawer
             .get_doc_branches(&self.doc_id)
             .await?
-            .and_then(|entry| entry.branches.get(inner.branch.as_str()).cloned())
+            .and_then(|entry| entry.branches.get(branch.as_str()).cloned())
             .ok_or_eyre("facet store doc missing branch after write")?;
-        inner.loaded_heads = Some(heads.clone());
+        self.inner.write().await.loaded_heads = Some(heads.clone());
         Ok(heads)
     }
 
@@ -648,9 +659,13 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         O: Sized,
         F: for<'a> FnOnce(&'a mut S) -> BoxFuture<'a, O>,
     {
-        let mut inner = self.inner.write().await;
-        let res = fun(&mut inner.store).await;
-        let heads = self.flush(&mut inner).await?;
+        let (res, patch) = {
+            let mut inner = self.inner.write().await;
+            let res = fun(&mut inner.store).await;
+            let patch = self.build_patch(&inner.store)?;
+            (res, patch)
+        };
+        let heads = self.flush_patch(patch).await?;
         Ok((res, heads))
     }
 
@@ -659,9 +674,13 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         O: Sized,
         F: for<'a> FnOnce(&'a mut S) -> BoxFuture<'a, Res<O>>,
     {
-        let mut inner = self.inner.write().await;
-        let res = fun(&mut inner.store).await?;
-        let heads = self.flush(&mut inner).await?;
+        let (res, patch) = {
+            let mut inner = self.inner.write().await;
+            let res = fun(&mut inner.store).await?;
+            let patch = self.build_patch(&inner.store)?;
+            (res, patch)
+        };
+        let heads = self.flush_patch(patch).await?;
         Ok((res, heads))
     }
 
@@ -670,9 +689,13 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         F: FnOnce(&mut S) -> O,
         O: Sized,
     {
-        let mut inner = self.inner.write().await;
-        let res = fun(&mut inner.store);
-        let heads = self.flush(&mut inner).await?;
+        let (res, patch) = {
+            let mut inner = self.inner.write().await;
+            let res = fun(&mut inner.store);
+            let patch = self.build_patch(&inner.store)?;
+            (res, patch)
+        };
+        let heads = self.flush_patch(patch).await?;
         Ok((res, heads))
     }
 
@@ -681,9 +704,13 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         F: FnOnce(&mut S) -> Res<O>,
         O: Sized,
     {
-        let mut inner = self.inner.write().await;
-        let res = fun(&mut inner.store)?;
-        let heads = self.flush(&mut inner).await?;
+        let (res, patch) = {
+            let mut inner = self.inner.write().await;
+            let res = fun(&mut inner.store)?;
+            let patch = self.build_patch(&inner.store)?;
+            (res, patch)
+        };
+        let heads = self.flush_patch(patch).await?;
         Ok((res, heads))
     }
 }
@@ -693,7 +720,7 @@ impl<S: FacetStore> FacetStoreHandle<S> {
 /// dropping the handle without `stop()` still aborts the loop.
 async fn facet_store_notif_loop<S: FacetStore>(
     inner: Arc<tokio::sync::RwLock<FacetStoreInner<S>>>,
-    doc_id: daybook_types::doc::DocId,
+    _doc_id: daybook_types::doc::DocId,
     mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<FacetStoreNotif>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> Res<()> {
@@ -736,7 +763,7 @@ impl<S: FacetStore> crate::rt::switch::SwitchSink for FacetStoreSink<S> {
             consume_dispatch: false,
             consume_config: false,
             drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::HasTag(
-                S::facet_key().tag,
+                S::facet_key().tag.to_string().into(),
             )),
         }
     }
@@ -749,7 +776,7 @@ impl<S: FacetStore> crate::rt::switch::SwitchSink for FacetStoreSink<S> {
         let crate::rt::switch::SwitchEvent::Doc(evt) = event else {
             return Ok(crate::rt::switch::SwitchSinkOutcome::default());
         };
-        if evt.doc_id == self.handle.doc_id() {
+        if evt.doc_id == *self.handle.doc_id() {
             self.handle
                 .notif_tx
                 .send(FacetStoreNotif::DocChanged {

@@ -511,9 +511,7 @@ pub mod doc {
                     known_plugs: val
                         .known_plugs
                         .into_iter()
-                        .map(|(key, track)| {
-                            Ok((key, root_doc::KnownPlug::try_from(track)?))
-                        })
+                        .map(|(key, track)| Ok((key, root_doc::KnownPlug::try_from(track)?)))
                         .collect::<Result<_, eyre::Report>>()?,
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 }),

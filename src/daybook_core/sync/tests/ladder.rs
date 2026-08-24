@@ -42,9 +42,7 @@ async fn wait_for_facet_manifest(node: &SyncTestNode, tag: WellKnownFacetTag) ->
     tokio::time::timeout(utils_rs::scale_timeout(Duration::from_secs(30)), async {
         loop {
             if matches!(
-                node.plugs_repo
-                    .get_facet_manifest_by_tag(&tag_str)
-                    .await,
+                node.plugs_repo.get_facet_manifest_by_tag(&tag_str).await,
                 crate::plugs::FacetManifestLookup::Found(_)
             ) {
                 break;

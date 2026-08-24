@@ -448,7 +448,8 @@ async fn pull_required_partitions_via_big_sync_worker(
 
         for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id]
             .into_iter()
-            .chain(bootstrap.config_doc_id) {
+            .chain(bootstrap.config_doc_id)
+        {
             big_repo.sync_doc_with_peer(doc_id, peer_id).await?;
         }
         Ok(())

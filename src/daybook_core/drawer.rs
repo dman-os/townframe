@@ -517,7 +517,9 @@ impl DrawerRepo {
     ) -> Res<Option<daybook_types::manifest::FacetManifest>> {
         if let Some(plugs_repo) = &self.plugs_repo {
             return match plugs_repo.get_facet_manifest_by_tag(facet_tag).await {
-                crate::plugs::FacetManifestLookup::Found(facet_manifest) => Ok(Some(facet_manifest)),
+                crate::plugs::FacetManifestLookup::Found(facet_manifest) => {
+                    Ok(Some(facet_manifest))
+                }
                 crate::plugs::FacetManifestLookup::PlugDisabled { plug_id } => {
                     eyre::bail!(
                         "facet tag '{}' is owned by disabled plug '{}'",

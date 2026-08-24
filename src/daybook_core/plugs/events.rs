@@ -6,7 +6,6 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(crate) enum PlugsNotif {
     ConfigDocChanged {
-        doc_id: daybook_types::doc::DocId,
         prev_heads: Option<ChangeHashSet>,
         new_heads: ChangeHashSet,
         origin: crate::event_origin::SwitchEventOrigin,
@@ -86,14 +85,20 @@ impl PlugsRepo {
             });
             if changed {
                 if let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await? {
-                    self.cache.lock().await.upsert_known(id, &manifest);
+                    surelock::key::lock_scope(|key| {
+                        let (mut cache, _key) = key.lock(&self.cache);
+                        cache.upsert_known(id, &manifest);
+                    });
                 }
             }
         }
         if let Some(prev) = prev {
             for id in prev.known_plugs.keys() {
                 if !cur.known_plugs.contains_key(id) {
-                    self.cache.lock().await.drop_known(id);
+                    surelock::key::lock_scope(|key| {
+                        let (mut cache, _key) = key.lock(&self.cache);
+                        cache.drop_known(id);
+                    });
                 }
             }
         }
@@ -106,9 +111,9 @@ impl PlugsRepo {
             if prev_ref == Some(ref_url) {
                 continue; // unchanged — no event, no read
             }
-            if let Some(event) =
-                self.activate_from_ref(id, ref_url, prev_ref.is_none(), origin)
-                    .await?
+            if let Some(event) = self
+                .activate_from_ref(id, ref_url, prev_ref.is_none(), origin)
+                .await?
             {
                 out.push(event);
             }
@@ -116,7 +121,10 @@ impl PlugsRepo {
         if let Some(prev) = prev {
             for id in prev.enabled.keys() {
                 if !cur.enabled.contains_key(id) {
-                    self.cache.lock().await.clear_active(id);
+                    surelock::key::lock_scope(|key| {
+                        let (mut cache, _key) = key.lock(&self.cache);
+                        cache.clear_active(id);
+                    });
                     out.push(PlugsEvent::PlugDisabled {
                         id: id.clone(),
                         origin: origin.clone(),
@@ -147,9 +155,9 @@ impl PlugsRepo {
                     .await;
                 if let Some(ref_url) = enabled_ref {
                     // Pending -> active: the pinned heads became readable.
-                    if let Some(event) =
-                        self.activate_from_ref(&plug_id, &ref_url, true, origin)
-                            .await?
+                    if let Some(event) = self
+                        .activate_from_ref(&plug_id, &ref_url, true, origin)
+                        .await?
                     {
                         self.registry.notify([event]);
                     }
@@ -198,7 +206,6 @@ impl PlugsRepo {
             };
             match notif {
                 PlugsNotif::ConfigDocChanged {
-                    doc_id,
                     prev_heads,
                     new_heads,
                     origin,
@@ -272,7 +279,6 @@ impl PlugsSwitchSink {
 #[async_trait]
 impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
     fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        use daybook_types::doc::FacetTag;
         use daybook_types::manifest::DocPredicateClause;
         crate::rt::switch::SwtchSinkInterest {
             consume_doc: true,
@@ -282,12 +288,12 @@ impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
             consume_config: false,
             // Only docs whose diff touches the plug facets reach on_event.
             drawer_predicate: Some(DocPredicateClause::Or(vec![
-                DocPredicateClause::HasTag(FacetTag::WellKnown(
-                    daybook_types::doc::WellKnownFacetTag::PlugsConfig,
-                )),
-                DocPredicateClause::HasTag(FacetTag::WellKnown(
-                    daybook_types::doc::WellKnownFacetTag::PlugManifest,
-                )),
+                DocPredicateClause::HasTag(
+                    daybook_types::doc::WellKnownFacetTag::PlugsConfig.into(),
+                ),
+                DocPredicateClause::HasTag(
+                    daybook_types::doc::WellKnownFacetTag::PlugManifest.into(),
+                ),
             ])),
         }
     }
@@ -322,7 +328,6 @@ impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
             self.repo
                 .notif_tx
                 .send(PlugsNotif::ConfigDocChanged {
-                    doc_id: evt.doc_id.clone(),
                     prev_heads: evt.prev_heads.clone(),
                     new_heads: evt.new_heads.clone(),
                     origin: evt.origin.clone(),

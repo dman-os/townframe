@@ -121,9 +121,7 @@ impl DrawerRepoFfi {
         let this = Arc::clone(&self);
         Ok(self
             .fcx
-            .do_on_rt(async move {
-                this._plugs_repo.repo.get_plug_config_doc_id(&plug_id).await
-            })
+            .do_on_rt(async move { this._plugs_repo.repo.get_plug_config_doc_id(&plug_id).await })
             .await?)
     }
 

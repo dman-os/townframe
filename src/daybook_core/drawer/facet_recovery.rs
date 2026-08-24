@@ -141,27 +141,6 @@ pub fn facet_write_points(
     Ok(points)
 }
 
-    let mut recovered = Vec::new();
-    let length = match read_heads {
-        Some(read_heads) => doc.length_at(&updated_at_list, read_heads),
-        None => doc.length(&updated_at_list),
-    };
-    for ii in 0..length {
-        if let Some((_, exid)) = get(doc, &updated_at_list, ii, read_heads)? {
-            let Some(hash) = doc.hash_for_opid(&exid) else {
-                eyre::bail!(
-                    "failed recovering facet heads: missing hash for updatedAt entry index={} opid={}",
-                    ii,
-                    exid
-                );
-            };
-            recovered.push(hash);
-        }
-    }
-
-    Ok(recovered)
-}
-
 fn get<'a, P: Into<automerge::Prop>>(
     doc: &'a Automerge,
     obj: impl AsRef<automerge::ObjId>,

@@ -112,17 +112,21 @@ impl PlugsRepo {
     /// disabled plugs return None; commands and inits resolve through active
     /// plugs only (ADR 007 §6).
     pub async fn get(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
-        let cache = self.cache.lock().await;
-        cache
-            .active_manifests
-            .get(id)
-            .map(|(_, manifest)| Arc::clone(manifest))
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache
+                .active_manifests
+                .get(id)
+                .map(|(_, manifest)| Arc::clone(manifest))
+        })
     }
 
     /// Known plug manifest (from the facet-set index), regardless of enablement.
     pub async fn get_known(&self, id: &str) -> Option<Arc<manifest::PlugManifest>> {
-        let cache = self.cache.lock().await;
-        cache.manifests.get(id).cloned()
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache.manifests.get(id).cloned()
+        })
     }
 
     pub async fn get_plug_config_doc_id(&self, plug_id: &str) -> Option<String> {
@@ -133,25 +137,30 @@ impl PlugsRepo {
     }
 
     pub async fn get_display_hint(&self, prop_tag: &str) -> Option<manifest::FacetDisplayHint> {
-        let cache = self.cache.lock().await;
-        cache
-            .facet_manifests
-            .get(prop_tag)
-            .map(|facet_manifest| facet_manifest.display_config.clone())
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache
+                .facet_manifests
+                .get(prop_tag)
+                .map(|facet_manifest| facet_manifest.display_config.clone())
+        })
     }
 
     /// ADR 007 §6: drawer facet validation consults active plugs only, with a
     /// distinct "plug disabled" vs "unknown tag" error.
     pub async fn get_facet_manifest_by_tag(&self, facet_tag: &str) -> FacetManifestLookup {
-        let (plug_id, facet_manifest) = {
-            let cache = self.cache.lock().await;
+        let (plug_id, facet_manifest) = surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
             let Some(plug_id) = cache.tag_to_plug.get(facet_tag) else {
-                return FacetManifestLookup::UnknownTag;
+                return (None, None);
             };
             (
-                plug_id.clone(),
+                Some(plug_id.clone()),
                 cache.facet_manifests.get(facet_tag).cloned(),
             )
+        });
+        let Some(plug_id) = plug_id else {
+            return FacetManifestLookup::UnknownTag;
         };
         let enabled = match self.config_store.get() {
             Some(store) => {
@@ -171,10 +180,10 @@ impl PlugsRepo {
     }
 
     pub async fn get_owner_plug_id_by_facet_tag(&self, facet_tag: &str) -> Option<String> {
-        let plug_id = {
-            let cache = self.cache.lock().await;
-            cache.tag_to_plug.get(facet_tag)?.clone()
-        };
+        let plug_id = surelock::key::lock_scope(|key| -> Option<String> {
+            let (cache, _key) = key.lock(&self.cache);
+            Some(cache.tag_to_plug.get(facet_tag)?.clone())
+        })?;
         let enabled = match self.config_store.get() {
             Some(store) => {
                 store
@@ -190,27 +199,33 @@ impl PlugsRepo {
     }
 
     pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetDisplayHint)> {
-        let cache = self.cache.lock().await;
-        cache
-            .facet_manifests
-            .iter()
-            .map(|(tag, facet_manifest)| (tag.clone(), facet_manifest.display_config.clone()))
-            .collect()
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache
+                .facet_manifests
+                .iter()
+                .map(|(tag, facet_manifest)| (tag.clone(), facet_manifest.display_config.clone()))
+                .collect()
+        })
     }
 
     /// Known plugs (all manifest docs catalogued by the facet-set index).
     pub async fn list_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
-        let cache = self.cache.lock().await;
-        cache.manifests.values().cloned().collect()
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache.manifests.values().cloned().collect()
+        })
     }
 
     /// Active plugs only (enabled + readable at pinned heads).
     pub async fn list_active_plugs(&self) -> Vec<Arc<manifest::PlugManifest>> {
-        let cache = self.cache.lock().await;
-        cache
-            .active_manifests
-            .values()
-            .map(|(_, manifest)| Arc::clone(manifest))
-            .collect()
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache
+                .active_manifests
+                .values()
+                .map(|(_, manifest)| Arc::clone(manifest))
+                .collect()
+        })
     }
 }

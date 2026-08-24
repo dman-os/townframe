@@ -376,7 +376,8 @@ impl RepoCtx {
 
         let (doc_app, doc_drawer, doc_config, core_inventory_doc_id, docs_inventory_doc_id) =
             if initialize_repo {
-                let (doc_app, doc_drawer, doc_config) = init_core_docs(&big_repo, &authority).await?;
+                let (doc_app, doc_drawer, doc_config) =
+                    init_core_docs(&big_repo, &authority).await?;
                 info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
                 let (core_id, docs_id) = Self::run_repo_init_dance(
                     &big_repo,
@@ -843,8 +844,8 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             eyre::bail!("clone init: InitState not set");
         }
     };
-    let doc_id_config = doc_id_config
-        .ok_or_else(|| eyre::eyre!("clone init: InitState missing doc_id_config"))?;
+    let doc_id_config =
+        doc_id_config.ok_or_else(|| eyre::eyre!("clone init: InitState missing doc_id_config"))?;
     let doc_app = parts
         .big_repo
         .get_doc(&doc_id_app)
@@ -1021,7 +1022,13 @@ async fn get_ready_doc(
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
-) -> Res<(BigDocHandle, BigDocHandle, BigDocHandle, DocumentId, DocumentId)> {
+) -> Res<(
+    BigDocHandle,
+    BigDocHandle,
+    BigDocHandle,
+    DocumentId,
+    DocumentId,
+)> {
     let init_state = globals::get_init_state(repo_sql).await?;
     let globals::InitState::Created {
         doc_id_app,

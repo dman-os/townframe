@@ -1,5 +1,5 @@
 use super::*;
-use crate::repos::{Repo, SubscribeOpts, TryRecvError};
+use crate::repos::{Repo, SubscribeOpts};
 #[tokio::test(flavor = "multi_thread")]
 async fn inspect_test_plug_oci_layout() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_inspect_test_plug_oci_layout").await?;
@@ -89,7 +89,7 @@ async fn test_plug_add_emits_no_event() -> Res<()> {
     let mut saw_enablement = false;
     while let Ok(event) = listener.try_recv() {
         if matches!(
-            event,
+            event.as_ref(),
             PlugsEvent::PlugEnabled { .. }
                 | PlugsEvent::PlugDisabled { .. }
                 | PlugsEvent::EnabledPlugUpdated { .. }

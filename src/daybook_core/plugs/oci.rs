@@ -1,6 +1,5 @@
 use super::*;
 
-pub const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
 pub const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str =
     "application/vnd.daybook.plug.manifest.v1+json";
 

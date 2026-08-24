@@ -1745,7 +1745,10 @@ mod tests {
         let json = serde_json::to_value(&root).expect("schema serializes");
         assert!(json.is_object());
         assert!(
-            serde_json::to_string(&root).expect("schema to string").len() > 100,
+            serde_json::to_string(&root)
+                .expect("schema to string")
+                .len()
+                > 100,
             "generated schema should be non-trivial"
         );
     }

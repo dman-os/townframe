@@ -999,10 +999,9 @@ mod tests {
 
         // 2. Enable at the manifest doc (ADR §3 full ref, pinned at current
         // heads). Enablement is what drives the pin worker's reindex.
-        let ref_url: url::Url = format!(
-            "db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main"
-        )
-        .parse()?;
+        let ref_url: url::Url =
+            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+                .parse()?;
         plugs.enable_plug(&ref_url).await?;
         wait_for_pin_presence(&worker, true, &hash_plug, true).await?;
 
@@ -1015,10 +1014,9 @@ mod tests {
 
         // 4. Re-pin to the new doc (same plug id, ref differs → EnabledPlugUpdated)
         //    → the pin worker reindexes with the new manifest and unpins.
-        let ref_url_v2: url::Url = format!(
-            "db+facet:///{doc_id_v2}/org.example.daybook.plugManifest/main?branch=main"
-        )
-        .parse()?;
+        let ref_url_v2: url::Url =
+            format!("db+facet:///{doc_id_v2}/org.example.daybook.plugManifest/main?branch=main")
+                .parse()?;
         plugs.enable_plug(&ref_url_v2).await?;
         wait_for_pin_presence(&worker, true, &hash_plug, false).await?;
 

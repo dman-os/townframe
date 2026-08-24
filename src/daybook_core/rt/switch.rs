@@ -279,14 +279,10 @@ pub async fn spawn_switch_worker(
 
     let store = SwitchStore::load(repo_sql).await?;
 
-    let drawer_listener = drawer
-        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let plug_listener = plugs_repo
-        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let config_listener = config_repo
-        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
-    let dispatch_listener = dispatch_repo
-        .subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let drawer_listener = drawer.subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let plug_listener = plugs_repo.subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let config_listener = config_repo.subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
+    let dispatch_listener = dispatch_repo.subscribe(SubscribeOpts::new(SUBSCRIPTION_CAPACITY));
 
     let mut worker = SwitchWorker {
         store,
@@ -1180,12 +1176,7 @@ mod tests {
             }
             let outcome = listener
                 .listener
-                .on_event(
-                    event,
-                    &SwitchSinkCtx {
-                        store: None,
-                    },
-                )
+                .on_event(event, &SwitchSinkCtx { store: None })
                 .await?;
             if let Some(next_predicate) = outcome.drawer_predicate_update {
                 listener.drawer_predicate = Some(next_predicate);
@@ -1368,7 +1359,10 @@ mod tests {
             let all = ctx.dispatch_repo.list().await;
             eprintln!("PROBE no test-label; dispatch count={}", all.len());
             for (id, d) in all.iter().take(6) {
-                eprintln!("  PROBE id={} deets={:?} status={:?}", id, d.deets, d.status);
+                eprintln!(
+                    "  PROBE id={} deets={:?} status={:?}",
+                    id, d.deets, d.status
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

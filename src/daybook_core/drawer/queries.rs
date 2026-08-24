@@ -595,7 +595,6 @@ impl DrawerRepo {
         Ok(out)
     }
 
-
     /// ADR 007 §7: the write points (heads + author) of a facet between two
     /// head sets, oldest first. Each write's facet content and dmeta marker
     /// live in the same change, so hydrating at a write point's heads yields
@@ -619,12 +618,7 @@ impl DrawerRepo {
         };
         handle
             .with_document_read(|am_doc| {
-                crate::drawer::facet_recovery::facet_write_points(
-                    am_doc,
-                    facet_key,
-                    from,
-                    to,
-                )
+                crate::drawer::facet_recovery::facet_write_points(am_doc, facet_key, from, to)
             })
             .await
     }
