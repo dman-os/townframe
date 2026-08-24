@@ -52,27 +52,32 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 ));
             }
         }
-        let receipt = match repo
-            .runtime
-            .sync_doc_with_peer_receipt(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
-            .await
+        let timeout = repo.sync_policy().doc_sync_timeout;
+        let receipt = match tokio::time::timeout(
+            timeout,
+            repo.runtime.sync_doc_with_peer_receipt(doc_id, peer_id),
+        )
+        .await
         {
-            Ok(receipt) => receipt,
-            Err(crate::SyncDocError::Other(inner)) => return Err(inner),
-            Err(crate::SyncDocError::IoError(inner)) => {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(crate::SyncDocError::Other(inner))) => return Err(inner),
+            Ok(Err(crate::SyncDocError::IoError(inner))) => {
                 return Err(inner).wrap_err("i/o error syncing doc");
             }
-            Err(crate::SyncDocError::TransportError) => {
+            Ok(Err(crate::SyncDocError::TransportError)) => {
                 eyre::bail!("transport error syncing doc");
             }
-            Err(crate::SyncDocError::NotFound) => {
+            Ok(Err(crate::SyncDocError::NotFound)) => {
                 eyre::bail!("remote doc was not found");
             }
-            Err(crate::SyncDocError::Unauthorized) => {
+            Ok(Err(crate::SyncDocError::Unauthorized)) => {
                 eyre::bail!("remote doc sync was unauthorized");
             }
-            Err(crate::SyncDocError::Policy(error)) => {
+            Ok(Err(crate::SyncDocError::Policy(error))) => {
                 eyre::bail!("remote doc sync was rejected by policy: {error}");
+            }
+            Err(_) => {
+                eyre::bail!("timed out syncing doc");
             }
         };
         debug!(peer_id = %peer_id, obj_id = %obj_id, ?receipt.outcome, "big sync document receipt");

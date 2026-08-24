@@ -16,11 +16,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
 import org.example.daybook.LocalBigDialogController
@@ -50,6 +52,8 @@ import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
@@ -61,6 +65,7 @@ class CaptureScreenViewModel(
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel,
     val initialDocId: String? = null,
+    val rt: RtFfi? = null,
 ) : ViewModel() {
     private val _captureMode = MutableStateFlow(CaptureMode.TEXT)
     val captureMode = _captureMode.asStateFlow()
@@ -197,20 +202,16 @@ class CaptureScreenViewModel(
     }
 
     // Registration handle to auto-unregister
-    private var listenerRegistration: ListenerRegistration? = null
+    private var registerJob: Job? = null
+    private var drawerRegistration: ListenerRegistration? = null
+    private var rtRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
-    private val listener =
+    private val drawerListener =
         object : DrawerEventListener {
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
-                        is DrawerEvent.DocUpdated -> {
-                            if (event.id == _currentDocId.value) {
-                                loadDoc(event.id)
-                            }
-                        }
-
                         is DrawerEvent.DocDeleted -> {
                             if (event.id == _currentDocId.value) {
                                 _currentDocId.value = null
@@ -225,15 +226,35 @@ class CaptureScreenViewModel(
             }
         }
 
+    private val switchDocListener =
+        object : SwitchDocEventListener {
+            override fun onSwitchDocEvent(event: SwitchDocEvent) {
+                viewModelScope.launch {
+                    if (event.docId == _currentDocId.value) {
+                        loadDoc(event.docId)
+                    }
+                }
+            }
+        }
+
     init {
         if (initialDocId != null) {
             loadDoc(initialDocId)
         } else {
             editorController.bindDoc(null)
         }
-        viewModelScope.launch {
-            listenerRegistration = drawerRepo.ffiRegisterListener(listener)
-        }
+        registerJob =
+            viewModelScope.launch {
+                val dReg = drawerRepo.ffiRegisterListener(drawerListener)
+                val rReg = rt?.ffiRegisterListener(switchDocListener)
+                if (!isActive) {
+                    dReg.unregister()
+                    rReg?.unregister()
+                    return@launch
+                }
+                drawerRegistration = dReg
+                rtRegistration = rReg
+            }
 
         // Initialize mode from current window
         viewModelScope.launch {
@@ -258,7 +279,9 @@ class CaptureScreenViewModel(
     }
 
     override fun onCleared() {
-        listenerRegistration?.unregister()
+        registerJob?.cancel()
+        drawerRegistration?.unregister()
+        rtRegistration?.unregister()
         super.onCleared()
     }
 }
@@ -275,6 +298,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 blobsRepo = container.blobsRepo,
                 tablesVm = tablesVm,
                 initialDocId = initialDocId,
+                rt = container.rtFfi,
             )
         }
 

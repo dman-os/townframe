@@ -16,7 +16,7 @@ async fn long_af_test_learned_image_label_proposals_receipt_twice_prints_labels(
     .await?;
     super::common::import_plabels_oci(&test_cx).await?;
 
-    let image_bytes = include_bytes!("../../daybook_core/e2e/sample-receipt.jpg");
+    let image_bytes = include_bytes!("../../plug_test/e2e/sample-receipt.jpg");
 
     let _doc_a = add_blob_image_doc(&test_cx, image_bytes).await?;
     let proposal_set_after_first = wait_for_proposal_set(&test_cx, 300).await?;

@@ -65,13 +65,6 @@ package townframe:btress-api;"#
     // Generate different feature modules with specific attribute sets
     let mapping = vec![
         (
-            "../daybook_wflows/gen/mod.rs",
-            RustAttrs {
-                wit: true,
-                ..default()
-            },
-        ),
-        (
             "../daybook_api/gen/mod.rs",
             RustAttrs {
                 garde: true,

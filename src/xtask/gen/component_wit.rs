@@ -261,7 +261,9 @@ pub(crate) fn schema_type(reg: &TypeReg, buf: &mut impl Write, id: TypeId) -> Re
             alias = AsKebabCase(&name[..]),
             other = reg.wit_name(*ty).expect("unregistered inner type")
         )?,
-        ty => eyre::bail!("found unsupported schema type: {ty:?}"),
+        ty => {
+            eyre::bail!("found unsupported schema type: {ty:?}");
+        }
     };
     Ok(())
 }

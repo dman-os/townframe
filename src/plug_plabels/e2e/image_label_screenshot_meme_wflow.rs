@@ -13,7 +13,7 @@ async fn long_af_test_image_label_fallback_multi_label_screenshot_meme() -> Res<
     .await?;
     super::common::import_plabels_oci(&test_cx).await?;
 
-    let image_bytes = include_bytes!("../../daybook_core/e2e/sample-screenshot-meme.jpg");
+    let image_bytes = include_bytes!("../../plug_test/e2e/sample-screenshot-meme.jpg");
     let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {

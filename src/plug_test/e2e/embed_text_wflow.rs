@@ -4,13 +4,14 @@ use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_embed_text_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx_with_options(
+    let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
-        crate::e2e::DaybookTestCxOptions {
+        daybook_core::test_support::DaybookTestCxOptions {
             provision_mltools_models: true,
         },
     )
     .await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
 
     let new_doc = AddDocArgs {
         branch_path: daybook_types::doc::BranchPathBuf::from("main"),
@@ -44,13 +45,13 @@ async fn test_embed_text_workflow() -> Res<()> {
     let dispatch_id = test_cx
         .rt
         .dispatch(
-            "@daybook/wip",
+            "@daybook/test",
             "embed-text",
-            crate::rt::DispatchArgs::DocRoutine {
+            daybook_core::rt::DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 heads,
-                invocation: crate::rt::dispatch::RoutineInvocation::Command,
+                invocation: daybook_core::rt::dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: None,
             },

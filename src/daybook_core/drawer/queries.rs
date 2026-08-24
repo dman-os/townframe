@@ -188,7 +188,9 @@ impl DrawerRepo {
                         _ if facet_keys.is_none() => {
                             return eyre::Ok((facets, facet_heads_by_key, to_probe));
                         }
-                        _ => eyre::bail!("facets object not found in content doc"),
+                        _ => {
+                            eyre::bail!("facets object not found in content doc");
+                        }
                     };
 
                 let selected_keys: Vec<FacetKey> = match &facet_keys {
@@ -219,10 +221,13 @@ impl DrawerRepo {
                     }
 
                     let key_str = key.to_string();
-                    let value: Option<ThroughJson<FacetRaw>> =
-                        autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
-                    if let Some(facet_value) = value {
-                        facets.insert(key, Arc::new(facet_value.0));
+                    if automerge::ReadDoc::get_at(am_doc, &facets_obj, &*key_str, heads)?.is_some()
+                    {
+                        let value: Option<ThroughJson<FacetRaw>> =
+                            autosurgeon::hydrate_prop_at(am_doc, &facets_obj, &*key_str, heads)?;
+                        if let Some(facet_value) = value {
+                            facets.insert(key, Arc::new(facet_value.0));
+                        }
                     }
                 }
                 eyre::Ok((facets, facet_heads_by_key, to_probe))
@@ -248,7 +253,9 @@ impl DrawerRepo {
                         match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)?
                         {
                             Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("facets object not found in content doc"),
+                            _ => {
+                                eyre::bail!("facets object not found in content doc");
+                            }
                         };
                     let mut hydrated = HashMap::new();
                     let mut hydrated_to_cache = Vec::new();

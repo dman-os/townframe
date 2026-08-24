@@ -71,6 +71,8 @@ pub struct RtConfig {
     pub startup_progress_task_id: Option<String>,
 }
 
+pub use switch::SwitchDocEvent;
+
 pub struct Rt {
     pub config: RtConfig,
     pub rcx: Arc<RepoCtx>,
@@ -96,7 +98,20 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
+    pub registry: Arc<crate::repos::ListenersRegistry>,
     local_wflow_part_id: String,
+}
+
+impl crate::repos::Repo for Rt {
+    type Event = SwitchDocEvent;
+
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.registry
+    }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancel_token
+    }
 }
 
 pub struct RtStopToken {
@@ -504,6 +519,7 @@ impl Rt {
             sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
+            registry: crate::repos::ListenersRegistry::new(),
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
@@ -971,7 +987,7 @@ impl Rt {
 
     fn ensure_rt_live(&self) -> Res<()> {
         if self.cancel_token.is_cancelled() {
-            eyre::bail!("rt is shutting down")
+            eyre::bail!("rt is shutting down");
         }
         Ok(())
     }
@@ -2706,7 +2722,8 @@ async fn ensure_bundle_workload_running(
                 }
             }
             None => {
-                wcx.metastore
+                if let Err(err) = wcx
+                    .metastore
                     .set_wflow(
                         &key[..],
                         &WflowMeta {
@@ -2716,39 +2733,57 @@ async fn ensure_bundle_workload_running(
                             }),
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    if let Some(meta) = wcx.metastore.get_wflow(key).await? {
+                        if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
+                            workload_id: meta_workload_id,
+                        }) = &meta.service
+                        {
+                            if meta_workload_id != &workload_id {
+                                return Err(err);
+                            }
+                        } else {
+                            return Err(err);
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                }
             }
         }
     }
-    let has_workload = wash_host
-        .workload_status(wash_runtime::types::WorkloadStatusRequest {
-            workload_id: workload_id.clone(),
-        })
-        .await
-        .ok()
-        .map(|status| match &status.workload_status.workload_state {
-            wash_runtime::types::WorkloadState::Starting
-            | wash_runtime::types::WorkloadState::Running => true,
-            wash_runtime::types::WorkloadState::NotFound => false,
+    loop {
+        let status = wash_host
+            .workload_status(wash_runtime::types::WorkloadStatusRequest {
+                workload_id: workload_id.clone(),
+            })
+            .await
+            .map_err(|err| eyre::eyre!("failed to query workload status: {err:#}"))?;
+        match status.workload_status.workload_state {
+            wash_runtime::types::WorkloadState::Running => break,
+            wash_runtime::types::WorkloadState::Starting => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            wash_runtime::types::WorkloadState::NotFound => {
+                start_bundle_workload(
+                    wash_host,
+                    blobs_repo,
+                    workload_id.clone(),
+                    plug_id.clone(),
+                    bundle_name.clone(),
+                    bundle_man,
+                )
+                .await
+                .wrap_err("error starting bundle wflow")?;
+            }
             wash_runtime::types::WorkloadState::Unspecified
             | wash_runtime::types::WorkloadState::Completed
             | wash_runtime::types::WorkloadState::Stopping
             | wash_runtime::types::WorkloadState::Error => {
-                panic!("unexpected workload status: {status:?}")
+                eyre::bail!("unexpected workload status for {workload_id}: {status:?}");
             }
-        })
-        .unwrap_or_default();
-    if !has_workload {
-        start_bundle_workload(
-            wash_host,
-            blobs_repo,
-            workload_id.clone(),
-            plug_id,
-            bundle_name,
-            bundle_man,
-        )
-        .await
-        .wrap_err("error starting bundle wflow")?;
+        }
     }
     Ok(workload_id)
 }

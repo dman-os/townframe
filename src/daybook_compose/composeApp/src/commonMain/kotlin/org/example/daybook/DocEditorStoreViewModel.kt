@@ -13,8 +13,11 @@ import kotlinx.coroutines.launch
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
+import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.SwitchDocEvent
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
@@ -25,7 +28,10 @@ private data class DocEditorSessionEntry(
     var lastTouchedMs: Long = Clock.System.now().toEpochMilliseconds(),
 )
 
-class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
+class DocEditorStoreViewModel(
+    private val drawerRepo: DrawerRepoFfi,
+    private val rt: RtFfi? = null,
+) : ViewModel() {
     private val sessions = ConcurrentHashMap<String, DocEditorSessionEntry>()
 
     private val _selectedDocId = MutableStateFlow<String?>(null)
@@ -34,20 +40,15 @@ class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel
     private val _selectedController = MutableStateFlow<EditorSessionController?>(null)
     val selectedController = _selectedController.asStateFlow()
 
-    private var listenerRegistration: ListenerRegistration? = null
+    private var drawerRegistration: ListenerRegistration? = null
+    private var switchDocRegistration: ListenerRegistration? = null
     private var registerJob: Job? = null
     private val evictionTtlMs = 10.minutes.inWholeMilliseconds
 
-    private val listener =
+    private val drawerListener =
         object : DrawerEventListener {
             override fun onDrawerEvent(event: DrawerEvent) {
                 when (event) {
-                    is DrawerEvent.DocUpdated -> {
-                        if (sessions.containsKey(event.id)) {
-                            viewModelScope.launch { refreshDoc(event.id) }
-                        }
-                    }
-
                     is DrawerEvent.DocDeleted -> {
                         sessions.remove(event.id)
                         if (_selectedDocId.value == event.id) {
@@ -61,15 +62,27 @@ class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel
             }
         }
 
+    private val switchDocListener =
+        object : SwitchDocEventListener {
+            override fun onSwitchDocEvent(event: SwitchDocEvent) {
+                if (sessions.containsKey(event.docId)) {
+                    viewModelScope.launch { refreshDoc(event.docId) }
+                }
+            }
+        }
+
     init {
         registerJob =
             viewModelScope.launch {
-                val registration = drawerRepo.ffiRegisterListener(listener)
+                val dReg = drawerRepo.ffiRegisterListener(drawerListener)
+                val sReg = rt?.ffiRegisterListener(switchDocListener)
                 if (!isActive) {
-                    registration.unregister()
+                    dReg.unregister()
+                    sReg?.unregister()
                     return@launch
                 }
-                listenerRegistration = registration
+                drawerRegistration = dReg
+                switchDocRegistration = sReg
             }
         viewModelScope.launch {
             while (true) {
@@ -147,7 +160,8 @@ class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel
 
     override fun onCleared() {
         registerJob?.cancel()
-        listenerRegistration?.unregister()
+        drawerRegistration?.unregister()
+        switchDocRegistration?.unregister()
         super.onCleared()
     }
 }

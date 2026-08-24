@@ -28,8 +28,8 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .repo
         .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     let revoke_frontier: BTreeSet<Vec<u8>> = pair
@@ -73,8 +73,8 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
     );
     drop(locked);
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     assert!(
         pair.right()
             .repo
@@ -100,13 +100,16 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .await??;
 
     // Sync doc between nodes.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await
-        .ok();
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    match pair.right_conn().sync_doc_with_peer(doc_id).await {
+        Ok(())
+        | Err(
+            crate::SyncDocError::Unauthorized
+            | crate::SyncDocError::NotFound
+            | crate::SyncDocError::Policy(_),
+        ) => {}
+        Err(err) => return Err(crate::ferr!("unexpected sync error after revocation: {err:?}")),
+    }
 
     // The reader may retain already-held historical plaintext ("before-revoke"),
     // but MUST NOT observe the post-revocation content ("post-revoke-secret").
@@ -151,8 +154,8 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent.clone(), Access::Edit)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
 
@@ -169,8 +172,8 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         .repo
         .revoke_doc_access(doc_id, reader_agent)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // The reader's keyhive must know it lost access.
     let revoked_access = pair

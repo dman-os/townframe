@@ -72,7 +72,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         .repo
         .grant_doc_access(doc_id, admin_agent, Access::Admin)
         .await?;
-    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
     let (_writer_doc, admin_doc) = fixtures::sync_doc_bidirectional(
         topo.topo_conn(0, 1),
         topo.topo_conn(1, 0),
@@ -93,7 +93,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    topo.topo_conn(2, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
     let (_admin_doc, reader_doc_before_offline_write) = fixtures::sync_doc_bidirectional(
         topo.topo_conn(1, 2),
         topo.topo_conn(2, 1),
@@ -116,8 +116,8 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     // offline payload through Admin to Reader.
     let writer_to_admin = writer.connect(admin).await?;
     let admin_to_writer = admin.accepted_connection().await;
-    writer_to_admin.sync_keyhive_with_peer(None).await?;
-    admin_to_writer.sync_keyhive_with_peer(None).await?;
+    writer_to_admin.sync_keyhive_with_peer().await?;
+    admin_to_writer.sync_keyhive_with_peer().await?;
     let (_writer_doc, _admin_doc_after_reconnect) = fixtures::sync_doc_bidirectional(
         &writer_to_admin,
         &admin_to_writer,
@@ -285,8 +285,8 @@ async fn tier6_reopen_after_authority_grant_keeps_new_documents_writable() -> cr
         .repo
         .add_admin_member_to_group(cloned_agent, &repo_agents)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     pair.restart_left(left_storage).await?;
     let content = pair
@@ -385,8 +385,8 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         .repo
         .add_admin_member_to_group(cloned_agent, &repo_agents)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let clone_handle =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id).await?;
     clone_handle
@@ -395,8 +395,8 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
                 .map_err(|err| crate::ferr!("failed clone write: {err:?}"))
         })
         .await??;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     drop(clone_handle);
     drop(core_handle);
 
@@ -422,12 +422,9 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         .await
         .ok_or_else(|| crate::ferr!("clone is missing core Keyhive document"))?;
     remote_keyhive.force_pcs_update(remote_doc).await?;
-    pair.right()
-        .repo
-        .wait_for_keyhive_reconciliation(None)
-        .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right().repo.wait_for_keyhive_reconciliation().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     core_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "after-restart"))
@@ -458,8 +455,8 @@ async fn tier6_group_doc_grant_then_add_user() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let before = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
 
@@ -475,8 +472,8 @@ async fn tier6_group_doc_grant_then_add_user() -> crate::Res<()> {
         "group member add must update the containing document's CGKA"
     );
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // History-inclusive: user reads content written before membership.
     let new_member_doc =
@@ -537,8 +534,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
         .grant_doc_access(doc_b_id, group.clone(), Access::Read)
         .await?;
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let before_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id).await?;
     let before_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id).await?;
@@ -591,8 +588,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
         "doc B's CGKA must change when a member is added to the same governing group"
     );
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Both documents must be readable by the new member.
     let reader_a =
@@ -667,8 +664,8 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
         .grant_doc_access(doc_id, outer.clone(), Access::Read)
         .await?;
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let before = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
 
@@ -687,8 +684,8 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
          document through the nested group chain"
     );
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -740,8 +737,8 @@ async fn tier6_multipath_dedup() -> crate::Res<()> {
         .grant_doc_access(doc_id, beta.clone(), Access::Read)
         .await?;
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Add user to alpha.
     pair.left()
@@ -766,8 +763,8 @@ async fn tier6_multipath_dedup() -> crate::Res<()> {
          CGKA operations (was {count_after_alpha}, now {count_after_beta})"
     );
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // The user must be able to read through either path.
     let user_doc =
@@ -820,16 +817,16 @@ async fn tier6_history_inclusive_access() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Add the new member.
     pair.left()
         .repo
         .add_member_to_group(member_agent, &group, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // The user must be able to read the full history including content
     // written before they were added.
@@ -883,8 +880,8 @@ async fn tier6_group_add_checkpoint() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     pair.left()
         .repo
@@ -912,8 +909,8 @@ async fn tier6_group_add_checkpoint() -> crate::Res<()> {
         ops_after_write >= ops_after_add,
         "content write must not discard the group add/checkpoint CGKA state"
     );
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -959,8 +956,8 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Baseline: CGKA ops after initial create + grant.
     let baseline = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
@@ -1014,8 +1011,8 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
         "second content write must not reduce CGKA operation count"
     );
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -1071,7 +1068,7 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
         .grant_doc_access(doc_id, group_read.clone(), Access::Read)
         .await?;
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
 
     // Add the same user to BOTH groups. The effective access through the Edit
     // path is the strongest, so the user must be able to write.
@@ -1084,7 +1081,7 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
         .add_member_to_group(member_agent, &group_edit, Access::Edit)
         .await?;
 
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
 
     // Materialise: read the pre-grant content.
     let member_doc =
@@ -1118,7 +1115,7 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
         .await??;
 
     // Sync the edit back to the owner and verify convergence.
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
     let note = owner_doc2
@@ -1196,8 +1193,8 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, group.clone(), Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Add the user to the group — this also triggers a checkpoint and writes
     // a delegation with the sedimentree frontier as `after_content`.
@@ -1249,8 +1246,8 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     // after_content.
 
     // ── Verify history-inclusive access ──────────────────────────────────
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;

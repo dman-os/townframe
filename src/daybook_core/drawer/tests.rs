@@ -30,7 +30,9 @@ async fn get_dmeta_on_main(repo: &DrawerRepo, doc_id: &DocId) -> Res<daybook_typ
         .ok_or_eyre("dmeta facet missing")?;
     let dmeta = match serde_json::from_value::<WellKnownFacet>(dmeta.clone())? {
         WellKnownFacet::Dmeta(dmeta) => dmeta,
-        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+        other => {
+            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+        }
     };
     Ok(dmeta)
 }
@@ -409,7 +411,9 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 added_ids.insert(id.clone());
                 doc_added_heads.push(drawer_heads.clone());
             }
-            other => eyre::bail!("unexpected event: {other:?}"),
+            other => {
+                eyre::bail!("unexpected event: {other:?}");
+            }
         }
     }
 
@@ -645,7 +649,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
+async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
 
@@ -2240,6 +2244,8 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
 
     let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let facet_note = FacetKey::from(WellKnownFacetTag::Note);
+    let listener = repo.subscribe(crate::repos::SubscribeOpts::new(256));
+
     let doc_id = repo
         .add(AddDocArgs {
             branch_path: BranchPathBuf::from("main"),
@@ -2258,7 +2264,14 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
         })
         .await?;
 
-    let listener = repo.subscribe(crate::repos::SubscribeOpts::new(256));
+    let added_event = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        listener.recv_lossy_async(),
+    )
+    .await
+    .wrap_err("timeout waiting for doc added event")?
+    .map_err(|_| eyre::eyre!("listener closed"))?;
+    assert!(matches!(&*added_event, DrawerEvent::DocAdded { id, .. } if id == &doc_id));
 
     repo.update_at_heads(
         DocPatch {
@@ -2606,11 +2619,15 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
                 let mut tx = doc.transaction();
                 let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("aggregate docs map missing"),
+                    _ => {
+                        eyre::bail!("aggregate docs map missing");
+                    }
                 };
                 let map_obj = match tx.get(&docs_obj, "map")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => eyre::bail!("aggregate docs.map missing"),
+                    _ => {
+                        eyre::bail!("aggregate docs.map missing");
+                    }
                 };
                 let entry = DocEntry {
                     branches: [(

@@ -23,28 +23,45 @@ fn recover_facet_heads_inner(
     // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
     let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("facets object not found"),
+        None => return Ok(Vec::new()),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for 'facets' property: expected Map, got {other:?}");
+        }
     };
 
     let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
     let dmeta_obj = match get(doc, &facets_obj, &dmeta_key, read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta facet not found"),
+        None => return Ok(Vec::new()),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for dmeta facet property: expected Map, got {other:?}");
+        }
     };
 
     let dmeta_facets_obj = match get(doc, &dmeta_obj, "facets", read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta.facets map not found"),
+        None => return Ok(Vec::new()),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for dmeta.facets property: expected Map, got {other:?}");
+        }
     };
 
     let facet_meta_obj = match get(doc, &dmeta_facets_obj, facet_key.to_string(), read_heads)? {
         Some((Value::Object(ObjType::Map), id)) => id,
-        _ => eyre::bail!("facet meta not found for key: {}", facet_key),
+        None => return Ok(Vec::new()),
+        Some((other, _)) => {
+            eyre::bail!(
+                "unexpected value for facet metadata property: expected Map, got {other:?}"
+            );
+        }
     };
 
     let updated_at_list = match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
         Some((Value::Object(ObjType::List), id)) => id,
-        _ => eyre::bail!("updatedAt list not found for facet: {}", facet_key),
+        None => return Ok(Vec::new()),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for updatedAt property: expected List, got {other:?}");
+        }
     };
 
     let mut recovered = Vec::new();
@@ -164,6 +181,51 @@ mod tests {
         assert!(heads.contains(&hash1_new));
         assert!(heads.contains(&hash2_new));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_recover_facet_heads_missing_returns_empty() -> Res<()> {
+        let doc = Automerge::new();
+        let facet_key = FacetKey::from(WellKnownFacetTag::Note);
+        let heads = recover_facet_heads(&doc, &facet_key)?;
+        assert!(heads.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_recover_facet_heads_malformed_facets_type_fails() -> Res<()> {
+        let mut doc = Automerge::new();
+        let facet_key = FacetKey::from(WellKnownFacetTag::Note);
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "facets", "not_a_map")?;
+        tx.commit().0.unwrap();
+
+        let result = recover_facet_heads(&doc, &facet_key);
+        assert!(result.is_err(), "expected error on scalar facets property");
+        Ok(())
+    }
+
+    #[test]
+    fn test_recover_facet_heads_malformed_updated_at_type_fails() -> Res<()> {
+        let mut doc = Automerge::new();
+        let facet_key = FacetKey::from(WellKnownFacetTag::Note);
+        let facet_key_str = facet_key.to_string();
+        let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
+
+        let mut tx = doc.transaction();
+        let facets_id = tx.put_object(automerge::ROOT, "facets", ObjType::Map)?;
+        let dmeta_id = tx.put_object(&facets_id, &dmeta_key, ObjType::Map)?;
+        let dmeta_facets_id = tx.put_object(&dmeta_id, "facets", ObjType::Map)?;
+        let facet_meta_id = tx.put_object(&dmeta_facets_id, &facet_key_str, ObjType::Map)?;
+        tx.put(&facet_meta_id, "updatedAt", "not_a_list")?;
+        tx.commit().0.unwrap();
+
+        let result = recover_facet_heads(&doc, &facet_key);
+        assert!(
+            result.is_err(),
+            "expected error on scalar updatedAt property"
+        );
         Ok(())
     }
 }

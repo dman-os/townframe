@@ -2121,6 +2121,26 @@ impl SqliteBigRepoStore {
                 cursor INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
             ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_sync_commits_watermark (
+                scope_id INTEGER NOT NULL,
+                doc_id BLOB NOT NULL,
+                big_sync_txid INTEGER NOT NULL,
+                latest_commit_row_id INTEGER NOT NULL,
+                PRIMARY KEY(scope_id, doc_id, big_sync_txid),
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
+            ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_automerge_part_cursor (
+                scope_id INTEGER NOT NULL,
+                source_part_id BLOB NOT NULL,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(scope_id, source_part_id),
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
+            ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_automerge_keyhive_cursor (
+                scope_id INTEGER PRIMARY KEY,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
+            ) STRICT",
             "CREATE TABLE IF NOT EXISTS big_repo_causal_ciphertext_index (
                 scope_id INTEGER NOT NULL,
                 sedimentree_id BLOB NOT NULL,
@@ -2459,6 +2479,102 @@ impl SqliteBigRepoStore {
         )
         .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .bind(self.scope_id)
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn record_sync_commit_watermark(
+        &self,
+        doc_id: crate::DocumentId,
+        big_sync_txid: u64,
+        latest_commit_row_id: i64,
+    ) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_repo_sync_commits_watermark(
+                scope_id, doc_id, big_sync_txid, latest_commit_row_id
+             )
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_id, doc_id, big_sync_txid)
+             DO UPDATE SET latest_commit_row_id = MAX(latest_commit_row_id, excluded.latest_commit_row_id)",
+        )
+        .bind(self.scope_id)
+        .bind(doc_id.as_bytes().as_slice())
+        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
+        .bind(latest_commit_row_id)
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_sync_commit_watermark(
+        &self,
+        doc_id: crate::DocumentId,
+        big_sync_txid: u64,
+    ) -> Res<Option<i64>> {
+        let row_id: Option<i64> = sqlx::query_scalar(
+            "SELECT latest_commit_row_id
+             FROM big_repo_sync_commits_watermark
+             WHERE scope_id = ?1 AND doc_id = ?2 AND big_sync_txid = ?3",
+        )
+        .bind(self.scope_id)
+        .bind(doc_id.as_bytes().as_slice())
+        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(row_id)
+    }
+
+    pub(crate) async fn automerge_part_cursor(&self, part_id: PartId) -> Res<u64> {
+        let cursor: Option<i64> = sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_automerge_part_cursor WHERE scope_id = ?1 AND source_part_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
+    }
+
+    pub(crate) async fn commit_automerge_part_cursor(
+        &self,
+        part_id: PartId,
+        cursor: u64,
+    ) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_repo_automerge_part_cursor(scope_id, source_part_id, cursor)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope_id, source_part_id)
+             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn automerge_keyhive_cursor(&self) -> Res<u64> {
+        let cursor: Option<i64> = sqlx::query_scalar(
+            "SELECT cursor FROM big_repo_automerge_keyhive_cursor WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
+    }
+
+    pub(crate) async fn commit_automerge_keyhive_cursor(&self, cursor: u64) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_repo_automerge_keyhive_cursor(scope_id, cursor)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id)
+             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+        )
+        .bind(self.scope_id)
+        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())

@@ -125,7 +125,9 @@ fn parse_uuid_scalar(scalar: &automerge::ScalarValue) -> Res<Uuid> {
     match scalar {
         automerge::ScalarValue::Str(text) => Ok(Uuid::parse_str(text)?),
         automerge::ScalarValue::Bytes(bytes) => Ok(Uuid::from_slice(bytes)?),
-        other => eyre::bail!("facet uuid has invalid scalar type: {other:?}"),
+        other => {
+            eyre::bail!("facet uuid has invalid scalar type: {other:?}");
+        }
     }
 }
 
@@ -188,15 +190,21 @@ fn load_dmeta(
     let key = dmeta_key();
     let dmeta_obj = match tx.get(facets_obj, &key)? {
         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta facet map not found"),
+        _ => {
+            eyre::bail!("dmeta facet map not found");
+        }
     };
     let dmeta_facets_obj = match tx.get(&dmeta_obj, "facets")? {
         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta.facets map not found"),
+        _ => {
+            eyre::bail!("dmeta.facets map not found");
+        }
     };
     let dmeta_facet_uuids_obj = match tx.get(&dmeta_obj, "facetUuids")? {
         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-        _ => eyre::bail!("dmeta.facetUuids map not found"),
+        _ => {
+            eyre::bail!("dmeta.facetUuids map not found");
+        }
     };
     Ok((dmeta_obj, dmeta_facets_obj, dmeta_facet_uuids_obj))
 }
@@ -209,7 +217,9 @@ fn set_updated_at_list(
 ) -> Res<()> {
     let updated_at_list = match tx.get(obj, prop)? {
         Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
-        _ => eyre::bail!("missing or invalid {prop} list"),
+        _ => {
+            eyre::bail!("missing or invalid {prop} list");
+        }
     };
 
     let len = tx.length(&updated_at_list);
@@ -264,7 +274,9 @@ pub fn ensure_for_add(
                 eyre::bail!("content doc id is not a string");
             }
         }
-        _ => eyre::bail!("content doc id not found"),
+        _ => {
+            eyre::bail!("content doc id not found");
+        }
     };
     let mut facet_uuids = HashMap::new();
     let mut facets = HashMap::new();
@@ -337,7 +349,7 @@ fn tombstone_facet_meta(
             Some((other, _)) => {
                 eyre::bail!(
                     "facet meta deletedAt has invalid shape while tombstoning key {key_str}: {other:?}"
-                )
+                );
             }
             None => tx.put_object(&facet_meta_obj, "deletedAt", automerge::ObjType::List)?,
         };
@@ -376,7 +388,9 @@ fn touch_facet_meta(
         _ if is_new_meta => {
             tx.put_object(&facet_meta_obj, "updatedAt", automerge::ObjType::List)?
         }
-        _ => eyre::bail!("facet meta missing updatedAt list for key {key_str}"),
+        _ => {
+            eyre::bail!("facet meta missing updatedAt list for key {key_str}");
+        }
     };
     let deleted_at_list = match tx.get(&facet_meta_obj, "deletedAt")? {
         Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
@@ -384,15 +398,19 @@ fn touch_facet_meta(
             tx.put_object(&facet_meta_obj, "deletedAt", automerge::ObjType::List)?
         }
         Some((other, _)) if is_new_meta => {
-            eyre::bail!("facet meta deletedAt has invalid shape for key {key_str}: {other:?}")
+            eyre::bail!("facet meta deletedAt has invalid shape for key {key_str}: {other:?}");
         }
-        _ => eyre::bail!("facet meta missing deletedAt list for key {key_str}"),
+        _ => {
+            eyre::bail!("facet meta missing deletedAt list for key {key_str}");
+        }
     };
 
     let uuid_list = match tx.get(&facet_meta_obj, "uuid")? {
         Some((automerge::Value::Object(automerge::ObjType::List), id)) => id,
         _ if is_new_meta => tx.put_object(&facet_meta_obj, "uuid", automerge::ObjType::List)?,
-        _ => eyre::bail!("facet meta missing uuid list for key {key_str}"),
+        _ => {
+            eyre::bail!("facet meta missing uuid list for key {key_str}");
+        }
     };
     let facet_uuid = if tx.length(&uuid_list) > 0 {
         match tx.get(&uuid_list, 0)? {
@@ -400,10 +418,12 @@ fn touch_facet_meta(
                 if let automerge::ScalarValue::Str(uuid_str) = uuid_scalar.as_ref() {
                     Uuid::parse_str(uuid_str)?
                 } else {
-                    eyre::bail!("facet meta uuid is not a string for key {key_str}")
+                    eyre::bail!("facet meta uuid is not a string for key {key_str}");
                 }
             }
-            _ => eyre::bail!("facet meta uuid entry missing for key {key_str}"),
+            _ => {
+                eyre::bail!("facet meta uuid entry missing for key {key_str}");
+            }
         }
     } else if is_new_meta {
         let uuid = Uuid::new_v4();

@@ -23,7 +23,7 @@ async fn tier1_document_created_before_connection_replicates() -> crate::Res<()>
     let doc_id = owner_doc.document_id();
 
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
 
@@ -186,26 +186,16 @@ async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
 
     // The editor's commit may advance CGKA state. Propagate that state before
     // asking Owner to decrypt the new document entrypoint.
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
 
     // Pull the editor branch into Owner first, then pull the converged state
     // back into Editor. Each call is a synchronization barrier; a concurrent
     // pair of calls can race before either side has the other's new branch.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
     for (label, handle) in [("Owner", &owner_doc), ("Editor", &editor_doc)] {
         assert_eq!(
             read_optional_text(handle, "owner_note").await.as_deref(),
@@ -252,13 +242,8 @@ async fn tier1_noop_sync_emits_no_change_notification() -> crate::Res<()> {
         .await?;
     let before = pair.right().repo.doc_head_state(doc_id).await?;
 
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
     let after = pair.right().repo.doc_head_state(doc_id).await?;
 
     assert_eq!(before, after);
@@ -346,7 +331,7 @@ async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate:
     pair.restart_right(StorageConfig::Disk { path: right_path })
         .await?;
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc2 =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -468,8 +453,8 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
     })
     .await?;
     pair.connect().await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -488,22 +473,12 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
         })
         .await??;
 
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
-        .await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     for (label, handle) in [("owner", &owner_doc), ("editor", &editor_doc)] {
         assert_eq!(
@@ -531,7 +506,7 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
     pair.restart_right(StorageConfig::Disk { path: right_path })
         .await?;
     pair.connect().await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let reopened =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     assert_eq!(

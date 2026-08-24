@@ -324,7 +324,7 @@ mod local {
                 model_id.clone(),
             ),
             EmbedBackendConfig::CloudOllama { .. } | EmbedBackendConfig::CloudGemini { .. } => {
-                eyre::bail!("cloud backend is not supported in local::embed_text")
+                eyre::bail!("cloud backend is not supported in local::embed_text");
             }
         };
 
@@ -678,7 +678,7 @@ mod cloud {
                 .build()
                 .map_err(Into::into),
             Some(CloudAuth::ApiKey { .. }) => {
-                eyre::bail!("api-key auth is not supported for Ollama backend")
+                eyre::bail!("api-key auth is not supported for Ollama backend");
             }
             None => reqwest::Client::builder().build().map_err(Into::into),
         }
@@ -707,7 +707,9 @@ mod cloud {
             EmbedBackendConfig::CloudGemini { model, auth } => {
                 (model, auth, genai::adapter::AdapterKind::Gemini)
             }
-            _ => eyre::bail!("unsupported cloud embed backend"),
+            _ => {
+                eyre::bail!("unsupported cloud embed backend");
+            }
         };
 
         let mut embed_options = genai::embed::EmbedOptions::default();
@@ -821,7 +823,7 @@ mod cloud {
                 if let Some(auth) = auth {
                     match auth {
                         CloudAuth::Basic { .. } => {
-                            eyre::bail!("basic auth is not supported for Gemini backend")
+                            eyre::bail!("basic auth is not supported for Gemini backend");
                         }
                         CloudAuth::ApiKey { .. } => {}
                     }
@@ -1269,7 +1271,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let image_bytes = include_bytes!("../daybook_core/e2e/sample-screenshot-meme.jpg").to_vec();
+        let image_bytes = include_bytes!("../plug_test/e2e/sample-screenshot-meme.jpg").to_vec();
 
         runtime.block_on(async {
             let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");

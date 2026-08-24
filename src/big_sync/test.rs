@@ -303,7 +303,9 @@ impl SyncBackend for MemorySyncBackend {
                     deets: big_sync_core::SyncCompletionDeets::AddedMember,
                 }))
             }
-            (Some(_), None) | (None, None) => eyre::bail!("missing on remote"),
+            (Some(_), None) | (None, None) => {
+                eyre::bail!("missing on remote");
+            }
         }
     }
 }

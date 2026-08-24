@@ -23,11 +23,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let sqlite_connection = args
         .sqlite_connections
         .iter()
-        .find(|(key, _)| key == "@daybook/wip/doc-embedding-index")
+        .find(|(key, _)| key == "@daybook/test/doc-embedding-index")
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "sqlite connection '@daybook/wip/doc-embedding-index' not found"
+                "sqlite connection '@daybook/test/doc-embedding-index' not found"
             ))
         })?;
 

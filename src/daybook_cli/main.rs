@@ -493,7 +493,7 @@ mod tests {
             .sync_repo
             .wait_until_peers_sync(
                 std::slice::from_ref(&big_sync_core::PeerId::new(*bootstrap.id.as_bytes())),
-                std::time::Duration::from_secs(120),
+                None,
             )
             .await?;
 

@@ -3104,18 +3104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daybook_wflows"
-version = "0.1.0"
-dependencies = [
- "am_utils_rs",
- "api_utils_rs",
- "color-eyre",
- "daybook_types",
- "wflow_sdk",
- "wit-bindgen 0.60.0",
-]
-
-[[package]]
 name = "deadpool"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8822,6 +8810,7 @@ dependencies = [
 name = "plug_test"
 version = "0.1.0"
 dependencies = [
+ "am_utils_rs",
  "api_utils_rs",
  "color-eyre",
  "daybook_core",

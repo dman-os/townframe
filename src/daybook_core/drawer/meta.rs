@@ -332,11 +332,15 @@ impl DrawerRepo {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
                         match doc.get(&id, "map")? {
                             Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("invalid drawer shape"),
+                            _ => {
+                                eyre::bail!("invalid drawer shape");
+                            }
                         }
                     }
                     None => return eyre::Ok((drawer_heads, Vec::new())),
-                    _ => eyre::bail!("invalid drawer shape"),
+                    _ => {
+                        eyre::bail!("invalid drawer shape");
+                    }
                 };
 
                 let mut entries = Vec::new();

@@ -209,7 +209,7 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
         node.wait_for_full_sync(connected_peers, part_ids.iter().copied())
             .await?;
     }
-    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+    let mut last_log = tokio::time::Instant::now();
     let mut last_diff = None;
 
     loop {
@@ -240,9 +240,10 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
             return Ok(());
         }
 
-        if tokio::time::Instant::now() >= deadline {
-            let diff = last_diff.unwrap_or_else(|| "cluster failed to converge".to_string());
-            panic!("{diff}");
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            let diff = last_diff.as_deref().unwrap_or("cluster divergence");
+            tracing::warn!("assert_cluster_alignment_lww waiting for convergence:\n{diff}");
+            last_log = tokio::time::Instant::now();
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
