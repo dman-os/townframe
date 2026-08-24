@@ -108,7 +108,11 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
             | crate::SyncDocError::NotFound
             | crate::SyncDocError::Policy(_),
         ) => {}
-        Err(err) => return Err(crate::ferr!("unexpected sync error after revocation: {err:?}")),
+        Err(err) => {
+            return Err(crate::ferr!(
+                "unexpected sync error after revocation: {err:?}"
+            ));
+        }
     }
 
     // The reader may retain already-held historical plaintext ("before-revoke"),

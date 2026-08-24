@@ -14,12 +14,12 @@
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
-use crate::sqlite_big_repo_store::KeyhiveIncorporationSink;
 use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::runtime2::{
     CausalDecryptResult, DocIo, KeyhiveSyncOutcome, MaterializationBlocker, RuntimeIo,
     SyncDocAttempt, TaskSet,
 };
+use crate::store::sqlite::KeyhiveIncorporationSink;
 use crate::{
     BigEphemeral, BigKeyhiveHandle, DocumentId,
     encrypted_blob::decode_encrypted_blob,
@@ -146,7 +146,7 @@ where
     storage: S,
     /// Durable metadata index used by Keyhive causal decryption to discover
     /// every ciphertext encrypted under a particular CGKA Update.
-    causal_ciphertext_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
+    causal_ciphertext_store: crate::store::sqlite::SqliteBigRepoStore,
     /// Shared sedimentree cache (minimized trees).
     sedimentrees: SubductionSedimentrees,
     /// Keyhive handle — document operations, content encryption.
@@ -185,7 +185,7 @@ where
 /// subduction storage. Used by [`NativeBigRepoIo::try_causal_decrypt`].
 struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
     storage: S,
-    causal_index: Option<crate::sqlite_big_repo_store::SqliteBigRepoStore>,
+    causal_index: Option<crate::store::sqlite::SqliteBigRepoStore>,
     sed_id: SedimentreeId,
     /// In-memory cache of (content_ref -> encrypted content).
     #[expect(clippy::type_complexity)]
@@ -197,7 +197,7 @@ struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
 impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
     fn new(
         storage: S,
-        causal_index: Option<crate::sqlite_big_repo_store::SqliteBigRepoStore>,
+        causal_index: Option<crate::store::sqlite::SqliteBigRepoStore>,
         sed_id: SedimentreeId,
     ) -> Self {
         Self {
@@ -573,10 +573,20 @@ where
                     .await?;
             }
 
-            let pcs_key_hash = keyhive
-                .try_pcs_key_hash(Arc::clone(&kh_doc))
-                .await
-                .ok_or_else(|| ferr!("causal checkpoint PCS root remained unavailable"))?;
+            let pcs_key_hash = match keyhive.try_pcs_key_hash(Arc::clone(&kh_doc)).await {
+                Some(pcs_key_hash) => pcs_key_hash,
+                None => {
+                    // A concurrent task rotated/forked the CGKA between our
+                    // preparation and this verification (remote ops ingested
+                    // via ApplySyncSession). Defer like the other concurrent-
+                    // mutation paths; the racing op re-triggers coverage.
+                    debug!(
+                        ?sed_id,
+                        "causal checkpoint deferred: PCS root unavailable after concurrent CGKA update"
+                    );
+                    return Ok(None);
+                }
+            };
             let checkpoint =
                 CausalCheckpoint::new(*pcs_key_hash.raw.as_bytes(), covered_frontier.clone());
             let head = causal_checkpoint_id(&checkpoint);
@@ -1892,7 +1902,7 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
 #[expect(clippy::too_many_arguments)]
 pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
-    group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
+    group_part_store: crate::store::sqlite::SqliteBigRepoStore,
     storage: S,
     policy: Arc<crate::runtime2::support::BigRepoPolicy>,
     sync_policy: BigRepoSyncPolicy,
@@ -1901,12 +1911,13 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    automerge_source_parts: HashSet<PartId>,
+    automerge_frontier_scope: crate::runtime2::WorkerGroupScope,
+    causal_checkpoint_scope: crate::runtime2::WorkerGroupScope,
+    group_part_scope: crate::runtime2::WorkerGroupScope,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
     crate::runtime2::KeyhiveChangeNotifier,
-    tokio::sync::mpsc::UnboundedSender<HashSet<PartId>>,
     crate::runtime2::Runtime2StopToken<Sendable, crate::runtime2::TokioTaskRuntime>,
 )>
 where
@@ -1969,12 +1980,8 @@ where
     // until the durable incorporation record commits.
     let (keyhive_events_tx, keyhive_events_rx) = tokio::sync::mpsc::channel(1024);
     let keyhive_reporter_weak = keyhive_events_tx.downgrade();
-    let keyhive_overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reporter_overflow = Arc::clone(&keyhive_overflow);
-    let incorporation_sink = KeyhiveIncorporationSink::new(
-        group_part_store.clone(),
-        evt_tx.clone(),
-    );
+    let incorporation_sink =
+        KeyhiveIncorporationSink::new(group_part_store.clone(), evt_tx.clone());
     let reporter_sink = incorporation_sink.clone();
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
@@ -1987,18 +1994,12 @@ where
         .with_durable_incorporation_hook(move |hashes, source| {
             let sink = reporter_sink.clone();
             let dispatcher_tx = keyhive_reporter_weak.clone();
-            let overflow = Arc::clone(&reporter_overflow);
             Sendable::from_future(async move {
                 sink.append(hashes.clone(), source.clone())
                     .await
                     .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
                 if let Some(tx) = dispatcher_tx.upgrade() {
-                    crate::runtime2::keyhive_dispatcher::try_send_change_event(
-                        &tx,
-                        &overflow,
-                        hashes,
-                        source,
-                    );
+                    crate::runtime2::keyhive_dispatcher::try_send_change_event(&tx, hashes, source);
                 }
                 Ok(())
             })
@@ -2013,10 +2014,10 @@ where
     let (keyhive_dispatcher, _keyhive_dispatcher_task) =
         crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
             Arc::clone(&keyhive_protocol),
+            group_part_store.clone(),
             keyhive_events_tx,
             keyhive_events_rx,
             keyhive_dispatcher_subscriptions,
-            keyhive_overflow,
             utils_rs::batching::DebouncePolicy {
                 quiet_window: std::time::Duration::from_millis(100),
                 max_latency: std::time::Duration::from_secs(1),
@@ -2153,6 +2154,7 @@ where
         PeerId::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
+        group_part_scope,
     );
     stop_token.group_part_stop = Some(spawned_group_part.stop);
     stop_token.child_tasks.spawn(spawned_group_part.run)?;
@@ -2163,6 +2165,7 @@ where
         handle.clone(),
         Arc::clone(&timer),
         evt_tx.clone(),
+        causal_checkpoint_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
     stop_token
@@ -2174,9 +2177,9 @@ where
         Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
         handle.clone(),
         evt_tx.clone(),
-        automerge_source_parts,
+        keyhive.clone(),
+        automerge_frontier_scope,
     );
-    let automerge_frontier_parts_tx = spawned_automerge_frontier.parts_tx;
     stop_token.automerge_frontier_stop = Some(spawned_automerge_frontier.stop);
     stop_token
         .child_tasks
@@ -2250,13 +2253,7 @@ where
         BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard)
     };
 
-    Ok((
-        handle,
-        ephemeral,
-        keyhive_notifier,
-        automerge_frontier_parts_tx,
-        stop_token,
-    ))
+    Ok((handle, ephemeral, keyhive_notifier, stop_token))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

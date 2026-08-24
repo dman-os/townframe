@@ -1146,10 +1146,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.retry_blocked_refs(&bundle, &origin).await?;
             }
 
-            if !has_live {
-                let origin = BigRepoChangeOrigin::Remote { peer_id };
-                self.retry_materialization(origin).await?;
-            }
+            // No eager rematerialization here: without a live handle, received
+            // content stays persisted-but-unhydrated unless this node can
+            // write, in which case causal-coverage healing below drives the
+            // materialization itself. Eagerly walking the tree for read-only
+            // or Relay-only holders only produced pending-set churn.
             self.reconcile_causal_coverage().await?;
         } else {
             debug_assert!(

@@ -36,7 +36,9 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
 
     // DAYB_STRESS_KEEP_ROOT=1 preserves the cluster temp root for post-mortem
     // inspection (keyhive sqlite stores) after the run exits.
-    let temp_dir = tempfile::Builder::new().prefix("daybook-stress").tempdir()?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("daybook-stress")
+        .tempdir()?;
     let temp_root = if std::env::var_os("DAYB_STRESS_KEEP_ROOT").is_some() {
         temp_dir.keep()
     } else {
@@ -601,16 +603,16 @@ async fn wait_for_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> 
 }
 
 async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Res<()> {
-    let left_snapshot = collect_doc_branch_heads(left)
-        .await?
-        .map_err(|reason| eyre::Report::msg(format!("left node document branches not yet materialized: {reason}")))?;
-    let right_snapshot = collect_doc_branch_heads(right)
-        .await?
-        .map_err(|reason| {
-            eyre::Report::msg(format!(
-                "right node document branches not yet materialized: {reason}"
-            ))
-        })?;
+    let left_snapshot = collect_doc_branch_heads(left).await?.map_err(|reason| {
+        eyre::Report::msg(format!(
+            "left node document branches not yet materialized: {reason}"
+        ))
+    })?;
+    let right_snapshot = collect_doc_branch_heads(right).await?.map_err(|reason| {
+        eyre::Report::msg(format!(
+            "right node document branches not yet materialized: {reason}"
+        ))
+    })?;
 
     if left_snapshot == right_snapshot {
         return Ok(());
@@ -1159,11 +1161,9 @@ async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
     ])
     .await?;
 
-    let doc_id: Option<big_repo::DocumentId> = std::env::var("DAYB_STRESS_INSPECT_DOC")
-        .ok()
-        .map(|s| {
-            const ALPH: &[u8; 58] =
-                b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let doc_id: Option<big_repo::DocumentId> =
+        std::env::var("DAYB_STRESS_INSPECT_DOC").ok().map(|s| {
+            const ALPH: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
             // 34-byte little-endian bignum; doc ids are 32 bytes so this
             // cannot overflow.
             let mut num = vec![0_u8; 34];
@@ -1220,7 +1220,10 @@ async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
             println!("   big_repo.get_doc: {lookup_kind}");
             drop(lookup);
             let handle = node.drawer.get_handle_by_branch_doc_id(doc_id).await?;
-            println!("   drawer.get_handle_by_branch_doc_id: {}", handle.is_some());
+            println!(
+                "   drawer.get_handle_by_branch_doc_id: {}",
+                handle.is_some()
+            );
             let heads = node.drawer.get_branch_heads_by_doc_id(doc_id).await?;
             println!(
                 "   drawer.get_branch_heads_by_doc_id: {} heads",

@@ -32,14 +32,14 @@ pub mod rpc;
 mod runtime2;
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
-    SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt,
+    SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt, WorkerGroupScope,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
-mod sqlite_big_repo_store;
+mod store;
 pub use runtime2::{automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id};
 #[cfg(feature = "test-support")]
-pub use sqlite_big_repo_store::BigSyncStoreSnapshot;
-pub use sqlite_big_repo_store::SqliteBigRepoStore;
+pub use store::sqlite::BigSyncStoreSnapshot;
+pub use store::sqlite::SqliteBigRepoStore;
 mod wire;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +103,12 @@ pub struct Config {
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
     pub hidden_parts: HashSet<PartId>,
-    /// Optional initial source partitions for AutomergeFrontierWorker.
-    pub automerge_source_parts: Option<HashSet<PartId>>,
+    /// Keyhive groups whose documents the Automerge frontier worker processes.
+    pub automerge_frontier_scope: WorkerGroupScope,
+    /// Keyhive groups whose documents the causal checkpoint worker processes.
+    pub causal_checkpoint_scope: WorkerGroupScope,
+    /// Keyhive groups whose documents and group parts the group-part worker manages.
+    pub group_part_scope: WorkerGroupScope,
 }
 
 #[derive(Debug, Clone)]
@@ -135,8 +139,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive_notifier: runtime2::KeyhiveChangeNotifier,
     #[educe(Debug(ignore))]
-    automerge_frontier_parts_tx: tokio::sync::mpsc::UnboundedSender<HashSet<PartId>>,
-    #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
@@ -149,15 +151,6 @@ pub type SharedBigRepo = Arc<BigRepo>;
 impl BigRepo {
     pub const BACKEND_ID: &'static str = "BigRepoSyncBackend";
 
-    /// Replace the set of source partitions for AutomergeFrontierWorker to tail.
-    pub fn set_automerge_source_parts(
-        &self,
-        parts: impl IntoIterator<Item = PartId>,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<HashSet<PartId>>> {
-        let parts_set: HashSet<PartId> = parts.into_iter().collect();
-        self.automerge_frontier_parts_tx.send(parts_set)
-    }
-
     /// Boot BigRepo, constructing its own SQLite-backed store for both the
     /// big-sync partition layer and subduction/runtime storage.
     ///
@@ -169,7 +162,9 @@ impl BigRepo {
             storage,
             scope_key,
             hidden_parts,
-            automerge_source_parts,
+            automerge_frontier_scope,
+            causal_checkpoint_scope,
+            group_part_scope,
         } = config;
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
@@ -197,7 +192,9 @@ impl BigRepo {
                 storage,
                 scope_key,
                 hidden_parts,
-                automerge_source_parts,
+                automerge_frontier_scope,
+                causal_checkpoint_scope,
+                group_part_scope,
             },
             store,
         )
@@ -248,7 +245,9 @@ impl BigRepo {
             storage,
             scope_key: _,
             hidden_parts: _,
-            automerge_source_parts,
+            automerge_frontier_scope,
+            causal_checkpoint_scope,
+            group_part_scope,
         } = config;
         let big_sync_store: SharedPartStore = Arc::new(store.clone());
         let keyhive_events = store.clone();
@@ -296,7 +295,7 @@ impl BigRepo {
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
-        let (runtime, ephemeral, keyhive_notifier, automerge_frontier_parts_tx, runtime_stop) =
+        let (runtime, ephemeral, keyhive_notifier, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
                 signer,
                 subduction_storage.clone(),
@@ -308,7 +307,9 @@ impl BigRepo {
                 Arc::clone(&change_manager),
                 evt_tx,
                 evt_rx,
-                automerge_source_parts.unwrap_or_default(),
+                automerge_frontier_scope,
+                causal_checkpoint_scope,
+                group_part_scope,
             )
             .await?;
 
@@ -328,7 +329,6 @@ impl BigRepo {
             runtime,
             ephemeral,
             keyhive_notifier,
-            automerge_frontier_parts_tx,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             connection_tasks: Arc::clone(&connection_tasks),

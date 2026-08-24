@@ -1516,8 +1516,7 @@ where
             }
             Runtime2Evt::DocWorkerMaterializationRetryCompleted { doc_id, status } => {
                 let start_seq = self.materialization_retries_in_flight.remove(&doc_id);
-                let stale = start_seq
-                    .is_some_and(|start| self.admitted_head > start);
+                let stale = start_seq.is_some_and(|start| self.admitted_head > start);
                 match &status {
                     crate::runtime2::MaterializationStatus::Pending(blockers) => {
                         self.pending_materialization.insert(doc_id);

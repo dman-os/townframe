@@ -8,11 +8,7 @@
 
 use keyhive_core::{
     access::Access,
-    principal::{
-        membered::Membered,
-        peer::Peer,
-        identifier::Identifier,
-    },
+    principal::{identifier::Identifier, membered::Membered, peer::Peer},
 };
 use nonempty::nonempty;
 use subduction_keyhive::test_utils::{
@@ -80,7 +76,13 @@ async fn one_round(i: usize) -> Res<()> {
         .await?;
 
     verbose_round(
-        "round1", &alice_proto, &bob_proto, &alice_id, &bob_id, &a_conn, &b_conn,
+        "round1",
+        &alice_proto,
+        &bob_proto,
+        &alice_id,
+        &bob_id,
+        &a_conn,
+        &b_conn,
     )
     .await;
 
@@ -95,10 +97,7 @@ async fn one_round(i: usize) -> Res<()> {
 
     // The doc creation under test: coparent = the group.
     let doc = alice
-        .generate_doc(
-            vec![Peer::Group(gid, group.clone())],
-            nonempty![[0u8; 32]],
-        )
+        .generate_doc(vec![Peer::Group(gid, group.clone())], nonempty![[0u8; 32]])
         .await?;
     let doc_id = doc.lock().await.doc_id();
 
@@ -116,7 +115,13 @@ async fn one_round(i: usize) -> Res<()> {
 
     // Full sync round: this is what should carry the delegations to bob.
     verbose_round(
-        "round2", &alice_proto, &bob_proto, &alice_id, &bob_id, &a_conn, &b_conn,
+        "round2",
+        &alice_proto,
+        &bob_proto,
+        &alice_id,
+        &bob_id,
+        &a_conn,
+        &b_conn,
     )
     .await;
 
@@ -134,9 +139,15 @@ async fn one_round(i: usize) -> Res<()> {
     // "server never advertises" from "harness under-drains messages".
     let mut extra_rounds = 0_usize;
     while !bob_got_doc && extra_rounds < 3 {
-            verbose_round(
-                "extra", &alice_proto, &bob_proto, &alice_id, &bob_id, &a_conn, &b_conn,
-            )
+        verbose_round(
+            "extra",
+            &alice_proto,
+            &bob_proto,
+            &alice_id,
+            &bob_id,
+            &a_conn,
+            &b_conn,
+        )
         .await;
         extra_rounds += 1;
         bob_got_doc = bob

@@ -30,7 +30,9 @@ pub async fn boot_repo() -> Res<(
         storage: StorageConfig::Memory,
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_source_parts: None,
+        automerge_frontier_scope: Default::default(),
+        causal_checkpoint_scope: Default::default(),
+        group_part_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -71,7 +73,9 @@ pub async fn _boot_disk_repo(
         storage: StorageConfig::Disk { path },
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_source_parts: None,
+        automerge_frontier_scope: Default::default(),
+        causal_checkpoint_scope: Default::default(),
+        group_part_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -2880,7 +2884,9 @@ impl SyncRepoNode {
             storage: StorageConfig::Disk { path: path.clone() },
             scope_key: Arc::from("big-repo-sync-test"),
             hidden_parts: HashSet::new(),
-            automerge_source_parts: None,
+            automerge_frontier_scope: Default::default(),
+            causal_checkpoint_scope: Default::default(),
+            group_part_scope: Default::default(),
         })
         .await?;
         let shared_store = repo.shared_part_store();

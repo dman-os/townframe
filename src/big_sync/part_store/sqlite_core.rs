@@ -108,7 +108,10 @@ impl<T> ReplayBus<T> {
             sender: tx,
             pending: PendingSubscription::new(),
         });
-        self.subs.write().expect(ERROR_MUTEX).insert(id, Arc::clone(&sub));
+        self.subs
+            .write()
+            .expect(ERROR_MUTEX)
+            .insert(id, Arc::clone(&sub));
         self.pending.write().expect(ERROR_MUTEX).insert(id);
         (sub, rx)
     }

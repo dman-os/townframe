@@ -8,7 +8,7 @@
 
 use crate::interlude::*;
 
-use crate::sqlite_big_repo_store::SqliteBigRepoStore;
+use crate::store::sqlite::SqliteBigRepoStore;
 use std::convert::Infallible;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -313,7 +313,7 @@ pub(crate) enum BigRepoKeyhiveStorageError {
     #[error(transparent)]
     Fs(#[from] FsKeyhiveStorageError),
     #[error(transparent)]
-    Sqlite(#[from] crate::sqlite_big_repo_store::SqliteBigRepoStoreError),
+    Sqlite(#[from] crate::store::sqlite::SqliteBigRepoStoreError),
 }
 
 impl BigRepoKeyhiveStorage {
@@ -323,7 +323,9 @@ impl BigRepoKeyhiveStorage {
 
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn memory() -> Self {
-        Self::new(BigRepoKeyhiveStorageInner::MemoryLegacy(MemoryKeyhiveStorage::new()))
+        Self::new(BigRepoKeyhiveStorageInner::MemoryLegacy(
+            MemoryKeyhiveStorage::new(),
+        ))
     }
 
     pub(crate) fn memory_sqlite(events: SqliteBigRepoStore) -> Self {
@@ -340,14 +342,18 @@ impl BigRepoKeyhiveStorage {
 
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
         match &self.inner {
-            BigRepoKeyhiveStorageInner::Memory { .. } | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(()),
-            BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.save_prekey_secrets(bytes).await,
+            BigRepoKeyhiveStorageInner::Memory { .. }
+            | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(()),
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
+                archives.save_prekey_secrets(bytes).await
+            }
         }
     }
 
     pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
         match &self.inner {
-            BigRepoKeyhiveStorageInner::Memory { .. } | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(None),
+            BigRepoKeyhiveStorageInner::Memory { .. }
+            | BigRepoKeyhiveStorageInner::MemoryLegacy(_) => Ok(None),
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.load_prekey_secrets().await,
         }
     }

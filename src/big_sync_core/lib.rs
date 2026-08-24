@@ -29,12 +29,12 @@ mod bucket;
 use bucket::*;
 mod cursor;
 use cursor::*;
+mod fingerprint;
+mod ids;
 /// New-generation stream abstractions (see module docs). Additive only:
 /// existing machines migrate onto these in the upcoming swap, nothing is
 /// rewired yet.
 pub mod outbox;
-mod fingerprint;
-mod ids;
 use bucket::BucketMachine;
 pub mod mpsc;
 pub mod part_store;
@@ -42,8 +42,8 @@ use part_store::*;
 pub mod rpc;
 use rpc::*;
 pub mod scheduler;
-pub mod watermark;
 mod tasks;
+pub mod watermark;
 use crate::tasks::leaf_buckets::*;
 use crate::tasks::list_bucket::*;
 use tasks::decide_peer_strat::*;

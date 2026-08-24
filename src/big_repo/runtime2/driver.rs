@@ -29,8 +29,7 @@
 //!   never reads a clock).
 
 use crate::interlude::*;
-use big_sync_core::outbox::Outbox;
-use big_sync_core::scheduler::{Scheduler, SpawnedTask, TaskId};
+use big_sync_core::scheduler::{SpawnedTask, TaskId};
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -57,12 +56,13 @@ pub trait StreamMachine {
     /// Report successful execution of the front command.
     fn complete_cmd(&mut self, id: utils_rs::prelude::Uuid);
 
-    /// Retire a finished job's scheduler entry. Called by the driver before
-    /// the job's completion event is delivered — the stop/completion pairing.
-    fn complete_job(&mut self, id: TaskId);
-
-    /// The event the driver delivers after [`Self::complete_job`] for a task
-    /// that exited successfully.
+    /// Retire a finished scheduler task. Called by the driver before the
+    /// task completion is handed to the runner for job aggregation.
+    fn complete_job(&mut self, id: TaskId) -> bool;
+    /// Cancel task handles stopped by the machine's keyed scheduler.
+    fn drain_stop_queue(&mut self) -> Vec<TaskId>;
+    /// The event the driver delivers after the runner reports a completed
+    /// reconciliation job.
     fn job_completed_evt(&mut self, job: TaskId) -> Self::Evt;
 
     /// Hand spawned seeds to the driver.
@@ -81,10 +81,11 @@ pub trait StreamMachine {
 ///
 /// Replay/fetching stays entirely outside the machine: the source is the
 /// only place that talks to a bus, a store log, or the network.
+#[async_trait::async_trait]
 pub trait EventSource {
     type Evt;
     /// The next batch of events. `Err` ends the driver (subscription closed).
-    fn next_batch(&mut self) -> impl Future<Output = Res<Vec<Self::Evt>>> + Send;
+    async fn next_batch(&mut self) -> Res<Vec<Self::Evt>>;
 }
 
 /// Outcome of executing one serial command.
@@ -97,12 +98,12 @@ pub enum ExecOutcome<M: StreamMachine> {
 }
 
 /// Executes the machine's serial commands in order.
+#[async_trait::async_trait]
 pub trait CmdExecutor<M: StreamMachine> {
     /// Execute one command. Called only while the command is the outbox
     /// front; completion is reported by the driver via
     /// [`StreamMachine::complete_cmd`].
-    fn execute(&mut self, cmd: &M::Cmd)
-    -> impl Future<Output = Res<ExecOutcome<M>>> + Send;
+    async fn execute(&mut self, cmd: &M::Cmd) -> Res<ExecOutcome<M>>;
 }
 
 /// Spawns a scheduled seed as concurrent tokio work and reports
@@ -116,37 +117,53 @@ pub trait SeedRunner<M: StreamMachine> {
         result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
         live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
     );
+    /// Observe a successfully completed task. Most sites map each task to
+    /// its own machine completion; a site with grouped task execution may
+    /// return the enclosing job only when its final task completes.
+    fn task_completed(&mut self, task: TaskId) -> Option<TaskId> {
+        Some(task)
+    }
+    /// Observe cancellation of a task that was replaced before it completed.
+    fn task_stopped(&mut self, _task: TaskId) {}
 }
 
 /// Site-specific hooks invoked by the driver. Hook futures are boxed: they
 /// embed arbitrary site I/O and boxing keeps the generic loop's inference
 /// tractable (hooks fire rarely — janitor/pump/idle — so the allocation is
 /// noise).
+#[async_trait::async_trait]
 pub trait DriverHooks<M: StreamMachine> {
     /// Janitor tick: site maintenance (generation rebuilds, ...). Runs
     /// before the scheduler clock advances.
-    fn on_janitor<'a>(&'a mut self, machine: &'a mut M) -> futures::future::BoxFuture<'a, Res<()>> {
+    async fn on_janitor(&mut self, machine: &mut M) -> Res<()> {
         let _ = machine;
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
     }
 
     /// Pump after every loop iteration: start work that admitted events made
     /// ready (e.g. build seeds from pending rows). Runs after the outbox is
     /// drained and the spawn queue emptied.
-    fn pump<'a>(&'a mut self, machine: &'a mut M) -> futures::future::BoxFuture<'a, Res<()>> {
+    async fn pump(&mut self, machine: &mut M) -> Res<()> {
         let _ = machine;
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
     }
 
     /// The machine reported idle.
-    fn on_idle<'a>(&'a mut self, machine: &'a mut M) -> futures::future::BoxFuture<'a, Res<()>> {
+    async fn on_idle(&mut self, machine: &mut M) -> Res<()> {
         let _ = machine;
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
+    }
+    /// Consume a successful task result and optionally feed a derived event
+    /// into the machine. This is used by task graphs whose decoder work
+    /// produces keyed follow-up work.
+    async fn on_task_completed(&mut self, machine: &mut M, _task: TaskId) -> Res<()> {
+        let _ = machine;
+        Ok(())
     }
 }
 
 /// One admitted keyhive event resolved from the durable admission log
-/// ([`crate::sqlite_big_repo_store::SqliteBigRepoStore::admission_events_after`]).
+/// ([`crate::store::sqlite::SqliteBigRepoStore::admission_events_after`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AdmittedRow {
     pub(crate) seq: u64,
@@ -161,7 +178,7 @@ pub(crate) struct AdmittedRow {
 /// crashes re-read from the durable position and each reducer's admission
 /// guard drops already-watermarked rows (at-least-once replay).
 pub(crate) struct AdmissionSource {
-    pub(crate) store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
+    pub(crate) store: crate::store::sqlite::SqliteBigRepoStore,
     pub(crate) timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
     /// In-memory read position; starts at the durable cursor.
     pub(crate) read_cursor: u64,
@@ -169,6 +186,7 @@ pub(crate) struct AdmissionSource {
     pub(crate) idle_poll: Duration,
 }
 
+#[async_trait::async_trait]
 impl EventSource for AdmissionSource {
     type Evt = Vec<AdmittedRow>;
 
@@ -233,7 +251,7 @@ pub async fn run_stream_driver<M, S, D>(
 where
     M: StreamMachine,
     S: EventSource<Evt = M::Evt>,
-    D: CmdExecutor<M> + SeedRunner<M> + DriverHooks<M>,
+    D: CmdExecutor<M> + SeedRunner<M> + DriverHooks<M> + Send,
 {
     let (result_tx, mut result_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<TaskId, eyre::Report>>();
@@ -254,14 +272,20 @@ where
                 }
             }
             Some(result) = result_rx.recv() => {
-                let job = result?;
-                live_tasks.remove(&job);
-                // Stop/completion pairing: retire the scheduler entry before
-                // the completion event lands, so live-set-derived state
-                // (idle detection, counts) is never stale.
-                machine.complete_job(job);
-                let evt = machine.job_completed_evt(job);
-                machine.on_evt(evt);
+                let task = result?;
+                let Some(_handle) = live_tasks.remove(&task) else {
+                    continue;
+                };
+                // Retire the scheduler task before reporting its grouped
+                // completion. Replaced tasks are rejected as stale.
+                if !machine.complete_job(task) {
+                    continue;
+                }
+                driver.on_task_completed(&mut machine, task).await?;
+                if let Some(job) = driver.task_completed(task) {
+                    let evt = machine.job_completed_evt(job);
+                    machine.on_evt(evt);
+                }
             }
             _ = janitor.tick() => {
                 driver.on_janitor(&mut machine).await?;
@@ -269,6 +293,12 @@ where
             }
         }
         drive_outbox(&mut machine, driver).await?;
+        for task in machine.drain_stop_queue() {
+            if let Some(handle) = live_tasks.remove(&task) {
+                handle.abort();
+            }
+            driver.task_stopped(task);
+        }
         for task in machine.drain_spawn_queue() {
             driver.spawn_seed(task, &result_tx, &mut live_tasks);
         }
@@ -282,6 +312,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync_core::outbox::Outbox;
+    use big_sync_core::scheduler::Scheduler;
     use big_sync_core::scheduler::SpawnedTask;
 
     /// Toy machine used to prove the driver contract without any real I/O.
@@ -317,10 +349,16 @@ mod tests {
             drop(self.outbox.complete(id));
         }
 
-        fn complete_job(&mut self, id: TaskId) {
-            let _ = self.scheduler.stop(id);
-            self.completed_jobs_paired.push(id);
-            self.pending_job = Some(id);
+        fn complete_job(&mut self, id: TaskId) -> bool {
+            let completed = self.scheduler.stop(id).is_some();
+            if completed {
+                self.completed_jobs_paired.push(id);
+                self.pending_job = Some(id);
+            }
+            completed
+        }
+        fn drain_stop_queue(&mut self) -> Vec<TaskId> {
+            self.scheduler.drain_stop_queue().collect()
         }
 
         fn job_completed_evt(&mut self, job: TaskId) -> String {
@@ -345,27 +383,25 @@ mod tests {
         batches: Vec<Vec<String>>,
     }
 
+    #[async_trait::async_trait]
     impl EventSource for ToySource {
         type Evt = String;
 
-        fn next_batch(&mut self) -> impl Future<Output = Res<Vec<String>>> + Send {
-            let mut next = std::future::ready(Err(ferr!("closed")));
-            if let Some(batch) = self.batches.pop() {
-                next = std::future::ready(Ok(batch));
-            }
-            next
+        async fn next_batch(&mut self) -> Res<Vec<String>> {
+            let Some(batch) = self.batches.pop() else {
+                return Err(ferr!("closed"));
+            };
+            Ok(batch)
         }
     }
 
     struct ToyExec;
 
+    #[async_trait::async_trait]
     impl CmdExecutor<ToyMachine> for ToyExec {
-        fn execute(
-            &mut self,
-            cmd: &String,
-        ) -> impl Future<Output = Res<ExecOutcome<ToyMachine>>> + Send {
+        async fn execute(&mut self, cmd: &String) -> Res<ExecOutcome<ToyMachine>> {
             let _ = cmd;
-            std::future::ready(Ok(ExecOutcome::Done(None)))
+            Ok(ExecOutcome::Done(None))
         }
     }
 

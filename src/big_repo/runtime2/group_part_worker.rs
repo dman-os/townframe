@@ -7,8 +7,8 @@
 //!   └─> GroupPartCore (pure reducer, [`StreamMachine`])
 //!         ├─ WatermarkMachine: admission guard + contiguous-prefix settlement
 //!         │   of the keyhive incorporation stream
-//!         ├─ Scheduler<BatchSeed>: AFFECTED-DOC reconciliation jobs, drained
-//!         │   by the driver and executed CONCURRENTLY as tokio tasks
+//!         ├─ KeyedScheduler<GroupPartKey, GroupPartSeed>: decode/document/group
+//!         │   by the driver and executed concurrently with a spawn limit
 //!         └─ Outbox: serial cmds (cursor advance tx, settled-watermark ack)
 //!               └─> runtime2::driver executes front-peek/complete(id)
 //! ```
@@ -31,20 +31,19 @@
 
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
-use crate::runtime2::driver;
-use crate::sqlite_big_repo_store::{GroupPartReconciliation, SqliteBigRepoStore};
+use crate::runtime2::{WorkerGroupScope, driver};
+use crate::store::sqlite::{GroupPartReconciliation, SqliteBigRepoStore};
 use big_sync_core::outbox::Outbox;
-use big_sync_core::scheduler::{Scheduler, SpawnedTask, TaskId};
+use big_sync_core::scheduler::{KeyedScheduler, SpawnedTask, TaskId};
 use big_sync_core::watermark::WatermarkMachine;
 use big_sync_core::{ObjId, PartId, PeerId};
 use keyhive_core::event::static_event::StaticEvent;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 const EVENT_BATCH_SIZE: u32 = 64;
-const DOC_BATCH_SIZE: usize = 64;
-/// Concurrent doc-batch tasks during the initial full projection build.
+/// Concurrent per-document tasks during the initial full projection build.
 const INITIAL_BUILD_CONCURRENCY: usize = 16;
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
@@ -70,6 +69,7 @@ pub fn spawn_group_part_worker(
     local_peer_id: PeerId,
     timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    scope: WorkerGroupScope,
 ) -> SpawnedGroupPartWorker<future_form::Sendable> {
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
 
@@ -79,6 +79,8 @@ pub fn spawn_group_part_worker(
         local_peer_id,
         timer,
         evt_tx,
+        scope,
+        completed: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     let fut = async move {
@@ -125,327 +127,79 @@ pub fn spawn_group_part_worker(
     }
 }
 
-/// The keyhive event log as a watermark stream.
-///
-/// The log has one global seq space and one durable cursor
-/// (`keyhive_group_part_cursor`), so there is exactly one stream today. True
-/// multi-stream adoption (per group part) needs per-part durable cursors in
-/// the store schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct EventLog;
-
-/// Maps raw admitted-row batches from the shared
-/// [`driver::AdmissionSource`] into the core's event vocabulary.
-struct RowSource(driver::AdmissionSource);
-
-impl crate::runtime2::driver::EventSource for RowSource {
-    type Evt = Evt;
-
-    async fn next_batch(&mut self) -> Res<Vec<Evt>> {
-        Ok(self.0.next_batch().await?.into_iter().map(Evt::Rows).collect())
-    }
+/// The driver-side halves of the worker: executors, runner and hooks. Holds
+/// no reducer state — the core travels separately through
+/// [`crate::runtime2::driver::run_stream_driver`].
+struct GroupPartDriver {
+    store: SqliteBigRepoStore,
+    keyhive: BigKeyhiveHandle,
+    local_peer_id: PeerId,
+    timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    scope: WorkerGroupScope,
+    completed: Arc<std::sync::Mutex<HashMap<TaskId, GroupPartTaskOutput>>>,
 }
 
-/// The single lane a reconciliation waiter waits on. Exists so the generic
-/// machines keep their lane dimension without pretending this site has
-/// several.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Lane;
-
-/// An admitted-but-unsettled keyhive log row is [`driver::AdmittedRow`]: its
-/// seq plus the raw event bytes the driver resolves to affected documents.
-
-/// Everything a doc-batch task needs to reconcile its chunk against current
-/// Keyhive state. Built by the driver at reconcile start; contains ONLY the
-/// documents named by the covered rows.
-#[derive(Debug, Clone)]
-struct BatchSeed {
-    covers_through: u64,
-    docs: Vec<ObjId>,
-    group_documents: HashMap<[u8; 32], BTreeSet<ObjId>>,
-    managed_group_parts: HashSet<PartId>,
-    local_principal: PeerId,
-}
-
-/// Serial side-effect commands executed through the [`Outbox`].
-///
-/// Parallel work (doc-batch reconciliation) does NOT travel here — it flows
-/// through the [`Scheduler`] spawn queue so the driver can run batches
-/// concurrently. The outbox is strictly for effects whose order matters.
-#[derive(Debug)]
-enum Cmd {
-    /// Commit the durable event cursor at `watermark` via an empty-mutation
-    /// reconciliation transaction (the store commits the cursor inside the tx).
-    AdvanceCursor(u64),
-    /// Publish the settled admission watermark on the runtime evt channel.
-    AnnounceSettled(u64),
-}
-
-/// Events fed back into the core by the driver.
-#[derive(Debug)]
-enum Evt {
-    /// Subscription delivered keyhive log rows (seq + raw event bytes).
-    Rows(Vec<driver::AdmittedRow>),
-    /// A spawned doc-batch task committed its reconciliation transaction.
-    BatchCommitted(TaskId),
-    /// The durable cursor now reflects everything up to `watermark`.
-    CursorPersisted(u64),
-    /// The announcement command was delivered.
-    SettledAnnounced,
-    /// The driver reported the machine idle. Drives the settled-watermark
-    /// announcements the hub's quiescence probe waits on.
-    Idle,
-}
-
-/// Reserved job id for rows settled without any scheduled work (events whose
-/// affected-document set is empty). Never collides with scheduler ids, which
-/// are allocated from zero upward.
-const IMMEDIATE_JOB: TaskId = TaskId::MAX;
-
-/// Pure reducer: events in, commands and scheduled jobs out. No I/O, no
-/// clock reads, no channels — the driver owns all of that.
-#[derive(Debug)]
-struct GroupPartCore {
-    /// Multi-stream admission/settlement machine. One stream today
-    /// ([`EventLog`]); the genericity stays so per-part streams slot in when
-    /// the store grows per-part cursors.
-    machine: WatermarkMachine<EventLog, TaskId, Lane, (), u64>,
-    outbox: Outbox<Cmd, ()>,
-    scheduler: Scheduler<BatchSeed>,
-    /// Admitted-but-unsettled rows, ascending by seq. The admission guard
-    /// keeps it deduped; reconciles drain their covered prefix from the front.
-    pending_rows: Vec<driver::AdmittedRow>,
-    reconcile_active: bool,
-    /// Seqs covered by the active reconcile; settled via the gate job.
-    reconcile_rows: Vec<u64>,
-    /// Scheduler task id the reconcile's row waiters are keyed under.
-    gate_job: Option<TaskId>,
-    /// Scheduler task ids of the active reconcile still awaiting commit.
-    pending_batches: usize,
-    /// Highest admission seq whose cursor is durably persisted.
-    last_settled: u64,
-    /// Highest settled seq announced to the hub.
-    last_announced_settled: u64,
-    announced_idle: bool,
-}
-
-impl GroupPartCore {
-    fn new() -> Self {
-        Self {
-            machine: Default::default(),
-            outbox: Default::default(),
-            scheduler: Default::default(),
-            pending_rows: Vec::new(),
-            reconcile_active: false,
-            reconcile_rows: Vec::new(),
-            gate_job: None,
-            pending_batches: 0,
-            last_settled: 0,
-            last_announced_settled: 0,
-            announced_idle: false,
-        }
-    }
-
-    /// Hand subscription rows to the admission guard. Returns `true` when at
-    /// least one new row was admitted (i.e. work exists).
-    fn on_rows(&mut self, rows: Vec<driver::AdmittedRow>) -> bool {
-        self.announced_idle = false;
-        let mut admitted = false;
-        for row in rows {
-            // At-least-once replay of an already-watermarked cursor.
-            if self.machine.admit(EventLog, row.seq) {
-                self.pending_rows.push(row);
-                admitted = true;
-            }
-        }
-        if admitted {
-            // A late replay can deliver rows below an already-pending one;
-            // reconciles consume a sorted prefix, so restore order.
-            self.pending_rows.sort_unstable();
-            self.pending_rows.dedup();
-        }
-        admitted
-    }
-
-    /// True when an incremental reconcile should start: admitted-but-
-    /// unsettled rows exist and none is in flight.
-    fn should_reconcile(&self) -> bool {
-        !self.reconcile_active && !self.pending_rows.is_empty()
-    }
-
-    /// Highest admitted-but-unsettled seq — the coverage target.
-    fn reconcile_target(&self) -> u64 {
-        self.pending_rows
-            .last()
-            .expect("reconcile_target called with no pending rows")
-            .seq
-    }
-
-    /// Drain the covered prefix of pending rows (seq ≤ target).
-    fn take_covered_rows(&mut self, upto: u64) -> Vec<driver::AdmittedRow> {
-        let covered = self
-            .pending_rows
+impl GroupPartDriver {
+    /// One-time full projection build for a fresh store (durable cursor ==
+    /// 0): re-derive the projection from CURRENT Keyhive state over ALL known
+    /// documents. Per-document reconciliation runs concurrently with a bounded
+    /// initial-build concurrency; the final empty-batch transaction commits the
+    /// durable cursor so incremental reconciliation takes over from there. There
+    /// are no periodic rebuilds: every later
+    async fn build_initial_projection(&mut self) -> Res<()> {
+        tracing::debug!("group-part worker building initial full projection");
+        // ensure all currently visible group parts exist
+        // before rebuilding documents. Incremental reconciliation supplies only
+        // event-affected group parts instead of repeating this scan.
+        //
+        // A part must exist before a pending want can be advertised:
+        // `summarize_parts` needs the part row even before a document payload
+        // arrives, so an empty group is still handled during the initial build.
+        let group_ids = self.keyhive.visible_group_ids().await;
+        let initial_group_parts: HashSet<PartId> = group_ids
             .iter()
-            .take_while(|row| row.seq <= upto)
-            .cloned()
-            .collect::<Vec<_>>();
-        self.pending_rows.drain(..covered.len());
-        covered
-    }
-
-    /// True while any admitted row, reconcile batch, or serial command is
-    /// outstanding.
-    fn has_outstanding_work(&self) -> bool {
-        !self.pending_rows.is_empty() || self.reconcile_active || !self.outbox.is_empty()
-    }
-
-    /// Start an incremental reconcile covering `covered` (already drained
-    /// from the pending prefix). Each seed becomes a concurrent scheduler
-    /// task; every covered row is gated behind the LAST batch committing.
-    ///
-    /// Seeds with NO documents (rows naming no resolvable doc) still settle
-    /// their watermark: they are tracked under [`IMMEDIATE_JOB`] and settled
-    /// synchronously — hints, not work.
-    fn begin_reconcile(
-        &mut self,
-        now: Instant,
-        seeds: Vec<BatchSeed>,
-        covered: Vec<driver::AdmittedRow>,
-    ) {
-        // Covered rows are drained from the pending prefix before this call,
-        // so the only invariant left is "no reconcile already in flight".
-        debug_assert!(!self.reconcile_active);
-        let covered_seqs: Vec<u64> = covered.iter().map(|row| row.seq).collect();
-
-        if seeds.is_empty() {
-            // Nothing named any doc: settle the rows outright.
-            for seq in &covered_seqs {
-                self.machine
-                    .track(EventLog, IMMEDIATE_JOB, *seq, [Lane], ());
+            .map(|group_id| group_id.to_bytes())
+            .filter(|id| self.scope.admits_group(id))
+            .map(group_part_id)
+            .collect();
+        for part_id in &initial_group_parts {
+            self.store.ensure_part(*part_id).await?;
+        }
+        let initial_group_parts = Arc::new(initial_group_parts);
+        const CURSOR: u64 = 0;
+        let docs = self.keyhive.document_ids().await;
+        let futs = docs.into_iter().map(|doc| {
+            let store = self.store.clone();
+            let keyhive = self.keyhive.clone();
+            let initial_group_parts = initial_group_parts.clone();
+            let scope = self.scope.clone();
+            let local_principal = self.local_peer_id;
+            async move {
+                if !scope.admits_doc_groups(
+                    &keyhive
+                        .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+                        .await,
+                ) {
+                    return Ok(());
+                }
+                let reconciliation =
+                    reconcile_doc(&keyhive, doc, &initial_group_parts, &scope, local_principal)
+                        .await?;
+                store
+                    .reconcile_group_part_batch(&[reconciliation], CURSOR, false)
+                    .await
             }
-            let reached = self.machine.settle_job(IMMEDIATE_JOB).into_iter().fold(
-                None,
-                |acc: Option<u64>, (_, reached)| reached.or(acc),
-            );
-            if let Some(watermark) = reached {
-                self.outbox.push(Cmd::AdvanceCursor(watermark), ());
-            }
-            return;
-        }
-
-        self.reconcile_active = true;
-        self.reconcile_rows = covered_seqs;
-        self.pending_batches = seeds.len();
-
-        let mut job_ids = Vec::with_capacity(seeds.len());
-        for seed in seeds {
-            job_ids.push(self.scheduler.spawn(now, seed));
-        }
-        // Gate every covered row on the reconcile: one waiter per row, all
-        // sharing the lane that settles when the last batch commits. The
-        // job key is the first batch's id — JobBoard keys (job, cursor)
-        // pairs, so one job may wait on many cursors.
-        let gate = job_ids[0];
-        for seq in &self.reconcile_rows {
-            self.machine.track(EventLog, gate, *seq, [Lane], ());
-        }
-        self.gate_job = Some(gate);
-    }
-
-    /// A doc-batch task committed its tx. When it was the reconcile's last
-    /// batch, settles every covered row via the gate job and emits the
-    /// reachable watermark as an [`Cmd::AdvanceCursor`].
-    fn on_batch_committed(&mut self, _job: TaskId) {
-        debug_assert!(self.reconcile_active);
-        self.pending_batches = self.pending_batches.saturating_sub(1);
-        if self.pending_batches > 0 {
-            return;
-        }
-        self.reconcile_active = false;
-        let gate_job = self.gate_job.take().expect("active reconcile has a gate");
-        let mut watermark: Option<u64> = None;
-        for (_, reached) in self.machine.settle_job(gate_job) {
-            if reached.is_some() {
-                watermark = reached;
-            }
-        }
-        self.reconcile_rows.clear();
-        if let Some(watermark) = watermark {
-            self.outbox.push(Cmd::AdvanceCursor(watermark), ());
-        }
-    }
-
-    fn on_cursor_persisted(&mut self, watermark: u64) {
-        self.last_settled = self.last_settled.max(watermark);
-        self.announced_idle = false;
-    }
-
-    /// Announce the settled admission watermark: when going idle, or when a
-    /// newer cursor persisted since the last announcement.
-    fn on_idle(&mut self) {
-        if !self.announced_idle || self.last_settled > self.last_announced_settled {
-            self.last_announced_settled = self.last_settled;
-            self.outbox
-                .push(Cmd::AnnounceSettled(self.last_announced_settled), ());
-            self.announced_idle = true;
-        }
-    }
-
-    /// Feed an event back into the reducers.
-    fn on_evt(&mut self, evt: Evt) {
-        match evt {
-            Evt::Rows(rows) => {
-                self.on_rows(rows);
-            }
-            Evt::BatchCommitted(job) => self.on_batch_committed(job),
-            Evt::CursorPersisted(watermark) => self.on_cursor_persisted(watermark),
-            Evt::SettledAnnounced => {}
-            Evt::Idle => self.on_idle(),
-        }
+        });
+        drive_buffered(futs, INITIAL_BUILD_CONCURRENCY).await?;
+        self.store
+            .reconcile_group_part_batch(&[], CURSOR, true)
+            .await?;
+        Ok(())
     }
 }
 
-impl crate::runtime2::driver::StreamMachine for GroupPartCore {
-    type Evt = Evt;
-    type Cmd = Cmd;
-    type Seed = BatchSeed;
-
-    fn on_evt(&mut self, evt: Evt) {
-        GroupPartCore::on_evt(self, evt);
-    }
-
-    fn front_cmd(&mut self) -> Option<(utils_rs::prelude::Uuid, &Cmd)> {
-        self.outbox.front().map(|(pending, cmd)| (pending.id(), cmd))
-    }
-
-    fn complete_cmd(&mut self, id: utils_rs::prelude::Uuid) {
-        drop(self.outbox.complete(id));
-    }
-
-    fn complete_job(&mut self, id: TaskId) {
-        // Stop/completion pairing (friction (c)): retire the scheduler entry
-        // before the completion event lands so live-set-derived state is
-        // never stale. We never respawn batch tasks.
-        let _ = self.scheduler.stop(id);
-    }
-
-    fn job_completed_evt(&mut self, job: TaskId) -> Evt {
-        Evt::BatchCommitted(job)
-    }
-
-    fn drain_spawn_queue(&mut self) -> Vec<SpawnedTask<BatchSeed>> {
-        self.scheduler.drain_spawn_queue().collect()
-    }
-
-    fn tick_scheduler(&mut self, now: Instant) {
-        self.scheduler.tick(now);
-    }
-
-    fn is_idle(&mut self) -> bool {
-        !self.has_outstanding_work()
-    }
-}
-
+#[async_trait::async_trait]
 impl crate::runtime2::driver::CmdExecutor<GroupPartCore> for GroupPartDriver {
     async fn execute(
         &mut self,
@@ -477,158 +231,454 @@ impl crate::runtime2::driver::CmdExecutor<GroupPartCore> for GroupPartDriver {
 impl crate::runtime2::driver::SeedRunner<GroupPartCore> for GroupPartDriver {
     fn spawn_seed(
         &mut self,
-        task: SpawnedTask<BatchSeed>,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<
-            Result<TaskId, eyre::Report>,
-        >,
+        task: SpawnedTask<GroupPartSeed>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
         live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
     ) {
-        let job = task.id;
+        let task_id = task.id;
         let seed = task.seed;
         let store = self.store.clone();
         let keyhive = self.keyhive.clone();
+        let scope = self.scope.clone();
+        let completed = self.completed.clone();
         let result_tx = result_tx.clone();
-        let handle = tokio::spawn(async move {
-            let outcome = run_batch(&store, &keyhive, &seed).await;
-            // Worker loop gone (shutdown) → nothing to report to; dropping
-            // the send error is the documented exception (channel closure IS
-            // the shutdown signal here).
-            drop(result_tx.send(outcome.map(|()| job)));
-        });
-        live.insert(job, handle);
-    }
-}
-
-impl crate::runtime2::driver::DriverHooks<GroupPartCore> for GroupPartDriver {
-    fn pump<'a>(
-        &'a mut self,
-        machine: &'a mut GroupPartCore,
-    ) -> futures::future::BoxFuture<'a, Res<()>> {
-        Box::pin(async move {
-            if !machine.should_reconcile() {
-                return Ok(());
-            }
-            let target = machine.reconcile_target();
-            let covered = machine.take_covered_rows(target);
-            let (group_documents, managed_group_parts) = self.snapshot_keyhive().await?;
-            let docs = select_incremental_docs(
-                covered
-                    .iter()
-                    .map(|row| affected_documents(&row.bytes, &group_documents)),
-            )?;
-            let seeds = docs
-                .chunks(DOC_BATCH_SIZE)
-                .map(|chunk| BatchSeed {
-                    covers_through: target,
-                    docs: chunk.to_vec(),
-                    group_documents: group_documents.clone(),
-                    managed_group_parts: managed_group_parts.clone(),
-                    local_principal: self.local_peer_id,
-                })
-                .collect();
-            machine.begin_reconcile(Instant::now(), seeds, covered);
-            Ok(())
-        })
-    }
-
-    fn on_idle<'a>(
-        &'a mut self,
-        machine: &'a mut GroupPartCore,
-    ) -> futures::future::BoxFuture<'a, Res<()>> {
-        Box::pin(async move {
-            machine.on_evt(Evt::Idle);
-            Ok(())
-        })
-    }
-}
-
-/// The driver-side halves of the worker: executors, runner and hooks. Holds
-/// no reducer state — the core travels separately through
-/// [`crate::runtime2::driver::run_stream_driver`].
-struct GroupPartDriver {
-    store: SqliteBigRepoStore,
-    keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
-    timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
-    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-}
-
-impl GroupPartDriver {
-    /// One-time full projection build for a fresh store (durable cursor ==
-    /// 0): re-derive the projection from CURRENT Keyhive state over ALL known
-    /// documents. Batches run concurrently (bounded); the final empty-batch
-    /// transaction commits the durable cursor so incremental reconciliation
-    /// takes over from there. There are no periodic rebuilds: every later
-    /// change is attributed through the admission stream.
-    async fn build_initial_projection(&mut self) -> Res<()> {
-        tracing::debug!("group-part worker building initial full projection");
-        let (group_documents, managed_group_parts) = self.snapshot_keyhive().await?;
-        const CURSOR: u64 = 0;
-        let docs: Vec<_> = self.keyhive.document_ids().await;
-        // Owned batches: borrowing chunk slices here would bake their
-        // lifetime into the boxed hook future and break higher-ranked
-        // inference.
-        let batches: Vec<Vec<ObjId>> =
-            docs.chunks(DOC_BATCH_SIZE).map(<[ObjId]>::to_vec).collect();
-        let futs = batches.into_iter().map(|docs| {
-            let store = self.store.clone();
-            let keyhive = self.keyhive.clone();
-            let group_documents = group_documents.clone();
-            let managed_group_parts = managed_group_parts.clone();
-            let local_principal = self.local_peer_id;
-            async move {
-                let mut reconciliations = Vec::with_capacity(docs.len());
-                for doc in docs {
-                    reconciliations.push(
-                        reconcile_doc(
-                            &keyhive,
-                            doc,
-                            &group_documents,
-                            &managed_group_parts,
-                            local_principal,
-                        )
-                        .await?,
-                    );
+        let fut = async move {
+            match seed {
+                GroupPartSeed::Decode { seq, bytes } => {
+                    let affected = affected_event(&keyhive, &bytes, &scope).await?;
+                    Ok(GroupPartTaskOutput::Decoded { seq, affected })
                 }
-                store
-                    .reconcile_group_part_batch(&reconciliations, CURSOR, false)
-                    .await
+                GroupPartSeed::Document {
+                    doc,
+                    covered,
+                    affected_group_parts,
+                    local_principal,
+                } => {
+                    let reconciliation = reconcile_doc(
+                        &keyhive,
+                        doc,
+                        &affected_group_parts,
+                        &scope,
+                        local_principal,
+                    )
+                    .await?;
+                    store
+                        .reconcile_group_part_batch(&[reconciliation], 0, false)
+                        .await?;
+                    Ok(GroupPartTaskOutput::Settled {
+                        key: GroupPartKey::Document(doc),
+                        covered,
+                    })
+                }
+                GroupPartSeed::Group { part, covered } => {
+                    store.ensure_part(part).await?;
+                    Ok(GroupPartTaskOutput::Settled {
+                        key: GroupPartKey::Group(part),
+                        covered,
+                    })
+                }
             }
+        };
+        let handle = tokio::spawn(async move {
+            let result = fut.await;
+            if let Ok(output) = result.as_ref() {
+                completed
+                    .lock()
+                    .expect("group-part completion map poisoned")
+                    .insert(task_id, output.clone());
+            }
+            drop(result_tx.send(result.map(|_| task_id)));
         });
-        drive_buffered(futs, INITIAL_BUILD_CONCURRENCY).await?;
-        self.store
-            .reconcile_group_part_batch(&[], CURSOR, true)
-            .await?;
+        live.insert(task_id, handle);
+    }
+    fn task_completed(&mut self, _task: TaskId) -> Option<TaskId> {
+        None
+    }
+    fn task_stopped(&mut self, task: TaskId) {
+        self.completed
+            .lock()
+            .expect("group-part completion map poisoned")
+            .remove(&task);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime2::driver::DriverHooks<GroupPartCore> for GroupPartDriver {
+    async fn on_task_completed(&mut self, machine: &mut GroupPartCore, task: TaskId) -> Res<()> {
+        let output = self
+            .completed
+            .lock()
+            .expect("group-part completion map poisoned")
+            .remove(&task)
+            .expect("successful task has no completion output");
+        match output {
+            GroupPartTaskOutput::Decoded { seq, affected } => {
+                machine.on_evt(Evt::Decoded {
+                    seq,
+                    affected,
+                    local_principal: self.local_peer_id,
+                });
+            }
+            GroupPartTaskOutput::Settled { key, covered } => {
+                machine.on_evt(Evt::TaskSettled { key, covered });
+            }
+        }
         Ok(())
     }
-
-    /// Fetch the Keyhive-derived snapshots shared by every batch task, and
-    /// pre-create group parts.
-    ///
-    /// Pre-creation rationale (member-before-group ordering): a group part
-    /// row must exist for the part to be advertiseable (`summarize_parts`
-    /// succeeds) even before any doc payload arrives — a pending want is
-    /// pull access and the route must be establishable for the first pull to
-    /// promote it. Source is ALL visible groups, NOT just groups referenced
-    /// by known docs: membership precedes document payloads, and an empty
-    /// group must still advertise its part or peers answer the route with
-    /// UnkownParts and it never establishes. Runs before doc reconciliation
-    /// so member-before-group and group-before-member orderings both settle.
-    async fn snapshot_keyhive(
-        &self,
-    ) -> Res<(
-        HashMap<[u8; 32], BTreeSet<ObjId>>,
-        HashSet<PartId>,
-    )> {
-        for group_id in self.keyhive.visible_group_ids().await {
-            self.store
-                .ensure_part(group_part_id(group_id.to_bytes()))
-                .await?;
+    async fn pump(&mut self, machine: &mut GroupPartCore) -> Res<()> {
+        for row in machine.take_pending_rows() {
+            machine.schedule_decode(Instant::now(), row);
         }
-        let group_documents = self.keyhive.group_document_ids_by_id().await;
-        let managed_group_parts: HashSet<PartId> =
-            group_documents.keys().copied().map(group_part_id).collect();
-        Ok((group_documents, managed_group_parts))
+        let now = Instant::now();
+        for seed in machine.take_ready_seeds() {
+            machine.schedule_seed(now, seed);
+        }
+        Ok(())
+    }
+    async fn on_idle(&mut self, machine: &mut GroupPartCore) -> Res<()> {
+        machine.on_evt(Evt::Idle);
+        Ok(())
+    }
+}
+
+/// Maps raw admitted-row batches from the shared
+/// [`driver::AdmissionSource`] into the core's event vocabulary.
+struct RowSource(driver::AdmissionSource);
+
+#[async_trait::async_trait]
+impl crate::runtime2::driver::EventSource for RowSource {
+    type Evt = Evt;
+
+    async fn next_batch(&mut self) -> Res<Vec<Evt>> {
+        Ok(self
+            .0
+            .next_batch()
+            .await?
+            .into_iter()
+            .map(Evt::Rows)
+            .collect())
+    }
+}
+
+/// This worker has one logical lane; the unit type is sufficient.
+
+/// An admitted-but-unsettled keyhive log row is [`driver::AdmittedRow`]: its
+/// seq plus the raw event bytes the driver resolves to affected documents.
+
+/// Keys used by the keyed task graph. Decode work is keyed by admission
+/// sequence; derived document and group work coalesces by its domain key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GroupPartKey {
+    Decode(u64),
+    Document(ObjId),
+    Group(PartId),
+}
+
+#[derive(Debug, Clone)]
+enum GroupPartSeed {
+    Decode {
+        seq: u64,
+        bytes: Arc<[u8]>,
+    },
+    Document {
+        doc: ObjId,
+        covered: BTreeSet<u64>,
+        affected_group_parts: HashSet<PartId>,
+        local_principal: PeerId,
+    },
+    Group {
+        part: PartId,
+        covered: BTreeSet<u64>,
+    },
+}
+
+impl GroupPartSeed {
+    fn key(&self) -> GroupPartKey {
+        match self {
+            Self::Decode { seq, .. } => GroupPartKey::Decode(*seq),
+            Self::Document { doc, .. } => GroupPartKey::Document(*doc),
+            Self::Group { part, .. } => GroupPartKey::Group(*part),
+        }
+    }
+
+    fn merge(old: Self, new: Self) -> Self {
+        match (old, new) {
+            (
+                Self::Decode { seq, .. },
+                Self::Decode {
+                    seq: new_seq,
+                    bytes,
+                },
+            ) => {
+                assert_eq!(seq, new_seq, "decode key changed during replacement");
+                Self::Decode { seq, bytes }
+            }
+            (
+                Self::Document {
+                    doc,
+                    mut covered,
+                    mut affected_group_parts,
+                    local_principal: _,
+                },
+                Self::Document {
+                    doc: new_doc,
+                    covered: new_covered,
+                    affected_group_parts: new_parts,
+                    local_principal: new_principal,
+                },
+            ) => {
+                assert_eq!(doc, new_doc, "document key changed during replacement");
+                covered.extend(new_covered);
+                affected_group_parts.extend(new_parts);
+                Self::Document {
+                    doc,
+                    covered,
+                    affected_group_parts,
+                    local_principal: new_principal,
+                }
+            }
+            (
+                Self::Group { part, mut covered },
+                Self::Group {
+                    part: new_part,
+                    covered: new_covered,
+                },
+            ) => {
+                assert_eq!(part, new_part, "group key changed during replacement");
+                covered.extend(new_covered);
+                Self::Group { part, covered }
+            }
+            (old, new) => panic!("keyed scheduler seed variant disagrees: {old:?} vs {new:?}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum GroupPartTaskOutput {
+    Decoded {
+        seq: u64,
+        affected: AffectedEvent,
+    },
+    Settled {
+        key: GroupPartKey,
+        covered: BTreeSet<u64>,
+    },
+}
+
+/// Serial side-effect commands executed through the [`Outbox`].
+///
+/// Per-document work does NOT travel here — it flows through the scheduler
+/// spawn queue so the driver can run it concurrently. The outbox is strictly
+/// for effects whose order matters.
+#[derive(Debug)]
+enum Cmd {
+    /// Commit the durable event cursor at `watermark` via an empty-mutation
+    /// reconciliation transaction (the store commits the cursor inside the tx).
+    AdvanceCursor(u64),
+    /// Publish the settled admission watermark on the runtime evt channel.
+    AnnounceSettled(u64),
+}
+
+/// Events fed back into the core by the driver.
+#[derive(Debug)]
+enum Evt {
+    Rows(Vec<driver::AdmittedRow>),
+    Decoded {
+        seq: u64,
+        affected: AffectedEvent,
+        local_principal: PeerId,
+    },
+    TaskSettled {
+        key: GroupPartKey,
+        covered: BTreeSet<u64>,
+    },
+    CursorPersisted(u64),
+    SettledAnnounced,
+    Idle,
+}
+
+#[derive(Debug)]
+struct GroupPartCore {
+    machine: WatermarkMachine<(), u64, GroupPartKey, (), u64>,
+    outbox: Outbox<Cmd, ()>,
+    scheduler: KeyedScheduler<GroupPartKey, GroupPartSeed>,
+    pending_rows: BTreeMap<u64, driver::AdmittedRow>,
+    ready_seeds: Vec<GroupPartSeed>,
+    last_settled: u64,
+    last_announced_settled: u64,
+    announced_idle: bool,
+}
+
+impl GroupPartCore {
+    fn new() -> Self {
+        Self {
+            machine: Default::default(),
+            outbox: Default::default(),
+            scheduler: Default::default(),
+            pending_rows: BTreeMap::new(),
+            ready_seeds: Vec::new(),
+            last_settled: 0,
+            last_announced_settled: 0,
+            announced_idle: false,
+        }
+    }
+
+    fn on_evt(&mut self, evt: Evt) {
+        match evt {
+            Evt::Rows(rows) => self.on_rows(rows),
+            Evt::Decoded {
+                seq,
+                affected,
+                local_principal,
+            } => self.on_decoded(seq, affected, local_principal),
+            Evt::TaskSettled { key, covered } => self.on_task_settled(key, covered),
+            Evt::CursorPersisted(watermark) => self.on_cursor_persisted(watermark),
+            Evt::SettledAnnounced => {}
+            Evt::Idle => self.on_idle(),
+        }
+    }
+
+    fn on_rows(&mut self, rows: Vec<driver::AdmittedRow>) {
+        self.announced_idle = false;
+        for row in rows {
+            if self.machine.admit((), row.seq) {
+                let old = self.pending_rows.insert(row.seq, row);
+                debug_assert!(old.is_none(), "admitted sequence was duplicated");
+            }
+        }
+    }
+
+    fn take_pending_rows(&mut self) -> Vec<driver::AdmittedRow> {
+        std::mem::take(&mut self.pending_rows)
+            .into_values()
+            .collect()
+    }
+
+    fn schedule_decode(&mut self, now: Instant, row: driver::AdmittedRow) {
+        let seq = row.seq;
+        self.machine
+            .track((), seq, seq, [GroupPartKey::Decode(seq)], ());
+        self.scheduler.replace(
+            now,
+            GroupPartKey::Decode(seq),
+            GroupPartSeed::Decode {
+                seq,
+                bytes: row.bytes,
+            },
+        );
+    }
+
+    fn schedule_seed(&mut self, now: Instant, seed: GroupPartSeed) {
+        let key = seed.key();
+        self.scheduler
+            .replace_with(now, key, seed, GroupPartSeed::merge);
+    }
+
+    fn take_ready_seeds(&mut self) -> Vec<GroupPartSeed> {
+        std::mem::take(&mut self.ready_seeds)
+    }
+
+    fn on_decoded(&mut self, seq: u64, affected: AffectedEvent, local_principal: PeerId) {
+        let docs: BTreeSet<_> = affected.docs.into_iter().collect();
+        let groups = affected.group_parts;
+        for doc in docs {
+            let key = GroupPartKey::Document(doc);
+            self.machine.track((), seq, seq, [key], ());
+            self.ready_seeds.push(GroupPartSeed::Document {
+                doc,
+                covered: [seq].into_iter().collect(),
+                affected_group_parts: groups.clone(),
+                local_principal,
+            });
+        }
+        for part in groups {
+            let key = GroupPartKey::Group(part);
+            self.machine.track((), seq, seq, [key], ());
+            self.ready_seeds.push(GroupPartSeed::Group {
+                part,
+                covered: [seq].into_iter().collect(),
+            });
+        }
+        self.settle_lane(seq, GroupPartKey::Decode(seq));
+    }
+
+    fn on_task_settled(&mut self, key: GroupPartKey, covered: BTreeSet<u64>) {
+        for seq in covered {
+            self.settle_lane(seq, key);
+        }
+    }
+
+    fn settle_lane(&mut self, seq: u64, lane: GroupPartKey) {
+        for (_, reached) in self.machine.settle(seq, seq, lane) {
+            if let Some(watermark) = reached {
+                self.outbox.push(Cmd::AdvanceCursor(watermark), ());
+            }
+        }
+    }
+
+    fn on_cursor_persisted(&mut self, watermark: u64) {
+        self.last_settled = self.last_settled.max(watermark);
+        self.announced_idle = false;
+    }
+
+    fn on_idle(&mut self) {
+        if !self.announced_idle || self.last_settled > self.last_announced_settled {
+            self.last_announced_settled = self.last_settled;
+            self.outbox
+                .push(Cmd::AnnounceSettled(self.last_announced_settled), ());
+            self.announced_idle = true;
+        }
+    }
+
+    fn has_outstanding_work(&self) -> bool {
+        !self.pending_rows.is_empty()
+            || !self.ready_seeds.is_empty()
+            || !self.machine.is_settled(&())
+            || !self.outbox.is_empty()
+    }
+}
+
+impl crate::runtime2::driver::StreamMachine for GroupPartCore {
+    type Evt = Evt;
+    type Cmd = Cmd;
+    type Seed = GroupPartSeed;
+
+    fn on_evt(&mut self, evt: Evt) {
+        GroupPartCore::on_evt(self, evt);
+    }
+
+    fn front_cmd(&mut self) -> Option<(utils_rs::prelude::Uuid, &Cmd)> {
+        self.outbox
+            .front()
+            .map(|(pending, cmd)| (pending.id(), cmd))
+    }
+
+    fn complete_cmd(&mut self, id: utils_rs::prelude::Uuid) {
+        drop(self.outbox.complete(id));
+    }
+
+    fn complete_job(&mut self, id: TaskId) -> bool {
+        self.scheduler.complete(id)
+    }
+
+    fn drain_stop_queue(&mut self) -> Vec<TaskId> {
+        self.scheduler.drain_stop_queue().collect()
+    }
+
+    fn job_completed_evt(&mut self, _job: TaskId) -> Evt {
+        unreachable!("group-part tasks complete through keyed task results")
+    }
+
+    fn drain_spawn_queue(&mut self) -> Vec<SpawnedTask<GroupPartSeed>> {
+        self.scheduler.drain_spawn_queue().collect()
+    }
+
+    fn tick_scheduler(&mut self, now: Instant) {
+        self.scheduler.tick(now);
+    }
+
+    fn is_idle(&mut self) -> bool {
+        !self.has_outstanding_work()
     }
 }
 
@@ -647,51 +697,11 @@ async fn drive_buffered<T: Send, F: Future<Output = Res<T>> + Send>(
         .await
 }
 
-/// Execute one doc-batch seed: compute each document's reconciliation
-/// against current Keyhive state, then commit the batch tx (without
-/// advancing the durable cursor — that is [`Cmd::AdvanceCursor`]'s job).
-async fn run_batch(
-    store: &SqliteBigRepoStore,
-    keyhive: &BigKeyhiveHandle,
-    seed: &BatchSeed,
-) -> Res<()> {
-    let mut reconciliations = Vec::with_capacity(seed.docs.len());
-    for &doc in &seed.docs {
-        reconciliations.push(
-            reconcile_doc(
-                keyhive,
-                doc,
-                &seed.group_documents,
-                &seed.managed_group_parts,
-                seed.local_principal,
-            )
-            .await?,
-        );
-    }
-    store
-        .reconcile_group_part_batch(&reconciliations, seed.covers_through, false)
-        .await
-}
-
-/// Resolve the documents named by a batch of keyhive events, deduplicated
-/// and ascending. This is the whole "which docs does this batch touch"
-/// computation — there is deliberately no fallback to scanning all known
-/// documents.
-fn select_incremental_docs(
-    rows: impl IntoIterator<Item = Res<Vec<ObjId>>>,
-) -> Res<Vec<ObjId>> {
-    let mut docs: BTreeSet<ObjId> = BTreeSet::new();
-    for row in rows {
-        docs.extend(row?);
-    }
-    Ok(docs.into_iter().collect())
-}
-
 async fn reconcile_doc(
     keyhive: &BigKeyhiveHandle,
     doc: ObjId,
-    group_documents: &HashMap<[u8; 32], BTreeSet<ObjId>>,
-    managed_group_parts: &HashSet<PartId>,
+    affected_group_parts: &HashSet<PartId>,
+    scope: &WorkerGroupScope,
     local_principal: PeerId,
 ) -> Res<GroupPartReconciliation> {
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.into_bytes())
@@ -703,11 +713,15 @@ async fn reconcile_doc(
         .into_iter()
         .map(|(principal, access)| (PeerId::new(principal), access))
         .collect::<HashMap<_, _>>();
-    let desired_group_parts: HashSet<PartId> = group_documents
-        .iter()
-        .filter(|(_, documents)| documents.contains(&doc))
-        .map(|(group_id, _)| group_part_id(*group_id))
+    let desired_group_parts: HashSet<PartId> = keyhive
+        .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+        .await
+        .into_iter()
+        .filter(|id| scope.admits_group(id))
+        .map(group_part_id)
         .collect();
+    let mut reconciled_group_parts = affected_group_parts.clone();
+    reconciled_group_parts.extend(desired_group_parts.iter().copied());
     let desired_global = agents
         .get(&local_principal)
         .is_some_and(|access| access.is_reader());
@@ -722,7 +736,7 @@ async fn reconcile_doc(
     Ok(GroupPartReconciliation {
         doc,
         agents,
-        managed_group_parts: managed_group_parts.clone(),
+        managed_group_parts: reconciled_group_parts,
         desired_group_parts,
         desired_global,
     })
@@ -735,21 +749,29 @@ pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
     PartId::new(raw.into())
 }
 
-/// Resolve the documents a persisted keyhive event affects. Returns an empty
-/// vec for hint-only events (prekey rotations carry no document identity);
-/// their rows still settle their watermark.
-fn affected_documents(
+/// Resolve the documents and group part(s) named by a persisted Keyhive event.
+/// Group-only events still produce a part-creation action.
+#[derive(Debug, Clone)]
+struct AffectedEvent {
+    docs: Vec<ObjId>,
+    group_parts: HashSet<PartId>,
+}
+
+async fn affected_event(
+    keyhive: &BigKeyhiveHandle,
     bytes: &[u8],
-    group_documents: &HashMap<[u8; 32], BTreeSet<ObjId>>,
-) -> Res<Vec<ObjId>> {
+    scope: &WorkerGroupScope,
+) -> Res<AffectedEvent> {
     let event: StaticEvent<Vec<u8>> = bincode::deserialize(bytes)
         .map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
     let mut documents = Vec::new();
+    let mut group_parts = HashSet::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {
             documents.push(ObjId::new(*operation.payload().doc_id().as_bytes()));
         }
         StaticEvent::Delegated(delegation) => {
+            group_parts.insert(group_part_id(delegation.issuer.to_bytes()));
             documents.extend(
                 delegation
                     .payload()
@@ -757,11 +779,18 @@ fn affected_documents(
                     .keys()
                     .map(|id| ObjId::new(id.to_bytes())),
             );
-            if let Some(group_docs) = group_documents.get(delegation.issuer.as_bytes()) {
-                documents.extend(group_docs.iter().copied());
-            }
+            documents.extend(
+                keyhive
+                    .document_ids_containing_group(
+                        keyhive_core::principal::identifier::Identifier::from(delegation.issuer),
+                    )
+                    .await
+                    .into_iter()
+                    .map(|id| ObjId::new(id.into_bytes())),
+            );
         }
         StaticEvent::Revoked(revocation) => {
+            group_parts.insert(group_part_id(revocation.issuer.to_bytes()));
             documents.extend(
                 revocation
                     .payload()
@@ -769,13 +798,40 @@ fn affected_documents(
                     .keys()
                     .map(|id| ObjId::new(id.to_bytes())),
             );
-            if let Some(group_docs) = group_documents.get(revocation.issuer.as_bytes()) {
-                documents.extend(group_docs.iter().copied());
-            }
+            documents.extend(
+                keyhive
+                    .document_ids_containing_group(
+                        keyhive_core::principal::identifier::Identifier::from(revocation.issuer),
+                    )
+                    .await
+                    .into_iter()
+                    .map(|id| ObjId::new(id.into_bytes())),
+            );
         }
         StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {}
     }
-    Ok(documents)
+    let mut docs = Vec::new();
+    for doc in documents {
+        if scope.admits_doc_groups(
+            &keyhive
+                .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+                .await,
+        ) {
+            docs.push(doc);
+        }
+    }
+    Ok(AffectedEvent {
+        docs,
+        group_parts: group_parts
+            .into_iter()
+            .filter(|part| match scope {
+                WorkerGroupScope::All => true,
+                WorkerGroupScope::Groups(groups) => {
+                    groups.iter().any(|id| group_part_id(*id) == *part)
+                }
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]
@@ -790,17 +846,6 @@ mod tests {
             "B1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
         );
     }
-
-    fn seed(covers_through: u64, docs: &[ObjId]) -> BatchSeed {
-        BatchSeed {
-            covers_through,
-            docs: docs.to_vec(),
-            group_documents: HashMap::new(),
-            managed_group_parts: HashSet::new(),
-            local_principal: PeerId::new([0; 32]),
-        }
-    }
-
     fn doc(n: u64) -> ObjId {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&n.to_be_bytes());
@@ -814,8 +859,6 @@ mod tests {
         }
     }
 
-    /// Drive the core's outbox to completion like the real driver would,
-    /// collecting every [`Cmd::AdvanceCursor`] watermark it emitted.
     fn advance_cmds(core: &mut GroupPartCore) -> Vec<u64> {
         let mut advances = Vec::new();
         while let Some((pending, cmd)) = core.outbox.front() {
@@ -829,106 +872,77 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_settles_contiguous_prefix_and_emits_advance() {
-        let mut core = GroupPartCore::new();
-        assert!(core.on_rows(vec![row(1), row(2), row(3)]));
-        assert!(core.should_reconcile());
-        let now = Instant::now();
-        let covered = core.take_covered_rows(core.reconcile_target());
-        core.begin_reconcile(
-            now,
-            vec![seed(3, &[doc(1)]), seed(3, &[doc(2)])],
-            covered,
-        );
-        assert!(!core.should_reconcile());
-        // First batch commits: watermark cannot advance yet.
-        let (job_a, job_b) = {
-            let mut ids = core
-                .scheduler
-                .drain_spawn_queue()
-                .map(|task| task.id)
-                .collect::<Vec<_>>();
-            ids.sort();
-            (ids[0], ids[1])
-        };
-        crate::runtime2::driver::StreamMachine::complete_job(&mut core, job_a);
-        core.on_evt(Evt::BatchCommitted(job_a));
-        assert!(advance_cmds(&mut core).is_empty());
-        // Second batch commits: the whole covered prefix settles.
-        crate::runtime2::driver::StreamMachine::complete_job(&mut core, job_b);
-        core.on_evt(Evt::BatchCommitted(job_b));
-        assert_eq!(advance_cmds(&mut core), vec![3]);
-        assert!(!core.should_reconcile());
-    }
-
-    #[test]
-    fn rows_arriving_mid_reconcile_wait_for_the_next_one() {
-        let mut core = GroupPartCore::new();
-        core.on_rows(vec![row(1), row(2)]);
-        let now = Instant::now();
-        let covered = core.take_covered_rows(core.reconcile_target());
-        core.begin_reconcile(now, vec![seed(2, &[doc(1)])], covered);
-        let job = core
-            .scheduler
-            .drain_spawn_queue()
-            .next()
-            .expect("one task")
-            .id;
-        // A late row arrives while the reconcile is in flight.
-        assert!(core.on_rows(vec![row(3)]));
-        crate::runtime2::driver::StreamMachine::complete_job(&mut core, job);
-        core.on_evt(Evt::BatchCommitted(job));
-        assert_eq!(advance_cmds(&mut core), vec![2]);
-        // Still unsettled work: the next reconcile must cover seq 3.
-        assert!(core.should_reconcile());
-        assert_eq!(core.reconcile_target(), 3);
-    }
-
-    #[test]
     fn duplicate_rows_are_dropped_by_admission() {
         let mut core = GroupPartCore::new();
-        assert!(core.on_rows(vec![row(5)]));
-        assert!(!core.on_rows(vec![row(5)]));
-        assert_eq!(core.reconcile_target(), 5);
+        core.on_rows(vec![row(5)]);
+        core.on_rows(vec![row(5)]);
+        assert_eq!(core.pending_rows.len(), 1);
     }
 
     #[test]
-    fn docless_rows_settle_immediately_without_scheduler_work() {
-        // Events carrying no resolvable document (prekey rotations, unknown
-        // payloads aside) are hints: they settle their watermark outright
-        // and schedule ZERO batch tasks.
+    fn decoded_event_creates_keyed_work_and_waits_for_success() {
         let mut core = GroupPartCore::new();
-        core.on_rows(vec![row(7), row(8)]);
-        let now = Instant::now();
-        let covered = core.take_covered_rows(core.reconcile_target());
-        core.begin_reconcile(now, vec![], covered);
-        // No scheduler tasks were spawned…
-        assert_eq!(core.scheduler.counts().spawn_queue, 0);
-        assert_eq!(core.scheduler.counts().live, 0);
-        // …but the watermark advanced past both rows.
-        assert_eq!(advance_cmds(&mut core), vec![8]);
-        assert!(!core.should_reconcile());
+        core.on_rows(vec![row(1)]);
+        let pending = core.take_pending_rows();
+        core.schedule_decode(Instant::now(), pending.into_iter().next().unwrap());
+        let decode = core.scheduler.drain_spawn_queue().next().unwrap().id;
+        assert!(crate::runtime2::driver::StreamMachine::complete_job(
+            &mut core, decode
+        ));
+        core.on_evt(Evt::Decoded {
+            seq: 1,
+            affected: AffectedEvent {
+                docs: vec![doc(1)],
+                group_parts: HashSet::new(),
+            },
+            local_principal: PeerId::new([0; 32]),
+        });
+        let seed = core.take_ready_seeds().pop().unwrap();
+        core.schedule_seed(Instant::now(), seed);
+        let task = core.scheduler.drain_spawn_queue().next().unwrap().id;
+        assert!(advance_cmds(&mut core).is_empty());
+        assert!(crate::runtime2::driver::StreamMachine::complete_job(
+            &mut core, task
+        ));
+        core.on_evt(Evt::TaskSettled {
+            key: GroupPartKey::Document(doc(1)),
+            covered: [1].into_iter().collect(),
+        });
+        assert_eq!(advance_cmds(&mut core), vec![1]);
     }
 
     #[test]
-    fn select_incremental_docs_dedups_sorts_and_propagates_errors() {
-        let ok = [
-            Ok(vec![doc(9), doc(1)]),
-            Ok(Vec::new()),
-            Ok(vec![doc(5)]),
-        ];
-        let selected = select_incremental_docs(ok).unwrap();
-        assert_eq!(
-            selected,
-            vec![doc(1), doc(5), doc(9)],
-            "affected docs only, deduped, ascending — never all known docs"
+    fn replacing_document_work_merges_coverage() {
+        let mut core = GroupPartCore::new();
+        core.schedule_seed(
+            Instant::now(),
+            GroupPartSeed::Document {
+                doc: doc(1),
+                covered: [1].into_iter().collect(),
+                affected_group_parts: HashSet::new(),
+                local_principal: PeerId::new([0; 32]),
+            },
         );
-
-        let failing: [Res<Vec<ObjId>>; 2] =
-            [Ok(vec![doc(1)]), Err(ferr!("decode failed"))];
-        assert!(select_incremental_docs(failing).is_err());
+        let old = core.scheduler.drain_spawn_queue().next().unwrap().id;
+        core.schedule_seed(
+            Instant::now(),
+            GroupPartSeed::Document {
+                doc: doc(1),
+                covered: [2].into_iter().collect(),
+                affected_group_parts: HashSet::new(),
+                local_principal: PeerId::new([0; 32]),
+            },
+        );
+        assert_eq!(
+            core.scheduler.drain_stop_queue().collect::<Vec<_>>(),
+            vec![old]
+        );
+        let replacement = core.scheduler.drain_spawn_queue().next().unwrap();
+        let GroupPartSeed::Document { covered, .. } = replacement.seed else {
+            panic!("expected document replacement");
+        };
+        assert_eq!(covered, [1, 2].into_iter().collect());
     }
-
     #[test]
     fn idle_announces_once_then_acks_newer_settlements_only() {
         let mut core = GroupPartCore::new();

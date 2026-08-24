@@ -410,6 +410,44 @@ impl BigKeyhiveHandle {
         out
     }
 
+    pub(crate) async fn document_ids_containing_group(
+        &self,
+        group_id: Identifier,
+    ) -> BTreeSet<DocumentId> {
+        self.keyhive
+            .document_ids_containing_group(KhGroupId::from(group_id))
+            .await
+            .into_iter()
+            .map(|id| DocumentId::new(id.to_bytes()))
+            .collect()
+    }
+
+    pub(crate) async fn group_ids_containing_document(
+        &self,
+        doc_id: DocumentId,
+    ) -> BTreeSet<[u8; 32]> {
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            .expect("document id must be a valid Ed25519 point");
+        let kh_doc_id = KhDocumentId::from(Identifier::from(verifying_key));
+        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
+            return BTreeSet::new();
+        };
+        let transitive = Membered::Document(kh_doc_id, doc)
+            .transitive_members()
+            .await;
+        let group_ids: Vec<KhGroupId> =
+            self.keyhive.groups().lock().await.keys().copied().collect();
+        group_ids
+            .into_iter()
+            .filter_map(|group_id| {
+                let group_identifier: Identifier = group_id.into();
+                transitive
+                    .contains_key(&group_identifier)
+                    .then_some(group_id.to_bytes())
+            })
+            .collect()
+    }
+
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
         &self.contact_card
     }

@@ -215,6 +215,104 @@ impl<Seed: Clone> Scheduler<Seed> {
     }
 }
 
+/// Keyed task replacement layered over [`Scheduler`]. A key has at most one
+/// current task; replacing it stops the old task before spawning the new one.
+#[derive(Debug)]
+pub struct KeyedScheduler<K, Seed>
+where
+    K: Eq + std::hash::Hash + Copy,
+    Seed: Clone,
+{
+    scheduler: Scheduler<Seed>,
+    active_by_key: HashMap<K, TaskId>,
+    key_by_task: HashMap<TaskId, K>,
+    seed_by_key: HashMap<K, Seed>,
+}
+
+impl<K, Seed> Default for KeyedScheduler<K, Seed>
+where
+    K: Eq + std::hash::Hash + Copy,
+    Seed: Clone,
+{
+    fn default() -> Self {
+        Self {
+            scheduler: Scheduler::default(),
+            active_by_key: HashMap::new(),
+            key_by_task: HashMap::new(),
+            seed_by_key: HashMap::new(),
+        }
+    }
+}
+
+impl<K, Seed> KeyedScheduler<K, Seed>
+where
+    K: Eq + std::hash::Hash + Copy,
+    Seed: Clone,
+{
+    /// Replace the current task for `key`, discarding its old seed.
+    pub fn replace(&mut self, now: Instant, key: K, seed: Seed) -> TaskId {
+        self.replace_with(now, key, seed, |_, new| new)
+    }
+
+    /// Replace the current task while merging its unfinished seed into the
+    /// replacement. The old task is stopped before the replacement spawns.
+    pub fn replace_with(
+        &mut self,
+        now: Instant,
+        key: K,
+        seed: Seed,
+        merge: impl FnOnce(Seed, Seed) -> Seed,
+    ) -> TaskId {
+        let seed = match self.seed_by_key.remove(&key) {
+            Some(old) => merge(old, seed),
+            None => seed,
+        };
+        if let Some(old_task) = self.active_by_key.remove(&key) {
+            self.key_by_task.remove(&old_task);
+            self.scheduler.stop(old_task);
+        }
+        let task = self.scheduler.spawn(now, seed.clone());
+        let old = self.active_by_key.insert(key, task);
+        assert!(old.is_none(), "key replacement left an old active task");
+        let old = self.key_by_task.insert(task, key);
+        assert!(old.is_none(), "scheduler task id was reused");
+        self.seed_by_key.insert(key, seed);
+        task
+    }
+
+    /// Retire a completed task. Returns false for a stale completion from a
+    /// task that was replaced or cancelled already.
+    pub fn complete(&mut self, task: TaskId) -> bool {
+        let Some(key) = self.key_by_task.remove(&task) else {
+            return false;
+        };
+        let current = self.active_by_key.remove(&key);
+        self.seed_by_key.remove(&key);
+        assert_eq!(current, Some(task), "completed task was not current");
+        self.scheduler.stop(task).is_some()
+    }
+
+    pub fn counts(&self) -> SchedulerCounts {
+        self.scheduler.counts()
+    }
+
+    pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, SpawnedTask<Seed>> {
+        self.scheduler.drain_spawn_queue()
+    }
+
+    pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId> {
+        self.scheduler.drain_stop_queue()
+    }
+
+    pub fn tick(&mut self, now: Instant) {
+        self.scheduler.tick(now);
+    }
+
+    pub fn active_task(&self, key: K) -> Option<TaskId> {
+        self.active_by_key.get(&key).copied()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +325,21 @@ mod tests {
 
     fn t(secs: u64) -> Instant {
         Instant::now() + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn keyed_scheduler_replaces_current_task() {
+        let now = t(0);
+        let mut scheduler = KeyedScheduler::<u64, Seed>::default();
+        let first = scheduler.replace(now, 1, Seed::Diff);
+        scheduler.drain_spawn_queue();
+        let second = scheduler.replace(now, 1, Seed::Sync(2));
+        assert_eq!(
+            scheduler.drain_stop_queue().collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert!(!scheduler.complete(first));
+        assert!(scheduler.complete(second));
     }
 
     #[test]

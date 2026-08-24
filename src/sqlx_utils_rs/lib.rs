@@ -28,7 +28,8 @@ impl SqlCtx {
     /// Open an isolated file-backed SQLite database that is removed when all
     /// clones of this context are dropped.
     pub async fn ephemeral_file() -> Res<Self> {
-        let directory = Arc::new(tempfile::tempdir().wrap_err("failed creating sqlite temp directory")?);
+        let directory =
+            Arc::new(tempfile::tempdir().wrap_err("failed creating sqlite temp directory")?);
         let path = directory.path().join("database.sqlite");
         let url = format!("sqlite://{}", path.display());
         let mut context = Self::open_file_url(&url).await?;

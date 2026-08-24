@@ -237,7 +237,6 @@ where
             .collect()
     }
 
-
     /// Supersede in-flight work for `job` on `stream` below `bound`: for
     /// every waiter with `cursor < bound` referencing `stream`, drop the
     /// lanes for which `keep` returns `false`. Waiters left with neither
@@ -454,7 +453,7 @@ where
     pub fn is_settled(&self, stream: &StreamId) -> bool {
         self.streams
             .get(stream)
-            .is_some_and(WatermarkBook::is_settled)
+            .map_or(true, WatermarkBook::is_settled)
     }
 
     fn stream_book_mut(&mut self, stream: StreamId) -> &mut WatermarkBook<Cursor> {
@@ -544,9 +543,10 @@ mod tests {
 
         // bound=4 covers cursor 3 only; its membership lane is kept, so
         // nothing is freed and nothing advances yet.
-        assert!(m
-            .supersede("p", 9, 4, |lane| lane == Lane::Membership)
-            .is_empty());
+        assert!(
+            m.supersede("p", 9, 4, |lane| lane == Lane::Membership)
+                .is_empty()
+        );
         assert_eq!(m.watermark(&"p"), None);
 
         // Membership completion for cursor 3 unblocks it up to 3; cursor 4
@@ -668,4 +668,3 @@ mod tests {
         assert!(m.is_settled(&"p"));
     }
 }
-

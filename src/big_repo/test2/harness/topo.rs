@@ -145,7 +145,14 @@ impl Node {
                 storage,
                 scope_key: Arc::from("big-repo-test"),
                 hidden_parts: Default::default(),
-                automerge_source_parts: Some(HashSet::from([crate::GLOBAL_PART_ID])),
+                // Frontier part-watching is opt-in: only tests exercising the
+                // AutomergeFrontierWorker enable source parts (via the repo
+                // config directly). Watching GLOBAL here made every node
+                // acquire + materialize every doc marker it synced, which is
+                // not normal-role behavior.
+                automerge_frontier_scope: Default::default(),
+                causal_checkpoint_scope: Default::default(),
+                group_part_scope: Default::default(),
             },
             (*store).clone(),
         )

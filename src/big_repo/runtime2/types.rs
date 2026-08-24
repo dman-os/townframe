@@ -276,6 +276,64 @@ impl LiveDocBundle {
     }
 }
 
+/// Which keyhive groups a background worker (automerge frontier, causal
+/// checkpoint, group part) does work for.
+///
+/// This is transitional, static boot configuration: the intended end state is
+/// a dedicated admission-log-driven worker maintaining a durable per-worker
+/// observed-group set, so operators gain dynamic group sponsorship without
+/// restarting the repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WorkerGroupScope {
+    /// Work on documents from every keyhive group. The default everywhere:
+    /// existing deployments and tests keep today's semantics.
+    #[default]
+    All,
+    /// Only documents that belong to at least one of these keyhive group
+    /// authority ids. Group membership is evaluated against live keyhive
+    /// state at event-processing time — never against group-part assignment —
+    /// so eligibility never races the group-part worker, and a document that
+    /// joins an eligible group later is picked up by its next admitted event
+    /// (the delegating event itself).
+    Groups(std::collections::HashSet<[u8; 32]>),
+}
+
+impl WorkerGroupScope {
+    /// Is a document whose containing-group ids are `doc_groups` eligible for
+    /// this worker?
+    pub fn admits_doc_groups(&self, doc_groups: &std::collections::BTreeSet<[u8; 32]>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Groups(scope) => doc_groups.iter().any(|group| scope.contains(group)),
+        }
+    }
+
+    pub fn admits_group(&self, group: &[u8; 32]) -> bool {
+        match self {
+            Self::All => true,
+            Self::Groups(scope) => scope.contains(group),
+        }
+    }
+}
+
+#[cfg(test)]
+mod worker_scope_tests {
+    use super::WorkerGroupScope;
+    use std::collections::{BTreeSet, HashSet};
+
+    #[test]
+    fn all_and_selective_scopes_match_group_membership() {
+        let eligible = [7; 32];
+        let other = [9; 32];
+        let groups = BTreeSet::from([eligible]);
+        assert!(WorkerGroupScope::All.admits_doc_groups(&groups));
+        assert!(WorkerGroupScope::Groups(HashSet::from([eligible])).admits_doc_groups(&groups));
+        assert!(!WorkerGroupScope::Groups(HashSet::from([other])).admits_doc_groups(&groups));
+        assert!(WorkerGroupScope::Groups(HashSet::from([eligible])).admits_group(&eligible));
+        assert!(!WorkerGroupScope::Groups(HashSet::from([other])).admits_group(&eligible));
+    }
+}
+
 // ─── Keyhive event type aliases ────────────────────────────────────────────────
 
 pub(crate) type SignedAddKeyOp =

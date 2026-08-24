@@ -1,40 +1,49 @@
 //! Keyhive change notification dispatcher.
 //!
 //! One dispatcher owns the fan-out of payload-free keyhive change hints to
-//! subscribed peers. It replaces the per-subscription broadcast/drain tasks:
-//! each change batch is classified once (against the published cache
-//! snapshot) and enqueued per destination peer in a [`KeyedBatcher`] with a
-//! [`DebouncePolicy`], so bursts collapse into a single wake-up per peer and
-//! continuous traffic cannot starve delivery.
+//! subscribed peers. Its truth source is the durable admission log
+//! ([`SqliteBigRepoStore::admission_events_after`]), tailed with an in-memory
+//! cursor: every incorporated event is classified and fanned out exactly
+//! once, in order, regardless of channel races or restarts. The live change
+//! channel (`report` / `try_send_change_event`) is only a wake-up hint whose
+//! loss costs latency bounded by [`ADMISSION_IDLE_POLL`], never a hint.
 //!
-//! The dispatcher owns no clocks: the surrounding task supplies `now` and
-//! performs delivery. Notifications are lossy hints — reconnect's initial
-//! pull repairs missed hints.
+//! Each admitted batch is classified once against the published visibility
+//! cache and enqueued per destination peer in a [`KeyedBatcher`] with a
+//! [`DebouncePolicy`], so bursts collapse into a single wake-up per peer.
+//!
+//! Classified hashes wake exactly the peers whose visibility covers them.
+//! Unclassified hashes — events the visibility projection does not attribute
+//! to any viewer (contact-card prekey ops are the known case) — fall back to
+//! waking every connected peer except the source, matching their
+//! broadcast-like audience. Only classification *errors* hold the cursor for
+//! retry; nothing is ever silently skipped.
 
 use crate::handler::BigRepoKeyhiveProtocol;
 use crate::interlude::*;
 use crate::rpc::KeyhiveChangedRpcEvent;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use crate::store::sqlite::SqliteBigRepoStore;
+use std::time::{Duration, Instant};
 use subduction_keyhive::{KeyhivePeerId, message::EventHash};
 use utils_rs::batching::{DebouncePolicy, KeyedBatcher};
 use uuid::Uuid;
 
-/// A change event reported to the dispatcher.
-///
-/// `source` is the peer the events were learned from (`None` for locally
-/// created events); it is excluded from that batch's conservative fallback.
-pub(crate) struct KeyhiveChangeEvent {
-    pub hashes: Vec<EventHash>,
-    pub source: Option<KeyhivePeerId>,
-}
+/// Ceiling on how long the admission log can go unpolled when all live hints
+/// are lost. Hints make steady-state latency negligible; this only bounds the
+/// recovery window. Kept tight because several consumers (stress bootstrap
+/// membership propagation) are notification-driven.
+const ADMISSION_IDLE_POLL: Duration = Duration::from_millis(250);
 
-/// The accumulated per-peer notification payload. Payload-free on the wire;
-/// the flag feeds counters and traces.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PendingKeyhiveNotification {
-    /// Whether an unclassified (pending/lagged) change forced this wake-up.
-    pub conservative: bool,
+/// Maximum admission rows classified per poll.
+const ADMISSION_BATCH: u32 = 256;
+
+/// A change hint reported by producers. The durable log already carries the
+/// hashes; this only accelerates the next poll.
+pub(crate) struct KeyhiveChangeEvent {
+    #[allow(dead_code)]
+    pub hashes: Vec<EventHash>,
+    #[allow(dead_code)]
+    pub source: Option<KeyhivePeerId>,
 }
 
 #[derive(Clone)]
@@ -50,22 +59,20 @@ pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerId, Sub
 pub(crate) struct KeyhiveChangeDispatcher {
     events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
     subscriptions: SubscriptionMap,
-    overflow: Arc<AtomicBool>,
 }
 
 impl KeyhiveChangeDispatcher {
-    /// Report a batch of newly incorporated event hashes.
+    /// Nudge the dispatcher to poll the admission log soon.
     ///
-    /// Fire-and-forget: a full channel marks overflow and triggers a
-    /// conservative wake-up once congestion clears.
+    /// Fire-and-forget: a full channel costs one [`ADMISSION_IDLE_POLL`] of
+    /// extra latency, never a missed notification.
     pub(crate) fn report(&self, hashes: Vec<EventHash>, source: Option<KeyhivePeerId>) {
-        try_send_change_event(&self.events_tx, &self.overflow, hashes, source);
+        try_send_change_event(&self.events_tx, hashes, source);
     }
 }
 
 pub(crate) fn try_send_change_event(
     events_tx: &tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
-    overflow: &AtomicBool,
     hashes: Vec<EventHash>,
     source: Option<KeyhivePeerId>,
 ) {
@@ -75,8 +82,9 @@ pub(crate) fn try_send_change_event(
     if let Err(err) = events_tx.try_send(KeyhiveChangeEvent { hashes, source }) {
         match err {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                overflow.store(true, Ordering::Release);
-                warn_loc!("keyhive change hint dropped: dispatcher channel full");
+                tracing::debug!(
+                    "keyhive change hint dropped: dispatcher channel full; admission tail will catch up"
+                );
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                 panic!(
@@ -149,22 +157,21 @@ impl KeyhiveChangeDispatcher {
 /// The caller creates the events channel and passes both ends: `events_tx`
 /// feeds the post-ingestion change reporter (remote events) and
 /// `KeyhiveChangeNotifier::note_local_keyhive_changed` (local events);
-/// `events_rx` is drained by the task.
+/// `events_rx` is drained by the task as wake-up hints.
 pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
+    store: SqliteBigRepoStore,
     events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
     events_rx: tokio::sync::mpsc::Receiver<KeyhiveChangeEvent>,
     subscriptions: SubscriptionMap,
-    overflow: Arc<AtomicBool>,
     policy: DebouncePolicy,
 ) -> (KeyhiveChangeDispatcher, tokio::task::JoinHandle<()>) {
     let handle = KeyhiveChangeDispatcher {
         events_tx,
         subscriptions: Arc::clone(&subscriptions),
-        overflow: Arc::clone(&overflow),
     };
     let join_handle = tokio::spawn(async move {
-        run_dispatcher(events_rx, protocol, subscriptions, overflow, policy).await;
+        run_dispatcher(events_rx, protocol, store, subscriptions, policy).await;
     });
     (handle, join_handle)
 }
@@ -172,67 +179,78 @@ pub(crate) fn spawn_keyhive_dispatcher(
 async fn run_dispatcher(
     mut events_rx: tokio::sync::mpsc::Receiver<KeyhiveChangeEvent>,
     protocol: BigRepoKeyhiveProtocol,
+    store: SqliteBigRepoStore,
     subscriptions: SubscriptionMap,
-    overflow: Arc<AtomicBool>,
     policy: DebouncePolicy,
 ) {
-    let mut batcher: KeyedBatcher<PeerId, PendingKeyhiveNotification, DebouncePolicy> =
-        KeyedBatcher::new(
-            policy,
-            |_: &PendingKeyhiveNotification| 0,
-            |acc, next| {
-                acc.conservative |= next.conservative;
-            },
-        );
+    let mut batcher: KeyedBatcher<PeerId, (), DebouncePolicy> =
+        KeyedBatcher::new(policy, |_: &()| 0, |(), ()| {});
+    // Boot at the current head: pre-boot incorporations are covered by each
+    // subscriber's initial pull, same as before the admission tail existed.
+    let mut cursor = store.admission_head().await.expect(
+        "admission head must be readable at dispatcher boot; storage failures are fatal here",
+    );
     loop {
-        if overflow.swap(false, Ordering::AcqRel) {
-            let connected: Vec<PeerId> = surelock::key::lock_scope(|key| {
-                let (subs, _key) = key.lock(&subscriptions);
-                subs.keys().copied().collect()
-            });
-            let now = Instant::now();
-            for peer_id in connected {
-                batcher.push(
-                    now,
-                    peer_id,
-                    PendingKeyhiveNotification { conservative: true },
-                );
+        // Tail the durable admission log until dry, blocked, or failing.
+        loop {
+            let rows = match store.admission_events_after(cursor, ADMISSION_BATCH).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    warn_loc!(%error, "admission log tail failed; retrying");
+                    break;
+                }
+            };
+            if rows.is_empty() {
+                break;
+            }
+            if classify_rows(&mut batcher, &protocol, &subscriptions, &rows).await {
+                cursor = rows.last().map(|row| row.seq).unwrap_or(cursor);
+            }
+            // On classification error the cursor stays put: the same rows are
+            // retried after whatever storage hiccup cleared.
+            if rows.len() < ADMISSION_BATCH as usize {
+                break;
             }
         }
-        let deadline = batcher.next_deadline();
-        let sleep = match deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline.into()),
-            None => {
-                tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_secs(3600))
-            }
-        };
+
+        let deadline = tokio::time::Instant::from_std(
+            batcher
+                .next_deadline()
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))
+                .min(Instant::now() + ADMISSION_IDLE_POLL),
+        );
         tokio::select! {
             evt = events_rx.recv() => {
                 match evt {
-                    Some(evt) => {
-                        classify_and_enqueue(&mut batcher, &protocol, &subscriptions, evt).await;
-                    }
+                    // Wake-up hint only: the loop re-tails the durable log.
+                    Some(_) => {}
                     None => break,
                 }
             }
-            _ = sleep => {
-                let now = Instant::now();
-                let due = batcher.take_due(now);
+            _ = tokio::time::sleep_until(deadline) => {
+                let due = batcher.take_due(Instant::now());
                 deliver(&subscriptions, due).await;
             }
         }
     }
 }
 
-/// Classify one change batch against the published cache snapshot and enqueue
-/// the selected peers in the batcher.
-async fn classify_and_enqueue(
-    batcher: &mut KeyedBatcher<PeerId, PendingKeyhiveNotification, DebouncePolicy>,
+/// Classify one admitted batch and enqueue the selected peers for debounced
+/// delivery. Rows are grouped by source so the originating peer is never
+/// woken about its own events.
+///
+/// Returns `true` when the caller may advance its cursor past the batch:
+/// every hash either classified to explicit targets or fell back to the
+/// conservative wake (unattributable events such as contact-card prekey ops,
+/// whose audience is effectively everyone connected). Returns `false` —
+/// holding the cursor — only when classification errored (transient IO;
+/// the batch is retried).
+async fn classify_rows(
+    batcher: &mut KeyedBatcher<PeerId, (), DebouncePolicy>,
     protocol: &BigRepoKeyhiveProtocol,
     subscriptions: &SubscriptionMap,
-    evt: KeyhiveChangeEvent,
-) {
-    let now = Instant::now();
+    rows: &[crate::store::sqlite::AdmissionEventRow],
+) -> bool {
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         subs.keys()
@@ -240,60 +258,52 @@ async fn classify_and_enqueue(
             .collect()
     });
     if connected.is_empty() {
-        return;
+        return true;
     }
-    let changed: BTreeSet<EventHash> = evt.hashes.iter().copied().collect();
-    let targets = match protocol
-        .notification_targets(subduction_keyhive::VisibilityBatch {
-            connected: &connected,
-            changed: &changed,
-        })
-        .await
-    {
-        Ok(targets) => targets,
-        Err(error) => {
-            // Classification failed (e.g. cache refresh error): fall back to
-            // the conservative branch — wake every connected peer except the
-            // source. Notifications are lossy hints; a missed classification
-            // must not silently drop a wake-up.
-            tracing::warn!(%error, "keyhive notification classification failed; conservative fallback");
-            conservative_fanout(batcher, &connected, evt.source.as_ref(), now);
-            return;
-        }
-    };
-    for peer in &targets.peers {
-        if Some(peer) != evt.source.as_ref() {
-            let peer_id = PeerId::new(*peer.verifying_key());
-            batcher.push(now, peer_id, PendingKeyhiveNotification::default());
-        }
-    }
-    if !targets.unclassified.is_empty() {
-        // Pending/lagged hashes: conservatively wake every connected peer
-        // except the known source.
-        conservative_fanout(batcher, &connected, evt.source.as_ref(), now);
-    }
-}
 
-fn conservative_fanout(
-    batcher: &mut KeyedBatcher<PeerId, PendingKeyhiveNotification, DebouncePolicy>,
-    connected: &BTreeSet<KeyhivePeerId>,
-    source: Option<&KeyhivePeerId>,
-    now: Instant,
-) {
-    for peer in connected {
-        if Some(peer) != source {
-            let peer_id = PeerId::new(*peer.verifying_key());
-            batcher.push(
-                now,
-                peer_id,
-                PendingKeyhiveNotification { conservative: true },
-            );
+    // Group hashes by learning source for echo suppression.
+    let mut grouped: BTreeMap<Option<KeyhivePeerId>, BTreeSet<EventHash>> = BTreeMap::new();
+    for row in rows {
+        let source = row
+            .source_id
+            .as_deref()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .map(KeyhivePeerId::from_bytes);
+        grouped.entry(source).or_default().insert(row.event_hash);
+    }
+
+    let now = Instant::now();
+    for (source, changed) in grouped {
+        let targets = match protocol
+            .notification_targets(subduction_keyhive::VisibilityBatch {
+                connected: &connected,
+                changed: &changed,
+            })
+            .await
+        {
+            Ok(targets) => targets,
+            Err(error) => {
+                warn_loc!(%error, "keyhive notification classification failed; retrying");
+                return false;
+            }
+        };
+        // Unattributable hashes (prekey/contact-card ops) wake everyone:
+        // the visibility projection has no narrower audience for them.
+        let unattributed = !targets.unclassified.is_empty();
+        for peer in &connected {
+            let is_source = Some(peer) == source.as_ref();
+            let selected = targets.peers.contains(peer) || (unattributed && !is_source);
+            if selected {
+                let peer_id = PeerId::new(*peer.verifying_key());
+                batcher.push(now, peer_id, ());
+            }
         }
     }
+    true
 }
 
 /// Deliver due notifications concurrently, dropping subscriptions whose stream closed.
-async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, PendingKeyhiveNotification)>) {
+async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
     if due.is_empty() {
         return;
     }
@@ -301,35 +311,27 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, PendingKeyhi
         PeerId,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
-        PendingKeyhiveNotification,
     )> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         due.into_iter()
-            .filter_map(|(peer_id, notif)| {
+            .filter_map(|(peer_id, ())| {
                 subs.get(&peer_id)
-                    .map(|entry| (peer_id, entry.id, entry.tx.clone(), notif))
+                    .map(|entry| (peer_id, entry.id, entry.tx.clone()))
             })
             .collect()
     });
-    let delivery_futures =
-        targets
-            .into_iter()
-            .map(|(peer_id, sub_id, tx, notification)| async move {
-                if tx
-                    .send(KeyhiveChangedRpcEvent { initial: false })
-                    .await
-                    .is_err()
-                {
-                    Some((peer_id, sub_id))
-                } else {
-                    tracing::debug!(
-                        %peer_id,
-                        conservative = notification.conservative,
-                        "keyhive change notification delivered"
-                    );
-                    None
-                }
-            });
+    let delivery_futures = targets.into_iter().map(|(peer_id, sub_id, tx)| async move {
+        if tx
+            .send(KeyhiveChangedRpcEvent { initial: false })
+            .await
+            .is_err()
+        {
+            Some((peer_id, sub_id))
+        } else {
+            tracing::debug!(%peer_id, "keyhive change notification delivered");
+            None
+        }
+    });
     let results = futures::future::join_all(delivery_futures).await;
     let failed: Vec<(PeerId, Uuid)> = results.into_iter().flatten().collect();
     if !failed.is_empty() {

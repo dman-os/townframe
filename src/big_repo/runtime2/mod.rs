@@ -3,8 +3,8 @@ use future_form::FutureForm;
 
 pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
-mod group_part_worker;
 pub(crate) mod driver;
+mod group_part_worker;
 
 pub use automerge_frontier_worker::{
     AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_docs_part_id,
@@ -40,6 +40,7 @@ pub use lease::{
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub(crate) use native::KeyhiveChangeNotifier;
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
+pub use types::WorkerGroupScope;
 
 mod doc_worker;
 mod handle;

@@ -29,7 +29,6 @@ use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
 use utils_rs::lru::KeyedLruPool;
 
-
 #[cfg(test)]
 mod tests;
 
@@ -476,6 +475,11 @@ pub(crate) struct KeyhiveEventRow {
 pub(crate) struct AdmissionEventRow {
     pub(crate) seq: u64,
     pub(crate) bytes: Vec<u8>,
+    /// Hash of the admitted event, for classification without rehashing.
+    pub(crate) event_hash: [u8; 32],
+    /// Verifying key of the peer the events were learned from (`None` for
+    /// locally created events).
+    pub(crate) source_id: Option<Vec<u8>>,
 }
 
 /// Inline sink for durable Keyhive incorporation records.
@@ -2496,8 +2500,7 @@ impl SqliteBigRepoStore {
                     let old = self
                         .load_member_state(&mut tx, part_id, mutation.doc)
                         .await?;
-                    transition_event_payloads
-                        .insert((part_id, mutation.doc), payload.clone());
+                    transition_event_payloads.insert((part_id, mutation.doc), payload.clone());
                     transitions.push((
                         part_id,
                         mutation.doc,
@@ -2908,7 +2911,11 @@ impl SqliteBigRepoStore {
                     .push(", ")
                     .push_bind(hash.as_bytes().as_slice())
                     .push(", ")
-                    .push_bind(payloads.get(hash.as_bytes().as_slice()).expect(ERROR_IMPOSSIBLE))
+                    .push_bind(
+                        payloads
+                            .get(hash.as_bytes().as_slice())
+                            .expect(ERROR_IMPOSSIBLE),
+                    )
                     .push(", ")
                     .push_bind(&source_id)
                     .push(")");
@@ -2917,7 +2924,9 @@ impl SqliteBigRepoStore {
             query.build().execute(&mut *tx).await?;
         }
         tx.commit().await?;
-        Ok(Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE)))
+        Ok(Self::u64_from_db(
+            head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE),
+        ))
     }
 
     /// Current admission-log head (0 when empty).
@@ -2939,7 +2948,7 @@ impl SqliteBigRepoStore {
         limit: u32,
     ) -> Res<Vec<AdmissionEventRow>> {
         let rows = sqlx::query(
-            "SELECT seq, event_bytes
+            "SELECT seq, event_hash, source_id, event_bytes
              FROM big_repo_keyhive_admission_log
              WHERE scope_id = ?1 AND seq > ?2
              ORDER BY seq
@@ -2954,6 +2963,11 @@ impl SqliteBigRepoStore {
             .map(|row| {
                 Ok(AdmissionEventRow {
                     seq: Self::u64_from_db(row.try_get("seq")?),
+                    event_hash: row
+                        .try_get::<Vec<u8>, _>("event_hash")?
+                        .try_into()
+                        .expect(ERROR_IMPOSSIBLE),
+                    source_id: row.try_get("source_id")?,
                     bytes: row.try_get("event_bytes")?,
                 })
             })
