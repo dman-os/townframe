@@ -92,7 +92,7 @@ async fn test_plug_add_emits_no_event() -> Res<()> {
             event,
             PlugsEvent::PlugEnabled { .. }
                 | PlugsEvent::PlugDisabled { .. }
-                | PlugsEvent::PlugUpdated { .. }
+                | PlugsEvent::EnabledPlugUpdated { .. }
         ) {
             saw_enablement = true;
         }
@@ -417,7 +417,8 @@ async fn test_view_provider_bundle_must_exist() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_custom_view_local_reference_must_exist() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_custom_view_local_reference_must_exist").await?;
+    let ctx =
+        crate::test_support::test_cx("plugs_test_custom_view_local_reference_must_exist").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let (_view_temp_dir, file_url) = temp_component_url().await?;
 
@@ -473,7 +474,10 @@ async fn test_custom_view_local_reference_must_exist() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_custom_view_dependency_requires_declared_dependency() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_custom_view_dependency_requires_declared_dependency").await?;
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_custom_view_dependency_requires_declared_dependency",
+    )
+    .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let mut plug = mock_plug("custom-view-dependency-missing");
@@ -509,7 +513,9 @@ async fn test_custom_view_dependency_requires_declared_dependency() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_custom_view_dependency_requires_target_view() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_custom_view_dependency_requires_target_view").await?;
+    let ctx =
+        crate::test_support::test_cx("plugs_test_custom_view_dependency_requires_target_view")
+            .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let (_provider_temp_dir, file_url) = temp_component_url().await?;
 
@@ -642,7 +648,9 @@ async fn test_plug_component_url_validation() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_plug_reference_json_path_must_exist_in_schema").await?;
+    let ctx =
+        crate::test_support::test_cx("plugs_test_plug_reference_json_path_must_exist_in_schema")
+            .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let mut plug = mock_plug("ref-path");
@@ -671,7 +679,10 @@ async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_plug_at_commit_json_path_type_must_be_array_of_strings() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_plug_at_commit_json_path_type_must_be_array_of_strings").await?;
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_plug_at_commit_json_path_type_must_be_array_of_strings",
+    )
+    .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let mut plug = mock_plug("bad-at-commit");
@@ -732,7 +743,8 @@ async fn test_processor_routine_must_exist() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_processor_predicate_tags_must_be_in_scope").await?;
+    let ctx = crate::test_support::test_cx("plugs_test_processor_predicate_tags_must_be_in_scope")
+        .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let temp_dir = tempfile::tempdir()?;
@@ -792,7 +804,10 @@ async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_command_invoke_acl_rejects_target_without_dependency").await?;
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_command_invoke_acl_rejects_target_without_dependency",
+    )
+    .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let temp_dir = tempfile::tempdir()?;
@@ -875,7 +890,8 @@ async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_command_invoke_acl_rejects_missing_command() -> Res<()> {
-    let ctx = crate::test_support::test_cx("plugs_test_command_invoke_acl_rejects_missing_command").await?;
+    let ctx = crate::test_support::test_cx("plugs_test_command_invoke_acl_rejects_missing_command")
+        .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
 
     let temp_dir = tempfile::tempdir()?;

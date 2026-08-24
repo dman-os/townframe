@@ -15,8 +15,6 @@ impl Default for OciImportOptions {
     }
 }
 
-
-
 // oci support
 impl PlugsRepo {
     /// ADR 007 §8: authoring import from a local OCI layout. Pulls the
@@ -329,5 +327,4 @@ impl PlugsRepo {
             .await
             .wrap_err_with(|| format!("error reading OCI layout blob '{}'", path.display()))
     }
-
 }

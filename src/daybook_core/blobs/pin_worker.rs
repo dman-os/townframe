@@ -813,7 +813,7 @@ impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
             },
             crate::rt::switch::SwitchEvent::Plugs(event) => match &**event {
                 crate::plugs::PlugsEvent::PlugEnabled { id, .. }
-                | crate::plugs::PlugsEvent::PlugUpdated { id, .. } => {
+                | crate::plugs::PlugsEvent::EnabledPlugUpdated { id, .. } => {
                     self.worker
                         .handle_work_item(BlobPinWorkItem::PlugUpsert {
                             plug_id: id.to_string(),
@@ -827,7 +827,8 @@ impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
                         })
                         .await?;
                 }
-                crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => {}
+                crate::plugs::PlugsEvent::PlugsConfigChanged { .. }
+                | crate::plugs::PlugsEvent::ManifestRejected { .. } => {}
             },
             crate::rt::switch::SwitchEvent::Dispatch(_)
             | crate::rt::switch::SwitchEvent::Config(_) => {}
@@ -1012,7 +1013,7 @@ mod tests {
         manifest.version = "0.2.0".parse().unwrap();
         let doc_id_v2 = plugs.add(manifest).await?;
 
-        // 4. Re-pin to the new doc (same plug id, ref differs → PlugUpdated)
+        // 4. Re-pin to the new doc (same plug id, ref differs → EnabledPlugUpdated)
         //    → the pin worker reindexes with the new manifest and unpins.
         let ref_url_v2: url::Url = format!(
             "db+facet:///{doc_id_v2}/org.example.daybook.plugManifest/main?branch=main"

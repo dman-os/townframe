@@ -1139,8 +1139,9 @@ mod tests {
                 SwitchEvent::Plugs(event) => match &**event {
                     PlugsEvent::PlugEnabled { origin, .. }
                     | PlugsEvent::PlugDisabled { origin, .. }
-                    | PlugsEvent::PlugUpdated { origin, .. }
-                    | PlugsEvent::PlugsConfigChanged { origin, .. } => origin.clone(),
+                    | PlugsEvent::EnabledPlugUpdated { origin, .. }
+                    | PlugsEvent::PlugsConfigChanged { origin, .. }
+                    | PlugsEvent::ManifestRejected { origin, .. } => origin.clone(),
                 },
                 SwitchEvent::Dispatch(event) => match &**event {
                     DispatchEvent::DispatchAdded { origin, .. }

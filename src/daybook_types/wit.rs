@@ -81,11 +81,49 @@ pub mod doc {
         PlugsConfig(PlugsConfig),
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct KnownPlug {
+        pub latest: String,
+        pub latest_version: String,
+        pub latest_rejection: Option<String>,
+        pub last_valid: String,
+        pub last_valid_version: String,
+        pub last_enabled_version: Option<String>,
+    }
+
+    impl From<&root_doc::KnownPlug> for KnownPlug {
+        fn from(track: &root_doc::KnownPlug) -> Self {
+            KnownPlug {
+                latest: track.latest.to_string(),
+                latest_version: track.latest_version.clone(),
+                latest_rejection: track.latest_rejection.clone(),
+                last_valid: track.last_valid.to_string(),
+                last_valid_version: track.last_valid_version.clone(),
+                last_enabled_version: track.last_enabled_version.clone(),
+            }
+        }
+    }
+
+    impl TryFrom<KnownPlug> for root_doc::KnownPlug {
+        type Error = eyre::Report;
+        fn try_from(track: KnownPlug) -> Res<Self> {
+            Ok(root_doc::KnownPlug {
+                latest: track.latest.parse()?,
+                latest_version: track.latest_version.clone(),
+                latest_rejection: track.latest_rejection.clone(),
+                last_valid: track.last_valid.parse()?,
+                last_valid_version: track.last_valid_version.clone(),
+                last_enabled_version: track.last_enabled_version.clone(),
+            })
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct PlugsConfig {
         pub enabled: Vec<(String, String)>,
-        pub known_manifests: Vec<(String, String)>,
+        pub known_plugs: Vec<(String, KnownPlug)>,
         pub plug_config_doc_ids: Vec<(String, String)>,
     }
 
@@ -332,10 +370,10 @@ pub mod doc {
                         .into_iter()
                         .map(|(key, url)| (key, url.to_string()))
                         .collect(),
-                    known_manifests: val
-                        .known_manifests
+                    known_plugs: val
+                        .known_plugs
                         .into_iter()
-                        .map(|(key, url)| (key, url.to_string()))
+                        .map(|(key, track)| (key, KnownPlug::from(&track)))
                         .collect(),
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 }),
@@ -470,10 +508,12 @@ pub mod doc {
                         .into_iter()
                         .map(|(key, url)| Ok((key, url.parse()?)))
                         .collect::<Result<_, eyre::Report>>()?,
-                    known_manifests: val
-                        .known_manifests
+                    known_plugs: val
+                        .known_plugs
                         .into_iter()
-                        .map(|(key, url)| Ok((key, url.parse()?)))
+                        .map(|(key, track)| {
+                            Ok((key, root_doc::KnownPlug::try_from(track)?))
+                        })
                         .collect::<Result<_, eyre::Report>>()?,
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 }),

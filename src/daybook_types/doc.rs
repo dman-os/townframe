@@ -31,6 +31,36 @@ pub struct FacetMeta {
     pub deleted_at: Vec<Timestamp>,
 }
 
+/// ADR 007 §5: the per-plug track in the plugg config facet. We keep info
+/// about the activated and latest manifests of plugs — not an index of all
+/// version manifests. `latest` is the highest version seen (valid or
+/// rejected, with the rejection reason); `last_valid` is the ref the
+/// runtime cache materializes (equals `latest` when the latest is valid);
+/// `last_enabled_version` is the upgrade-compat baseline. Versions are
+/// stored as semver strings (semver is a `manifest`-feature-only dep here).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct KnownPlug {
+    /// full ref (pinned heads) at the latest version's manifest.
+    pub latest: Url,
+    /// semver string of the latest version.
+    #[serde(default)]
+    pub latest_version: String,
+    /// rejection reason of the latest version; None when it is valid.
+    #[serde(default)]
+    pub latest_rejection: Option<String>,
+    /// full ref at the last valid version's manifest (the cache baseline).
+    pub last_valid: Url,
+    /// semver string of the last valid version.
+    #[serde(default)]
+    pub last_valid_version: String,
+    /// version last enabled, if ever — the upgrade-compat baseline.
+    #[serde(default)]
+    pub last_enabled_version: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
@@ -192,11 +222,11 @@ crate::define_enum_and_tag!(
             /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
             ///            ?branch=<branch>&at=<head1>|<head2>
             pub enabled: HashMap<String, Url>,
-            /// Known manifest docs (plug id -> full ref), the ADR 007 §5
-            /// source of truth for known plugs (replaces the facet-set index
-            /// derivation).
+            /// Known plugs (plug id -> track): the latest version seen with
+            /// its validity status + the last valid/enabled versions (ADR
+            /// 007 §5; replaces the facet-set index derivation).
             #[serde(default)]
-            pub known_manifests: HashMap<String, Url>,
+            pub known_plugs: HashMap<String, KnownPlug>,
             pub plug_config_doc_ids: HashMap<String, String>,
         },
     }

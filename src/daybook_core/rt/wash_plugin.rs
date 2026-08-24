@@ -336,10 +336,12 @@ mod binds_guest {
                         .into_iter()
                         .map(|(key, url)| Ok((key, url.parse()?)))
                         .collect::<Result<_, eyre::Report>>()?,
-                    known_manifests: val
-                        .known_manifests
+                    known_plugs: val
+                        .known_plugs
                         .into_iter()
-                        .map(|(key, url)| Ok((key, url.parse()?)))
+                        .map(|(key, track)| {
+                            Ok((key, root_doc::KnownPlug::try_from(track)?))
+                        })
                         .collect::<Result<_, eyre::Report>>()?,
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 })

@@ -1,7 +1,7 @@
 use super::*;
 
 impl PlugsRepo {
-    /// Comprehensive validation for an incoming plug.
+    /// Comprehensive validation for an incoming plug (authoring path).
     ///
     /// This method checks for:
     /// - Structural validity (via garde).
@@ -10,7 +10,32 @@ impl PlugsRepo {
     /// - Internal consistency (commands referencing existing routines).
     /// - ACL scope restrictions.
     /// - Versioning rules (no breaking changes in non-major updates).
+    ///
+    /// The version/compat baseline is the last VALID version in the derived
+    /// cache (the authoring path is strict). The remote manifest-change gate
+    /// uses [`validate_structure`] + a last-ENABLED-version baseline instead.
     pub async fn validate_incoming_plug(&self, manifest: &manifest::PlugManifest) -> Res<()> {
+        self.validate_structure(manifest).await?;
+        let plug_id = manifest.id();
+        let existing = self.get_known(&plug_id).await;
+        if let Some(old) = &existing {
+            if manifest.version <= old.version {
+                eyre::bail!(
+                    "Version must be greater than existing version (current: {}, incoming: {})",
+                    old.version,
+                    manifest.version
+                );
+            }
+            check_breaking_changes(manifest, old)?;
+        }
+        Ok(())
+    }
+
+    /// Structural validity + tag clashes + deps + ACLs + components — no
+    /// version baseline. Used by the record gate (remote manifest changes)
+    /// and by activation gates; the compat diff is applied separately
+    /// against the last enabled version.
+    pub async fn validate_structure(&self, manifest: &manifest::PlugManifest) -> Res<()> {
         use garde::Validate;
 
         // -- Structural Validation --
@@ -34,8 +59,6 @@ impl PlugsRepo {
             )?;
         }
 
-        let plug_id = manifest.id();
-        let existing = self.get_known(&plug_id).await;
         let dependency_base_ids: HashSet<String> = manifest
             .dependencies
             .keys()
@@ -43,60 +66,6 @@ impl PlugsRepo {
             .collect::<Res<HashSet<_>>>()?;
         let mut cached_view_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
             HashMap::new();
-
-        // -- Versioning and Breaking Change Protection --
-        // To maintain stability, we don't allow breaking changes (like removing commands
-        // or changing their parameters) in minor or patch updates.
-        if let Some(old) = &existing {
-            if manifest.version <= old.version {
-                eyre::bail!(
-                    "Version must be greater than existing version (current: {}, incoming: {})",
-                    old.version,
-                    manifest.version
-                );
-            }
-
-            let is_major = manifest.version.major > old.version.major
-                || (old.version.major == 0 && manifest.version.minor > old.version.minor);
-
-            if !is_major {
-                // In non-major updates, we must ensure existing commands are preserved
-                // to avoid breaking integrations or automated workflows.
-                for (old_cmd_name, old_cmd) in &old.commands {
-                    let new_cmd = manifest.commands.get(old_cmd_name);
-                    if let Some(new_cmd) = new_cmd {
-                        // Deets define the routine and parameters; changing them breaks callers.
-                        // FIXME: we need a better comparison for CommandDeets if it's complex
-                        if format!("{:?}", new_cmd.deets) != format!("{:?}", old_cmd.deets) {
-                            eyre::bail!(
-                                "Breaking change: command '{}' deets cannot change in non-major version update",
-                                old_cmd_name
-                            );
-                        }
-                    } else {
-                        eyre::bail!(
-                            "Breaking change: command '{}' cannot be removed in non-major version update",
-                            old_cmd_name
-                        );
-                    }
-                }
-            }
-
-            // We also check that property keys aren't removed or their schemas don't become incompatible.
-            for old_prop in &old.facets {
-                if let Some(new_prop) = manifest
-                    .facets
-                    .iter()
-                    .find(|prop| prop.key_tag == old_prop.key_tag)
-                    && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema)
-                {
-                    eyre::bail!(
-                        "Incompatible schema for property tag '{}'",
-                        old_prop.key_tag
-                    );
-                }
-            }
-        }
 
         // -- Property Tag Clash Detection --
         // Many parts of the system rely on property tags being unique identifiers.
@@ -719,6 +688,58 @@ fn validate_facet_reference_manifests(
                     facet_tag
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// Non-major-update breaking-change protection vs an explicit baseline
+/// manifest: existing commands must be preserved with unchanged deets, and
+/// facet value schemas must stay compatible. Major updates bypass these
+/// checks. Used by the authoring path (baseline = last valid) and the
+/// update/activation gates (baseline = last enabled).
+pub fn check_breaking_changes(
+    incoming: &manifest::PlugManifest,
+    baseline: &manifest::PlugManifest,
+) -> Res<()> {
+    let is_major = incoming.version.major > baseline.version.major
+        || (baseline.version.major == 0 && incoming.version.minor > baseline.version.minor);
+
+    if !is_major {
+        // In non-major updates, we must ensure existing commands are preserved
+        // to avoid breaking integrations or automated workflows.
+        for (old_cmd_name, old_cmd) in &baseline.commands {
+            let new_cmd = incoming.commands.get(old_cmd_name);
+            if let Some(new_cmd) = new_cmd {
+                // Deets define the routine and parameters; changing them breaks callers.
+                // FIXME: we need a better comparison for CommandDeets if it's complex
+                if format!("{:?}", new_cmd.deets) != format!("{:?}", old_cmd.deets) {
+                    eyre::bail!(
+                        "Breaking change: command '{}' deets cannot change in non-major version update",
+                        old_cmd_name
+                    );
+                }
+            } else {
+                eyre::bail!(
+                    "Breaking change: command '{}' cannot be removed in non-major version update",
+                    old_cmd_name
+                );
+            }
+        }
+    }
+
+    // We also check that property keys aren't removed or their schemas don't become incompatible.
+    for old_prop in &baseline.facets {
+        if let Some(new_prop) = incoming
+            .facets
+            .iter()
+            .find(|prop| prop.key_tag == old_prop.key_tag)
+            && !is_schema_compatible(&old_prop.value_schema, &new_prop.value_schema)
+        {
+            eyre::bail!(
+                "Incompatible schema for property tag '{}'",
+                old_prop.key_tag
+            );
         }
     }
     Ok(())
