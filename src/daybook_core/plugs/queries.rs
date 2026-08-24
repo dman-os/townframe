@@ -228,4 +228,43 @@ impl PlugsRepo {
                 .collect()
         })
     }
+
+    /// Read the current plugs config (enabled map + per-plug tracks). None
+    /// when the config store is not attached.
+    pub async fn get_config(&self) -> Option<PlugsConfig> {
+        let store = self.config_store.get()?;
+        Some(store.query_sync(|config| config.clone()).await)
+    }
+
+    /// Resolve a plug id or a full facet ref to a manifest. A ref is read at
+    /// its pinned heads (None when not locally readable); an id resolves
+    /// through the known-manifest cache.
+    pub async fn resolve_manifest(&self, target: &str) -> Res<Option<Arc<manifest::PlugManifest>>> {
+        if target.starts_with("db+facet://") {
+            let ref_url = url::Url::parse(target)?;
+            let Some((_, manifest)) = self.read_manifest_at_ref(&ref_url).await? else {
+                return Ok(None);
+            };
+            Ok(Some(manifest))
+        } else {
+            Ok(self.get_known(target).await)
+        }
+    }
+
+    /// ADR 007 §6: enabled entries whose doc/heads are not locally readable
+    /// (config/manifest race). Returns (plug id, pinned ref).
+    pub async fn list_pending(&self) -> Vec<(String, url::Url)> {
+        let Some(store) = self.config_store.get() else {
+            return Vec::new();
+        };
+        let enabled = store.query_sync(|config| config.enabled.clone()).await;
+        let mut pending = Vec::new();
+        for (id, ref_url) in enabled {
+            match self.read_manifest_at_ref(&ref_url).await {
+                Ok(Some(_)) => {}
+                _ => pending.push((id, ref_url)),
+            }
+        }
+        pending
+    }
 }

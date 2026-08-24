@@ -1483,6 +1483,11 @@ async fn test_rollback_to_last_enabled_allowed() -> Res<()> {
     repo.disable_plug("@test/plug1").await?;
     // Rollback to the last enabled version (0.1.0) is allowed.
     repo.enable_plug(&v1_ref).await?;
+    wait_until(
+        || async { repo.get("@test/plug1").await.is_some() },
+        "plug active after rollback",
+    )
+    .await?;
     let active = repo
         .get("@test/plug1")
         .await

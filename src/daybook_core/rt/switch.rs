@@ -264,13 +264,14 @@ struct PreparedSwitchSink {
     drawer_predicate: Option<daybook_types::manifest::DocPredicateClause>,
 }
 
+#[expect(clippy::too_many_arguments)]
 pub async fn spawn_switch_worker(
     drawer: Arc<crate::drawer::DrawerRepo>,
     plugs_repo: Arc<crate::plugs::PlugsRepo>,
     config_repo: Arc<crate::config::ConfigRepo>,
     dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     registry: Arc<crate::repos::ListenersRegistry>,
-    part_store: big_repo::SharedPartStore,
+    frontier_part_store: big_repo::SharedPartStore,
     rt_cancel_token: tokio_util::sync::CancellationToken,
     repo_sql: SqlCtx,
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
@@ -291,7 +292,7 @@ pub async fn spawn_switch_worker(
         config_repo,
         dispatch_repo,
         registry,
-        part_store,
+        frontier_part_store,
         prepared_sinks: prepare_sinks(sinks),
         predicate_requirements: HashSet::new(),
         predicate_resolved: HashMap::new(),
@@ -355,8 +356,6 @@ pub async fn spawn_switch_worker(
                 .get_partition_cursor(&docs_partition_id_text)
                 .await?;
             let partition_listener = worker
-                .rt
-                .rcx
                 .frontier_part_store
                 .subscribe_local(SubPartsRequest {
                     lower_bound: cursor,
@@ -523,7 +522,7 @@ struct SwitchWorker {
     config_repo: Arc<crate::config::ConfigRepo>,
     dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     registry: Arc<crate::repos::ListenersRegistry>,
-    part_store: big_repo::SharedPartStore,
+    frontier_part_store: big_repo::SharedPartStore,
     prepared_sinks: Vec<PreparedSwitchSink>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,

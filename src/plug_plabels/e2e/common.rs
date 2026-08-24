@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use utils_rs::prelude::*;
 
 pub async fn import_plabels_oci(
@@ -27,7 +25,7 @@ pub async fn import_plabels_oci(
     let doc_id = imported
         .doc_id
         .ok_or_eyre("imported plabels plug missing manifest doc id")?;
-    let ref_url: url::Url =
+    let ref_url: Url =
         format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
     test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;

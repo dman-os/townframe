@@ -399,10 +399,10 @@ impl<S: FacetStore> Clone for FacetStoreHandle<S> {
 impl<S: FacetStore> Drop for FacetStoreHandle<S> {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        if let Ok(mut guard) = self.notif_handle.try_lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
+        if let Ok(mut guard) = self.notif_handle.try_lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
         }
     }
 }

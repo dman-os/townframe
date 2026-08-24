@@ -321,7 +321,6 @@ impl DrawerRepo {
         Some(self.content_actor_id(None, branch_ref.branch_doc_id))
     }
 
-
     pub(crate) async fn get_branch_heads_by_doc_id(
         &self,
         branch_doc_id: DocumentId,

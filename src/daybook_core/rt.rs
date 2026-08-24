@@ -599,7 +599,7 @@ impl Rt {
             Arc::clone(&rt.config_repo),
             Arc::clone(&rt.dispatch_repo),
             Arc::clone(&rt.registry),
-            Arc::clone(&rt.rcx.part_store),
+            Arc::clone(&rt.rcx.frontier_part_store),
             rt.cancel_token.clone(),
             rt.rcx.sql.clone(),
             switch_sinks,

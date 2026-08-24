@@ -221,9 +221,6 @@ impl PlugsRepo {
                             );
                         }
                     }
-                    "static" => {
-                        eyre::bail!("Unrecognized static component_url: {url}");
-                    }
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
                         let hash = url.path().trim_start_matches('/');
                         let blob_id = match hash.parse::<crate::blobs::BlobId>() {

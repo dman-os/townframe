@@ -80,16 +80,16 @@ impl PlugsRepo {
         // latest or a last_enabled_version-only change has no cache effect
         // (the cache materializes valid versions only).
         for (id, track) in &cur.known_plugs {
-            let changed = prev.as_ref().is_none_or(|p| {
-                p.known_plugs.get(id).map(|old| &old.last_valid) != Some(&track.last_valid)
+            let changed = prev.as_ref().is_none_or(|plug| {
+                plug.known_plugs.get(id).map(|old| &old.last_valid) != Some(&track.last_valid)
             });
-            if changed {
-                if let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await? {
-                    surelock::key::lock_scope(|key| {
-                        let (mut cache, _key) = key.lock(&self.cache);
-                        cache.upsert_known(id, &manifest);
-                    });
-                }
+            if changed
+                && let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await?
+            {
+                surelock::key::lock_scope(|key| {
+                    let (mut cache, _key) = key.lock(&self.cache);
+                    cache.upsert_known(id, &manifest);
+                });
             }
         }
         if let Some(prev) = prev {
@@ -107,7 +107,7 @@ impl PlugsRepo {
         // `EnabledPlugUpdated`, a removed ref is `PlugDisabled`. The cache
         // is only the materialization side effect.
         for (id, ref_url) in &cur.enabled {
-            let prev_ref = prev.as_ref().and_then(|p| p.enabled.get(id));
+            let prev_ref = prev.as_ref().and_then(|plug| plug.enabled.get(id));
             if prev_ref == Some(ref_url) {
                 continue; // unchanged — no event, no read
             }
@@ -146,14 +146,21 @@ impl PlugsRepo {
     ) -> Res<()> {
         match self.record_known_manifest_doc(doc_id, new_heads).await? {
             RecordKnownOutcome::Recorded { plug_id } => {
-                // Pending resolution: if the plug is enabled, refresh its
-                // active entry — the pinned heads may have just become
-                // readable.
+                // Pending resolution: if the plug is enabled but not yet
+                // materialized, its pinned heads may have just become
+                // readable — activate it. An already-active plug was handled
+                // synchronously by its own mutator; re-resolving it here from
+                // a possibly-stale enabled ref could revert or drop the
+                // cache entry, so only touch plugs that are genuinely pending.
                 let enabled_ref = self
                     .config_store()?
                     .query_sync(|config| config.enabled.get(&plug_id).cloned())
                     .await;
-                if let Some(ref_url) = enabled_ref {
+                let is_pending = surelock::key::lock_scope(|key| {
+                    let (cache, _key) = key.lock(&self.cache);
+                    !cache.active_manifests.contains_key(&plug_id)
+                });
+                if let Some(ref_url) = enabled_ref.filter(|_| is_pending) {
                     // Pending -> active: the pinned heads became readable.
                     if let Some(event) = self
                         .activate_from_ref(&plug_id, &ref_url, true, origin)
@@ -238,14 +245,14 @@ impl PlugsRepo {
     ) -> Res<()> {
         let store = self.config_store()?;
         let versions = store.versions(prev_heads, new_heads).await?;
-        let local_writer = store.local_writer_actor().await;
+        let local_store = store.local_writer_actor().await;
         let mut events = vec![];
         let mut prev_config = match prev_heads {
             Some(prev) => store.at(prev).await?,
             None => None,
         };
         for version in versions {
-            let is_local = local_writer
+            let is_local = local_store
                 .as_ref()
                 .is_some_and(|actor| actor == &version.actor_id);
             if is_local {

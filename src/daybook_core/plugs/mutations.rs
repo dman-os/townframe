@@ -205,7 +205,7 @@ impl PlugsRepo {
                 track.last_enabled_version = Some(enabled_version.clone());
                 let is_new_latest = track.latest_version.is_empty()
                     || semver::Version::parse(&track.latest_version)
-                        .map_or(true, |v| v <= manifest.version);
+                        .map_or(true, |ver| ver <= manifest.version);
                 if is_new_latest {
                     track.latest = ref_url.clone();
                     track.latest_version = enabled_version.clone();
@@ -225,8 +225,8 @@ impl PlugsRepo {
         // different ref → `EnabledPlugUpdated`; same ref re-enable → no-op.
         // The cache is only the materialization side effect.
         let mut events = vec![];
-        if already_enabled.as_ref() != Some(&ref_url) {
-            if let Some(event) = self
+        if already_enabled.as_ref() != Some(&ref_url)
+            && let Some(event) = self
                 .activate_from_ref(
                     &plug_id,
                     &ref_url,
@@ -234,9 +234,8 @@ impl PlugsRepo {
                     &self.local_origin(),
                 )
                 .await?
-            {
-                events.push(event);
-            }
+        {
+            events.push(event);
         }
         events.push(PlugsEvent::PlugsConfigChanged {
             heads: new_heads.clone(),
@@ -336,7 +335,7 @@ impl PlugsRepo {
                 track.last_enabled_version = Some(enabled_version.clone());
                 let is_new_latest = track.latest_version.is_empty()
                     || semver::Version::parse(&track.latest_version)
-                        .map_or(true, |v| v <= manifest.version);
+                        .map_or(true, |ver| ver <= manifest.version);
                 if is_new_latest {
                     track.latest = new_ref.clone();
                     track.latest_version = enabled_version.clone();
@@ -369,6 +368,7 @@ impl PlugsRepo {
         &self,
         doc_id: &daybook_types::doc::DocId,
         heads: &ChangeHashSet,
+        no_enable: bool,
     ) -> Res<ImportedPlug> {
         let manifest = self
             .read_manifest_doc(doc_id, heads)
@@ -393,15 +393,20 @@ impl PlugsRepo {
         .await?;
         let ref_url = Self::build_enabled_ref(doc_id, "main", heads)?;
         match self.record_known_manifest_doc(doc_id, heads).await? {
-            RecordKnownOutcome::Rejected { reason, .. } => {
+            RecordKnownOutcome::Rejected { reason, .. } if !no_enable => {
                 eyre::bail!("import rejected: {reason}")
             }
+            // Known-only import: a version/compat rejection is fine — the
+            // plug is recorded (with the rejection) but not enabled.
+            RecordKnownOutcome::Rejected { .. } => {}
             RecordKnownOutcome::Unreadable => {
                 eyre::bail!("manifest doc unreadable at given heads")
             }
             RecordKnownOutcome::Recorded { .. } => {}
         }
-        self.enable_plug(&ref_url).await?;
+        if !no_enable {
+            self.enable_plug(&ref_url).await?;
+        }
         Ok(ImportedPlug {
             plug_id: manifest.id(),
             version: manifest.version.clone(),
@@ -409,6 +414,74 @@ impl PlugsRepo {
             imported_blob_hashes: vec![],
             source_digest: None,
         })
+    }
+
+    /// ADR 007 §9: import a plug from a bare doc id at current main branch
+    /// heads (or explicit heads).
+    pub async fn import_doc_id(
+        &self,
+        doc_id: &daybook_types::doc::DocId,
+        heads: Option<&ChangeHashSet>,
+        no_enable: bool,
+    ) -> Res<ImportedPlug> {
+        let heads = match heads {
+            Some(heads) => heads.clone(),
+            None => {
+                let drawer = self
+                    .drawer
+                    .get()
+                    .ok_or_eyre("plugs repo drawer not attached")?;
+                drawer
+                    .get_branch_heads_for_path(doc_id, daybook_types::doc::BranchPath::new("main"))
+                    .await?
+                    .ok_or_eyre("manifest doc missing main branch")?
+            }
+        };
+        self.import_from_doc_id(doc_id, &heads, no_enable).await
+    }
+
+    /// ADR 007 §9: enable a plug by full facet ref, or by bare doc id
+    /// (current main branch heads, or explicit heads). Doc-id targets get
+    /// core-docs-group access so the manifest doc replicates in the core
+    /// partition. Returns the pinned ref.
+    pub async fn enable_target(
+        &self,
+        target: &str,
+        heads: Option<&ChangeHashSet>,
+    ) -> Res<url::Url> {
+        if target.starts_with("db+facet://") {
+            let ref_url = url::Url::parse(target)?;
+            self.enable_plug(&ref_url).await?;
+            return Ok(ref_url);
+        }
+        let drawer = self
+            .drawer
+            .get()
+            .ok_or_eyre("plugs repo drawer not attached")?;
+        let doc_id = target.to_string();
+        let branch_path = daybook_types::doc::BranchPath::new("main");
+        let heads = match heads {
+            Some(heads) => heads.clone(),
+            None => drawer
+                .get_branch_heads_for_path(&doc_id, branch_path)
+                .await?
+                .ok_or_eyre("manifest doc missing main branch")?,
+        };
+        let branch_ref = drawer
+            .get_branch_ref(&doc_id, branch_path)
+            .await?
+            .ok_or_eyre("manifest doc missing main branch")?;
+        let authority =
+            crate::authority::ensure(&self.big_repo, drawer.meta_store_sql(), None).await?;
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.core_docs,
+            [branch_ref.branch_doc_id],
+        )
+        .await?;
+        let ref_url = Self::build_enabled_ref(target, "main", &heads)?;
+        self.enable_plug(&ref_url).await?;
+        Ok(ref_url)
     }
 
     /// Add a new plug to the repo after validating it (ADR 007 §8: authoring).
@@ -446,9 +519,6 @@ impl PlugsRepo {
                         let hash = self.blobs.put(&data).await?;
                         *url =
                             url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
-                    }
-                    "static" => {
-                        eyre::bail!("unsupported static wasm component_url: {url}");
                     }
                     crate::blobs::BLOB_SCHEME => {}
                     _ => {
@@ -556,14 +626,13 @@ impl PlugsRepo {
         }
         let mut reason = None;
         // Gate A: version must strictly bump over the latest version seen.
-        if let Some(track) = &track {
-            if let Ok(latest_version) = semver::Version::parse(&track.latest_version)
-                && incoming_version <= latest_version
-            {
-                reason = Some(format!(
-                    "version must be greater than the latest version ({latest_version})"
-                ));
-            }
+        if let Some(track) = &track
+            && let Ok(latest_version) = semver::Version::parse(&track.latest_version)
+            && incoming_version <= latest_version
+        {
+            reason = Some(format!(
+                "version must be greater than the latest version ({latest_version})"
+            ));
         }
         // Gate B: structural validity (garde, tag clashes, dependencies) —
         // no version baseline.
@@ -684,7 +753,7 @@ impl PlugsRepo {
             let last_enabled = track
                 .last_enabled_version
                 .as_ref()
-                .and_then(|v| semver::Version::parse(v).ok());
+                .and_then(|ver| semver::Version::parse(ver).ok());
             if last_enabled == Some(incoming.clone()) {
                 return Ok(None);
             }
