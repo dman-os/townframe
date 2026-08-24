@@ -602,15 +602,16 @@ impl PlugsRepo {
                         last_valid_version: String::new(),
                         last_enabled_version: None,
                     });
-                if track.latest != ref_url {
-                    track.latest = ref_url.clone();
-                    track.latest_version = incoming_version.to_string();
-                    track.latest_rejection = rejection.clone();
-                    if rejection.is_none() {
-                        // The new version is the latest VALID one.
-                        track.last_valid = ref_url.clone();
-                        track.last_valid_version = incoming_version.to_string();
-                    }
+                // The idempotence check above guarantees we only reach this
+                // point when the track is fresh or its latest ref differs —
+                // either way the new version must be recorded.
+                track.latest = ref_url.clone();
+                track.latest_version = incoming_version.to_string();
+                track.latest_rejection = rejection.clone();
+                if rejection.is_none() {
+                    // The new version is the latest VALID one.
+                    track.last_valid = ref_url.clone();
+                    track.last_valid_version = incoming_version.to_string();
                 }
             })
             .await?;

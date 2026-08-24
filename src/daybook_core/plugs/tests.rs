@@ -1010,3 +1010,723 @@ async fn test_plug_file_to_blob_conversion() -> Res<()> {
     ctx.stop().await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1: config-delta events, gates, and the known_plugs track (ADR 007 §5/§7).
+// Local paths go through the public mutators; remote paths are driven by writing
+// the config / manifest facets directly through the drawer (the switch's Doc
+// events always carry origin = Remote; the notif loop's local-writer-actor
+// filter is what distinguishes local writes).
+// ---------------------------------------------------------------------------
+
+fn mock_plug_at(name: &str, version: &str) -> manifest::PlugManifest {
+    let mut plug = mock_plug(name);
+    plug.version = version.parse().unwrap();
+    plug
+}
+
+fn mock_plug_with_facet(
+    name: &str,
+    version: &str,
+    tag: &str,
+    schema: schemars::Schema,
+) -> manifest::PlugManifest {
+    let mut plug = mock_plug_at(name, version);
+    plug.facets.push(manifest::FacetManifest {
+        key_tag: tag.into(),
+        value_schema: schema,
+        display_config: default(),
+        references: default(),
+    });
+    plug
+}
+
+async fn read_config(ctx: &crate::test_support::DaybookTestContext) -> Res<PlugsConfig> {
+    let config_doc_id = ctx.rt.rcx.doc_config.document_id().to_string();
+    let facet_key =
+        daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugsConfig);
+    let doc = ctx
+        .rt
+        .drawer
+        .get_doc_with_facets_at_branch(
+            &config_doc_id,
+            daybook_types::doc::BranchPath::new("main"),
+            Some(vec![facet_key.clone()]),
+        )
+        .await?
+        .ok_or_eyre("config doc missing")?;
+    let raw = doc
+        .facets
+        .get(&facet_key)
+        .ok_or_eyre("config facet missing")?;
+    Ok(serde_json::from_value(raw.clone())?)
+}
+
+/// Simulate a remote manifest change: write a new manifest version to an
+/// existing manifest doc through the drawer.
+async fn write_manifest_via_drawer(
+    ctx: &crate::test_support::DaybookTestContext,
+    doc_id: &daybook_types::doc::DocId,
+    manifest: &manifest::PlugManifest,
+) -> Res<()> {
+    ctx.rt
+        .drawer
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    PlugsRepo::plug_manifest_facet_key(),
+                    daybook_types::doc::WellKnownFacet::PlugManifest(manifest.clone()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn doc_heads(
+    ctx: &crate::test_support::DaybookTestContext,
+    doc_id: &daybook_types::doc::DocId,
+) -> Res<ChangeHashSet> {
+    ctx.rt
+        .drawer
+        .get_doc_branches(doc_id)
+        .await?
+        .ok_or_eyre("doc missing")?
+        .branches
+        .get("main")
+        .cloned()
+        .ok_or_eyre("doc missing main branch")
+}
+
+async fn wait_for_event(
+    listener: &crate::repos::ListenerHandle<PlugsEvent>,
+    pred: impl Fn(&PlugsEvent) -> bool,
+    what: &str,
+) -> Res<Arc<PlugsEvent>> {
+    let start = std::time::Instant::now();
+    loop {
+        while let Ok(event) = listener.try_recv() {
+            if pred(event.as_ref()) {
+                return Ok(event);
+            }
+        }
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            eyre::bail!("timed out waiting for {what}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+fn drain_events(listener: &crate::repos::ListenerHandle<PlugsEvent>) -> Vec<Arc<PlugsEvent>> {
+    let mut events = vec![];
+    while let Ok(event) = listener.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+async fn wait_until<F, Fut>(mut f: F, what: &str) -> Res<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        if f().await {
+            return Ok(());
+        }
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            eyre::bail!("timed out waiting for {what}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// ADR 007 §7: enabling a plug emits `PlugEnabled` (local origin), makes it
+/// active, and records `last_enabled_version` in the track.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_enable_plug_emits_plug_enabled() -> Res<()> {
+    let ctx = crate::test_support::test_cx("plugs_test_enable_plug_emits_plug_enabled").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo.add(mock_plug("plug1")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+
+    repo.enable_plug(&ref_url).await?;
+
+    let event = wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "PlugEnabled",
+    )
+    .await?;
+    let PlugsEvent::PlugEnabled {
+        id,
+        heads: ev_heads,
+        origin,
+    } = event.as_ref()
+    else {
+        unreachable!()
+    };
+    assert_eq!(id, "@test/plug1");
+    assert_eq!(ev_heads, &heads);
+    assert!(matches!(
+        origin,
+        crate::event_origin::SwitchEventOrigin::Local { .. }
+    ));
+
+    // Active now.
+    assert!(repo.get("@test/plug1").await.is_some());
+
+    // Track: last_enabled_version recorded.
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.last_enabled_version.as_deref(), Some("0.1.0"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §7: re-enabling the same ref is a no-op — no duplicate
+/// `PlugEnabled` (the notif loop's local-writer-actor filter also prevents
+/// double-processing of the mutator's own config write).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_re_enable_same_ref_no_duplicate_event() -> Res<()> {
+    let ctx =
+        crate::test_support::test_cx("plugs_test_re_enable_same_ref_no_duplicate_event").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo.add(mock_plug("plug1")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&ref_url).await?;
+    wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "first PlugEnabled",
+    )
+    .await?;
+    drain_events(&listener);
+
+    repo.enable_plug(&ref_url).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = drain_events(&listener);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.as_ref(), PlugsEvent::PlugEnabled { .. })),
+        "re-enable of the same ref must not emit PlugEnabled"
+    );
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §7: disabling a plug emits `PlugDisabled` and clears the active
+/// entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_disable_plug_emits_plug_disabled() -> Res<()> {
+    let ctx = crate::test_support::test_cx("plugs_test_disable_plug_emits_plug_disabled").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo.add(mock_plug("plug1")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&ref_url).await?;
+    wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "PlugEnabled",
+    )
+    .await?;
+    drain_events(&listener);
+
+    repo.disable_plug("@test/plug1").await?;
+
+    let event = wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugDisabled { .. }),
+        "PlugDisabled",
+    )
+    .await?;
+    let PlugsEvent::PlugDisabled { id, origin } = event.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(id, "@test/plug1");
+    assert!(matches!(
+        origin,
+        crate::event_origin::SwitchEventOrigin::Local { .. }
+    ));
+    assert!(repo.get("@test/plug1").await.is_none());
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §7: re-pinning to a newer version of the same manifest doc emits
+/// `EnabledPlugUpdated` and the active manifest becomes the new version.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_plug_emits_enabled_plug_updated() -> Res<()> {
+    let ctx =
+        crate::test_support::test_cx("plugs_test_update_plug_emits_enabled_plug_updated").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo.add(mock_plug_at("plug1", "0.1.0")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&ref_url).await?;
+    wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "PlugEnabled",
+    )
+    .await?;
+
+    // Remote republish: v0.2.0 on the same doc (valid, no breaking change).
+    write_manifest_via_drawer(&ctx, &doc_id, &mock_plug_at("plug1", "0.2.0")).await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_version == "0.2.0")
+                })
+                .unwrap_or(false)
+        },
+        "record of v0.2.0",
+    )
+    .await?;
+    drain_events(&listener);
+
+    repo.update_plug("@test/plug1").await?;
+
+    let event = wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::EnabledPlugUpdated { .. }),
+        "EnabledPlugUpdated",
+    )
+    .await?;
+    let PlugsEvent::EnabledPlugUpdated { id, .. } = event.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(id, "@test/plug1");
+    let active = repo
+        .get("@test/plug1")
+        .await
+        .ok_or_eyre("plug not active")?;
+    assert_eq!(active.version.to_string(), "0.2.0");
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: activating the same version that was rejected is blocked —
+/// the durable `latest_rejection` blocks "update to latest".
+#[tokio::test(flavor = "multi_thread")]
+async fn test_same_version_activation_blocked_when_latest_rejected() -> Res<()> {
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_same_version_activation_blocked_when_latest_rejected",
+    )
+    .await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let doc_id = repo
+        .add(mock_plug_with_facet(
+            "plug1",
+            "0.1.0",
+            "org.test.prop1",
+            schemars::schema_for!(String),
+        ))
+        .await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&v1_ref).await?;
+
+    // Remote republish: v0.2.0 with an incompatible schema for the same tag
+    // (breaking in a non-major update) — the record gate rejects it.
+    write_manifest_via_drawer(
+        &ctx,
+        &doc_id,
+        &mock_plug_with_facet(
+            "plug1",
+            "0.2.0",
+            "org.test.prop1",
+            schemars::schema_for!(i64),
+        ),
+    )
+    .await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_rejection.is_some())
+                })
+                .unwrap_or(false)
+        },
+        "rejection of v0.2.0",
+    )
+    .await?;
+
+    // Explicit activation of the rejected version is blocked.
+    let v2_heads = doc_heads(&ctx, &doc_id).await?;
+    let v2_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v2_heads)?;
+    let res = repo.enable_plug(&v2_ref).await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("was rejected"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: `update_plug` (jump to latest) is blocked when the latest
+/// version was rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_plug_blocked_when_latest_rejected() -> Res<()> {
+    let ctx =
+        crate::test_support::test_cx("plugs_test_update_plug_blocked_when_latest_rejected").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let doc_id = repo
+        .add(mock_plug_with_facet(
+            "plug1",
+            "0.1.0",
+            "org.test.prop1",
+            schemars::schema_for!(String),
+        ))
+        .await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&v1_ref).await?;
+
+    write_manifest_via_drawer(
+        &ctx,
+        &doc_id,
+        &mock_plug_with_facet(
+            "plug1",
+            "0.2.0",
+            "org.test.prop1",
+            schemars::schema_for!(i64),
+        ),
+    )
+    .await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_rejection.is_some())
+                })
+                .unwrap_or(false)
+        },
+        "rejection of v0.2.0",
+    )
+    .await?;
+
+    let res = repo.update_plug("@test/plug1").await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("rejected"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: rolling back to the previously enabled version after a
+/// disable is allowed (it was validated when first enabled).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rollback_to_last_enabled_allowed() -> Res<()> {
+    let ctx = crate::test_support::test_cx("plugs_test_rollback_to_last_enabled_allowed").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let doc_id = repo.add(mock_plug_at("plug1", "0.1.0")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&v1_ref).await?;
+
+    // A newer valid version is recorded (but never enabled).
+    write_manifest_via_drawer(&ctx, &doc_id, &mock_plug_at("plug1", "0.2.0")).await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_version == "0.2.0")
+                })
+                .unwrap_or(false)
+        },
+        "record of v0.2.0",
+    )
+    .await?;
+
+    repo.disable_plug("@test/plug1").await?;
+    // Rollback to the last enabled version (0.1.0) is allowed.
+    repo.enable_plug(&v1_ref).await?;
+    let active = repo
+        .get("@test/plug1")
+        .await
+        .ok_or_eyre("plug not active")?;
+    assert_eq!(active.version.to_string(), "0.1.0");
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: a downgrade to a version that was never enabled is blocked.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_downgrade_blocked() -> Res<()> {
+    let ctx = crate::test_support::test_cx("plugs_test_downgrade_blocked").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let doc_id = repo.add(mock_plug_at("plug1", "0.1.0")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&v1_ref).await?;
+
+    // Record + enable v0.2.0: last_enabled becomes 0.2.0.
+    write_manifest_via_drawer(&ctx, &doc_id, &mock_plug_at("plug1", "0.2.0")).await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_version == "0.2.0")
+                })
+                .unwrap_or(false)
+        },
+        "record of v0.2.0",
+    )
+    .await?;
+    let v2_heads = doc_heads(&ctx, &doc_id).await?;
+    let v2_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v2_heads)?;
+    repo.enable_plug(&v2_ref).await?;
+
+    repo.disable_plug("@test/plug1").await?;
+    // Re-enabling 0.1.0 is a downgrade (last enabled was 0.2.0) — blocked.
+    let res = repo.enable_plug(&v1_ref).await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("downgrade rejected"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: the per-plug track records latest (valid or rejected), last
+/// valid, and last enabled — the durable state that gates updates.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_known_plugs_track_fields() -> Res<()> {
+    let ctx = crate::test_support::test_cx("plugs_test_known_plugs_track_fields").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let doc_id = repo
+        .add(mock_plug_with_facet(
+            "plug1",
+            "0.1.0",
+            "org.test.prop1",
+            schemars::schema_for!(String),
+        ))
+        .await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+
+    // After add: latest == last_valid == v0.1.0, never enabled.
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.latest, v1_ref);
+    assert_eq!(track.latest_version, "0.1.0");
+    assert_eq!(track.latest_rejection, None);
+    assert_eq!(track.last_valid, v1_ref);
+    assert_eq!(track.last_valid_version, "0.1.0");
+    assert_eq!(track.last_enabled_version, None);
+
+    // After enable: last_enabled_version recorded.
+    repo.enable_plug(&v1_ref).await?;
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.last_enabled_version.as_deref(), Some("0.1.0"));
+
+    // Remote republish v0.2.0 with an incompatible schema: rejected. The
+    // track keeps latest = v0.2.0 + rejection, last_valid stays v0.1.0.
+    write_manifest_via_drawer(
+        &ctx,
+        &doc_id,
+        &mock_plug_with_facet(
+            "plug1",
+            "0.2.0",
+            "org.test.prop1",
+            schemars::schema_for!(i64),
+        ),
+    )
+    .await?;
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .map(|c| {
+                    c.known_plugs
+                        .get("@test/plug1")
+                        .is_some_and(|t| t.latest_rejection.is_some())
+                })
+                .unwrap_or(false)
+        },
+        "rejection of v0.2.0",
+    )
+    .await?;
+    let v2_heads = doc_heads(&ctx, &doc_id).await?;
+    let v2_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v2_heads)?;
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.latest, v2_ref);
+    assert_eq!(track.latest_version, "0.2.0");
+    assert!(
+        track
+            .latest_rejection
+            .as_deref()
+            .unwrap_or("")
+            .contains("Incompatible schema")
+    );
+    assert_eq!(track.last_valid, v1_ref);
+    assert_eq!(track.last_valid_version, "0.1.0");
+    assert_eq!(track.last_enabled_version.as_deref(), Some("0.1.0"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §5: a remote manifest change that fails the record gate emits
+/// `ManifestRejected` with the rejection reason and a remote origin.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_remote_manifest_rejection_emits_manifest_rejected",
+    )
+    .await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo
+        .add(mock_plug_with_facet(
+            "plug1",
+            "0.1.0",
+            "org.test.prop1",
+            schemars::schema_for!(String),
+        ))
+        .await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&v1_ref).await?;
+    wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "PlugEnabled",
+    )
+    .await?;
+    drain_events(&listener);
+
+    write_manifest_via_drawer(
+        &ctx,
+        &doc_id,
+        &mock_plug_with_facet(
+            "plug1",
+            "0.2.0",
+            "org.test.prop1",
+            schemars::schema_for!(i64),
+        ),
+    )
+    .await?;
+
+    let event = wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::ManifestRejected { .. }),
+        "ManifestRejected",
+    )
+    .await?;
+    let PlugsEvent::ManifestRejected {
+        id,
+        version,
+        reason,
+        origin,
+    } = event.as_ref()
+    else {
+        unreachable!()
+    };
+    assert_eq!(id, "@test/plug1");
+    assert_eq!(version, "0.2.0");
+    assert!(reason.contains("Incompatible schema"));
+    assert!(matches!(
+        origin,
+        crate::event_origin::SwitchEventOrigin::Remote { .. }
+    ));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// ADR 007 §7: the notif loop's local-writer-actor filter prevents
+/// double-processing — a local enable emits exactly one `PlugEnabled`
+/// (from the mutator), never a second one from the loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_local_config_write_not_double_processed() -> Res<()> {
+    let ctx =
+        crate::test_support::test_cx("plugs_test_local_config_write_not_double_processed").await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+    let listener = repo.subscribe(SubscribeOpts::new(32));
+
+    let doc_id = repo.add(mock_plug("plug1")).await?;
+    let heads = doc_heads(&ctx, &doc_id).await?;
+    let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
+    repo.enable_plug(&ref_url).await?;
+
+    wait_for_event(
+        &listener,
+        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
+        "PlugEnabled",
+    )
+    .await?;
+    // Let the notif loop drain any in-flight config diffs.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = drain_events(&listener);
+    let enabled_count = events
+        .iter()
+        .filter(|e| matches!(e.as_ref(), PlugsEvent::PlugEnabled { .. }))
+        .count();
+    assert_eq!(
+        enabled_count, 0,
+        "no duplicate PlugEnabled from the notif loop"
+    );
+
+    ctx.stop().await?;
+    Ok(())
+}
