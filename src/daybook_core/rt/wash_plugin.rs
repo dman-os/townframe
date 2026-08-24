@@ -96,13 +96,18 @@ mod binds_guest {
                 mime: val.mime,
                 content: val.content,
             }),
-            root_doc::WellKnownFacet::Blob(val) => wit_doc::WellKnownFacet::Blob(root_doc::Blob {
+            root_doc::WellKnownFacet::Blob(val) => wit_doc::WellKnownFacet::Blob(wit_doc::Blob {
                 mime: val.mime,
                 length_octets: val.length_octets,
                 digest: val.digest,
                 inline: val.inline,
                 urls: val.urls,
             }),
+            root_doc::WellKnownFacet::BlobPin(val) => {
+                wit_doc::WellKnownFacet::BlobPin(wit_doc::BlobPin {
+                    length_octets: val.length_octets,
+                })
+            }
             root_doc::WellKnownFacet::Pending(pending) => {
                 wit_doc::WellKnownFacet::Pending(wit_doc::Pending {
                     key: pending.key.to_string(),
@@ -303,6 +308,11 @@ mod binds_guest {
                 inline: blob.inline,
                 urls: blob.urls,
             }),
+            wit_doc::WellKnownFacet::BlobPin(blob_pin) => {
+                root_doc::WellKnownFacet::BlobPin(root_doc::BlobPin {
+                    length_octets: blob_pin.length_octets,
+                })
+            }
         })
     }
 

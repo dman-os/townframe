@@ -90,6 +90,8 @@ pub struct Rt {
     pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
     pub sqlite_plugin: Arc<wash_plugin_sqlite::SqlPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
+    pub blob_pin_worker: Arc<crate::blobs::BlobPinWorker>,
+    pub blob_pins_part_worker: Arc<crate::blobs::BlobPinsPartWorker>,
     pub doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
@@ -102,6 +104,8 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
     switch_worker: switch::SwitchWorkerHandle,
+    blob_pin_worker_stop: crate::repos::RepoStopToken,
+    blob_pins_part_worker_stop: crate::repos::RepoStopToken,
     doc_blobs_index_stop: crate::repos::RepoStopToken,
     doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
     doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
@@ -176,6 +180,18 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_blobs_index_repo during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_pins_part_worker during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.blob_pin_worker_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_pin_worker during shutdown - continuing"
             );
         }
 
@@ -274,7 +290,13 @@ impl Rt {
         let total_started = std::time::Instant::now();
         let startup_progress_task_id = config.startup_progress_task_id.clone();
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
-        crate::repo::ensure_authority_partitions(&rcx.part_store, &authority).await?;
+        crate::repo::ensure_authority_partitions(
+            &rcx.part_store,
+            &authority,
+            &rcx.core_inventory_doc_id,
+            &rcx.docs_inventory_doc_id,
+        )
+        .await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -317,6 +339,22 @@ impl Rt {
             Arc::clone(&drawer),
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+        let (blob_pins_part_worker, blob_pins_part_worker_stop) =
+            crate::blobs::BlobPinsPartWorker::boot(
+                Arc::clone(&drawer),
+                Arc::clone(&rcx.blob_part_store),
+                Arc::clone(&sqlite_local_state_repo),
+            )
+            .await?;
+        let (blob_pin_worker, blob_pin_worker_stop) = crate::blobs::BlobPinWorker::boot(
+            Arc::clone(&drawer),
+            Arc::clone(&plugs_repo),
+            rcx.sql.clone(),
+            Some(Arc::clone(&blobs_repo)),
+            rcx.core_inventory_doc_id,
+            rcx.docs_inventory_doc_id,
         )
         .await?;
         Self::emit_startup_progress_status(
@@ -458,6 +496,8 @@ impl Rt {
             stateless_view_plugin,
             sqlite_plugin,
             blobs_repo,
+            blob_pin_worker: Arc::clone(&blob_pin_worker),
+            blob_pins_part_worker: Arc::clone(&blob_pins_part_worker),
             doc_blobs_index_repo: Arc::clone(&doc_blobs_index_repo),
             doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
             doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
@@ -503,6 +543,11 @@ impl Rt {
                     "doc_processor".to_string(),
                     crate::rt::triage::doc_processor_triage_listener(),
                 ),
+                ("blob_pins".to_string(), blob_pin_worker.triage_listener()),
+                (
+                    "blob_pins_part".to_string(),
+                    blob_pins_part_worker.triage_listener(),
+                ),
                 (
                     "doc_blobs".to_string(),
                     doc_blobs_index_repo.triage_listener(),
@@ -535,6 +580,8 @@ impl Rt {
                 rt,
                 partition_watcher,
                 switch_worker,
+                blob_pin_worker_stop,
+                blob_pins_part_worker_stop,
                 doc_blobs_index_stop,
                 doc_facet_set_index_stop,
                 doc_facet_ref_index_stop,

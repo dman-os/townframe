@@ -118,6 +118,13 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        BlobPin struct {
+            pub length_octets: u64,
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         ImageMetadata struct {
             // URL to src Blob facet
             pub facet_ref: Url,
@@ -131,7 +138,6 @@ crate::define_enum_and_tag!(
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         OcrResult struct {
-            // URL to src ImageMetadata facet
             pub facet_ref: Url,
             pub ref_heads: ChangeHashSet,
             pub model_tag: String,
@@ -1021,6 +1027,10 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::Blob => Self::Blob(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::BlobPin => Self::BlobPin(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

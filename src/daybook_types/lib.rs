@@ -9,6 +9,8 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
+pub use pastey;
+
 pub mod doc;
 #[cfg(all(test, feature = "wit"))]
 mod test;

@@ -6,6 +6,7 @@ const REPO_AGENTS_GROUP_KEY: &str = "global.authority.repo_agents_group";
 const CORE_DOCS_GROUP_KEY: &str = "global.authority.core_docs_group";
 const CONTENT_DOCS_GROUP_KEY: &str = "global.authority.content_docs_group";
 const DRAWER_GROUP_KEY: &str = "global.authority.default_drawer_group";
+const BLOB_INVENTORIES_GROUP_KEY: &str = "global.authority.blob_inventories_group";
 
 /// Stable identifiers for the initial repository authority groups.
 ///
@@ -18,6 +19,7 @@ pub(crate) struct RepoAuthorityIds {
     pub core_docs: [u8; 32],
     pub content_docs: [u8; 32],
     pub default_drawer: [u8; 32],
+    pub blob_inventories: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -26,6 +28,7 @@ pub(crate) struct RepoAuthority {
     pub core_docs: BigKeyhiveGroup,
     pub content_docs: BigKeyhiveGroup,
     pub default_drawer: BigKeyhiveGroup,
+    pub blob_inventories: BigKeyhiveGroup,
 }
 
 impl RepoAuthority {
@@ -35,6 +38,7 @@ impl RepoAuthority {
             core_docs: self.core_docs.id().to_bytes(),
             content_docs: self.content_docs.id().to_bytes(),
             default_drawer: self.default_drawer.id().to_bytes(),
+            blob_inventories: self.blob_inventories.id().to_bytes(),
         }
     }
 
@@ -50,6 +54,13 @@ impl RepoAuthority {
     }
     pub(crate) fn default_drawer_part_id(&self) -> PartId {
         big_repo::group_part_id(self.default_drawer.id().to_bytes())
+    }
+    #[expect(dead_code)]
+    pub(crate) fn blob_inventories_parent(&self) -> BigKeyhiveAuthority {
+        self.blob_inventories.clone().into()
+    }
+    pub(crate) fn blob_inventories_part_id(&self) -> PartId {
+        big_repo::group_part_id(self.blob_inventories.id().to_bytes())
     }
 }
 
@@ -86,8 +97,20 @@ pub(crate) async fn ensure(
         supplied_ids.map(|ids| ids.default_drawer),
     )
     .await?;
+    let (blob_inventories, blob_inventories_created) = ensure_group(
+        big_repo,
+        sql,
+        BLOB_INVENTORIES_GROUP_KEY,
+        supplied_ids.map(|ids| ids.blob_inventories),
+    )
+    .await?;
 
-    if repo_agents_created || core_docs_created || content_docs_created || default_drawer_created {
+    if repo_agents_created
+        || core_docs_created
+        || content_docs_created
+        || default_drawer_created
+        || blob_inventories_created
+    {
         let local_agent = big_repo.local_keyhive_agent().await?;
         if repo_agents_created {
             big_repo
@@ -109,6 +132,11 @@ pub(crate) async fn ensure(
                 .add_admin_member_to_group(repo_agents.clone(), &default_drawer)
                 .await?;
         }
+        if blob_inventories_created {
+            big_repo
+                .add_admin_member_to_group(repo_agents.clone(), &blob_inventories)
+                .await?;
+        }
     }
 
     Ok(RepoAuthority {
@@ -116,6 +144,7 @@ pub(crate) async fn ensure(
         core_docs,
         content_docs,
         default_drawer,
+        blob_inventories,
     })
 }
 
@@ -170,7 +199,8 @@ pub(crate) async fn persist_ids(sql: &SqlCtx, ids: RepoAuthorityIds) -> Res<()> 
     persist_group_id(sql, REPO_AGENTS_GROUP_KEY, ids.repo_agents).await?;
     persist_group_id(sql, CORE_DOCS_GROUP_KEY, ids.core_docs).await?;
     persist_group_id(sql, CONTENT_DOCS_GROUP_KEY, ids.content_docs).await?;
-    persist_group_id(sql, DRAWER_GROUP_KEY, ids.default_drawer).await
+    persist_group_id(sql, DRAWER_GROUP_KEY, ids.default_drawer).await?;
+    persist_group_id(sql, BLOB_INVENTORIES_GROUP_KEY, ids.blob_inventories).await
 }
 pub(crate) async fn grant_docs_admin(
     big_repo: &SharedBigRepo,

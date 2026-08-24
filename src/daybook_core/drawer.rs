@@ -18,6 +18,7 @@ mod tests;
 pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use meta::doc_version_updates;
 pub use meta::version_updates;
 
 use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
@@ -311,7 +312,7 @@ impl DrawerRepo {
         Ok(Some(latest_heads))
     }
 
-    async fn get_branch_heads_for_path(
+    pub(crate) async fn get_branch_heads_for_path(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
@@ -330,7 +331,7 @@ impl DrawerRepo {
         Ok(Some(heads))
     }
 
-    async fn get_handle_by_branch_doc_id(
+    pub(crate) async fn get_handle_by_branch_doc_id(
         &self,
         document_id: DocumentId,
     ) -> Res<Option<big_repo::BigDocHandle>> {

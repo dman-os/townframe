@@ -87,6 +87,7 @@ pub struct CloneProvisionResponse {
     pub core_docs_group: [u8; 32],
     pub content_docs_group: [u8; 32],
     pub default_drawer_group: [u8; 32],
+    pub blob_inventories_group: [u8; 32],
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -140,6 +141,7 @@ impl CloneProvisionResponse {
                 core_docs: self.core_docs_group,
                 content_docs: self.content_docs_group,
                 default_drawer: self.default_drawer_group,
+                blob_inventories: self.blob_inventories_group,
             },
         })
     }
@@ -552,14 +554,8 @@ pub async fn clone_repo_init_from_url(
 
         let part_store = big_repo.shared_part_store();
         let blob_part_store = crate::repo::open_blob_part_store(&staging).await?;
-        let blobs_repo = crate::blobs::BlobsRepo::new(
-            staging.join("blobs"),
-            "clone-bootstrap".into(),
-            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&blob_part_store),
-            )),
-        )
-        .await?;
+        let blobs_repo =
+            crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
         ensure_bootstrap_local_partitions(&part_store, &bootstrap).await?;
 
@@ -580,6 +576,8 @@ pub async fn clone_repo_init_from_url(
             &crate::repo::globals::InitState::Created {
                 doc_id_app: bootstrap.app_doc_id,
                 doc_id_drawer: bootstrap.drawer_doc_id,
+                core_inventory_doc_id: None,
+                docs_inventory_doc_id: None,
             },
         )
         .await?;
