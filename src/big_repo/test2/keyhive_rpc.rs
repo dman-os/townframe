@@ -2,9 +2,8 @@
 //!
 //! The cluster's only incremental trigger for a peer to pull a creator's new
 //! Keyhive state is the `SubscribeKeyhiveChanges` RPC stream (`rpc.rs`). The
-//! stream is served by the
-//! [`KeyhiveChangeNotifier`](crate::runtime2::KeyhiveChangeNotifier) →
-//! dispatcher: each change batch is classified once against the published
+//! stream is served by the durable-incorporation hook → dispatcher: each
+//! change batch is classified once against the published
 //! cache snapshot and debounced per destination peer, so bursts collapse into
 //! a single payload-free wake-up.
 //!

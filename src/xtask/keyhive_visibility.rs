@@ -101,9 +101,8 @@ async fn one_round(i: usize) -> Res<()> {
         .await?;
     let doc_id = doc.lock().await.doc_id();
 
-    // big_repo's create_document calls this after persisting the new events;
-    // mirror it so the creator's cache generation is bumped like in prod.
-    alice_proto.note_local_keyhive_changed().await?;
+    // Cache freshness is structural now: static_events_for_agent gates on
+    // Keyhive::state_generation, so no manual bump is needed after mutation.
 
     let events_after = alice.static_events_for_agent(&bob_agent_on_alice).await;
     let new_visible = events_after.len() as i64 - events_before.len() as i64;

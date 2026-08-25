@@ -245,6 +245,30 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         async move { Self::load_dir(dir).await.map_err(Into::into) }.boxed()
     }
 
+    fn load_events_with_source(
+        &self,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Vec<(
+                StorageHash,
+                Vec<u8>,
+                Option<subduction_keyhive::KeyhivePeerId>,
+            )>,
+            Self::Error,
+        >,
+    > {
+        let dir = self.event_dir();
+        async move {
+            Ok(Self::load_dir(dir)
+                .await?
+                .into_iter()
+                .map(|(hash, bytes)| (hash, bytes, None))
+                .collect())
+        }
+        .boxed()
+    }
+
     fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         let dir = self.event_dir();
         async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
@@ -475,6 +499,35 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorageInner {
         .boxed()
     }
 
+    fn load_events_with_source(
+        &self,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Vec<(
+                StorageHash,
+                Vec<u8>,
+                Option<subduction_keyhive::KeyhivePeerId>,
+            )>,
+            Self::Error,
+        >,
+    > {
+        async move {
+            match self {
+                Self::Memory { events, .. } | Self::Fs { events, .. } => events
+                    .load_keyhive_events_with_source()
+                    .await
+                    .map_err(Into::into),
+                Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_events_with_source(storage)
+                .await
+                .map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
     fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
@@ -608,6 +661,22 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
 
     fn load_events(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
         self.inner.load_events()
+    }
+
+    fn load_events_with_source(
+        &self,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Vec<(
+                StorageHash,
+                Vec<u8>,
+                Option<subduction_keyhive::KeyhivePeerId>,
+            )>,
+            Self::Error,
+        >,
+    > {
+        self.inner.load_events_with_source()
     }
 
     fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {

@@ -93,6 +93,7 @@ impl SyncBackend for BlobSyncBackend {
         &self,
         peer_id: PeerId,
         obj_id: ObjId,
+        parts: Vec<PartId>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         let blob_id = BlobId::new(*obj_id.as_bytes());
@@ -131,10 +132,28 @@ impl SyncBackend for BlobSyncBackend {
         } else {
             SyncCompletionDeets::Noop
         };
+        for part_id in parts {
+            self.part_store
+                .add_obj_to_parts(obj_id, vec![part_id])
+                .await;
+        }
         Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
             obj_id,
             deets,
         }))
+    }
+
+    async fn remove_obj_from_parts(
+        &self,
+        obj_id: big_sync_core::ObjId,
+        parts: Vec<big_sync_core::PartId>,
+    ) -> Res<()> {
+        for part_id in parts {
+            self.part_store
+                .remove_obj_from_part(obj_id, part_id)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -446,7 +465,12 @@ mod tests {
 
         let remote_payload = serde_json::json!({ "mime": "text/plain" });
         let outcome = backend_b
-            .sync_obj(peer_id_a, obj_id_added, Some(remote_payload.clone()))
+            .sync_obj(
+                peer_id_a,
+                obj_id_added,
+                Vec::new(),
+                Some(remote_payload.clone()),
+            )
             .await?;
 
         match outcome {
@@ -466,7 +490,7 @@ mod tests {
 
         // Case 2: Subsequent sync_obj when blob is already materialized locally returns Noop
         let noop_outcome = backend_b
-            .sync_obj(peer_id_a, obj_id_added, Some(remote_payload))
+            .sync_obj(peer_id_a, obj_id_added, Vec::new(), Some(remote_payload))
             .await?;
         match noop_outcome {
             big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -573,7 +597,7 @@ mod tests {
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[1]
                 .backend
-                .sync_obj(peer_0, obj_id, Some(remote_meta))
+                .sync_obj(peer_0, obj_id, Vec::new(), Some(remote_meta))
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -603,7 +627,7 @@ mod tests {
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[2]
                 .backend
-                .sync_obj(peer_1, obj_id, Some(remote_meta))
+                .sync_obj(peer_1, obj_id, Vec::new(), Some(remote_meta))
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(_) => {}

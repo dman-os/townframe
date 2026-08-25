@@ -17,7 +17,7 @@ use super::log_nickname;
 use crate::test::StressBigSyncRpcClient;
 use crate::{
     BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
-    StorageConfig,
+    StorageConfig, WorkerGroupScope,
 };
 use big_sync::{HostPartStore, stress_support};
 use sqlx_utils_rs::SqlCtx;
@@ -48,6 +48,9 @@ pub(crate) struct Node {
     /// restart that drops it silently re-advertises GLOBAL to peers that
     /// still hide it, and those routes never establish.
     hidden_parts: HashSet<big_sync_core::PartId>,
+    /// Frontier-worker group scope. Disabled by default (see boot_with_store);
+    /// persisted across restarts like hidden_parts.
+    pub(crate) frontier_scope: WorkerGroupScope,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +98,26 @@ impl Node {
         storage: StorageConfig,
         hidden_parts: HashSet<big_sync_core::PartId>,
     ) -> crate::Res<Self> {
+        Self::boot_with_scopes(
+            seed,
+            label,
+            storage,
+            hidden_parts,
+            WorkerGroupScope::disabled(),
+        )
+        .await
+    }
+
+    /// Boot a node with an explicit frontier-worker group scope. Tests that
+    /// exercise the AutomergeFrontierWorker must opt in here — the default is
+    /// disabled so relays/read-only peers never materialize forwarded docs.
+    pub(crate) async fn boot_with_scopes(
+        seed: u8,
+        label: &'static str,
+        storage: StorageConfig,
+        hidden_parts: HashSet<big_sync_core::PartId>,
+        frontier_scope: WorkerGroupScope,
+    ) -> crate::Res<Self> {
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
             StorageConfig::Disk { path } => {
@@ -129,7 +152,7 @@ impl Node {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         store.ensure_part(crate::GLOBAL_PART_ID).await?;
-        Self::boot_with_store(seed, label, storage, store, hidden_parts).await
+        Self::boot_with_store(seed, label, storage, store, hidden_parts, frontier_scope).await
     }
 
     async fn boot_with_store(
@@ -138,6 +161,7 @@ impl Node {
         storage: StorageConfig,
         store: Arc<SqliteBigRepoStore>,
         hidden_parts: HashSet<big_sync_core::PartId>,
+        frontier_scope: WorkerGroupScope,
     ) -> crate::Res<Self> {
         let (repo, repo_stop) = BigRepo::boot_with_store(
             Config {
@@ -145,12 +169,14 @@ impl Node {
                 storage,
                 scope_key: Arc::from("big-repo-test"),
                 hidden_parts: Default::default(),
-                // Frontier part-watching is opt-in: only tests exercising the
-                // AutomergeFrontierWorker enable source parts (via the repo
-                // config directly). Watching GLOBAL here made every node
-                // acquire + materialize every doc marker it synced, which is
-                // not normal-role behavior.
-                automerge_frontier_scope: Default::default(),
+                // Workers are opt-in per test: the default scope disables the
+                // AutomergeFrontierWorker entirely so relays/read-only peers
+                // never acquire + materialize docs they only forward. Tests
+                // exercising a worker must enable it explicitly via
+                // boot_with_scopes. Watching GLOBAL here made every node
+                // materialize every doc marker it synced, which is not
+                // normal-role behavior.
+                automerge_frontier_scope: frontier_scope.clone(),
                 causal_checkpoint_scope: Default::default(),
                 group_part_scope: Default::default(),
             },
@@ -206,6 +232,7 @@ impl Node {
             label,
             identity_seed: [seed; 32],
             hidden_parts,
+            frontier_scope,
         })
     }
 
@@ -213,6 +240,7 @@ impl Node {
         let seed = self.identity_seed;
         let label = self.label;
         let hidden_parts = self.hidden_parts.clone();
+        let frontier_scope = self.frontier_scope.clone();
         let retained_memory_store =
             matches!(&storage, StorageConfig::Memory).then(|| Arc::clone(&self.store));
         self.shutdown().await;
@@ -220,13 +248,14 @@ impl Node {
         if let Some(store) = retained_memory_store {
             // Memory restarts intentionally retain the store for tests that
             // isolate Keyhive loss from part-store persistence.
-            Self::boot_with_store(seed[0], label, storage, store, hidden_parts).await
+            Self::boot_with_store(seed[0], label, storage, store, hidden_parts, frontier_scope)
+                .await
         } else {
             // Disk restarts reopen the SQLite file, modeling a new process
             // rather than reusing the old pool/Arc. Keep the hidden-parts
             // config: a restart that drops it silently re-advertises parts
             // peers still hide.
-            Self::boot_with_config_and_hidden(seed[0], label, storage, hidden_parts).await
+            Self::boot_with_scopes(seed[0], label, storage, hidden_parts, frontier_scope).await
         }
     }
 

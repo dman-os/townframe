@@ -13,6 +13,12 @@ impl BigRepoSyncBackend {
 
 #[async_trait::async_trait]
 impl big_sync::SyncBackend for BigRepoSyncBackend {
+    /// Part membership is exclusively owned by runtime2 reconciliation workers.
+    /// Sync replay acknowledges removals without mutating that projection.
+    async fn remove_obj_from_parts(&self, _obj_id: ObjId, _parts: Vec<PartId>) -> Res<()> {
+        Ok(())
+    }
+
     #[tracing::instrument(
         skip_all,
         fields(%peer_id, %obj_id, remote_payload_present = remote_payload.is_some()),
@@ -21,6 +27,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         &self,
         peer_id: PeerId,
         obj_id: big_sync_core::ObjId,
+        // Part hints are deliberately ignored: big_repo part membership is
+        // owned by the runtime2 workers (group-part reconciliation, frontier
+        // publishing), never by the sync path.
+        _parts: Vec<big_sync_core::PartId>,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
         let repo: Arc<crate::BigRepo> = self

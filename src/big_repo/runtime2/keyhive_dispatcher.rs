@@ -57,18 +57,9 @@ pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerId, Sub
 /// Producer-side handle to the dispatcher task.
 #[derive(Clone)]
 pub(crate) struct KeyhiveChangeDispatcher {
-    events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
+    // Keeps the hint channel open without creating protocol/task reference cycles.
+    _events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
     subscriptions: SubscriptionMap,
-}
-
-impl KeyhiveChangeDispatcher {
-    /// Nudge the dispatcher to poll the admission log soon.
-    ///
-    /// Fire-and-forget: a full channel costs one [`ADMISSION_IDLE_POLL`] of
-    /// extra latency, never a missed notification.
-    pub(crate) fn report(&self, hashes: Vec<EventHash>, source: Option<KeyhivePeerId>) {
-        try_send_change_event(&self.events_tx, hashes, source);
-    }
 }
 
 pub(crate) fn try_send_change_event(
@@ -154,9 +145,8 @@ impl KeyhiveChangeDispatcher {
 
 /// Spawn the dispatcher task.
 ///
-/// The caller creates the events channel and passes both ends: `events_tx`
-/// feeds the post-ingestion change reporter (remote events) and
-/// `KeyhiveChangeNotifier::note_local_keyhive_changed` (local events);
+/// The caller creates the events channel and passes both ends. The protocol's
+/// durable-incorporation hook feeds it for both local and remote events;
 /// `events_rx` is drained by the task as wake-up hints.
 pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
@@ -167,7 +157,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     policy: DebouncePolicy,
 ) -> (KeyhiveChangeDispatcher, tokio::task::JoinHandle<()>) {
     let handle = KeyhiveChangeDispatcher {
-        events_tx,
+        _events_tx: events_tx,
         subscriptions: Arc::clone(&subscriptions),
     };
     let join_handle = tokio::spawn(async move {

@@ -7,7 +7,8 @@ use crate::trap;
 
 use big_sync_core::{
     BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
-    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId, mpsc,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, SyncTaskKind, TaskCtx, TaskId,
+    mpsc,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -475,16 +476,6 @@ impl BigSyncWorker {
             while let Some((id, cmd)) = self.machine.get_cmd() {
                 trace!(?cmd, "executing machine cmd");
                 match cmd {
-                    BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
-                        self.part_store
-                            .remove_obj_from_part(obj_id, part_id)
-                            .await?;
-                    }
-                    BigSyncMachineCommand::AddObjToPart { obj_id, part_id } => {
-                        self.part_store
-                            .add_obj_to_parts(obj_id, vec![part_id])
-                            .await?;
-                    }
                     BigSyncMachineCommand::SetPartCursor {
                         peer_id,
                         part_id,
@@ -779,14 +770,17 @@ impl BigSyncWorker {
             );
             return Ok(());
         };
-        let object_backend_id = if task.part_hints.is_empty() {
-            peer_state.objects.get(&task.deets.obj_id).cloned()
-        } else {
-            None
-        };
+        // Removal tasks evict exactly the hinted parts — never expand via
+        // local membership (that's what we're removing).
+        let object_backend_id =
+            if task.kind == SyncTaskKind::RemoveFromParts || task.part_hints.is_empty() {
+                None
+            } else {
+                peer_state.objects.get(&task.deets.obj_id).cloned()
+            };
         let mut part_ids: Vec<PartId> = if object_backend_id.is_some() {
             Vec::new()
-        } else if task.part_hints.is_empty() {
+        } else if task.part_hints.is_empty() && task.kind == SyncTaskKind::Sync {
             self.part_store.obj_parts(task.deets.obj_id).await?
         } else {
             task.part_hints.iter().copied().collect()
@@ -925,7 +919,8 @@ impl SyncTaskWorker {
         let fut = async move {
             let SyncTask {
                 id: _task_id,
-                part_hints: _part_hints,
+                kind,
+                part_hints,
                 deets,
             } = self.task;
             let SyncTaskDeets {
@@ -933,28 +928,57 @@ impl SyncTaskWorker {
                 obj_id,
                 remote_payload,
             } = deets;
-            let res = self.backend.sync_obj(peer_id, obj_id, remote_payload).await;
-            let event = match res {
-                Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                    BigSyncEvent::SyncCompleted(big_sync_core::SyncCompletedEvent {
-                        task_id: _task_id,
-                        peer_id,
-                        completion,
-                    })
+            let event = match kind {
+                SyncTaskKind::RemoveFromParts => {
+                    let mut parts: Vec<PartId> = part_hints.iter().copied().collect();
+                    parts.sort_unstable();
+                    parts.dedup();
+                    match self.backend.remove_obj_from_parts(obj_id, parts).await {
+                        Ok(()) => {
+                            BigSyncEvent::RemoveCompleted(big_sync_core::RemoveCompletedEvent {
+                                task_id: _task_id,
+                                peer_id,
+                                obj_id,
+                            })
+                        }
+                        Err(err) => BigSyncEvent::RemoveFailed(big_sync_core::RemoveFailedEvent {
+                            task_id: _task_id,
+                            peer_id,
+                            obj_id,
+                            err,
+                        }),
+                    }
                 }
-                Ok(SyncTaskRunOutcome::Stale) => {
-                    BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
-                        task_id: _task_id,
-                        peer_id,
-                        obj_id,
-                    })
+                SyncTaskKind::Sync => {
+                    let mut parts: Vec<PartId> = part_hints.iter().copied().collect();
+                    parts.sort_unstable();
+                    let res = self
+                        .backend
+                        .sync_obj(peer_id, obj_id, parts, remote_payload)
+                        .await;
+                    match res {
+                        Ok(SyncTaskRunOutcome::Completion(completion)) => {
+                            BigSyncEvent::SyncCompleted(big_sync_core::SyncCompletedEvent {
+                                task_id: _task_id,
+                                peer_id,
+                                completion,
+                            })
+                        }
+                        Ok(SyncTaskRunOutcome::Stale) => {
+                            BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
+                                task_id: _task_id,
+                                peer_id,
+                                obj_id,
+                            })
+                        }
+                        Err(err) => BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                            task_id: _task_id,
+                            peer_id,
+                            obj_id,
+                            err,
+                        }),
+                    }
                 }
-                Err(err) => BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                    task_id: _task_id,
-                    peer_id,
-                    obj_id,
-                    err,
-                }),
             };
             if let Err(err) = self.host_tx.send(event).await
                 && !self.cancel_token.is_cancelled()

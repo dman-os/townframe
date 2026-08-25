@@ -48,8 +48,12 @@ pub struct KeyhiveSyncCancelled {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocPolicyError {
     /// The local policy has no document definition.
+    /// The local policy does not know this document. A hive only knows a
+    /// document it can fetch, so this means no local access path exists.
     DocumentNotFound,
-    /// The local policy knows the document but denies the requested operation.
+    /// The local policy knows the document but rejects content authored by a
+    /// principal it does not see as holding edit access (stale or divergent
+    /// local membership view).
     InsufficientAccess,
     /// The policy rejected an identifier as malformed.
     InvalidIdentifier,
@@ -299,6 +303,11 @@ pub enum WorkerGroupScope {
 }
 
 impl WorkerGroupScope {
+    /// A scope that admits nothing — disables the worker.
+    pub fn disabled() -> Self {
+        Self::Groups(std::collections::HashSet::new())
+    }
+
     /// Is a document whose containing-group ids are `doc_groups` eligible for
     /// this worker?
     pub fn admits_doc_groups(&self, doc_groups: &std::collections::BTreeSet<[u8; 32]>) -> bool {

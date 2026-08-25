@@ -1452,6 +1452,31 @@ async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
 }
 
 #[tokio::test]
+async fn sqlite_big_repo_unadmitted_keyhive_events_returns_only_diff_candidates() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store = SqliteBigRepoStore::new(sql, "keyhive-unadmitted-diff", BuckId::MAX_LEVEL).await?;
+    let unadmitted = subduction_keyhive::storage::StorageHash::new([7; 32]);
+    let admitted = subduction_keyhive::storage::StorageHash::new([8; 32]);
+    let source = subduction_keyhive::KeyhivePeerId::from_bytes([9; 32]);
+    store
+        .save_keyhive_event(unadmitted, b"candidate".to_vec(), Some(source.clone()))
+        .await?;
+    store
+        .save_keyhive_event(admitted, b"already-admitted".to_vec(), None)
+        .await?;
+    store.append_admitted_events(vec![admitted], None).await?;
+
+    let candidates = store.unadmitted_keyhive_events().await?;
+
+    assert_eq!(
+        candidates,
+        vec![([7; 32], b"candidate".to_vec(), Some(source))],
+        "one SQL diff must return bytes and source only for missing admissions"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
     // The arrival log is keyhive's recovery source: `ingest_from_storage`
     // replays it wholesale and no snapshot-boundary marker exists, so no

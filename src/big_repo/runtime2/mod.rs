@@ -38,7 +38,6 @@ pub use lease::{
     TrackedWorkGuard,
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
-pub(crate) use native::KeyhiveChangeNotifier;
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
 pub use types::WorkerGroupScope;
 

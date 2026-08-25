@@ -22,12 +22,10 @@ structstruck::strike! {
             part_id: PartId,
             cursor: CursorIndex
         },
-        AddObjToPart {
-            obj_id: ObjId,
-            part_id: PartId,
-            cursor: CursorIndex,
-        },
-        RemoveObjFromPart {
+        /// Scheduling signal only: the outer machine turns this into a
+        /// `SyncTaskKind::RemoveFromParts` task executed by the backend.
+        /// The machine itself never mutates part membership.
+        RemoveObjFromParts {
             obj_id: ObjId,
             part_id: PartId,
             cursor: CursorIndex,
@@ -209,13 +207,7 @@ impl CursorSyncMachine {
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
                 let waiter = job.waiters.entry(evt.cursor).or_default();
                 waiter.parts.push(evt.part_id);
-                waiter.pending_membership = true;
                 waiter.pending_sync = true;
-                out.push(CursorMachineCommand::AddObjToPart {
-                    cursor: evt.cursor,
-                    obj_id: evt.obj_id,
-                    part_id: evt.part_id,
-                });
                 out.push(CursorMachineCommand::SyncObj {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
@@ -238,7 +230,7 @@ impl CursorSyncMachine {
                 let waiter = job.waiters.entry(evt.cursor).or_default();
                 waiter.parts.push(evt.part_id);
                 waiter.pending_membership = true;
-                out.push(CursorMachineCommand::RemoveObjFromPart {
+                out.push(CursorMachineCommand::RemoveObjFromParts {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
                     part_id: evt.part_id,

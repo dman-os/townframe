@@ -124,6 +124,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
+    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     keyhive_storage: BigRepoKeyhiveStorage,
     #[educe(Debug(ignore))]
     sync_policy: runtime2::types::BigRepoSyncPolicy,
@@ -137,7 +138,9 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
     #[educe(Debug(ignore))]
-    keyhive_notifier: runtime2::KeyhiveChangeNotifier,
+    keyhive_protocol: handler::BigRepoKeyhiveProtocol,
+    #[educe(Debug(ignore))]
+    keyhive_dispatcher: runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -284,7 +287,6 @@ impl BigRepo {
             BigKeyhiveHandle::new(node_identity_seed, listener).await?
         };
         keyhive.import_prekey_secrets(&keyhive_storage).await?;
-        keyhive.ingest_from_storage(&keyhive_storage).await?;
         keyhive.save_prekey_secrets(&keyhive_storage).await?;
         let policy_keyhive = keyhive.clone_keyhive();
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
@@ -295,7 +297,7 @@ impl BigRepo {
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
-        let (runtime, ephemeral, keyhive_notifier, runtime_stop) =
+        let (runtime, ephemeral, keyhive_protocol, keyhive_dispatcher, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
                 signer,
                 subduction_storage.clone(),
@@ -328,7 +330,8 @@ impl BigRepo {
             sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
-            keyhive_notifier,
+            keyhive_protocol,
+            keyhive_dispatcher,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             connection_tasks: Arc::clone(&connection_tasks),
@@ -431,18 +434,12 @@ impl BigRepo {
         peer_id: PeerId,
         tx: irpc::channel::mpsc::Sender<crate::rpc::KeyhiveChangedRpcEvent>,
     ) -> Uuid {
-        self.keyhive_notifier
-            .dispatcher()
-            .subscribe(peer_id, tx)
-            .await
+        self.keyhive_dispatcher.subscribe(peer_id, tx).await
     }
 
     /// Unregister a peer's notification stream for the given subscription ID.
     pub(crate) async fn unsubscribe_keyhive_changes(&self, peer_id: &PeerId, sub_id: Uuid) {
-        self.keyhive_notifier
-            .dispatcher()
-            .unsubscribe(peer_id, sub_id)
-            .await;
+        self.keyhive_dispatcher.unsubscribe(peer_id, sub_id).await;
     }
 
     /// Synchronize local Keyhive state with a directly connected peer.
@@ -592,12 +589,9 @@ impl BigRepo {
         self: &Arc<Self>,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Res<BigKeyhiveGroup> {
-        let (group, hashes) = self
+        let (group, _hashes) = self
             .keyhive
-            .create_group_with_parents(parents, &self.keyhive_storage)
-            .await?;
-        self.keyhive_notifier
-            .note_local_keyhive_changed(&hashes)
+            .create_group_with_parents(parents, &self.keyhive_protocol)
             .await?;
         self.wait_for_keyhive_reconciliation().await?;
         Ok(group)
@@ -624,9 +618,9 @@ impl BigRepo {
             after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
         }
 
-        let (affected_docs, hashes) = self
+        let (affected_docs, _hashes) = self
             .keyhive
-            .add_member_to_group(member, group, access, after_content, &self.keyhive_storage)
+            .add_member_to_group(member, group, access, after_content, &self.keyhive_protocol)
             .await?;
 
         // BigRepo's contract is history-inclusive for reader grants. Publish a
@@ -642,9 +636,6 @@ impl BigRepo {
             }
         }
 
-        self.keyhive_notifier
-            .note_local_keyhive_changed(&hashes)
-            .await?;
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
@@ -669,14 +660,14 @@ impl BigRepo {
         };
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
 
-        let hashes = self
+        let _hashes = self
             .keyhive
             .grant_doc_access(
                 principal,
                 doc_id,
                 access,
                 after_content,
-                &self.keyhive_storage,
+                &self.keyhive_protocol,
             )
             .await?;
 
@@ -684,9 +675,6 @@ impl BigRepo {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
 
-        self.keyhive_notifier
-            .note_local_keyhive_changed(&hashes)
-            .await?;
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
@@ -700,22 +688,19 @@ impl BigRepo {
         let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
         let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
-        let hashes = self
+        let _hashes = self
             .keyhive
             .revoke_doc_access(
                 principal,
                 doc_id,
                 true,
                 after_content,
-                &self.keyhive_storage,
+                &self.keyhive_protocol,
             )
             .await?;
         if !self.runtime.ensure_causal_coverage(doc_id).await? {
             tracing::debug!(%doc_id, "document revocation causal checkpoint deferred to durable event reconciliation");
         }
-        self.keyhive_notifier
-            .note_local_keyhive_changed(&hashes)
-            .await?;
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }

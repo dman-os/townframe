@@ -487,16 +487,25 @@ pub(crate) struct AdmissionEventRow {
 pub(crate) struct KeyhiveIncorporationSink {
     store: SqliteBigRepoStore,
     runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    /// Dispatcher hint channel; weak because the dispatcher outlives boot but
+    /// may shut down first. Hints are wake-ups only — the durable admission
+    /// log is the truth the dispatcher tails.
+    dispatcher_events:
+        tokio::sync::mpsc::WeakSender<crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent>,
 }
 
 impl KeyhiveIncorporationSink {
     pub(crate) fn new(
         store: SqliteBigRepoStore,
         runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        dispatcher_events: tokio::sync::mpsc::WeakSender<
+            crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent,
+        >,
     ) -> Self {
         Self {
             store,
             runtime_events,
+            dispatcher_events,
         }
     }
 
@@ -528,6 +537,44 @@ impl KeyhiveIncorporationSink {
             );
         }
         Ok(())
+    }
+}
+
+impl subduction_keyhive::DurableIncorporationSink<Sendable> for KeyhiveIncorporationSink {
+    fn admit(
+        self: Arc<Self>,
+        hashes: Vec<[u8; 32]>,
+        source: Option<subduction_keyhive::KeyhivePeerId>,
+    ) -> <Sendable as future_form::FutureForm>::Future<
+        'static,
+        Result<(), subduction_keyhive::StorageError>,
+    > {
+        Sendable::from_future(async move {
+            self.append(hashes.clone(), source.clone())
+                .await
+                .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
+            if let Some(tx) = self.dispatcher_events.upgrade() {
+                crate::runtime2::keyhive_dispatcher::try_send_change_event(&tx, hashes, source);
+            }
+            Ok(())
+        })
+    }
+
+    fn unadmitted_wal_events(
+        self: Arc<Self>,
+    ) -> <Sendable as future_form::FutureForm>::Future<
+        'static,
+        Result<
+            Vec<([u8; 32], Vec<u8>, Option<subduction_keyhive::KeyhivePeerId>)>,
+            subduction_keyhive::StorageError,
+        >,
+    > {
+        Sendable::from_future(async move {
+            self.store
+                .unadmitted_keyhive_events()
+                .await
+                .map_err(|error| subduction_keyhive::StorageError::Load(error.to_string()))
+        })
     }
 }
 
@@ -3000,6 +3047,95 @@ impl SqliteBigRepoStore {
                 Ok((
                     subduction_keyhive::storage::StorageHash::new(hash),
                     event_bytes,
+                ))
+            })
+            .collect()
+    }
+
+    /// Events present in the retained keyhive WAL (replay tail) that have no
+    /// admission entry, with serialized bytes and original source attribution.
+    ///
+    /// ONE set-diff query: the common boot returns an empty vector because
+    /// admission appends synchronously with persistence. This is the candidate
+    /// feed for crash-window reconciliation — never a full WAL or projection walk.
+    pub(crate) async fn unadmitted_keyhive_events(
+        &self,
+    ) -> Result<
+        Vec<([u8; 32], Vec<u8>, Option<subduction_keyhive::KeyhivePeerId>)>,
+        SqliteBigRepoStoreError,
+    > {
+        let rows = sqlx::query(
+            "SELECT t.event_hash, l.event_bytes, l.source_id
+             FROM big_repo_keyhive_replay_tail t
+             JOIN big_repo_keyhive_event_log l
+               ON l.scope_id = t.scope_id AND l.event_hash = t.event_hash
+             WHERE t.scope_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM big_repo_keyhive_admission_log a
+                   WHERE a.scope_id = t.scope_id AND a.event_hash = t.event_hash
+               )",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let hash = Self::decode_id(row.try_get::<Vec<u8>, _>("event_hash")?)?;
+                let source = row
+                    .try_get::<Option<Vec<u8>>, _>("source_id")?
+                    .map(|bytes| {
+                        subduction_keyhive::KeyhivePeerId::from_bytes(
+                            bytes
+                                .try_into()
+                                .expect("stored Keyhive peer id must be 32 bytes"),
+                        )
+                    });
+                let event_bytes = row.try_get("event_bytes")?;
+                Ok((hash, event_bytes, source))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn load_keyhive_events_with_source(
+        &self,
+    ) -> Result<
+        Vec<(
+            subduction_keyhive::storage::StorageHash,
+            Vec<u8>,
+            Option<subduction_keyhive::KeyhivePeerId>,
+        )>,
+        SqliteBigRepoStoreError,
+    > {
+        let rows = sqlx::query(
+            "SELECT event_hash, event_bytes, source_id
+             FROM big_repo_keyhive_event_log
+             WHERE scope_id = ?1
+               AND event_hash IN (
+                   SELECT event_hash
+                   FROM big_repo_keyhive_replay_tail
+                   WHERE scope_id = ?1
+               )
+             ORDER BY seq",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let hash = Self::decode_id(row.try_get::<Vec<u8>, _>("event_hash")?)?;
+                let source = row
+                    .try_get::<Option<Vec<u8>>, _>("source_id")?
+                    .map(|bytes| {
+                        subduction_keyhive::KeyhivePeerId::from_bytes(
+                            bytes
+                                .try_into()
+                                .expect("stored Keyhive peer id must be 32 bytes"),
+                        )
+                    });
+                Ok((
+                    subduction_keyhive::storage::StorageHash::new(hash),
+                    row.try_get("event_bytes")?,
+                    source,
                 ))
             })
             .collect()

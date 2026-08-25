@@ -59,73 +59,8 @@ use subduction_ephemeral::{
     clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
     policy::OpenEphemeralPolicy,
 };
-use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId, message::EventHash};
+use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
-/// Single funnel for "the local Keyhive changed".
-///
-/// Every local Keyhive mutation calls
-/// [`KeyhiveChangeNotifier::note_local_keyhive_changed`] instead of talking to
-/// the protocol cache or the RPC broadcast directly: the method cache-busts
-/// the protocol (so the creator's next serve/sync is fresh) and then
-/// broadcasts the keyhive-changed hint that `rpc.rs` forwards to connected
-/// peers — they pull if they want. Keeping both effects in one call is what
-/// prevents mutations from emitting one half without the other.
-#[derive(Clone)]
-pub(crate) struct KeyhiveChangeNotifier {
-    /// Keyhive protocol handle — cache busting + syncpoint invalidation.
-    keyhive_protocol: BigRepoKeyhiveProtocol,
-    /// Dispatcher handle — classification + debounced fan-out to subscribers.
-    dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
-    /// Durable incorporation sink for locally accepted events.
-    incorporation_sink: KeyhiveIncorporationSink,
-}
-
-impl KeyhiveChangeNotifier {
-    pub(crate) fn new(
-        keyhive_protocol: BigRepoKeyhiveProtocol,
-        dispatcher: crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
-        incorporation_sink: KeyhiveIncorporationSink,
-    ) -> Self {
-        Self {
-            keyhive_protocol,
-            dispatcher,
-            incorporation_sink,
-        }
-    }
-
-    /// The dispatcher handle (subscription registration + local reports).
-    pub(crate) fn dispatcher(
-        &self,
-    ) -> &crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher {
-        &self.dispatcher
-    }
-
-    /// Cache-bust the protocol cache, then report the local change to the
-    /// dispatcher for classification and debounced fan-out.
-    ///
-    /// The cache bust is deliberately synchronous with the mutation: a peer
-    /// that pulls in response to the notification must be served fresh state,
-    /// and the protocol serves sync requests from its cache. `hashes` are the
-    /// hashes of the events the mutation persisted (empty when unknown — the
-    /// dispatcher then falls back to a conservative wake-up).
-    pub(crate) async fn note_local_keyhive_changed(
-        &self,
-        hashes: &[EventHash],
-    ) -> eyre::Result<()> {
-        if let Err(err) = self.keyhive_protocol.note_local_keyhive_changed().await {
-            tracing::debug!(%err, "keyhive network local-change notification deferred/best-effort");
-        }
-        // Local mutations bypass protocol ingestion, so record their accepted
-        // operation hashes at the same durable incorporation boundary as
-        // remote exchanges. The dispatcher remains only a wake-up hint.
-        self.incorporation_sink
-            .append(hashes.to_vec(), None)
-            .await?;
-        self.dispatcher.report(hashes.to_vec(), None);
-        Ok(())
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // CONTEXT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,9 +95,6 @@ where
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
-    /// Single funnel for local Keyhive change notifications: cache-busts the
-    /// protocol and broadcasts the RPC keyhive-changed hint to peers.
-    keyhive_notifier: KeyhiveChangeNotifier,
 }
 
 impl<S> std::fmt::Debug for NativeBigRepoIo<S>
@@ -429,23 +361,19 @@ where
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
-            let keyhive_changed = !cgka_ops.is_empty();
-            let mut hashes = Vec::new();
-            if keyhive_changed {
-                hashes =
-                    persist_cgka_updates_durably(&self.keyhive_storage, cgka_ops, local_secrets)
-                        .await?;
+            if !cgka_ops.is_empty() {
+                persist_cgka_updates_durably(
+                    &self.keyhive_protocol,
+                    &self.keyhive_storage,
+                    cgka_ops,
+                    local_secrets,
+                )
+                .await?;
             }
             self.subduction
                 .store_sedimentree(sed_id, sedimentree, blobs)
                 .await
                 .wrap_err("failed storing initial sedimentree")?;
-            if keyhive_changed {
-                // Cache-bust + notify peers in one call.
-                self.keyhive_notifier
-                    .note_local_keyhive_changed(&hashes)
-                    .await?;
-            }
             Ok(())
         })
     }
@@ -457,8 +385,6 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<BTreeSet<FragmentRequested>>> {
         Sendable::from_future(async move {
             let mut fragment_requests = BTreeSet::new();
-            let mut keyhive_changed = false;
-            let mut hashes = Vec::new();
             let mut batch_keys = HashMap::new();
             for (head, parents, blob) in commits {
                 let (encrypted_blob, app_key, update_op, local_secret) =
@@ -483,15 +409,13 @@ where
                     })?;
                 batch_keys.insert(head, app_key);
                 if let Some(update_op) = update_op {
-                    hashes.extend(
-                        persist_cgka_updates_durably(
-                            &self.keyhive_storage,
-                            vec![update_op],
-                            local_secret.into_iter().collect(),
-                        )
-                        .await?,
-                    );
-                    keyhive_changed = true;
+                    persist_cgka_updates_durably(
+                        &self.keyhive_protocol,
+                        &self.keyhive_storage,
+                        vec![update_op],
+                        local_secret.into_iter().collect(),
+                    )
+                    .await?;
                 }
                 let (request, _heads) = self
                     .subduction
@@ -504,12 +428,6 @@ where
                         "duplicate fragment request"
                     );
                 }
-            }
-            if keyhive_changed {
-                // Cache-bust + notify peers in one call.
-                self.keyhive_notifier
-                    .note_local_keyhive_changed(&hashes)
-                    .await?;
             }
             Ok(fragment_requests)
         })
@@ -562,15 +480,13 @@ where
                         return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
                     }
                 };
-                let hashes = persist_cgka_updates_durably(
+                persist_cgka_updates_durably(
+                    &self.keyhive_protocol,
                     &self.keyhive_storage,
                     vec![update],
                     vec![local_secret],
                 )
                 .await?;
-                self.keyhive_notifier
-                    .note_local_keyhive_changed(&hashes)
-                    .await?;
             }
 
             let pcs_key_hash = match keyhive.try_pcs_key_hash(Arc::clone(&kh_doc)).await {
@@ -621,7 +537,6 @@ where
             // ingesting remote ops). In that case the encryption performs its
             // own rotation; persist it like any other local CGKA update
             // instead of treating it as an invariant violation.
-            let mut rotation_hashes = Vec::new();
             if update_op.is_some() || local_secret.is_some() {
                 debug!(
                     ?sed_id,
@@ -629,7 +544,8 @@ where
                     rotated = update_op.is_some(),
                     "causal checkpoint encryption rotated the prepared PCS root"
                 );
-                rotation_hashes = persist_cgka_updates_durably(
+                persist_cgka_updates_durably(
+                    &self.keyhive_protocol,
                     &self.keyhive_storage,
                     update_op.into_iter().collect(),
                     local_secret.into_iter().collect(),
@@ -645,11 +561,6 @@ where
                 fragment_request.is_none(),
                 "depth-zero causal checkpoint requested Automerge fragmentation"
             );
-            if !rotation_hashes.is_empty() {
-                self.keyhive_notifier
-                    .note_local_keyhive_changed(&rotation_hashes)
-                    .await?;
-            }
             Ok(Some((head, checkpoint, heads_observed)))
         })
     }
@@ -1201,14 +1112,11 @@ where
         Sendable::from_future(async move {
             let uuid = Uuid::new_v4();
             info!(%uuid, "creating doc");
-            let (doc_id, hashes) = self
+            let (doc_id, _hashes) = self
                 .keyhive
-                .create_doc(parents, content_heads, &self.keyhive_storage)
+                .create_doc(parents, content_heads, &self.keyhive_protocol)
                 .await?;
             info!(%uuid, ?doc_id, "created doc");
-            self.keyhive_notifier
-                .note_local_keyhive_changed(&hashes)
-                .await?;
             Ok(doc_id)
         })
     }
@@ -1304,9 +1212,10 @@ where
             match self.has_doc_fetch_access(doc_id).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: doc not present or authorized in local Keyhive");
+                    debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
+                    );
                     return Ok(SyncDocAttempt::Policy(
-                        subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess,
+                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound,
                     ));
                 }
                 Err(err) => {
@@ -1917,7 +1826,8 @@ pub async fn spawn_native_runtime2<S>(
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
-    crate::runtime2::KeyhiveChangeNotifier,
+    BigRepoKeyhiveProtocol,
+    crate::runtime2::keyhive_dispatcher::KeyhiveChangeDispatcher,
     crate::runtime2::Runtime2StopToken<Sendable, crate::runtime2::TokioTaskRuntime>,
 )>
 where
@@ -1976,13 +1886,16 @@ where
     ));
 
     // ── Keyhive protocol and handler ──────────────────────────────────────
-    // The incorporation hook is awaited inline: the exchange cannot complete
-    // until the durable incorporation record commits.
+    // The incorporation sink is awaited inline: the exchange cannot complete
+    // until the durable incorporation record commits. The same sink answers
+    // boot's WAL-vs-admission diff for crash-window reconciliation.
     let (keyhive_events_tx, keyhive_events_rx) = tokio::sync::mpsc::channel(1024);
     let keyhive_reporter_weak = keyhive_events_tx.downgrade();
-    let incorporation_sink =
-        KeyhiveIncorporationSink::new(group_part_store.clone(), evt_tx.clone());
-    let reporter_sink = incorporation_sink.clone();
+    let incorporation_sink = KeyhiveIncorporationSink::new(
+        group_part_store.clone(),
+        evt_tx.clone(),
+        keyhive_reporter_weak,
+    );
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -1991,21 +1904,12 @@ where
             keyhive.contact_card().clone(),
         )
         .with_storage_recovery()
-        .with_durable_incorporation_hook(move |hashes, source| {
-            let sink = reporter_sink.clone();
-            let dispatcher_tx = keyhive_reporter_weak.clone();
-            Sendable::from_future(async move {
-                sink.append(hashes.clone(), source.clone())
-                    .await
-                    .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
-                if let Some(tx) = dispatcher_tx.upgrade() {
-                    crate::runtime2::keyhive_dispatcher::try_send_change_event(&tx, hashes, source);
-                }
-                Ok(())
-            })
-        }),
+        .with_durable_incorporation_sink(Arc::new(incorporation_sink.clone())),
     );
-
+    keyhive_protocol
+        .ingest_from_storage()
+        .await
+        .map_err(|error| ferr!("failed recovering keyhive event WAL: {error}"))?;
     // One dispatcher owns the debounced, classified fan-out of keyhive change
     // hints to subscribed peers. It stops when the events channel closes
     // (BigRepo drop).
@@ -2023,12 +1927,6 @@ where
                 max_latency: std::time::Duration::from_secs(1),
             },
         );
-    let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
-        Arc::clone(&keyhive_protocol),
-        keyhive_dispatcher,
-        incorporation_sink.clone(),
-    );
-
     let mut keyhive_handler = BigRepoKeyhiveHandler::new(
         Arc::clone(&keyhive_protocol),
         BigRepoKeyhiveConnAdapter::<BigRepoIrohTransport>::new
@@ -2090,8 +1988,6 @@ where
     let subduction_handle: Arc<BigRepoSubduction<S>> = Arc::clone(&subduction);
 
     // ── IO facades ─────────────────────────────────────────────────────────
-    // Single funnel for local Keyhive change notifications (cache bust + RPC
-    // broadcast). Mutations inside the IO and the public API both call it.
     let native_io = Arc::new(NativeBigRepoIo {
         subduction: Arc::clone(&subduction_handle),
         storage: storage.clone(),
@@ -2102,7 +1998,6 @@ where
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
-        keyhive_notifier: keyhive_notifier.clone(),
     });
 
     let iroh_connect = Arc::new(IrohTransportConnect {
@@ -2253,7 +2148,13 @@ where
         BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard)
     };
 
-    Ok((handle, ephemeral, keyhive_notifier, stop_token))
+    Ok((
+        handle,
+        ephemeral,
+        keyhive_protocol,
+        keyhive_dispatcher,
+        stop_token,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2298,11 +2199,24 @@ mod tests {
         )
     }
 
+    fn kh_protocol(
+        keyhive: &BigKeyhiveHandle,
+        storage: &BigRepoKeyhiveStorage,
+    ) -> BigRepoKeyhiveProtocol {
+        Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+            keyhive.clone_keyhive(),
+            storage.clone(),
+            keyhive.keyhive_peer_id(),
+            keyhive.contact_card().clone(),
+        ))
+    }
+
     #[tokio::test]
     async fn ciphertext_store_durable_after_mark_decrypted() -> eyre::Result<()> {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([9; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
+        let kh_protocol = kh_protocol(&keyhive, &kh_storage);
         let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
@@ -2310,7 +2224,7 @@ mod tests {
                     head: [1; 32],
                     tail: vec![],
                 },
-                &kh_storage,
+                &kh_protocol,
             )
             .await?;
         let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
@@ -2369,6 +2283,7 @@ mod tests {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([14; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
+        let kh_protocol = kh_protocol(&keyhive, &kh_storage);
         let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
@@ -2376,7 +2291,7 @@ mod tests {
                     head: [1; 32],
                     tail: vec![],
                 },
-                &kh_storage,
+                &kh_protocol,
             )
             .await?;
         let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
@@ -2431,6 +2346,7 @@ mod tests {
         let (listener, _evt_rx) = kh_listener();
         let keyhive = BigKeyhiveHandle::new([11; 32], listener).await?;
         let kh_storage = BigRepoKeyhiveStorage::memory();
+        let kh_protocol = kh_protocol(&keyhive, &kh_storage);
         let (doc_id, _hashes) = keyhive
             .create_doc(
                 default(),
@@ -2438,7 +2354,7 @@ mod tests {
                     head: [1; 32],
                     tail: vec![],
                 },
-                &kh_storage,
+                &kh_protocol,
             )
             .await?;
         let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
