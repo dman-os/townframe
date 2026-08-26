@@ -94,7 +94,6 @@ pub struct IrohSyncRepo {
     blob_sync_worker: big_sync::BigSyncWorkerHandle,
     big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
-    _blob_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +149,6 @@ pub struct IrohSyncRepoStopToken {
     big_repo_rpc_stop_token: big_repo::rpc::BigRepoRpcStopToken,
     big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     big_sync_worker_stop: big_sync::StopToken,
-    blob_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     blob_sync_worker_stop: big_sync::StopToken,
     // partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
 }
@@ -170,7 +168,6 @@ impl IrohSyncRepoStopToken {
         self.big_sync_worker_stop.stop().await?;
         self.big_sync_rpc_stop.stop().await?;
         self.blob_sync_worker_stop.stop().await?;
-        self.blob_sync_rpc_stop.stop().await?;
         self.big_repo_rpc_stop_token.stop().await?;
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
@@ -245,6 +242,7 @@ impl IrohSyncRepo {
             doc_sync_backends,
             "daybook-docs",
             max_task_backoff,
+            Arc::from("daybook-core"),
         )?;
 
         let mut blob_sync_backends = std::collections::HashMap::new();
@@ -255,12 +253,18 @@ impl IrohSyncRepo {
                 blob_sync_backends,
                 "daybook-blobs",
                 max_task_backoff,
+                Arc::from("daybook-blobs"),
             )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
-            big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;
-        let (blob_sync_rpc, blob_sync_rpc_stop) =
-            big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.blob_part_store)).await?;
+            big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
+                (Arc::from("daybook-core"), Arc::clone(&rcx.part_store) as _),
+                (
+                    Arc::from("daybook-blobs"),
+                    Arc::clone(&rcx.blob_part_store) as _,
+                ),
+            ]))
+            .await?;
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 SUBDUCTION_ALPN,
@@ -274,10 +278,6 @@ impl IrohSyncRepo {
             .accept(
                 big_sync::rpc::BIG_SYNC_RPC_ALPN,
                 big_sync_rpc.protocol_handler(),
-            )
-            .accept(
-                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
-                blob_sync_rpc.protocol_handler(),
             )
             .accept(
                 big_repo::rpc::REPO_SYNC_ALPN,
@@ -321,7 +321,6 @@ impl IrohSyncRepo {
             blob_sync_worker,
             big_repo_rpc: big_repo_rpc.clone(),
             _big_sync_rpc: big_sync_rpc,
-            _blob_sync_rpc: blob_sync_rpc,
         });
         #[cfg(test)]
         bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
@@ -354,7 +353,6 @@ impl IrohSyncRepo {
                 big_repo_rpc_stop_token: repo_rpc_stop_token,
                 big_sync_rpc_stop,
                 big_sync_worker_stop,
-                blob_sync_rpc_stop,
                 blob_sync_worker_stop,
             },
         ))
@@ -654,11 +652,7 @@ impl IrohSyncRepo {
             self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
             let doc_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
-            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
-                endpoint,
-                addr.clone(),
-                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
-            );
+            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
@@ -908,11 +902,8 @@ impl IrohSyncRepo {
                 .await?;
             let doc_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), endpoint_addr.clone());
-            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
-                endpoint,
-                endpoint_addr.clone(),
-                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
-            );
+            let blob_rpc_client =
+                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, endpoint_addr.clone());
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
@@ -923,7 +914,7 @@ impl IrohSyncRepo {
             self.big_sync_worker
                 .set_peer(
                     conn.peer_id,
-                    Arc::clone(&doc_rpc_client) as Arc<dyn big_sync::rpc::HostBigRpcClient>,
+                    Arc::clone(&doc_rpc_client) as Arc<dyn big_sync::rpc::WireBigSyncRpcClient>,
                     doc_parts,
                     HashMap::new(),
                 )
@@ -932,7 +923,8 @@ impl IrohSyncRepo {
                 self.blob_sync_worker
                     .set_peer(
                         conn.peer_id,
-                        Arc::clone(&blob_rpc_client) as Arc<dyn big_sync::rpc::HostBigRpcClient>,
+                        Arc::clone(&blob_rpc_client)
+                            as Arc<dyn big_sync::rpc::WireBigSyncRpcClient>,
                         blob_parts,
                         HashMap::new(),
                     )

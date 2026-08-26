@@ -101,7 +101,7 @@ impl SqlCtx {
     ///
     /// The callback receives a transaction and must return a boxed future. Keeping
     /// transaction ownership here prevents accidental writes outside the transaction.
-    pub async fn with_write_tx<T, F>(&self, f: F) -> Result<T, sqlx::Error>
+    pub async fn with_write_tx<T, F>(&self, op: F) -> Result<T, sqlx::Error>
     where
         T: Send,
         F: for<'a> FnOnce(
@@ -115,7 +115,7 @@ impl SqlCtx {
         >,
     {
         let tx = self.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let (result, tx) = f(tx).await?;
+        let (result, tx) = op(tx).await?;
         tx.commit().await?;
         Ok(result)
     }

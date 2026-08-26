@@ -69,8 +69,6 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// writer). `WaitForKeyhiveReconciliation` captures this and resolves
     /// once `group_part_settled_seq` covers it.
     admitted_head: u64,
-    /// Notifier for Keyhive event log changes.
-    keyhive_event_notify: Arc<tokio::sync::Notify>,
 
     // ── doc sync bookkeeping ───────────────────────────────────────────────
     /// Waiters for caller-initiated doc sync rounds, keyed by waiter id.
@@ -484,6 +482,21 @@ where
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
                     .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
+                    .wrap_err(ERROR_CHANNEL)?;
+            }
+            Runtime2Cmd::ApplyKeyhiveToDoc {
+                doc_id,
+                admission_seq,
+                resp,
+            } => {
+                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+                worker
+                    .send(DocWorkerMsg::ReattemptMaterialization {
+                        origin: crate::changes::BigRepoChangeOrigin::Keyhive,
+                        keyhive_seq: Some(admission_seq),
+                        resp,
+                        _lease,
+                    })
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
@@ -1450,7 +1463,7 @@ where
             Runtime2Evt::KeyhiveSyncDone {
                 peer_id,
                 request_id,
-                changed,
+                changed: _,
             } => {
                 self.finish_keyhive_sync(peer_id, request_id)?;
             }
@@ -2041,6 +2054,7 @@ where
         let (resp, result) = futures::channel::oneshot::channel();
         if let Err(error) = worker.send(DocWorkerMsg::ReattemptMaterialization {
             origin: crate::changes::BigRepoChangeOrigin::Keyhive,
+            keyhive_seq: None,
             resp,
             _lease,
         }) {
@@ -2072,7 +2086,6 @@ where
     }
 
     /// Cancel all pending keyhive syncs for a peer.
-
     fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerId, reason: &'static str) {
         self.active_keyhive_syncs.remove(peer_id);
         // A latched change notification is stale once the connection is gone;
@@ -2329,6 +2342,8 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub group_part_stop: Option<crate::runtime2::GroupPartWorkerStopToken>,
     pub causal_checkpoint_stop: Option<crate::runtime2::CausalCheckpointWorkerStopToken>,
     pub automerge_frontier_stop: Option<crate::runtime2::AutomergeFrontierWorkerStopToken>,
+    pub(crate) keyhive_dispatcher_stop:
+        Option<crate::runtime2::keyhive_dispatcher::KeyhiveDispatcherStopToken>,
 }
 
 impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
@@ -2344,6 +2359,10 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
     /// `timeout` is the machine loop aborted outright.
     pub async fn stop(mut self, timeout: std::time::Duration) -> eyre::Result<()> {
         // Stop construction-time background workers first in reverse order:
+        // the dispatcher is spawned last, so it is cancelled first.
+        if let Some(stop) = self.keyhive_dispatcher_stop.take() {
+            stop.cancel();
+        }
         if let Some(stop) = self.automerge_frontier_stop.take() {
             stop.cancel();
         }
@@ -2542,11 +2561,7 @@ where
         clock,
         connect,
         event_channel,
-        keyhive_event_notify,
     } = config;
-
-    let keyhive_event_notify =
-        keyhive_event_notify.unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
 
     // Create two independent task sets for reverse-order shutdown.
     let child_tasks = tasks.task_set();
@@ -2581,7 +2596,6 @@ where
         keyhive_round_ids: 0,
         group_part_settled_seq: 0,
         admitted_head: 0,
-        keyhive_event_notify,
         keyhive_reconciliation_waiters: Vec::new(),
         pending_doc_syncs: HashMap::new(),
         quiescence_waiters: Vec::new(),
@@ -2602,6 +2616,7 @@ where
     let handle = Runtime2Handle::<F>::new(
         cmd_tx.clone(),
         hub.sync_policy,
+        #[cfg(any(test, feature = "test-support"))]
         Arc::clone(&hub.timer),
         doc_sync_waiter_ids,
         keyhive_sync_waiter_ids,
@@ -2627,6 +2642,7 @@ where
             group_part_stop: None,
             causal_checkpoint_stop: None,
             automerge_frontier_stop: None,
+            keyhive_dispatcher_stop: None,
         },
     ))
 }

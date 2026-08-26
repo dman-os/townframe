@@ -442,6 +442,78 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+
+    // Blob docs exist in the seed BEFORE the clone so the bootstrap phase must
+    // serve blob-scope sync requests (the seed's blob worker probes the
+    // bootstrap node's RPC registry for the "daybook-blobs" scope).
+    tokio::fs::create_dir_all(&repo_a_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions::default(),
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    let node_a = open_sync_node(&repo_a_path).await?;
+    let mut blob_payloads = Vec::new();
+    let mut args_batch = Vec::new();
+    for idx in 0..3usize {
+        let payload = format!("clone-bootstrap-blob-{idx:03}").into_bytes();
+        let hash = node_a.blobs_repo.put(&payload).await?;
+        blob_payloads.push((hash, payload));
+        args_batch.push(AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::Blob),
+                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
+                    digest: crate::blobs::blob_id_to_digest_str(hash),
+                    inline: None,
+                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                })),
+            )]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        });
+    }
+    node_a.drawer.batch_add(args_batch).await?;
+
+    // Clone to repo_b through the bootstrap path.
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
+
+    // Open node_b as a full node and converge.
+    let node_b = open_sync_node(&repo_b_path).await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+
+    // The blob bytes must actually be present in node_b's blob store — doc-set
+    // equality alone would not catch a blob-scope sync gap.
+    for (hash, expected) in &blob_payloads {
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, None).await?;
+        assert_eq!(
+            &got, expected,
+            "blob content mismatch after clone bootstrap for hash={hash}"
+        );
+    }
+
+    node_b.stop().await?;
+    node_a.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let temp_root = tempfile::tempdir()?;

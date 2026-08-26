@@ -133,34 +133,31 @@ impl<T> ReplayBus<T> {
 
 impl<T: Clone + Send + 'static> ReplayBus<T> {
     pub fn broadcast(&self, item: T) {
-        let live_ids: Vec<uuid::Uuid> = self
-            .live
-            .read()
-            .expect(ERROR_MUTEX)
-            .iter()
-            .copied()
-            .collect();
         let mut dead = Vec::new();
-        for id in live_ids {
-            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
-                && sub.sender.try_send(item.clone()).is_err()
-            {
-                dead.push(id);
+        {
+            // Snapshot the live set under the subs read lock (subs → live
+            // lock order, matching `remove`/`promote_to_live`) so no
+            // per-event id Vec is allocated.
+            let subs = self.subs.read().expect(ERROR_MUTEX);
+            let live = self.live.read().expect(ERROR_MUTEX);
+            for id in live.iter().copied() {
+                if let Some(sub) = subs.get(&id).cloned()
+                    && sub.sender.try_send(item.clone()).is_err()
+                {
+                    dead.push(id);
+                }
             }
         }
-        let pending_ids: Vec<uuid::Uuid> = self
-            .pending
-            .read()
-            .expect(ERROR_MUTEX)
-            .iter()
-            .copied()
-            .collect();
-        for id in pending_ids {
-            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
-                && sub.pending.mark_dirty()
-                && sub.sender.try_send(item.clone()).is_err()
-            {
-                dead.push(id);
+        {
+            let subs = self.subs.read().expect(ERROR_MUTEX);
+            let pending = self.pending.read().expect(ERROR_MUTEX);
+            for id in pending.iter().copied() {
+                if let Some(sub) = subs.get(&id).cloned()
+                    && sub.pending.mark_dirty()
+                    && sub.sender.try_send(item.clone()).is_err()
+                {
+                    dead.push(id);
+                }
             }
         }
         if !dead.is_empty() {
@@ -188,7 +185,8 @@ pub async fn run_replay_loop<T, C, F, Fut>(
             .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
         let (items, next_cursor) = match fetch_page(cursor).await {
             Ok(res) => res,
-            Err(_) => {
+            Err(err) => {
+                tracing::warn!(?err, "replay fetch_page failed; dropping subscription");
                 bus.remove(sub.id);
                 return;
             }
@@ -200,10 +198,14 @@ pub async fn run_replay_loop<T, C, F, Fut>(
                 return;
             }
         }
+        // A page with no next cursor is the final page: finalize even if it
+        // carried items. Re-fetching the same cursor would resend duplicates
+        // forever.
+        let has_next = next_cursor.is_some();
         if let Some(nc) = next_cursor {
             cursor = nc;
         }
-        if count != 0 {
+        if count != 0 && has_next {
             continue;
         }
         if sub.pending.begin_finalization() {

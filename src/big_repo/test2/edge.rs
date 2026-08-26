@@ -707,6 +707,73 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+/// A Keyhive admission must publish only after the live bundle has retried
+/// materialization with the newly admitted key state.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair =
+        Pair::boot_with_frontier_workers(164, 165, "FrontierOwner", "FrontierReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "frontier-after-key"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent.clone(), Access::Relay)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    assert!(matches!(
+        pair.right().repo.get_doc(&doc_id).await?,
+        crate::DocLookup::PendingMaterialization
+    ));
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.right().repo.wait_for_keyhive_reconciliation().await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    let reader_doc = pair
+        .right()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+    let expected_payload = reader_doc
+        .with_document_read(|doc| {
+            serde_json::json!({
+                "heads": am_utils_rs::serialize_commit_heads(&doc.get_heads()),
+            })
+        })
+        .await;
+    let published_payload = pair
+        .right()
+        .repo
+        .frontier_part_store()
+        .obj_payload(crate::automerge_doc_obj_id(doc_id))
+        .await?
+        .ok_or_else(|| crate::ferr!("automerge frontier payload was not published"))?;
+    assert_eq!(
+        published_payload, expected_payload,
+        "frontier publication must observe heads unlocked by the Keyhive admission"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
 // ─── Live handle with a temporarily unavailable content key ────────────────
 //
 // A reader may retain a live handle across an access downgrade. The handle

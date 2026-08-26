@@ -23,6 +23,7 @@ pub struct BigSyncWorkerHandle {
 
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
 type SharedPeerRpcClient = Arc<dyn crate::rpc::HostBigRpcClient>;
+type SharedWireRpcClient = Arc<dyn crate::rpc::WireBigSyncRpcClient>;
 type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient>>>;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
@@ -50,7 +51,7 @@ structstruck::strike! {
         SetPeer {
             peer_id: PeerId,
             #[educe(Debug(ignore))]
-            client: SharedPeerRpcClient,
+            client: SharedWireRpcClient,
             /// Partitions to sync from the peer
             parts: HashMap<PartId, BackendId>,
             /// Objects to follow directly from the peer
@@ -137,7 +138,7 @@ impl BigSyncWorkerHandle {
     pub async fn set_peer(
         &self,
         peer_id: PeerId,
-        client: Arc<dyn crate::rpc::HostBigRpcClient>,
+        client: Arc<dyn crate::rpc::WireBigSyncRpcClient>,
         parts: HashMap<PartId, BackendId>,
         objects: HashMap<ObjId, BackendId>,
     ) -> Res<()> {
@@ -248,8 +249,9 @@ pub fn spawn_big_sync_worker(
     part_store: SharedPartitionStore,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
     label: &'static str,
+    scope_key: Arc<str>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
-    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None)
+    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None, scope_key)
 }
 
 pub fn spawn_big_sync_worker_with_options(
@@ -257,6 +259,7 @@ pub fn spawn_big_sync_worker_with_options(
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
     label: &'static str,
     max_task_backoff: Option<Duration>,
+    scope_key: Arc<str>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
@@ -276,6 +279,7 @@ pub fn spawn_big_sync_worker_with_options(
         sync_backends,
         machine,
         label,
+        scope_key,
 
         machine_spawn_queue: default(),
         sync_spawn_queue: default(),
@@ -383,6 +387,10 @@ struct BigSyncWorker {
     /// logs can be attributed to a specific worker (the machine itself is
     /// otherwise anonymous — it only knows remote peer ids).
     label: &'static str,
+
+    /// Storage scope this worker is bound to. Stamped on every outgoing RPC
+    /// request so the server routes it to the matching scope-bound store.
+    scope_key: Arc<str>,
 
     task_set: utils_rs::AbortableJoinSet,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
@@ -555,10 +563,13 @@ impl BigSyncWorker {
                         return Ok(());
                     }
                 }
-                self.rpc_clients
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .insert(peer_id, client);
+                self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
+                    peer_id,
+                    Arc::new(crate::rpc::ScopedRpcClient {
+                        scope_key: Arc::clone(&self.scope_key),
+                        inner: client,
+                    }) as SharedPeerRpcClient,
+                );
                 self.peers.insert(
                     peer_id,
                     PeerState {
@@ -771,13 +782,15 @@ impl BigSyncWorker {
             return Ok(());
         };
         // Removal tasks evict exactly the hinted parts — never expand via
-        // local membership (that's what we're removing).
-        let object_backend_id =
-            if task.kind == SyncTaskKind::RemoveFromParts || task.part_hints.is_empty() {
-                None
-            } else {
-                peer_state.objects.get(&task.deets.obj_id).cloned()
-            };
+        // local membership (that's what we're removing). Empty-hint Sync
+        // tasks resolve the backend from the peer's known object membership:
+        // local `obj_parts` can be empty for an object with no local parts,
+        // which would leave `backend_id` unresolved below.
+        let object_backend_id = if task.kind == SyncTaskKind::RemoveFromParts {
+            None
+        } else {
+            peer_state.objects.get(&task.deets.obj_id).cloned()
+        };
         let mut part_ids: Vec<PartId> = if object_backend_id.is_some() {
             Vec::new()
         } else if task.part_hints.is_empty() && task.kind == SyncTaskKind::Sync {
@@ -804,7 +817,14 @@ impl BigSyncWorker {
                 ),
             }
         }
-        let backend_id = backend_id.expect(ERROR_IMPOSSIBLE);
+        let Some(backend_id) = backend_id else {
+            tracing::debug!(
+                peer_id = %task.deets.peer_id,
+                obj_id = %task.deets.obj_id,
+                "sync task has no resolvable backend; skipping"
+            );
+            return Ok(());
+        };
         let backend = Arc::clone(
             self.sync_backends
                 .get(&backend_id)

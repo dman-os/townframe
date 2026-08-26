@@ -109,6 +109,14 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: Option<futures::channel::oneshot::Sender<eyre::Result<bool>>>,
     },
+    ApplyKeyhiveToDoc {
+        doc_id: DocumentId,
+        admission_seq: u64,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            Result<crate::runtime2::MaterializationStatus, String>,
+        >,
+    },
     InspectDocHeadState {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -400,6 +408,9 @@ pub enum DocWorkerMsg {
         /// materialization origin (keyhive-driven retries must not surface as
         /// `Bootstrap`).
         origin: crate::changes::BigRepoChangeOrigin,
+        /// Admission-log sequence applied by this retry. `None` is used by
+        /// opportunistic retries that are not tied to one durable admission row.
+        keyhive_seq: Option<u64>,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::MaterializationStatus, String>,

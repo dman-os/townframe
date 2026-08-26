@@ -1061,7 +1061,7 @@ impl DrawerRepo {
             doc = %id,
             branch = %branch_name,
             bdoc = %branch_ref.branch_doc_id,
-            drawer_heads = %drawer_heads.iter().next().map(|h| h.to_string()).unwrap_or_default(),
+            drawer_heads = %drawer_heads.iter().next().map(ToString::to_string).unwrap_or_default(),
             "delete_branch: tombstone committed to drawer doc"
         );
         Ok(true)

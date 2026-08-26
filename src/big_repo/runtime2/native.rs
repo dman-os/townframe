@@ -323,7 +323,7 @@ where
     /// the resident cache and the incrementally-maintained heads table).
     /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
     /// cache-vs-durable detector. O(tree) — never call on a hot path.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     async fn durable_sedimentree_heads_full(
         storage: &S,
         sed_id: SedimentreeId,
@@ -1816,6 +1816,7 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
 pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     group_part_store: crate::store::sqlite::SqliteBigRepoStore,
+    frontier_store: Arc<dyn big_sync::HostPartStore>,
     storage: S,
     policy: Arc<crate::runtime2::support::BigRepoPolicy>,
     sync_policy: BigRepoSyncPolicy,
@@ -1824,9 +1825,9 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    automerge_frontier_scope: crate::runtime2::WorkerGroupScope,
-    causal_checkpoint_scope: crate::runtime2::WorkerGroupScope,
-    group_part_scope: crate::runtime2::WorkerGroupScope,
+    automerge_frontier_group_scope: crate::runtime2::WorkerGroupScope,
+    causal_checkpoint_group_scope: crate::runtime2::WorkerGroupScope,
+    group_part_group_scope: crate::runtime2::WorkerGroupScope,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -1916,10 +1917,11 @@ where
         .map_err(|error| ferr!("failed recovering keyhive event WAL: {error}"))?;
     // One dispatcher owns the debounced, classified fan-out of keyhive change
     // hints to subscribed peers. It stops when the events channel closes
-    // (BigRepo drop).
+    // (BigRepo drop) and is aborted on runtime shutdown (spawned on
+    // `child_tasks` below, reverse-order with the other workers).
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
-    let (keyhive_dispatcher, _keyhive_dispatcher_task) =
+    let (keyhive_dispatcher, spawned_keyhive_dispatcher) =
         crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
             Arc::clone(&keyhive_protocol),
             group_part_store.clone(),
@@ -2038,7 +2040,6 @@ where
         clock: Arc::clone(&clock),
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
         event_channel: Some((evt_tx.clone(), evt_rx)),
-        keyhive_event_notify: Some(group_part_store.keyhive_event_notifier()),
     };
 
     let (handle, mut stop_token) =
@@ -2053,7 +2054,7 @@ where
         PeerId::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
-        group_part_scope,
+        group_part_group_scope,
     );
     stop_token.group_part_stop = Some(spawned_group_part.stop);
     stop_token.child_tasks.spawn(spawned_group_part.run)?;
@@ -2064,7 +2065,7 @@ where
         handle.clone(),
         Arc::clone(&timer),
         evt_tx.clone(),
-        causal_checkpoint_scope,
+        causal_checkpoint_group_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
     stop_token
@@ -2074,10 +2075,11 @@ where
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),
         Arc::new(group_part_store.clone()) as Arc<dyn big_sync::HostPartStore>,
+        frontier_store,
         handle.clone(),
         evt_tx.clone(),
         keyhive.clone(),
-        automerge_frontier_scope,
+        automerge_frontier_group_scope,
     );
     stop_token.automerge_frontier_stop = Some(spawned_automerge_frontier.stop);
     stop_token
@@ -2148,6 +2150,15 @@ where
             })
         })?;
     }
+
+    // Keyhive change dispatcher: spawned last on child_tasks so reverse-order
+    // shutdown stops it first (its stop token is cancelled before the task set
+    // is aborted). The task set's spawn unwraps the dispatcher's result, so an
+    // unexpected error or panic brings down the process.
+    stop_token.keyhive_dispatcher_stop = Some(spawned_keyhive_dispatcher.stop);
+    stop_token
+        .child_tasks
+        .spawn(spawned_keyhive_dispatcher.run)?;
 
     // BigEphemeral remains available for application-level transient topics.
     // Keyhive invalidations use the direct BigRepo RPC stream instead of this

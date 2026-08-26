@@ -1153,7 +1153,7 @@ async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
         return Ok(());
     };
     let root = std::path::PathBuf::from(root);
-    let mut nodes = open_cluster_nodes(&[
+    let nodes = open_cluster_nodes(&[
         root.join("repo-0"),
         root.join("repo-1"),
         root.join("repo-2"),

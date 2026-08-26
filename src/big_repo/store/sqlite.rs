@@ -105,7 +105,6 @@ pub struct SqliteBigRepoStore {
     core: SqliteCore,
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
-    keyhive_event_notify: Arc<tokio::sync::Notify>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
 }
@@ -414,10 +413,6 @@ impl SqliteBigRepoStore {
     pub(crate) fn scope(&self) -> ScopeHandle<'_> {
         ScopeHandle { store: self }
     }
-    pub(crate) fn keyhive_event_notifier(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.keyhive_event_notify)
-    }
-
     pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
         Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
     }
@@ -436,7 +431,6 @@ impl SqliteBigRepoStore {
             core,
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
-            keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),

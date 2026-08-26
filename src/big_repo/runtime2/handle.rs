@@ -10,10 +10,9 @@
 
 use crate::DocumentId;
 use crate::interlude::*;
-use crate::runtime2::{
-    Timer,
-    messages::{Runtime2Cmd, fresh_waiter_id},
-};
+#[cfg(any(test, feature = "test-support"))]
+use crate::runtime2::Timer;
+use crate::runtime2::messages::{Runtime2Cmd, fresh_waiter_id};
 use big_sync_core::PeerId;
 use future_form::FutureForm;
 use std::sync::Arc;
@@ -25,7 +24,10 @@ pub struct Runtime2Handle<F: FutureForm> {
     pub(crate) doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Injected runtime-neutral timer for timeout operations.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) timer: Arc<dyn Timer<F>>,
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) _future_form: std::marker::PhantomData<F>,
 }
 
 impl<F: FutureForm> Clone for Runtime2Handle<F> {
@@ -35,7 +37,10 @@ impl<F: FutureForm> Clone for Runtime2Handle<F> {
             sync_policy: self.sync_policy,
             doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
             keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
+            #[cfg(any(test, feature = "test-support"))]
             timer: Arc::clone(&self.timer),
+            #[cfg(not(any(test, feature = "test-support")))]
+            _future_form: std::marker::PhantomData,
         }
     }
 }
@@ -49,7 +54,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub(crate) fn new(
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
-        timer: Arc<dyn Timer<F>>,
+        #[cfg(any(test, feature = "test-support"))] timer: Arc<dyn Timer<F>>,
         doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
         keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
@@ -58,7 +63,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
             sync_policy,
             doc_sync_waiter_ids,
             keyhive_sync_waiter_ids,
+            #[cfg(any(test, feature = "test-support"))]
             timer,
+            #[cfg(not(any(test, feature = "test-support")))]
+            _future_form: std::marker::PhantomData,
         }
     }
 
@@ -116,6 +124,26 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Apply the durable Keyhive admission to the document's materialized state.
+    pub(crate) async fn apply_keyhive_to_doc(
+        &self,
+        doc_id: DocumentId,
+        admission_seq: u64,
+    ) -> eyre::Result<crate::runtime2::MaterializationStatus> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::ApplyKeyhiveToDoc {
+                doc_id,
+                admission_seq,
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await
+            .map_err(|_| ferr!(ERROR_CHANNEL))?
+            .map_err(|error| ferr!("keyhive materialization failed: {error}"))
     }
 
     /// Commit a delta (sets of encrypted commits) to a document.
@@ -363,6 +391,11 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .wrap_err("keyhive post-sync reconciliation failed")
     }
 
+    /// Wait until currently admitted Keyhive events reach durable projection settlement.
+    ///
+    /// This may block for a long time while Keyhive synchronization and durable I/O
+    /// complete. Applications that require a deadline should apply their timeout at
+    /// the application boundary.
     pub async fn wait_for_keyhive_reconciliation(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx

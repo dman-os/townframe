@@ -135,7 +135,7 @@ impl SyncBackend for BlobSyncBackend {
         for part_id in parts {
             self.part_store
                 .add_obj_to_parts(obj_id, vec![part_id])
-                .await;
+                .await?;
         }
         Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
             obj_id,

@@ -26,29 +26,6 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    pub(crate) async fn record_sync_commit_watermark(
-        &self,
-        doc_id: crate::DocumentId,
-        big_sync_txid: u64,
-        latest_commit_row_id: i64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_sync_commits_watermark(
-                 scope_id, doc_id, big_sync_txid, latest_commit_row_id
-             )
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_id, doc_id, big_sync_txid)
-             DO UPDATE SET latest_commit_row_id = MAX(latest_commit_row_id, excluded.latest_commit_row_id)",
-            self.scope().id(),
-            doc_id.as_bytes().as_slice(),
-            i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE),
-            latest_commit_row_id
-        )
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
     pub(crate) async fn get_sync_commit_watermark(
         &self,
         doc_id: crate::DocumentId,

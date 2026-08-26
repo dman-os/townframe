@@ -167,7 +167,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
         bundle
             .component_urls
             .iter()
-            .any(|component_url| matches!(component_url.scheme(), "static" | "build"))
+            .any(|component_url| matches!(component_url.scheme(), "build"))
     });
     let wasm_target_dir = workspace_root.join("target/wasm");
     if needs_wasm_build {
@@ -184,11 +184,6 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
                         .await
                         .wrap_err_with(|| format!("error reading '{}'", file_path.display()))?
                 }
-                "static" => read_static_component_bytes(component_url, &wasm_target_dir)
-                    .await
-                    .wrap_err_with(|| {
-                        format!("error resolving static component URL '{component_url}'")
-                    })?,
                 "build" => read_build_component_bytes(component_url, &wasm_target_dir)
                     .await
                     .wrap_err_with(|| {
@@ -196,7 +191,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
                     })?,
                 scheme => {
                     eyre::bail!(
-                        "build-plug-oci only supports file://, static:, and build:// component urls, got '{}' in '{}'",
+                        "build-plug-oci only supports file://, and build:// component urls, got '{}' in '{}'",
                         scheme,
                         component_url
                     );
@@ -223,9 +218,6 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
                             }
                             _ => MediaType::Other("application/octet-stream".into()),
                         }
-                    }
-                    "static" if is_static_wasm_component(component_url) => {
-                        MediaType::Other(oci_wasm::WASM_LAYER_MEDIA_TYPE.into())
                     }
                     "build" if is_build_wasm_component(component_url) => {
                         MediaType::Other(oci_wasm::WASM_LAYER_MEDIA_TYPE.into())
@@ -351,39 +343,6 @@ async fn build_plug_wasm_component(
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
-}
-
-async fn read_static_component_bytes(
-    component_url: &url::Url,
-    wasm_target_dir: &Path,
-) -> Res<Vec<u8>> {
-    let static_name = component_url.path().trim_start_matches('/');
-    eyre::ensure!(
-        !static_name.is_empty(),
-        "static component URL must include a path, got '{}'",
-        component_url
-    );
-    if static_name.ends_with(".wasm.zst") {
-        let wasm_name = static_name
-            .strip_suffix(".zst")
-            .ok_or_eyre("static .wasm.zst path parsing error")?;
-        let wasm_path = wasm_target_dir
-            .join("wasm32-wasip2")
-            .join("release")
-            .join(wasm_name);
-        let wasm_bytes = tokio::fs::read(&wasm_path)
-            .await
-            .wrap_err_with(|| format!("missing wasm artifact at '{}'", wasm_path.display()))?;
-        return Ok(wasm_bytes);
-    }
-    eyre::bail!(
-        "unsupported static component URL '{}'; expected '*.wasm.zst'",
-        component_url
-    );
-}
-
-fn is_static_wasm_component(component_url: &url::Url) -> bool {
-    component_url.scheme() == "static" && component_url.path().ends_with(".wasm.zst")
 }
 
 async fn read_build_component_bytes(

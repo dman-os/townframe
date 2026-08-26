@@ -176,9 +176,9 @@ impl Node {
                 // boot_with_scopes. Watching GLOBAL here made every node
                 // materialize every doc marker it synced, which is not
                 // normal-role behavior.
-                automerge_frontier_scope: frontier_scope.clone(),
-                causal_checkpoint_scope: Default::default(),
-                group_part_scope: Default::default(),
+                automerge_frontier_group_scope: frontier_scope.clone(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
             },
             (*store).clone(),
         )
@@ -215,6 +215,7 @@ impl Node {
             backends,
             label,
             Some(Duration::from_secs(5)),
+            Arc::from("big-repo-test"),
         )?;
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
@@ -245,18 +246,20 @@ impl Node {
             matches!(&storage, StorageConfig::Memory).then(|| Arc::clone(&self.store));
         self.shutdown().await;
 
-        if let Some(store) = retained_memory_store {
+        let restarted = if let Some(store) = retained_memory_store {
             // Memory restarts intentionally retain the store for tests that
             // isolate Keyhive loss from part-store persistence.
             Self::boot_with_store(seed[0], label, storage, store, hidden_parts, frontier_scope)
-                .await
+                .await?
         } else {
             // Disk restarts reopen the SQLite file, modeling a new process
             // rather than reusing the old pool/Arc. Keep the hidden-parts
             // config: a restart that drops it silently re-advertises parts
             // peers still hide.
-            Self::boot_with_scopes(seed[0], label, storage, hidden_parts, frontier_scope).await
-        }
+            Self::boot_with_scopes(seed[0], label, storage, hidden_parts, frontier_scope).await?
+        };
+        restarted.repo.wait_for_keyhive_reconciliation().await?;
+        Ok(restarted)
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -424,7 +427,7 @@ impl ShutdownGuard {
 
     /// Remove and return all nodes, deferring their shutdown to the caller.
     /// Used when a test wants orderly explicit teardown.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn take(&mut self) -> Vec<Node> {
         std::mem::take(&mut self.nodes)
     }
@@ -589,6 +592,43 @@ impl Pair {
         Ok(pair)
     }
 
+    /// Boot a connected pair with admission-driven Automerge frontier workers.
+    pub(crate) async fn boot_with_frontier_workers(
+        left_seed: u8,
+        right_seed: u8,
+        left_label: &'static str,
+        right_label: &'static str,
+    ) -> crate::Res<Self> {
+        let left = Node::boot_with_scopes(
+            left_seed,
+            left_label,
+            StorageConfig::Memory,
+            Default::default(),
+            WorkerGroupScope::All,
+        )
+        .await?;
+        let mut guard = ShutdownGuard::from(vec![left]);
+        let right = Node::boot_with_scopes(
+            right_seed,
+            right_label,
+            StorageConfig::Memory,
+            Default::default(),
+            WorkerGroupScope::All,
+        )
+        .await?;
+        guard.nodes.push(right);
+        let mut pair = Self {
+            guard,
+            left_idx: 0,
+            right_idx: 1,
+            left_conn: None,
+            right_conn: None,
+        };
+        pair.connect().await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
+        Ok(pair)
+    }
+
     pub fn left(&self) -> &Node {
         &self.guard.nodes[self.left_idx]
     }
@@ -608,7 +648,7 @@ impl Pair {
     /// Borrow both nodes mutably for orderly teardown (unused; kept for
     /// future explicit-teardown rungs). Split via index to satisfy the borrow
     // checker.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn nodes_mut(&mut self) -> (&mut Node, &mut Node) {
         let (l, r) = (self.left_idx, self.right_idx);
         let (left_part, right_part) = {
@@ -631,7 +671,6 @@ impl Pair {
 /// [`ShutdownGuard`] primitives used by [`Pair`]. Each variant holds
 /// a guard for RAII teardown, the node vector, labelled connections for
 /// keyhive and document sync operations, and indexing metadata.
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum Topo {
     /// Relay A↔R↔B where R has Relay-only capability (stores encrypted parts
     Relay(TopoData3),
@@ -652,7 +691,7 @@ pub(crate) struct TopoData3 {
 }
 
 impl TopoData3 {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn from(
         nodes: Vec<Node>,
         edges: Vec<(usize, BigRepoConnection, usize, BigRepoConnection)>,

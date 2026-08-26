@@ -1,6 +1,25 @@
 use super::*;
 
 impl SqliteBigRepoStore {
+    /// All part IDs currently present in this store's scope.
+    ///
+    /// Used by the `All` worker-scope path to watch every part without
+    /// enumerating keyhive groups (a keyhive enumeration would miss parts
+    /// for groups not yet in the hive and pays a graph walk).
+    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartId>> {
+        // Runtime query (not the `query!` macro): this query is not in the
+        // offline `.sqlx` cache, and the macro would fail the build without
+        // DATABASE_URL.
+        let rows = sqlx::query("SELECT part_id FROM big_sync_parts WHERE scope_id = ?")
+            .bind(self.scope().id())
+            .fetch_all(&self.sql.read_pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
+            .collect())
+    }
+
     pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {
         let cursor: Option<i64> = sqlx::query_scalar!(
             "SELECT MAX(seq) AS \"seq: i64\" FROM big_repo_keyhive_event_log WHERE scope_id = ?",
@@ -46,9 +65,6 @@ impl SqliteBigRepoStore {
         // projection effects are applied; archived rows are pruned using the
         // archived_through watermark.
         tx.commit().await?;
-        if inserted {
-            self.keyhive_event_notify.notify_waiters();
-        }
         Ok(inserted)
     }
 
@@ -58,7 +74,7 @@ impl SqliteBigRepoStore {
         source: Option<subduction_keyhive::KeyhivePeerId>,
     ) -> Res<u64> {
         if hashes.is_empty() {
-            return Ok(self.admission_head().await?);
+            return self.admission_head().await;
         }
         hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         hashes.dedup_by(|left, right| left.as_bytes() == right.as_bytes());

@@ -156,11 +156,12 @@ impl MemoryRpcClient {
 }
 
 #[async_trait]
-impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
+impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
     async fn peer_summary(
         &self,
-        req: PeerSummaryRequest,
+        req: crate::rpc::ScopedRequest<PeerSummaryRequest>,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_count = req.parts.len(),
@@ -180,9 +181,10 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn sub_parts(
         &self,
-        req: SubPartsRequest,
+        req: crate::rpc::ScopedRequest<SubPartsRequest>,
     ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
     {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             targets = ?req.targets,
@@ -200,8 +202,9 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn get_changed_buckets(
         &self,
-        req: GetChangedBucketsRequest,
+        req: crate::rpc::ScopedRequest<GetChangedBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_id = %req.part_id,
@@ -219,8 +222,9 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn leaf_buckets(
         &self,
-        req: LeafBucketsRequest,
+        req: crate::rpc::ScopedRequest<LeafBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_id = %req.part_id,
@@ -311,7 +315,7 @@ impl SyncBackend for MemorySyncBackend {
         if !parts.is_empty() {
             self.local_part_store
                 .add_obj_to_parts(obj_id, parts.clone())
-                .await;
+                .await?;
         }
         Ok(SyncTaskRunOutcome::Completion(outcome))
     }
@@ -746,6 +750,7 @@ where
         Arc::clone(&store_for_worker),
         [(TEST_BACKEND_ID.into(), backend)].into(),
         "big-sync-test",
+        Arc::from("big-sync-test"),
     )?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),

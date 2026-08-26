@@ -257,14 +257,6 @@ impl BigKeyhiveHandle {
             .await
             .map(|inner| BigKeyhiveGroup { id, inner })
     }
-    /// Every group visible to the local principal. Keyhive restricts group
-    /// visibility by definition, so this is the authoritative source for
-    /// group-part pre-creation: a group part row must exist (cursor 0) the
-    /// moment a group is visible, even before any of its docs exist —
-    /// membership precedes document payloads.
-    pub(crate) async fn visible_group_ids(&self) -> Vec<KhGroupId> {
-        self.keyhive.groups().lock().await.keys().copied().collect()
-    }
 
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.
@@ -385,23 +377,6 @@ impl BigKeyhiveHandle {
             .collect()
     }
 
-    pub(crate) async fn group_document_ids_by_id(&self) -> HashMap<[u8; 32], BTreeSet<DocumentId>> {
-        let group_ids: Vec<KhGroupId> =
-            self.keyhive.groups().lock().await.keys().copied().collect();
-        let mut out = HashMap::new();
-        for group_id in group_ids {
-            let docs = self
-                .keyhive
-                .document_ids_containing_group(group_id)
-                .await
-                .into_iter()
-                .map(|id| DocumentId::new(id.to_bytes()))
-                .collect();
-            out.insert(group_id.to_bytes(), docs);
-        }
-        out
-    }
-
     pub(crate) async fn document_ids_containing_group(
         &self,
         group_id: Identifier,
@@ -417,19 +392,17 @@ impl BigKeyhiveHandle {
     pub(crate) async fn group_ids_containing_document(
         &self,
         doc_id: DocumentId,
-    ) -> BTreeSet<[u8; 32]> {
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-            .expect("document id must be a valid Ed25519 point");
-        let kh_doc_id = KhDocumentId::from(Identifier::from(verifying_key));
+    ) -> Res<BTreeSet<[u8; 32]>> {
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
         let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
-            return BTreeSet::new();
+            return Ok(BTreeSet::new());
         };
         let transitive = Membered::Document(kh_doc_id, doc)
             .transitive_members()
             .await;
         let group_ids: Vec<KhGroupId> =
             self.keyhive.groups().lock().await.keys().copied().collect();
-        group_ids
+        Ok(group_ids
             .into_iter()
             .filter_map(|group_id| {
                 let group_identifier: Identifier = group_id.into();
@@ -437,7 +410,7 @@ impl BigKeyhiveHandle {
                     .contains_key(&group_identifier)
                     .then_some(group_id.to_bytes())
             })
-            .collect()
+            .collect())
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {

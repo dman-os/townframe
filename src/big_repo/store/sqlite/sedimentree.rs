@@ -604,7 +604,7 @@ impl SqliteBigRepoStore {
                     if !desired_parts.contains(&part_id)
                         || transitions
                             .iter()
-                            .any(|(p, d, _, _)| *p == part_id && *d == mutation.doc)
+                            .any(|(part, doc, _, _)| *part == part_id && *doc == mutation.doc)
                     {
                         continue;
                     }
@@ -745,8 +745,6 @@ impl SqliteBigRepoStore {
         Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 
-    #[allow(dead_code)]
-
     pub(crate) async fn automerge_part_cursor(&self, part_id: PartId) -> Res<u64> {
         let cursor: Option<i64> = sqlx::query_scalar!(
             "SELECT seq FROM cursors WHERE reader = ?1",
@@ -811,18 +809,18 @@ impl SqliteBigRepoStore {
         FAIL_NEXT_ADMISSION.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Current admission-log head (0 when empty).
-    /// Current event archive watermark (0 when no archive has completed).
+    // Current admission-log head (0 when empty).
+    // Current event archive watermark (0 when no archive has completed).
 
-    /// Advance the archive watermark monotonically.
+    // Advance the archive watermark monotonically.
 
-    /// Delete admitted event payloads covered by the archive checkpoint.
-    /// Run checkpointed WAL maintenance after an archive has advanced.
+    // Delete admitted event payloads covered by the archive checkpoint.
+    // Run checkpointed WAL maintenance after an archive has advanced.
 
-    /// Replay admitted events past `cursor`, oldest first. No error
-    /// swallowing: consumers must never silently skip incorporations.
+    // Replay admitted events past `cursor`, oldest first. No error
+    // swallowing: consumers must never silently skip incorporations.
 
-    /// Return retained event-log rows that lack a durable admission marker.
+    // Return retained event-log rows that lack a durable admission marker.
 
     pub(crate) fn tree_blob(id: SedimentreeId) -> Vec<u8> {
         IdCodec::tree_blob(id)

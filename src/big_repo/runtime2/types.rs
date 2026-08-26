@@ -3,6 +3,7 @@
 use crate::interlude::*;
 
 use crate::DocumentId;
+use crate::runtime2::group_part_id;
 use std::time::Duration;
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ const DEFAULT_SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT: Duration = Duration::from_se
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BigRepoSyncPolicy {
     pub(crate) doc_worker_idle_ttl: Duration,
-    pub(crate) doc_sync_timeout: Duration,
+    pub(crate) backend_doc_sync_timeout: Duration,
     pub(crate) subduction_nonce_ttl: Duration,
     pub(crate) subduction_default_roundtrip_timeout: Duration,
 }
@@ -26,7 +27,7 @@ impl Default for BigRepoSyncPolicy {
     fn default() -> Self {
         Self {
             doc_worker_idle_ttl: DEFAULT_DOC_WORKER_IDLE_TTL,
-            doc_sync_timeout: DEFAULT_DOC_SYNC_TIMEOUT,
+            backend_doc_sync_timeout: DEFAULT_DOC_SYNC_TIMEOUT,
             subduction_nonce_ttl: DEFAULT_SUBDUCTION_NONCE_TTL,
             subduction_default_roundtrip_timeout: DEFAULT_SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT,
         }
@@ -169,8 +170,7 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     pub latest_commit_row_id: std::sync::atomic::AtomicI64,
     #[educe(Debug(ignore))]
-    #[allow(dead_code)]
-    pub latest_keyhive_seq: std::sync::atomic::AtomicI64,
+    pub latest_keyhive_seq: std::sync::atomic::AtomicU64,
     #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
     #[educe(Debug(ignore))]
@@ -183,6 +183,7 @@ impl LiveDocBundle {
         doc: automerge::Automerge,
         lease: crate::runtime2::DocLease,
         partially_decrypted: bool,
+        latest_keyhive_seq: u64,
     ) -> Self {
         Self {
             id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -191,7 +192,7 @@ impl LiveDocBundle {
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
             latest_commit_row_id: std::sync::atomic::AtomicI64::new(0),
-            latest_keyhive_seq: std::sync::atomic::AtomicI64::new(0),
+            latest_keyhive_seq: std::sync::atomic::AtomicU64::new(latest_keyhive_seq),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
             _runtime2_lease: Some(lease),
         }
@@ -228,15 +229,14 @@ impl LiveDocBundle {
             .store(partial, std::sync::atomic::Ordering::Release);
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn update_commit_watermark(&self, row_id: i64) {
         self.latest_commit_row_id
             .fetch_max(row_id, std::sync::atomic::Ordering::Release);
         self.barrier_notify.notify_waiters();
     }
 
-    #[allow(dead_code)]
-    pub fn update_keyhive_watermark(&self, seq: i64) {
+    pub fn update_keyhive_watermark(&self, seq: u64) {
         self.latest_keyhive_seq
             .fetch_max(seq, std::sync::atomic::Ordering::Release);
         self.barrier_notify.notify_waiters();
@@ -260,8 +260,7 @@ impl LiveDocBundle {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn await_keyhive_watermark(&self, target_seq: i64) -> Res<()> {
+    pub async fn await_keyhive_watermark(&self, target_seq: u64) -> Res<()> {
         loop {
             let notified = self.barrier_notify.notified();
             tokio::pin!(notified);
@@ -294,12 +293,14 @@ pub enum WorkerGroupScope {
     #[default]
     All,
     /// Only documents that belong to at least one of these keyhive group
-    /// authority ids. Group membership is evaluated against live keyhive
-    /// state at event-processing time — never against group-part assignment —
-    /// so eligibility never races the group-part worker, and a document that
-    /// joins an eligible group later is picked up by its next admitted event
-    /// (the delegating event itself).
-    Groups(std::collections::HashSet<[u8; 32]>),
+    /// authority ids. The set holds the group-part ids (the
+    /// [`group_part_id`] conversion is done once at construction, not at
+    /// every consumption site). Group membership is evaluated against live
+    /// keyhive state at event-processing time — never against group-part
+    /// assignment — so eligibility never races the group-part worker, and a
+    /// document that joins an eligible group later is picked up by its next
+    /// admitted event (the delegating event itself).
+    Groups(std::collections::HashSet<PartId>),
 }
 
 impl WorkerGroupScope {
@@ -313,14 +314,30 @@ impl WorkerGroupScope {
     pub fn admits_doc_groups(&self, doc_groups: &std::collections::BTreeSet<[u8; 32]>) -> bool {
         match self {
             Self::All => true,
-            Self::Groups(scope) => doc_groups.iter().any(|group| scope.contains(group)),
+            Self::Groups(scope) => doc_groups
+                .iter()
+                .any(|group| scope.contains(&group_part_id(*group))),
         }
     }
 
     pub fn admits_group(&self, group: &[u8; 32]) -> bool {
         match self {
             Self::All => true,
-            Self::Groups(scope) => scope.contains(group),
+            Self::Groups(scope) => scope.contains(&group_part_id(*group)),
+        }
+    }
+
+    /// The explicit group-part set for a selective scope, or `None` for
+    /// `All`.
+    ///
+    /// Sites use this to decide explicitly whether they consider every event
+    /// (`None` — no group lookups at all) or filter events by these groups
+    /// (`Some(set)` — the set is the group list, never derived from a keyhive
+    /// enumeration).
+    pub fn groups(&self) -> Option<&std::collections::HashSet<PartId>> {
+        match self {
+            Self::All => None,
+            Self::Groups(groups) => Some(groups),
         }
     }
 }
@@ -336,10 +353,39 @@ mod worker_scope_tests {
         let other = [9; 32];
         let groups = BTreeSet::from([eligible]);
         assert!(WorkerGroupScope::All.admits_doc_groups(&groups));
-        assert!(WorkerGroupScope::Groups(HashSet::from([eligible])).admits_doc_groups(&groups));
-        assert!(!WorkerGroupScope::Groups(HashSet::from([other])).admits_doc_groups(&groups));
-        assert!(WorkerGroupScope::Groups(HashSet::from([eligible])).admits_group(&eligible));
-        assert!(!WorkerGroupScope::Groups(HashSet::from([other])).admits_group(&eligible));
+        assert!(
+            WorkerGroupScope::Groups(HashSet::from([super::group_part_id(eligible)]))
+                .admits_doc_groups(&groups)
+        );
+        assert!(
+            !WorkerGroupScope::Groups(HashSet::from([super::group_part_id(other)]))
+                .admits_doc_groups(&groups)
+        );
+        assert!(
+            WorkerGroupScope::Groups(HashSet::from([super::group_part_id(eligible)]))
+                .admits_group(&eligible)
+        );
+        assert!(
+            !WorkerGroupScope::Groups(HashSet::from([super::group_part_id(other)]))
+                .admits_group(&eligible)
+        );
+    }
+
+    #[test]
+    fn groups_accessor_makes_the_site_decision_explicit() {
+        let eligible = [7; 32];
+        let other = [9; 32];
+        // `All` exposes no group set: sites consider every event with no
+        // group lookups.
+        assert!(WorkerGroupScope::All.groups().is_none());
+        // A selective scope exposes its explicit group-part set directly —
+        // the set is the group list, never derived from a keyhive
+        // enumeration, and the `group_part_id` conversion is done once at
+        // construction.
+        let scope = WorkerGroupScope::Groups(HashSet::from([super::group_part_id(eligible)]));
+        let groups = scope.groups().expect("selective scope exposes its set");
+        assert!(groups.contains(&super::group_part_id(eligible)));
+        assert!(!groups.contains(&super::group_part_id(other)));
     }
 }
 
