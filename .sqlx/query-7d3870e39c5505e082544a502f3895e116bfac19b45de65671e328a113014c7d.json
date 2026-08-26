@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_repo_subduction_trees\n                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7d3870e39c5505e082544a502f3895e116bfac19b45de65671e328a113014c7d"
+}

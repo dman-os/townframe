@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)\n                             VALUES (?1, ?2, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "db094742119c76e6f34ac7716c18400ab5aaa70c0f007c1b2a754e806bd37345"
+}

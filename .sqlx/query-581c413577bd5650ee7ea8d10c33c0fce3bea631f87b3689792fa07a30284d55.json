@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(\n                scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash\n             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "581c413577bd5650ee7ea8d10c33c0fce3bea631f87b3689792fa07a30284d55"
+}

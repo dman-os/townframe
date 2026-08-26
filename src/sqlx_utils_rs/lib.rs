@@ -2,6 +2,8 @@ use color_eyre::eyre::{Result as Res, WrapErr};
 use sqlx::ConnectOptions;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -56,6 +58,17 @@ impl SqlCtx {
             .max_connections(4)
             .idle_timeout(None)
             .max_lifetime(None)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA busy_timeout = 5000")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_with(connect_options.clone())
             .await
             .wrap_err_with(|| format!("failed opening sqlite read pool: {url}"))?;
@@ -63,6 +76,17 @@ impl SqlCtx {
             .max_connections(1)
             .idle_timeout(None)
             .max_lifetime(None)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA busy_timeout = 5000")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_with(connect_options)
             .await
             .wrap_err_with(|| format!("failed opening sqlite write pool: {url}"))?;
@@ -72,6 +96,28 @@ impl SqlCtx {
             read_pool,
             _ephemeral_directory: None,
         })
+    }
+    /// Execute one operation on the dedicated SQLite writer connection.
+    ///
+    /// The callback receives a transaction and must return a boxed future. Keeping
+    /// transaction ownership here prevents accidental writes outside the transaction.
+    pub async fn with_write_tx<T, F>(&self, f: F) -> Result<T, sqlx::Error>
+    where
+        T: Send,
+        F: for<'a> FnOnce(
+            sqlx::Transaction<'a, sqlx::Sqlite>,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<(T, sqlx::Transaction<'a, sqlx::Sqlite>), sqlx::Error>>
+                    + Send
+                    + 'a,
+            >,
+        >,
+    {
+        let tx = self.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let (result, tx) = f(tx).await?;
+        tx.commit().await?;
+        Ok(result)
     }
 }
 
@@ -112,6 +158,30 @@ mod tests {
             .fetch_one(&ctx.read_pool)
             .await?;
         assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn with_write_tx_commits_callback_atomically() -> Res<()> {
+        let ctx = SqlCtx::memory().await?;
+        sqlx::query("CREATE TABLE tx_values (value INTEGER)")
+            .execute(&ctx.write_pool)
+            .await?;
+        let value = ctx
+            .with_write_tx(|mut tx| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO tx_values VALUES (7)")
+                        .execute(&mut *tx)
+                        .await?;
+                    Ok((7_i64, tx))
+                })
+            })
+            .await?;
+        assert_eq!(value, 7);
+        let stored: i64 = sqlx::query_scalar("SELECT value FROM tx_values")
+            .fetch_one(&ctx.read_pool)
+            .await?;
+        assert_eq!(stored, 7);
         Ok(())
     }
 }

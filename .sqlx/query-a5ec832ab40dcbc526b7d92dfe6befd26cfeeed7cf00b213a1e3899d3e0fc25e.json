@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_repo_subduction_commits\n             (scope_id, sedimentree_id, commit_id, digest, signed, blob)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "a5ec832ab40dcbc526b7d92dfe6befd26cfeeed7cf00b213a1e3899d3e0fc25e"
+}

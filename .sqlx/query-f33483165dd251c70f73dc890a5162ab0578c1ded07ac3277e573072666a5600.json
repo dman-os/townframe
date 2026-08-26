@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f33483165dd251c70f73dc890a5162ab0578c1ded07ac3277e573072666a5600"
+}

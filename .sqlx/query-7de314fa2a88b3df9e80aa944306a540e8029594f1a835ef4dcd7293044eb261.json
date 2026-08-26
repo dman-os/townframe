@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(seq) AS \"seq: i64\" FROM big_repo_keyhive_event_log WHERE scope_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7de314fa2a88b3df9e80aa944306a540e8029594f1a835ef4dcd7293044eb261"
+}

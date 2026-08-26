@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)\n             VALUES (?1, ?2, ?3)\n             ON CONFLICT(scope_id, obj_id) DO UPDATE SET payload_json = excluded.payload_json",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6152b20a2f889d267b6519167f3916758b5c0d17cbe63115882c63c127b361d0"
+}

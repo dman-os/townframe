@@ -20,6 +20,10 @@ use crate::runtime2::{
     SyncDocAttempt, TaskSet,
 };
 use crate::store::sqlite::KeyhiveIncorporationSink;
+
+/// Period between archive/prune/WAL maintenance passes.
+pub(crate) const KEYHIVE_MAINTENANCE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(300);
 use crate::{
     BigEphemeral, BigKeyhiveHandle, DocumentId,
     encrypted_blob::decode_encrypted_blob,
@@ -2069,7 +2073,7 @@ where
 
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),
-        Arc::new(group_part_store) as Arc<dyn big_sync::HostPartStore>,
+        Arc::new(group_part_store.clone()) as Arc<dyn big_sync::HostPartStore>,
         handle.clone(),
         evt_tx.clone(),
         keyhive.clone(),
@@ -2118,6 +2122,7 @@ where
     }
     {
         let kh_proto = Arc::clone(&keyhive_protocol);
+        let store = group_part_store.clone();
         let keyhive_archive_id = subduction_keyhive::storage::StorageHash::new(
             *keyhive.keyhive_peer_id().verifying_key(),
         );
@@ -2125,11 +2130,20 @@ where
             let timer = Arc::clone(&timer);
             Sendable::from_future(async move {
                 loop {
-                    timer.sleep(std::time::Duration::from_secs(300)).await;
-                    kh_proto
-                        .compact(keyhive_archive_id)
-                        .await
-                        .map_err(|error| ferr!("keyhive archive compaction failed: {error}"))?;
+                    timer.sleep(KEYHIVE_MAINTENANCE_INTERVAL).await;
+                    let result = async {
+                        kh_proto
+                            .compact(keyhive_archive_id)
+                            .await
+                            .map_err(|error| ferr!("keyhive archive compaction failed: {error}"))?;
+                        let watermark = store.keyhive_event_log_cursor().await?;
+                        store.set_archived_through(watermark).await?;
+                        store.run_maintenance().await
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "keyhive SQLite maintenance failed; continuing");
+                    }
                 }
             })
         })?;

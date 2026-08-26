@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_sync_parts SET latest_cursor = ?1\n                         WHERE scope_id = ?2 AND part_id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "87c1aa0aa08b2b86900f497ffa9fda161420454580341be9787ca126f4079ac6"
+}

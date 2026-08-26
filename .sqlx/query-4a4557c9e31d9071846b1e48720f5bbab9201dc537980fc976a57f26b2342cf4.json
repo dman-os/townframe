@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT payload_json AS \"payload_json!: String\"\n               FROM big_sync_objs\n              WHERE scope_id = ?1\n                AND obj_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload_json!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4a4557c9e31d9071846b1e48720f5bbab9201dc537980fc976a57f26b2342cf4"
+}

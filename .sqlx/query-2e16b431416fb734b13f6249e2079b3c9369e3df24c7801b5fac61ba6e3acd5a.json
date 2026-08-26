@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cursors(reader, seq) VALUES (?1, ?2)\n             ON CONFLICT(reader)\n             DO UPDATE SET seq = MAX(seq, excluded.seq)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2e16b431416fb734b13f6249e2079b3c9369e3df24c7801b5fac61ba6e3acd5a"
+}

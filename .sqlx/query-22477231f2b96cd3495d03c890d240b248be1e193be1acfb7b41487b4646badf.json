@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cursors\n                SET seq = MAX(seq, ?1)\n              WHERE reader = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "22477231f2b96cd3495d03c890d240b248be1e193be1acfb7b41487b4646badf"
+}

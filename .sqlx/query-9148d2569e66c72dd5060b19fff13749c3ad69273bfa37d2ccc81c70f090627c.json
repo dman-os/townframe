@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level)\n                     VALUES (?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9148d2569e66c72dd5060b19fff13749c3ad69273bfa37d2ccc81c70f090627c"
+}

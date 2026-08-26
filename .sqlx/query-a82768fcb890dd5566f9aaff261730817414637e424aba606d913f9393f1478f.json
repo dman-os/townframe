@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_sync_members\n                 SET changed_at = ?1, latest_cursor = ?1\n                 WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a82768fcb890dd5566f9aaff261730817414637e424aba606d913f9393f1478f"
+}

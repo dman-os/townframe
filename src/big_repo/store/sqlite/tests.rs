@@ -1545,6 +1545,27 @@ async fn sqlite_big_repo_admission_log_appends_dedups_and_replays() -> Res<()> {
 }
 
 #[tokio::test]
+async fn sqlite_big_repo_admission_fault_leaves_reconciliation_candidate() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store = SqliteBigRepoStore::new(sql, "keyhive-admission-fault", BuckId::MAX_LEVEL).await?;
+    let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
+    store
+        .save_keyhive_event(hash, b"fault-window".to_vec(), None)
+        .await?;
+    SqliteBigRepoStore::fail_next_admission_for_test();
+    assert!(
+        store
+            .append_admitted_events(vec![hash], None)
+            .await
+            .is_err()
+    );
+    let candidates = store.unadmitted_keyhive_events().await?;
+    assert_eq!(candidates, vec![([6; 32], b"fault-window".to_vec(), None)]);
+    assert_eq!(store.admission_head().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store =
@@ -1559,7 +1580,7 @@ async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
 }
 
 #[tokio::test]
-async fn sqlite_big_repo_keyhive_event_tail_deletion_keeps_history() -> Res<()> {
+async fn sqlite_big_repo_keyhive_event_deletion_prunes_history() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
@@ -1574,7 +1595,36 @@ async fn sqlite_big_repo_keyhive_event_tail_deletion_keeps_history() -> Res<()> 
             .bind(store.scope_id)
             .fetch_one(&store.sql.read_pool)
             .await?;
-    assert_eq!(immutable_count, 1);
+    assert_eq!(
+        immutable_count, 0,
+        "deleted event must be pruned from the WAL"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_big_repo_prune_admitted_events_respects_archived_through() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store = SqliteBigRepoStore::new(sql, "keyhive-prune", BuckId::MAX_LEVEL).await?;
+    let admitted = subduction_keyhive::storage::StorageHash::new([4; 32]);
+    let pending = subduction_keyhive::storage::StorageHash::new([5; 32]);
+    store
+        .save_keyhive_event(admitted, b"admitted".to_vec(), None)
+        .await?;
+    store
+        .save_keyhive_event(pending, b"pending".to_vec(), None)
+        .await?;
+    store.append_admitted_events(vec![admitted], None).await?;
+    store.set_archived_through(2).await?;
+    assert_eq!(store.run_maintenance().await?, 1);
+    assert!(
+        store
+            .load_keyhive_events()
+            .await?
+            .iter()
+            .all(|(hash, _)| *hash == pending)
+    );
+    assert_eq!(store.archived_through().await?, 2);
     Ok(())
 }
 
@@ -1643,6 +1693,28 @@ async fn causal_checkpoint_cursor_is_monotonic_and_survives_restart() -> Res<()>
     assert_eq!(reopened.causal_checkpoint_cursor().await?, 7);
     Ok(())
 }
+
+#[tokio::test]
+async fn automerge_cursors_share_durable_cursor_table() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store = SqliteBigRepoStore::new(sql, "automerge-cursor", BuckId::MAX_LEVEL).await?;
+    let cursor_table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cursors'",
+    )
+    .fetch_optional(&store.sql.read_pool)
+    .await?;
+    assert!(cursor_table.is_some(), "unified cursor table must exist");
+    let part = PartId(Byte32Id::new([44; 32]));
+    assert_eq!(store.automerge_part_cursor(part).await?, 0);
+    store.commit_automerge_part_cursor(part, 11).await?;
+    assert_eq!(store.automerge_part_cursor(part).await?, 11);
+    assert_eq!(store.automerge_keyhive_cursor().await?, 0);
+    store.commit_automerge_keyhive_cursor(17).await?;
+    store.commit_automerge_keyhive_cursor(13).await?;
+    assert_eq!(store.automerge_keyhive_cursor().await?, 17);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<()> {
     let sql = SqlCtx::memory().await?;
@@ -1867,7 +1939,7 @@ async fn reconcile_group_part_batch_rolls_back_on_cursor_update_failure() -> Res
 
     sqlx::query(
         "CREATE TRIGGER fail_cursor_update
-            BEFORE UPDATE OF cursor ON big_repo_group_part_cursor
+            BEFORE UPDATE OF seq ON cursors
             BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END",
     )
     .execute(&store.sql.write_pool)
