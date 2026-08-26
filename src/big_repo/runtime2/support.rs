@@ -349,19 +349,8 @@ impl BigRepoCiphertextLocator {
 
 // ─── persist_cgka_update_op ───────────────────────────────────────────────────
 
-pub(crate) async fn persist_cgka_update_op(
-    keyhive_storage: &BigRepoKeyhiveStorage,
-    update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
-) -> Res<Vec<EventHash>> {
-    let event = StaticEvent::CgkaOperation(Box::new(update_op));
-    let (hash, _) =
-        subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event, None)
-            .await
-            .map_err(|err| ferr!("failed to save keyhive cgka update op: {err}"))?;
-    Ok(vec![hash.0])
-}
-
 pub(crate) async fn persist_cgka_updates_durably(
+    keyhive_protocol: &crate::handler::BigRepoKeyhiveProtocol,
     keyhive_storage: &BigRepoKeyhiveStorage,
     update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
     local_secrets: Vec<keyhive_core::cgka::LocalCgkaSecret>,
@@ -388,11 +377,15 @@ pub(crate) async fn persist_cgka_updates_durably(
             .await
             .map_err(|error| ferr!("failed saving local CGKA secret: {error}"))?;
     }
-    let mut hashes = Vec::with_capacity(update_ops.len());
-    for update_op in update_ops {
-        hashes.extend(persist_cgka_update_op(keyhive_storage, update_op).await?);
-    }
-    Ok(hashes)
+    keyhive_protocol
+        .persist_local_events(
+            update_ops
+                .into_iter()
+                .map(|op| StaticEvent::CgkaOperation(Box::new(op)))
+                .collect(),
+        )
+        .await
+        .map_err(|err| ferr!("failed persisting keyhive cgka update ops: {err}"))
 }
 
 pub(crate) async fn encrypt_staged_automerge_ingest(

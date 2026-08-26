@@ -243,6 +243,14 @@ impl DrawerRepo {
                         )
                     })?;
                 let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
+                // TEMP-INSTRUMENTATION: per-node view of drawer meta convergence.
+                tracing::warn!(
+                    doc = %doc_id,
+                    branches = ?new_entry.branches.keys().collect::<Vec<_>>(),
+                    deleted = ?new_entry.branches_deleted.keys().collect::<Vec<_>>(),
+                    drawer_head = %patch_heads.iter().next().map(|h| h.to_string()).unwrap_or_default(),
+                    "entry patch applied"
+                );
 
                 for (branch_name, branch_ref) in &new_entry.branches {
                     let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());

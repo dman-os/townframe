@@ -964,7 +964,14 @@ impl DrawerRepo {
             .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
             .await?
             .ok_or_else(|| ferr!("missing branch doc '{}'", branch_ref.branch_doc_id))?;
-
+        // TEMP-INSTRUMENTATION: trace replicated branch deletion lifecycle.
+        tracing::warn!(
+            doc = %id,
+            branch = %branch_name,
+            bdoc = %branch_ref.branch_doc_id,
+            kind = ?branch_ref.branch_kind,
+            "delete_branch: initiated"
+        );
         self.remove_branch_from_partitions_if_needed(
             branch_ref.branch_kind,
             branch_ref.branch_doc_id,
@@ -1049,6 +1056,14 @@ impl DrawerRepo {
             *heads = drawer_heads.clone();
         });
 
+        // TEMP-INSTRUMENTATION: confirm the meta-doc commit that carries the tombstone.
+        tracing::warn!(
+            doc = %id,
+            branch = %branch_name,
+            bdoc = %branch_ref.branch_doc_id,
+            drawer_heads = %drawer_heads.iter().next().map(|h| h.to_string()).unwrap_or_default(),
+            "delete_branch: tombstone committed to drawer doc"
+        );
         Ok(true)
     }
 }

@@ -486,7 +486,9 @@ pub async fn clone_repo_init_from_url(
             },
             scope_key: Arc::from("daybook-core"),
             hidden_parts: Default::default(),
-            automerge_source_parts: None,
+            automerge_frontier_scope: Default::default(),
+            causal_checkpoint_scope: Default::default(),
+            group_part_scope: Default::default(),
         })
         .await?;
         let provision = request_clone_provision_from_url(

@@ -272,17 +272,17 @@ pub enum Runtime2Evt {
     KeyhiveChangeNotif {
         peer_id: PeerId,
     },
-    /// The highest Keyhive state generation the group-part projection has
-    /// reconciled. The hub bumps `keyhive_state_generation` on every state
-    /// advance (KeyhiveSyncDone{changed}, delegation, revocation, cgka); the
-    /// worker full-rebuilds on advance and acks the generation it covered.
-    GroupPartWorkerAdvanced {
-        generation: u64,
+    /// The durable incorporation-log head advanced: an incorporation hook
+    /// appended a batch and everything through `seq` is now applied to the
+    /// Keyhive graph. Emitted after each committed append.
+    KeyhiveAdmissionAdvanced {
+        seq: u64,
     },
-    /// The highest Keyhive state generation the causal-checkpoint worker has
-    /// covered into causal checkpoints.
-    CausalCheckpointWorkerAdvanced {
-        generation: u64,
+    /// The highest admission-log seq the group-part projection has settled
+    /// (persisted its cursor past). The hub compares it against the captured
+    /// admission head so `WaitForKeyhiveReconciliation` can resolve.
+    GroupPartWorkerSettled {
+        seq: u64,
     },
     DocWorkerStopped {
         doc_id: DocumentId,

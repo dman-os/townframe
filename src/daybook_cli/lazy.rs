@@ -126,8 +126,7 @@ pub async fn blobs_repo() -> Res<Arc<BlobsRepo>> {
         .get_or_try_init(|| async {
             let ctx = repo_ctx().await?;
             let blobs =
-                BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone())
-                    .await?;
+                BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
             register_shutdown({
                 let blobs = Arc::clone(&blobs);
                 move || async move { blobs.shutdown().await }

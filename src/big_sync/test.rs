@@ -263,6 +263,7 @@ impl SyncBackend for MemorySyncBackend {
         &self,
         peer_id: PeerId,
         obj_id: ObjId,
+        parts: Vec<PartId>,
         remote_payload: Option<serde_json::Value>,
     ) -> Res<SyncTaskRunOutcome> {
         let local_payload = self.local_part_store.obj_payload(obj_id).await?;
@@ -276,37 +277,52 @@ impl SyncBackend for MemorySyncBackend {
                 remote_part_store.obj_payload(obj_id).await?
             }
         };
-        match (local_payload, remote_payload) {
+        let outcome = match (local_payload, remote_payload) {
             (Some(local), Some(remote)) => match compare_lww_payloads(&local, &remote) {
                 Ordering::Less => {
                     self.local_part_store
                         .set_obj_payload(obj_id, remote)
                         .await?;
-                    Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                    SyncTaskCompletion {
                         obj_id,
                         deets: big_sync_core::SyncCompletionDeets::ChangedObject,
-                    }))
+                    }
                 }
-                Ordering::Equal | Ordering::Greater => {
-                    Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
-                        obj_id,
-                        deets: big_sync_core::SyncCompletionDeets::Noop,
-                    }))
-                }
+                Ordering::Equal | Ordering::Greater => SyncTaskCompletion {
+                    obj_id,
+                    deets: big_sync_core::SyncCompletionDeets::Noop,
+                },
             },
             (None, Some(payload)) => {
                 self.local_part_store
                     .set_obj_payload(obj_id, payload)
                     .await?;
-                Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                SyncTaskCompletion {
                     obj_id,
                     deets: big_sync_core::SyncCompletionDeets::AddedMember,
-                }))
+                }
             }
             (Some(_), None) | (None, None) => {
                 eyre::bail!("missing on remote");
             }
+        };
+        // The memory backend wants synced objs re-advertised to other peers:
+        // adopt the hinted parts so bucket replay short-circuits on them.
+        if !parts.is_empty() {
+            self.local_part_store
+                .add_obj_to_parts(obj_id, parts.clone())
+                .await;
         }
+        Ok(SyncTaskRunOutcome::Completion(outcome))
+    }
+
+    async fn remove_obj_from_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
+        for part_id in parts {
+            self.local_part_store
+                .remove_obj_from_part(obj_id, part_id)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -1269,7 +1285,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
-        .sync_obj(peer_a, obj, None)
+        .sync_obj(peer_a, obj, Vec::new(), None)
         .await
         .expect_err("remote absence should be treated as a hard error for now");
 
@@ -1312,10 +1328,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     backend_a
-        .sync_obj(peer_b, obj_b, Some(right_payload.clone()))
+        .sync_obj(peer_b, obj_b, Vec::new(), Some(right_payload.clone()))
         .await?;
     backend_b
-        .sync_obj(peer_a, obj_a, Some(left_payload.clone()))
+        .sync_obj(peer_a, obj_a, Vec::new(), Some(left_payload.clone()))
         .await?;
 
     let snapshot_a = store_a.snapshot().await?;

@@ -34,9 +34,18 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
     let mut rng = StdRng::seed_from_u64(seed);
     info!(seed, "starting four-node sync stress test");
 
-    let temp_root = tempfile::tempdir()?;
-    info!(path = %temp_root.path().display(), "initialized stress test cluster temp root");
-    let repo_paths = init_and_copy_repo_cluster(temp_root.path()).await?;
+    // DAYB_STRESS_KEEP_ROOT=1 preserves the cluster temp root for post-mortem
+    // inspection (keyhive sqlite stores) after the run exits.
+    let temp_dir = tempfile::Builder::new()
+        .prefix("daybook-stress")
+        .tempdir()?;
+    let temp_root = if std::env::var_os("DAYB_STRESS_KEEP_ROOT").is_some() {
+        temp_dir.keep()
+    } else {
+        temp_dir.path().to_path_buf()
+    };
+    info!(path = %temp_root.display(), "initialized stress test cluster temp root");
+    let repo_paths = init_and_copy_repo_cluster(&temp_root).await?;
     for (idx, path) in repo_paths.iter().enumerate() {
         info!(idx, path = %path.display(), "cluster node repo path");
     }
@@ -594,12 +603,16 @@ async fn wait_for_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> 
 }
 
 async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Res<()> {
-    let left_snapshot = collect_doc_branch_heads(left)
-        .await?
-        .ok_or_eyre("left node document branches not yet materialized")?;
-    let right_snapshot = collect_doc_branch_heads(right)
-        .await?
-        .ok_or_eyre("right node document branches not yet materialized")?;
+    let left_snapshot = collect_doc_branch_heads(left).await?.map_err(|reason| {
+        eyre::Report::msg(format!(
+            "left node document branches not yet materialized: {reason}"
+        ))
+    })?;
+    let right_snapshot = collect_doc_branch_heads(right).await?.map_err(|reason| {
+        eyre::Report::msg(format!(
+            "right node document branches not yet materialized: {reason}"
+        ))
+    })?;
 
     if left_snapshot == right_snapshot {
         return Ok(());
@@ -639,9 +652,12 @@ async fn assert_doc_head_parity(left: &SyncTestNode, right: &SyncTestNode) -> Re
     );
 }
 
+/// Collects every drawer doc's branch heads. Returns `Err(reason)` describing
+/// exactly which doc/branch is not yet materialized when a snapshot cannot be
+/// taken, so convergence polls report the offender instead of a bare `None`.
 async fn collect_doc_branch_heads(
     node: &SyncTestNode,
-) -> Res<Option<BTreeMap<(String, String), Vec<String>>>> {
+) -> Res<Result<BTreeMap<(String, String), Vec<String>>, String>> {
     let mut out = BTreeMap::new();
     let (_, ids) = node.drawer.list_just_ids().await?;
     let mut doc_ids = ids.into_iter().collect::<Vec<_>>();
@@ -652,14 +668,22 @@ async fn collect_doc_branch_heads(
         };
         let Some(branches) = node.drawer.get_doc_branches(&doc_id).await? else {
             if !entry.branches.is_empty() {
-                return Ok(None);
+                return Ok(Err(format!(
+                    "doc {doc_id}: entry lists branches {:?} but get_doc_branches \
+                     \u{0020}returned None — entry visible to get_entry but gone during \
+                     \u{0020}current_doc_branches (cache/live-doc split)",
+                    entry.branches.keys().collect::<Vec<_>>()
+                )));
             }
             continue;
         };
 
         for branch_name in entry.branches.keys() {
             if !branch_name.starts_with("/tmp") && !branches.branches.contains_key(branch_name) {
-                return Ok(None);
+                return Ok(Err(format!(
+                    "doc {doc_id}: branch '{branch_name}' is in the entry but absent from \
+                     \u{0020}resolved branch heads (branch doc not ready)",
+                )));
             }
         }
 
@@ -669,14 +693,16 @@ async fn collect_doc_branch_heads(
             let branch = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
-                return Ok(None);
+                return Ok(Err(format!(
+                    "doc {doc_id}: branch '{branch_name}' unresolvable (get_with_heads None)"
+                )));
             };
             let mut serialized_heads = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
             serialized_heads.sort_unstable();
             out.insert((doc_id.clone(), branch_name), serialized_heads);
         }
     }
-    Ok(Some(out))
+    Ok(Ok(out))
 }
 
 async fn assert_blob_parity(nodes: &[Option<SyncTestNode>]) -> Res<()> {
@@ -1106,4 +1132,107 @@ async fn pick_doc_and_non_main_branch(
         )));
     }
     Ok(None)
+}
+
+// ─── TEMPORARY post-mortem diagnostic (remove after flake root-cause) ───────
+//
+/// Loads a preserved stress-test cluster (DAYB_STRESS_KEEP_ROOT=1) without
+/// connecting the nodes, and prints each node's keyhive view of a stuck
+/// document: document registration, transitive member access, and per-node
+/// presence of the creator's keyhive events.
+///
+/// Env:
+/// - `DAYB_STRESS_INSPECT_ROOT`: preserved cluster temp root (required)
+/// - `DAYB_STRESS_INSPECT_DOC`:  base58 doc id to inspect (optional; falls
+///   back to listing recently created docs from the log)
+#[tokio::test(flavor = "multi_thread")]
+async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let Some(root) = std::env::var_os("DAYB_STRESS_INSPECT_ROOT") else {
+        eprintln!("diag_inspect_preserved_stress_cluster: DAYB_STRESS_INSPECT_ROOT not set; no-op");
+        return Ok(());
+    };
+    let root = std::path::PathBuf::from(root);
+    let mut nodes = open_cluster_nodes(&[
+        root.join("repo-0"),
+        root.join("repo-1"),
+        root.join("repo-2"),
+        root.join("repo-3"),
+    ])
+    .await?;
+
+    let doc_id: Option<big_repo::DocumentId> =
+        std::env::var("DAYB_STRESS_INSPECT_DOC").ok().map(|s| {
+            const ALPH: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+            // 34-byte little-endian bignum; doc ids are 32 bytes so this
+            // cannot overflow.
+            let mut num = vec![0_u8; 34];
+            for c in s.trim().bytes() {
+                let d = ALPH.iter().position(|a| *a == c).expect("bad base58");
+                let mut carry = d as u16;
+                for byte in &mut num {
+                    carry += (*byte as u16) * 58;
+                    *byte = carry as u8;
+                    carry /= 256;
+                }
+                assert_eq!(carry, 0, "base58 id overflows 34 bytes");
+            }
+            while num.len() > 32 {
+                assert_eq!(num.pop(), Some(0), "base58 id overflows 32 bytes");
+            }
+            num.reverse();
+            let mut bytes = [0_u8; 32];
+            bytes.copy_from_slice(&num);
+            big_repo::DocumentId::new(bytes)
+        });
+
+    for (idx, node) in nodes.iter().enumerate() {
+        let Some(node) = node else { continue };
+        let peer_id = node.sync_repo.router.endpoint().id();
+        println!("── repo-{idx} peer={peer_id}");
+        let keyhive = node.sync_repo.rcx.big_repo.keyhive();
+        if let Some(doc_id) = doc_id {
+            use big_repo::keyhive_core::principal::identifier::Identifier;
+            let ident = Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .expect("doc id must be a verifying key"),
+            );
+            let members = keyhive.agents_for_membered(ident).await;
+            println!(
+                "   doc registered & transitive members with access: {}",
+                members.len()
+            );
+            for (agent_bytes, access) in &members {
+                println!("     agent={agent_bytes:?} access={access:?}");
+            }
+            for (agent_bytes, access) in &members {
+                println!("     agent={agent_bytes:?} access={access:?}");
+            }
+
+            // TEMP-INSTRUMENTATION: resolution-chain probe — exactly what the
+            // parity poll exercises for a branch doc id.
+            let lookup = node.sync_repo.rcx.big_repo.get_doc(&doc_id).await?;
+            let lookup_kind = match &lookup {
+                big_repo::DocLookup::Ready(_) => "Ready",
+                big_repo::DocLookup::PendingMaterialization => "PendingMaterialization",
+                big_repo::DocLookup::Missing => "Missing",
+            };
+            println!("   big_repo.get_doc: {lookup_kind}");
+            drop(lookup);
+            let handle = node.drawer.get_handle_by_branch_doc_id(doc_id).await?;
+            println!(
+                "   drawer.get_handle_by_branch_doc_id: {}",
+                handle.is_some()
+            );
+            let heads = node.drawer.get_branch_heads_by_doc_id(doc_id).await?;
+            println!(
+                "   drawer.get_branch_heads_by_doc_id: {} heads",
+                heads.as_ref().map(|h| h.0.len()).unwrap_or(0)
+            );
+        }
+    }
+    for node in nodes.into_iter().flatten() {
+        node.stop().await?;
+    }
+    Ok(())
 }

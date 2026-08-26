@@ -4,12 +4,21 @@ use big_sync_core::{ObjId, PartId, PeerId};
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
+    /// `parts` carries the part hints that triggered this sync. The backend
+    /// owns local part-membership: adopt the obj into these parts if its
+    /// domain semantics want it re-advertised to other peers, or ignore them.
     async fn sync_obj(
         &self,
         peer_id: PeerId,
         obj_id: ObjId,
+        parts: Vec<PartId>,
         remote_payload: Option<ObjPayload>,
     ) -> Res<crate::SyncTaskRunOutcome>;
+
+    /// Backend-owned part-membership eviction. The machine replays removal
+    /// requests (subscription `Removed` events, remote tombstones) into this;
+    /// the backend decides what eviction means for its domain. Idempotent.
+    async fn remove_obj_from_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()>;
 }
 
 pub mod contract {
@@ -141,7 +150,12 @@ pub mod contract {
 
         let outcome = harness
             .backend()
-            .sync_obj(case.peer_id, case.obj_id, case.remote_payload.clone())
+            .sync_obj(
+                case.peer_id,
+                case.obj_id,
+                Vec::new(),
+                case.remote_payload.clone(),
+            )
             .await?;
 
         match (&case.expected_outcome, outcome) {

@@ -30,7 +30,9 @@ pub async fn boot_repo() -> Res<(
         storage: StorageConfig::Memory,
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_source_parts: None,
+        automerge_frontier_scope: Default::default(),
+        causal_checkpoint_scope: Default::default(),
+        group_part_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -71,7 +73,9 @@ pub async fn _boot_disk_repo(
         storage: StorageConfig::Disk { path },
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_source_parts: None,
+        automerge_frontier_scope: Default::default(),
+        causal_checkpoint_scope: Default::default(),
+        group_part_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -265,6 +269,7 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
         .expect("created document must be present in Keyhive");
     let (update, local_secret) = keyhive.force_pcs_update(kh_doc).await?;
     crate::runtime2::support::persist_cgka_updates_durably(
+        &repo.keyhive_protocol,
         &repo.keyhive_storage,
         vec![update],
         vec![local_secret],
@@ -311,6 +316,7 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
         .force_pcs_update(kh_doc)
         .await?;
     crate::runtime2::support::persist_cgka_updates_durably(
+        &repo.keyhive_protocol,
         &repo.keyhive_storage,
         vec![update],
         vec![local_secret],
@@ -2880,7 +2886,9 @@ impl SyncRepoNode {
             storage: StorageConfig::Disk { path: path.clone() },
             scope_key: Arc::from("big-repo-sync-test"),
             hidden_parts: HashSet::new(),
-            automerge_source_parts: None,
+            automerge_frontier_scope: Default::default(),
+            causal_checkpoint_scope: Default::default(),
+            group_part_scope: Default::default(),
         })
         .await?;
         let shared_store = repo.shared_part_store();
@@ -3884,7 +3892,12 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
     let outcome = client
         .sync_backend
-        .sync_obj(client_conn.peer_id(), doc_id, remote_payload.clone())
+        .sync_obj(
+            client_conn.peer_id(),
+            doc_id,
+            Vec::new(),
+            remote_payload.clone(),
+        )
         .await?;
     assert!(
         matches!(

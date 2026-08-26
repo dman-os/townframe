@@ -31,13 +31,19 @@ mod cursor;
 use cursor::*;
 mod fingerprint;
 mod ids;
+/// New-generation stream abstractions (see module docs). Additive only:
+/// existing machines migrate onto these in the upcoming swap, nothing is
+/// rewired yet.
+pub mod outbox;
 use bucket::BucketMachine;
 pub mod mpsc;
 pub mod part_store;
 use part_store::*;
 pub mod rpc;
 use rpc::*;
+pub mod scheduler;
 mod tasks;
+pub mod watermark;
 use crate::tasks::leaf_buckets::*;
 use crate::tasks::list_bucket::*;
 use tasks::decide_peer_strat::*;
@@ -48,7 +54,9 @@ pub use fingerprint::{Fingerprint, FingerprintSeed};
 pub use ids::{BuckId, Byte32Id, ObjId, PartId, PeerId};
 #[cfg(any(test, feature = "test-support"))]
 pub use tasks::TaskCounts;
-pub use tasks::{MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, TaskCtx, TaskId};
+pub use tasks::{
+    MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, SyncTaskKind, TaskCtx, TaskId,
+};
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
@@ -115,6 +123,21 @@ structstruck::strike! {
                 pub obj_id: ObjId,
             }
         ),
+        RemoveCompleted (
+            pub struct RemoveCompletedEvent {
+                pub task_id: TaskId,
+                pub peer_id: PeerId,
+                pub obj_id: ObjId,
+            }
+        ),
+        RemoveFailed (
+            pub struct RemoveFailedEvent {
+                pub task_id: TaskId,
+                pub peer_id: PeerId,
+                pub obj_id: ObjId,
+                pub err: eyre::Report,
+            }
+        ),
     }
 }
 
@@ -151,14 +174,6 @@ structstruck::strike! {
     /// This is different from tasks which can be retried are scheduled concurrently to machine.
     #[derive(Clone, Debug)]
     pub enum BigSyncMachineCommand {
-        AddObjToPart {
-            obj_id: ObjId,
-            part_id: PartId,
-        },
-        RemoveObjFromPart {
-            obj_id: ObjId,
-            part_id: PartId,
-        },
         SetPartCursor {
             peer_id: PeerId,
             part_id: PartId,
@@ -207,6 +222,9 @@ structstruck::strike! {
             part_hints: Set<PartId>,
             remote_payload: Option<crate::part_store::ObjPayload>,
         }>,
+        /// In-flight backend removal tasks keyed by object, mirroring
+        /// `sync_workers` coalescing semantics.
+        remove_workers: Map<ObjId, SyncWorkerState>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
             parts: Set<PartId>,
@@ -242,17 +260,20 @@ impl PeerState {
         parts: impl std::iter::Iterator<Item = &'a PartId>,
     ) -> Map<PartId, CursorIndex> {
         parts
-            .map(
-                |&part_id| match self.parts.get(&part_id).expect(ERROR_IMPOSSIBLE).strat {
-                    PeerPartStrategy::Pending(_) => unreachable!(),
-                    PeerPartStrategy::Bucket(BucketState { replay_cursor, .. }) => {
-                        (part_id, replay_cursor)
-                    }
-                    PeerPartStrategy::Cursor(CursorState { replay_cursor, .. }) => {
-                        (part_id, replay_cursor)
-                    }
-                },
-            )
+            .filter_map(|part_id| match self.parts.get(part_id).map(|p| &p.strat) {
+                // A part whose strategy is still being negotiated (or that was
+                // removed and re-added while a replay worker still references
+                // it) has no replay cursor yet. Skip it: the worker's delayed
+                // retry resubscribes once the decision lands. Replay is
+                // at-least-once, so skipping here cannot lose data.
+                None | Some(PeerPartStrategy::Pending(_)) => None,
+                Some(PeerPartStrategy::Bucket(BucketState { replay_cursor, .. })) => {
+                    Some((*part_id, *replay_cursor))
+                }
+                Some(PeerPartStrategy::Cursor(CursorState { replay_cursor, .. })) => {
+                    Some((*part_id, *replay_cursor))
+                }
+            })
             .collect()
     }
 }
@@ -653,40 +674,30 @@ impl BigSyncMachine {
                     self.handle_sync_stale(evt, state.retry);
                 }
             }
+            BigSyncEvent::RemoveCompleted(evt) => {
+                if self.tasks.stop_task(evt.task_id).is_some() {
+                    self.handle_remove_completed(evt);
+                }
+            }
+            BigSyncEvent::RemoveFailed(evt) => {
+                if let Some(state) = self.tasks.stop_task(evt.task_id) {
+                    self.handle_remove_failed(evt, state.retry);
+                }
+            }
         }
     }
 
     pub fn handle_cmd_success(&mut self, id: Uuid) {
-        let (found_id, last_cmd, cursor, peer_id) = self
+        let (found_id, _last_cmd, _cursor, _peer_id) = self
             .cmds
             .pop_front()
             .expect("success for a cmd that wasn't sent");
         if id != found_id {
             panic!("unexpected cmd success, cmds must be performed serially");
         }
-        if let Some(cursor) = cursor {
-            match last_cmd {
-                BigSyncMachineCommand::SetPartCursor { .. } => unreachable!(),
-                BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id }
-                | BigSyncMachineCommand::AddObjToPart { obj_id, part_id } => {
-                    tracing::trace!(
-                        peer_id = %peer_id,
-                        obj_id = %obj_id,
-                        part_id = %part_id,
-                        cursor,
-                        "big sync membership command completed",
-                    );
-                    let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
-                    peer_state.cursor_machine.on_obj_sync_job_evt(
-                        obj_id,
-                        cursor,
-                        CursorJobCompletionKind::Membership,
-                        &mut peer_state.cursors_cmd_buf,
-                    );
-                    self.drain_cursor_machine_cmds(peer_id);
-                }
-            }
-        }
+        // Membership mutations no longer flow through commands: object
+        // removal is a backend-executed task whose completion settles the
+        // membership lane via handle_remove_completed.
     }
 
     pub fn handle_tick(&mut self, now: std::time::Instant) {
@@ -755,6 +766,7 @@ impl BigSyncMachine {
         // and resolved parts while stopping only pending/obsolete strategy tasks.
         self.all_seen_peer.insert(peer_id);
         let mut peer_state = self.peers.remove(&peer_id).unwrap_or_else(|| PeerState {
+            remove_workers: default(),
             sync_workers: default(),
             replay_worker: default(),
             objects: default(),
@@ -1347,7 +1359,16 @@ impl BigSyncMachine {
                         obj_id,
                         remote_payload: remote_payload.clone(),
                     };
+                    for part_id in &part_hints {
+                        Self::cancel_obj_removal_hint(
+                            &mut self.tasks,
+                            &mut peer_state.remove_workers,
+                            obj_id,
+                            *part_id,
+                        );
+                    }
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                        kind: SyncTaskKind::Sync,
                         part_hints: part_hints.iter().copied().collect(),
                         deets: deets.clone(),
                     }));
@@ -1386,34 +1407,116 @@ impl BigSyncMachine {
                             ));
                             state.replay_cursor = cursor;
                         }
-                        _ => unreachable!(),
+                        // A removal can settle a cursor before the peer
+                        // replay worker has promoted the part out of
+                        // `Pending`. Replay is at-least-once, so dropping the
+                        // advance here is safe: the replay picks up from its
+                        // own cursor when it starts.
+                        PeerPartStrategy::Pending(_) => {
+                            tracing::debug!(
+                                peer_id = %peer_id,
+                                ?part_id,
+                                cursor,
+                                "cursor advanced while part still pending replay; ignoring"
+                            );
+                        }
                     }
                 }
-                CursorMachineCommand::RemoveObjFromPart {
+                CursorMachineCommand::RemoveObjFromParts {
                     obj_id,
                     part_id,
                     cursor,
                 } => {
-                    self.cmds.push_back((
-                        Uuid::new_v4(),
-                        BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
-                        Some(cursor),
+                    // Trim the hint from any in-flight sync task for this
+                    // object; stop it if nothing is left to fetch.
+                    let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
+                        worker.part_hints.remove(&part_id);
+                        worker.part_hints.is_empty().then_some(worker.task_id)
+                    });
+                    if let Some(task_id) = stop_task {
+                        let worker = peer_state
+                            .sync_workers
+                            .remove(&obj_id)
+                            .expect(ERROR_UNRECONIZED);
+                        assert_eq!(worker.task_id, task_id);
+                        self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
+                    }
+                    Self::schedule_obj_removal(
+                        &mut self.tasks,
+                        &mut peer_state.remove_workers,
                         peer_id,
-                    ));
-                }
-                CursorMachineCommand::AddObjToPart {
-                    obj_id,
-                    part_id,
-                    cursor,
-                } => {
-                    self.cmds.push_back((
-                        Uuid::new_v4(),
-                        BigSyncMachineCommand::AddObjToPart { obj_id, part_id },
+                        obj_id,
+                        part_id,
                         Some(cursor),
-                        peer_id,
-                    ));
+                    );
                 }
             }
+        }
+    }
+
+    /// Coalesce an object-removal request into a backend-executed
+    /// [`SyncTaskKind::RemoveFromParts`] task. Membership mutation itself
+    /// happens in the backend; the machine only replays the request.
+    fn schedule_obj_removal(
+        tasks: &mut Tasks,
+        remove_workers: &mut Map<ObjId, SyncWorkerState>,
+        peer_id: PeerId,
+        obj_id: ObjId,
+        part_id: PartId,
+        cursor: Option<CursorIndex>,
+    ) {
+        let (cursors, part_hints) = if let Some(mut worker) = remove_workers.remove(&obj_id) {
+            let _state = tasks.stop_task(worker.task_id).expect(ERROR_UNRECONIZED);
+            if let Some(cursor) = cursor {
+                worker.cursors.insert(cursor);
+            }
+            worker.part_hints.insert(part_id);
+            (worker.cursors, worker.part_hints)
+        } else {
+            let mut cursors: Set<CursorIndex> = default();
+            if let Some(cursor) = cursor {
+                cursors.insert(cursor);
+            }
+            (cursors, [part_id].into())
+        };
+        let deets = SyncTaskDeets {
+            peer_id,
+            obj_id,
+            remote_payload: None,
+        };
+        let task_id = tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+            kind: SyncTaskKind::RemoveFromParts,
+            part_hints: part_hints.iter().copied().collect(),
+            deets,
+        }));
+        remove_workers.insert(
+            obj_id,
+            SyncWorkerState {
+                task_id,
+                cursors,
+                part_hints,
+                remote_payload: None,
+            },
+        );
+    }
+
+    /// Drop `part_id` from any in-flight removal task for the object — the
+    /// inverse of `schedule_obj_removal`, used when a later event re-adds the
+    /// object to a part while its removal is still pending.
+    fn cancel_obj_removal_hint(
+        tasks: &mut Tasks,
+        remove_workers: &mut Map<ObjId, SyncWorkerState>,
+        obj_id: ObjId,
+        part_id: PartId,
+    ) {
+        let stop_task = remove_workers.get_mut(&obj_id).and_then(|worker| {
+            worker.part_hints.remove(&part_id);
+            worker.part_hints.is_empty().then_some(worker.task_id)
+        });
+        if let Some(task_id) = stop_task {
+            let worker = remove_workers.remove(&obj_id).expect(ERROR_UNRECONIZED);
+            assert_eq!(worker.task_id, task_id);
+            tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
         }
     }
 }
@@ -1449,12 +1552,21 @@ impl BigSyncMachine {
                         } else {
                             (default(), [part_id].into(), remote_payload)
                         };
+                    for part_id in &part_hints {
+                        Self::cancel_obj_removal_hint(
+                            &mut self.tasks,
+                            &mut peer_state.remove_workers,
+                            obj_id,
+                            *part_id,
+                        );
+                    }
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
                         remote_payload: remote_payload.clone(),
                     };
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                        kind: SyncTaskKind::Sync,
                         part_hints: part_hints.iter().copied().collect(),
                         deets: deets.clone(),
                     }));
@@ -1468,13 +1580,27 @@ impl BigSyncMachine {
                         },
                     );
                 }
-                BucketMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
-                    self.cmds.push_back((
-                        Uuid::new_v4(),
-                        BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
-                        None,
+                BucketMachineCommand::RemoveObjFromParts { obj_id, part_id } => {
+                    let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
+                        worker.part_hints.remove(&part_id);
+                        worker.part_hints.is_empty().then_some(worker.task_id)
+                    });
+                    if let Some(task_id) = stop_task {
+                        let worker = peer_state
+                            .sync_workers
+                            .remove(&obj_id)
+                            .expect(ERROR_UNRECONIZED);
+                        assert_eq!(worker.task_id, task_id);
+                        self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
+                    }
+                    Self::schedule_obj_removal(
+                        &mut self.tasks,
+                        &mut peer_state.remove_workers,
                         peer_id,
-                    ));
+                        obj_id,
+                        part_id,
+                        None,
+                    );
                 }
                 BucketMachineCommand::ListBuckets {
                     offset,
@@ -1724,6 +1850,87 @@ impl BigSyncMachine {
 
 // sync support
 impl BigSyncMachine {
+    fn handle_remove_completed(&mut self, evt: RemoveCompletedEvent) {
+        let (cursors, part_hints) = {
+            let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
+                assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
+                return;
+            };
+            let Some(worker) = peer_state.remove_workers.get(&evt.obj_id) else {
+                return;
+            };
+            if worker.task_id != evt.task_id {
+                return;
+            }
+            (worker.cursors.clone(), worker.part_hints.clone())
+        };
+        tracing::debug!(
+            peer_id = %evt.peer_id,
+            task_id = evt.task_id,
+            obj_id = %evt.obj_id,
+            part_hints = ?part_hints,
+            "backend object-membership removal completed",
+        );
+        let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
+            return;
+        };
+        peer_state.remove_workers.remove(&evt.obj_id);
+        for &cursor in &cursors {
+            peer_state.cursor_machine.on_obj_sync_job_evt(
+                evt.obj_id,
+                cursor,
+                CursorJobCompletionKind::Membership,
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        self.drain_cursor_machine_cmds(evt.peer_id);
+        self.drain_bucket_machine_cmds(evt.peer_id);
+    }
+
+    fn handle_remove_failed(&mut self, evt: RemoveFailedEvent, retry: Retry) {
+        let part_hints = {
+            let Some(peer_state) = self.peers.get(&evt.peer_id) else {
+                assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
+                return;
+            };
+            let Some(worker) = peer_state.remove_workers.get(&evt.obj_id) else {
+                return;
+            };
+            if worker.task_id != evt.task_id {
+                return;
+            }
+            worker.part_hints.clone()
+        };
+        tracing::debug!(
+            peer_id = %evt.peer_id,
+            task_id = evt.task_id,
+            obj_id = %evt.obj_id,
+            retry = ?retry,
+            error = %evt.err,
+            part_hints = ?part_hints,
+            "big sync object-removal task failed; rescheduling",
+        );
+        let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
+            return;
+        };
+        if let Some(worker) = peer_state.remove_workers.get_mut(&evt.obj_id) {
+            let task_id = self.tasks.spawn_delayed_task(
+                TaskSeed::Sync(SyncTaskSeed {
+                    kind: SyncTaskKind::RemoveFromParts,
+                    part_hints: part_hints.clone(),
+                    deets: SyncTaskDeets {
+                        peer_id: evt.peer_id,
+                        obj_id: evt.obj_id,
+                        remote_payload: None,
+                    },
+                }),
+                retry,
+                Duration::from_secs(2),
+            );
+            worker.task_id = task_id;
+        }
+    }
+
     fn handle_sync_completed(&mut self, evt: SyncCompletedEvent) {
         let completion = evt.completion;
         let Some(peer_state) = self.peers.get(&evt.peer_id) else {
@@ -1841,6 +2048,7 @@ impl BigSyncMachine {
         if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
             let task_id = self.tasks.spawn_delayed_task(
                 TaskSeed::Sync(SyncTaskSeed {
+                    kind: SyncTaskKind::Sync,
                     part_hints: part_hints.clone(),
                     deets,
                 }),
@@ -1887,6 +2095,7 @@ impl BigSyncMachine {
         if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
             let task_id = self.tasks.spawn_delayed_task(
                 TaskSeed::Sync(SyncTaskSeed {
+                    kind: SyncTaskKind::Sync,
                     part_hints: part_hints.clone(),
                     deets,
                 }),
@@ -1928,5 +2137,129 @@ mod tests {
             1,
             stranded.get(&1),
         );
+    }
+
+    #[test]
+    fn removal_cancels_retrying_sync_task_when_its_last_part_is_removed() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [part].into(),
+            objects: Set::new(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
+                    cursor: 1,
+                    part_id: part,
+                    obj_id: obj,
+                    payload: serde_json::json!({"head": 1}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+        let task_id = machine
+            .peers
+            .get(&peer)
+            .and_then(|peer_state| peer_state.sync_workers.get(&obj))
+            .map(|worker| worker.task_id)
+            .expect("addition must start an object sync task");
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 2,
+                    part_id: part,
+                    obj_id: obj,
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+
+        // The sync task is cancelled…
+        assert!(
+            !machine
+                .peers
+                .get(&peer)
+                .expect(ERROR_UNRECONIZED)
+                .sync_workers
+                .contains_key(&obj)
+        );
+        assert!(machine.drain_stop_queue().any(|stopped| stopped == task_id));
+        // …and a backend-executed removal task replaces it.
+        let removal = machine
+            .peers
+            .get(&peer)
+            .expect(ERROR_UNRECONIZED)
+            .remove_workers
+            .get(&obj)
+            .expect("removal must schedule a RemoveFromParts task");
+        assert_ne!(removal.task_id, task_id);
+        assert!(removal.part_hints.contains(&part));
+    }
+
+    #[test]
+    fn removal_keeps_sync_task_for_other_visible_parts() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let removed_part = PartId::random();
+        let remaining_part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [removed_part, remaining_part].into(),
+            objects: Set::new(),
+        }));
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            for part_id in [removed_part, remaining_part] {
+                peer_state
+                    .parts
+                    .get_mut(&part_id)
+                    .expect(ERROR_UNRECONIZED)
+                    .strat = PeerPartStrategy::Cursor(CursorState { replay_cursor: 0 });
+            }
+        }
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 1,
+                    part_ids: vec![removed_part, remaining_part],
+                    obj_id: obj,
+                    payload: serde_json::json!({"head": 1}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+        let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 2,
+                    part_id: removed_part,
+                    obj_id: obj,
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+
+        let worker = &machine.peers[&peer].sync_workers[&obj];
+        assert_eq!(worker.task_id, task_id);
+        assert_eq!(worker.part_hints, [remaining_part].into());
+        assert!(!machine.drain_stop_queue().any(|stopped| stopped == task_id));
     }
 }

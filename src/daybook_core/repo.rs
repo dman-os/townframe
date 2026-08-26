@@ -789,7 +789,9 @@ async fn boot_big_repo(
         },
         scope_key: Arc::from("daybook-core"),
         hidden_parts: Default::default(),
-        automerge_source_parts: None,
+        automerge_frontier_scope: Default::default(),
+        causal_checkpoint_scope: Default::default(),
+        group_part_scope: Default::default(),
     };
     big_repo::BigRepo::boot(config).await
 }

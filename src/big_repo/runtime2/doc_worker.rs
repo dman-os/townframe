@@ -291,6 +291,16 @@ impl LoadedDocSnapshot {
     }
 }
 
+impl<F: FutureForm> Drop for DocWorker2<F> {
+    fn drop(&mut self) {
+        if let DocState::Live(ref weak_bundle) = self.state
+            && let Some(bundle) = weak_bundle.upgrade()
+        {
+            bundle.mark_broken();
+        }
+    }
+}
+
 impl<F: FutureForm> DocWorker2<F> {
     /// Dispatch a single [`DocWorkerMsg`]. Called by the message loop.
     ///
@@ -1136,10 +1146,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.retry_blocked_refs(&bundle, &origin).await?;
             }
 
-            if !has_live {
-                let origin = BigRepoChangeOrigin::Remote { peer_id };
-                self.retry_materialization(origin).await?;
-            }
+            // No eager rematerialization here: without a live handle, received
+            // content stays persisted-but-unhydrated unless this node can
+            // write, in which case causal-coverage healing below drives the
+            // materialization itself. Eagerly walking the tree for read-only
+            // or Relay-only holders only produced pending-set churn.
             self.reconcile_causal_coverage().await?;
         } else {
             debug_assert!(
@@ -1706,12 +1717,10 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Live(weak) => weak.upgrade(),
             _ => None,
         };
-        tracing::debug!(%self.doc_id, "passed point R1: retry_materialization entry");
         // A live doc never needs a coarse rewalk: precisely retry the held
         // blocked refs — a keyhive round or an earlier session may have
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
-            tracing::debug!(%self.doc_id, blocked = self.blocked_refs.len(), "passed point R1b: live precise retry");
             let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");

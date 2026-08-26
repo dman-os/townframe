@@ -21,7 +21,7 @@ structstruck::strike! {
             remote_payload: Option<ObjPayload>,
             part_id: PartId,
         },
-        RemoveObjFromPart {
+        RemoveObjFromParts {
             obj_id: ObjId,
             part_id: PartId,
         },
@@ -356,7 +356,7 @@ impl BucketMachine {
                         assert!(old.is_none(), "fishy");
                     }
                     PartObjDelta::Delete => {
-                        out.push(BucketMachineCommand::RemoveObjFromPart {
+                        out.push(BucketMachineCommand::RemoveObjFromParts {
                             obj_id: obj.obj_id,
                             part_id: self.part_id,
                         });

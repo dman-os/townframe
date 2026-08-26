@@ -108,7 +108,11 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
             | crate::SyncDocError::NotFound
             | crate::SyncDocError::Policy(_),
         ) => {}
-        Err(err) => return Err(crate::ferr!("unexpected sync error after revocation: {err:?}")),
+        Err(err) => {
+            return Err(crate::ferr!(
+                "unexpected sync error after revocation: {err:?}"
+            ));
+        }
     }
 
     // The reader may retain already-held historical plaintext ("before-revoke"),
@@ -278,5 +282,78 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
     drop(reader_doc);
     drop(reader_doc2);
     drop(owner_doc);
+    Ok(())
+}
+
+/// A reader whose keyhive is stale (the owner revoked access but the
+/// revocation hint has not propagated yet) passes its local fetch gate and
+/// reaches the remote, which must reject the sync at the wire level with
+/// [`crate::SyncDocError::Unauthorized`]. This is the remote-rejection
+/// counterpart of the local `Policy(InsufficientAccess)` fail-fast: the
+/// fetcher believes it still has access, the serving peer disagrees.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(238, 239, "Owner", "StaleReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "shared"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    drop(reader_doc);
+    drop(owner_doc);
+
+    // Revoke without letting the reader's keyhive learn about it. The
+    // notification path debounces for at least `quiet_window` (100ms), so the
+    // doc-sync attempt below lands while the reader's local gate still passes
+    // and the owner's serving policy is the side that rejects.
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id, reader_agent)
+        .await?;
+
+    match pair.right_conn().sync_doc_with_peer(doc_id).await {
+        Err(crate::SyncDocError::Unauthorized) => {}
+        other => {
+            return Err(crate::ferr!(
+                "stale reader sync must be rejected by the remote with Unauthorized, got {other:?}"
+            ));
+        }
+    }
+
+    // Once the revocation reaches the reader, its local gate closes too.
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    let access = pair
+        .right()
+        .repo
+        .keyhive()
+        .agent_access_on(
+            &keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(pair.right().peer_id().as_bytes())
+                    .expect("peer id must be a verifying key"),
+            ),
+            keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .expect("doc id must be a verifying key"),
+            ),
+        )
+        .await;
+    assert_eq!(
+        access, None,
+        "after the revocation propagates the reader must lose effective document access"
+    );
     Ok(())
 }
