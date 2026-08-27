@@ -570,6 +570,7 @@ pub mod host_contract {
         assert_subscribe_contract(harness).await?;
         assert_readable_subscribe_contract(harness).await?;
         assert_subscribe_replay_filtering_contract(harness).await?;
+        assert_subscription_semantics_contract(harness).await?;
         assert_subscribe_live_filtering_contract(harness).await?;
         assert_subscribe_per_part_cursor_contract(harness).await?;
         assert_list_events_pagination_contract(harness).await?;
@@ -634,9 +635,9 @@ pub mod host_contract {
             .await??;
         assert_eq!(summary.len(), 2);
         assert_eq!(summary[&part_a].member_count, 1);
-        assert_eq!(summary[&part_a].latest_cursor, 1);
+        assert_eq!(summary[&part_a].latest_cursor, 2);
         assert_eq!(summary[&part_b].member_count, 1);
-        assert_eq!(summary[&part_b].latest_cursor, 2);
+        assert_eq!(summary[&part_b].latest_cursor, 4);
 
         match store
             .summarize_parts(HashSet::from([part_a, unknown]))
@@ -887,9 +888,13 @@ pub mod host_contract {
         let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
         let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
         assert_eq!(page_after.events.len(), 1);
+        let added_cursor = match &page_after.events[0] {
+            PartEvent::Added(event) => event.cursor,
+            other => panic!("expected added event, got {other:?}"),
+        };
         assert_added(
             &page_after.events[0],
-            3,
+            added_cursor,
             part,
             obj,
             payload("late-payload", 99),
@@ -1119,16 +1124,12 @@ pub mod host_contract {
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
         match &page_b.events[..] {
-            [PartEvent::Added(added), PartEvent::Changed(changed)] => {
-                assert_eq!(added.part_id, part_b);
-                assert_eq!(added.obj_id, obj);
-                assert_eq!(added.payload, payload("events-1", 1));
+            [PartEvent::Changed(changed)] => {
                 assert_eq!(changed.part_ids, vec![part_b]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("events-3", 3));
-                assert!(added.cursor < changed.cursor);
             }
-            other => panic!("unexpected part_b page: {other:?}"),
+            other => panic!("unexpected latest part_b page: {other:?}"),
         }
         Ok(())
     }
@@ -1152,6 +1153,7 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
+                    lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
@@ -1178,10 +1180,7 @@ pub mod host_contract {
                     assert_eq!(event.part_id, part);
                     break;
                 }
-                SubEvent::ReplayComplete
-                | SubEvent::Changed(_)
-                | SubEvent::Removed(_)
-                | SubEvent::ObjectChanged(_) => {}
+                SubEvent::ReplayComplete | SubEvent::Changed(_) | SubEvent::Removed(_) => {}
             }
         }
         Ok(())
@@ -1217,9 +1216,10 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
+                    lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part_b,
-                        cursor: 3,
+                        cursor: 0,
                     }]),
                 },
                 sub_peer,
@@ -1227,18 +1227,10 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
-            [
-                SubEvent::Added(added),
-                SubEvent::Changed(changed),
-                SubEvent::ReplayComplete,
-            ] => {
-                assert_eq!(added.part_id, part_b);
-                assert_eq!(added.obj_id, obj);
-                assert_eq!(added.payload, payload("sub-1", 1));
+            [SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
                 assert_eq!(changed.part_ids, vec![part_b]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("sub-3", 3));
-                assert!(added.cursor < changed.cursor);
                 changed.cursor
             }
             other => panic!("unexpected replay events: {other:?}"),
@@ -1289,6 +1281,7 @@ pub mod host_contract {
         let auth_rx = store
             .subscribe(
                 SubPartsRequest {
+                    lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
@@ -1299,9 +1292,13 @@ pub mod host_contract {
             .await??;
         let auth_events = collect_sub_events(&auth_rx).await?;
         assert!(
-            auth_events
-                .iter()
-                .any(|evt| matches!(evt, SubEvent::Added(added) if added.obj_id == obj && added.part_id == part)),
+            auth_events.iter().any(|evt| match evt {
+                SubEvent::Added(added) => added.obj_id == obj && added.part_id == part,
+                SubEvent::Changed(changed) => {
+                    changed.obj_id == obj && changed.part_ids == vec![part]
+                }
+                _ => false,
+            }),
             "authorized subscriber must receive the document event during replay; got {auth_events:?}"
         );
         assert!(
@@ -1315,6 +1312,7 @@ pub mod host_contract {
         let denied_rx = store
             .subscribe(
                 SubPartsRequest {
+                    lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
@@ -1347,9 +1345,6 @@ pub mod host_contract {
                     panic!(
                         "denied subscriber must not receive Removed event during replay; got {transition:?}"
                     );
-                }
-                SubEvent::ObjectChanged(_) => {
-                    panic!("denied subscriber must not receive ObjectChanged event during replay");
                 }
                 SubEvent::ReplayComplete => {}
             }
@@ -1398,6 +1393,7 @@ pub mod host_contract {
             store
                 .subscribe(
                     SubPartsRequest {
+                        lower_bound: 0,
                         targets: HashSet::from([
                             big_sync_core::rpc::SubscriptionTarget::Part {
                                 part_id: part,
@@ -1428,44 +1424,36 @@ pub mod host_contract {
             .await?;
 
         // Authorized (Read) must receive the live Changed event for each subscribed partition.
-        let mut auth_parts = HashSet::new();
-        for _ in 0..2 {
-            let auth_live = recv_sub_event(&auth_rx).await?;
-            let SubEvent::Changed(auth_changed) = auth_live else {
-                panic!("authorized subscriber expected Changed, got {auth_live:?}");
-            };
-            assert_eq!(auth_changed.obj_id, obj);
-            assert_eq!(auth_changed.payload, payload("live-filter", 2));
-            auth_parts.extend(auth_changed.part_ids);
-        }
+        // A change to one object is one logical event, even when it has
+        // multiple subscribed part tags.
+        let auth_live = recv_sub_event(&auth_rx).await?;
+        let SubEvent::Changed(auth_changed) = auth_live else {
+            panic!("authorized subscriber expected Changed, got {auth_live:?}");
+        };
+        assert_eq!(auth_changed.obj_id, obj);
+        assert_eq!(auth_changed.payload, payload("live-filter", 2));
         assert_eq!(
-            auth_parts,
+            auth_changed.part_ids.into_iter().collect::<HashSet<_>>(),
             HashSet::from([part, overlapping_part]),
-            "live events must cover every subscribed part",
+            "one live event must cover every subscribed part",
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(100), auth_rx.recv())
                 .await
                 .is_err(),
-            "multi-part change must not emit more events than subscribed partitions",
+            "multi-part change must not emit duplicate logical events",
         );
 
-        // Relay principals receive payload metadata so they can replicate
-        // encrypted objects without materializing plaintext.
-        let mut relay_parts = HashSet::new();
-        for _ in 0..2 {
-            let relay_live = recv_sub_event(&relay_rx).await?;
-            let SubEvent::Changed(relay_changed) = relay_live else {
-                panic!("relay subscriber expected Changed, got {relay_live:?}");
-            };
-            assert_eq!(relay_changed.obj_id, obj);
-            assert_eq!(relay_changed.payload, payload("live-filter", 2));
-            relay_parts.extend(relay_changed.part_ids);
-        }
+        let relay_live = recv_sub_event(&relay_rx).await?;
+        let SubEvent::Changed(relay_changed) = relay_live else {
+            panic!("relay subscriber expected Changed, got {relay_live:?}");
+        };
+        assert_eq!(relay_changed.obj_id, obj);
+        assert_eq!(relay_changed.payload, payload("live-filter", 2));
         assert_eq!(
-            relay_parts,
+            relay_changed.part_ids.into_iter().collect::<HashSet<_>>(),
             HashSet::from([part, overlapping_part]),
-            "live events must cover every subscribed part for relay",
+            "one relay event must cover every subscribed part",
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(100), relay_rx.recv())
@@ -1484,6 +1472,614 @@ pub mod host_contract {
                 panic!("denied subscriber channel closed unexpectedly");
             }
         }
+
+        Ok(())
+    }
+
+    pub async fn assert_subscription_semantics_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        #[expect(clippy::too_many_arguments)]
+        async fn run_case(
+            store: &dyn HostPartStore,
+            mode: u8,
+            order: u8,
+            obj: ObjId,
+            part_a: PartId,
+            part_b: PartId,
+            peer: PeerId,
+            live: bool,
+        ) -> Res<Vec<SubEvent>> {
+            store.ensure_part(part_a).await?;
+            store.ensure_part(part_b).await?;
+            store
+                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .await?;
+            store.set_obj_payload(obj, payload("matrix", 0)).await?;
+            store.add_obj_to_parts(obj, vec![part_a, part_b]).await?;
+            let baseline_cursor = store
+                .list_events(HashSet::from([part_a, part_b]), 0, u32::MAX)
+                .await??
+                .values()
+                .flat_map(|page| page.events.iter())
+                .map(|event| match event {
+                    PartEvent::Changed(inner) => inner.cursor,
+                    PartEvent::Added(inner) => inner.cursor,
+                    PartEvent::Removed(inner) => inner.cursor,
+                })
+                .max()
+                .unwrap_or_default();
+            let mut targets = HashSet::new();
+            if mode != 1 {
+                targets.insert(big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_a,
+                    cursor: baseline_cursor,
+                });
+                targets.insert(big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_b,
+                    cursor: baseline_cursor,
+                });
+            }
+            if mode != 0 {
+                targets.insert(big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj });
+            }
+            let request = SubPartsRequest {
+                lower_bound: baseline_cursor,
+                targets,
+            };
+            let operations: &[u8] = match order {
+                0 => &[0],
+                1 => &[1, 2],
+                2 => &[0, 1],
+                _ => unreachable!("unknown subscription mutation order"),
+            };
+            if !live {
+                for operation in operations {
+                    match operation {
+                        0 => store.set_obj_payload(obj, payload("matrix", 1)).await?,
+                        1 => store.remove_obj_from_part(obj, part_a).await?,
+                        2 => store.set_obj_payload(obj, payload("matrix", 2)).await?,
+                        _ => unreachable!("unknown subscription mutation"),
+                    }
+                }
+            }
+            let rx = store.subscribe(request, peer).await??;
+            if !live {
+                return collect_sub_events(&rx).await;
+            }
+            let mut events = collect_sub_events(&rx).await?;
+            for operation in operations {
+                match operation {
+                    0 => store.set_obj_payload(obj, payload("matrix", 1)).await?,
+                    1 => store.remove_obj_from_part(obj, part_a).await?,
+                    2 => store.set_obj_payload(obj, payload("matrix", 2)).await?,
+                    _ => unreachable!("unknown subscription mutation"),
+                }
+                events.push(recv_sub_event(&rx).await?);
+            }
+            while let Ok(Ok(event)) =
+                tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+            {
+                events.push(event);
+            }
+            Ok(events)
+        }
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct CanonicalState {
+            payload: Option<ObjPayload>,
+            live_parts: BTreeSet<PartId>,
+        }
+
+        struct EventLedger {
+            mode: u8,
+            obj: ObjId,
+            requested_parts: BTreeSet<PartId>,
+            state: CanonicalState,
+            last_cursor: Option<CursorIndex>,
+            replay_complete_count: u8,
+            changed_groups: HashMap<(CursorIndex, ObjId), BTreeSet<PartId>>,
+            violations: Vec<String>,
+        }
+
+        impl EventLedger {
+            fn new(mode: u8, obj: ObjId, part_a: PartId, part_b: PartId) -> Self {
+                Self {
+                    mode,
+                    obj,
+                    requested_parts: BTreeSet::from([part_a, part_b]),
+                    state: CanonicalState {
+                        payload: None,
+                        live_parts: BTreeSet::new(),
+                    },
+                    last_cursor: None,
+                    replay_complete_count: 0,
+                    changed_groups: HashMap::new(),
+                    violations: Vec::new(),
+                }
+            }
+
+            fn cursor(&mut self, cursor: CursorIndex) {
+                if let Some(last) = self.last_cursor
+                    && cursor < last {
+                        self.violations
+                            .push(format!("cursor regressed from {last} to {cursor}"));
+                    }
+                self.last_cursor = Some(self.last_cursor.map_or(cursor, |last| last.max(cursor)));
+            }
+
+            fn check_part(&mut self, part_id: PartId, event: &str) {
+                if self.mode == 1 || !self.requested_parts.contains(&part_id) {
+                    self.violations.push(format!(
+                        "{event} projected invalid part {part_id:?} for subscription mode {}",
+                        self.mode
+                    ));
+                }
+            }
+
+            fn check_changed_projection(&mut self, part_ids: &[PartId]) {
+                if self.mode == 1 && !part_ids.is_empty() {
+                    self.violations.push(format!(
+                        "object-target Changed contained real parts: {part_ids:?}"
+                    ));
+                }
+                if part_ids
+                    .iter()
+                    .any(|part| !self.requested_parts.contains(part))
+                {
+                    self.violations.push(format!(
+                        "Changed contained an unsubscribed part: {part_ids:?}"
+                    ));
+                }
+            }
+
+            fn observe(&mut self, event: SubEvent) {
+                match event {
+                    SubEvent::ReplayComplete => {
+                        self.replay_complete_count = self.replay_complete_count.saturating_add(1);
+                    }
+                    SubEvent::Changed(inner) => {
+                        self.cursor(inner.cursor);
+                        if inner.obj_id != self.obj {
+                            self.violations.push(format!(
+                                "Changed targeted {:?}, expected {:?}",
+                                inner.obj_id, self.obj
+                            ));
+                        }
+                        self.check_changed_projection(&inner.part_ids);
+                        self.state.payload = Some(inner.payload);
+                        self.state.live_parts.extend(inner.part_ids.iter().copied());
+                        self.changed_groups
+                            .entry((inner.cursor, inner.obj_id))
+                            .or_default()
+                            .extend(inner.part_ids);
+                    }
+                    SubEvent::Added(inner) => {
+                        self.cursor(inner.cursor);
+                        if inner.obj_id != self.obj {
+                            self.violations.push(format!(
+                                "Added targeted {:?}, expected {:?}",
+                                inner.obj_id, self.obj
+                            ));
+                        }
+                        self.check_part(inner.part_id, "Added");
+                        self.state.payload = Some(inner.payload);
+                        self.state.live_parts.insert(inner.part_id);
+                    }
+                    SubEvent::Removed(inner) => {
+                        self.cursor(inner.cursor);
+                        if inner.obj_id != self.obj {
+                            self.violations.push(format!(
+                                "Removed targeted {:?}, expected {:?}",
+                                inner.obj_id, self.obj
+                            ));
+                        }
+                        self.check_part(inner.part_id, "Removed");
+                        self.state.live_parts.remove(&inner.part_id);
+                    }
+                }
+            }
+
+            fn finish(self, expected: CanonicalState) -> CanonicalState {
+                let mut violations = self.violations;
+                if self.replay_complete_count != 1 {
+                    violations.push(format!(
+                        "expected exactly one ReplayComplete, got {}",
+                        self.replay_complete_count
+                    ));
+                }
+                if self.state != expected {
+                    violations.push(format!(
+                        "canonical state mismatch: observed {:?}, expected {:?}",
+                        self.state, expected
+                    ));
+                }
+                assert!(
+                    violations.is_empty(),
+                    "unresolved subscription violations: {violations:?}"
+                );
+                self.state
+            }
+        }
+        fn canonical_state(
+            mode: u8,
+            obj: ObjId,
+            part_a: PartId,
+            part_b: PartId,
+            events: Vec<SubEvent>,
+            expected: CanonicalState,
+        ) -> CanonicalState {
+            let mut ledger = EventLedger::new(mode, obj, part_a, part_b);
+            for event in events {
+                ledger.observe(event);
+            }
+            ledger.finish(expected)
+        }
+
+        let store = harness.store();
+        let peer = PeerId::new([90u8; 32]);
+        for (mode, order, seed) in [
+            (0u8, 0u8, 91u8),
+            (0, 1, 94),
+            (0, 2, 97),
+            (1, 0, 100),
+            (2, 0, 103),
+        ] {
+            let part_a = test_part(seed);
+            let part_b = test_part(seed + 1);
+            let replay = run_case(
+                store,
+                mode,
+                order,
+                test_obj(seed + 2),
+                part_a,
+                part_b,
+                peer,
+                false,
+            )
+            .await?;
+            let live = run_case(
+                store,
+                mode,
+                order,
+                test_obj(seed + 3),
+                part_a,
+                part_b,
+                peer,
+                true,
+            )
+            .await?;
+            let expected = CanonicalState {
+                payload: Some(payload(
+                    "matrix",
+                    match order {
+                        0 | 2 => 1,
+                        1 => 2,
+                        _ => unreachable!("unknown mutation order"),
+                    },
+                )),
+                live_parts: if mode == 1 {
+                    BTreeSet::new()
+                } else if order == 0 {
+                    BTreeSet::from([part_a, part_b])
+                } else {
+                    BTreeSet::from([part_b])
+                },
+            };
+            let replay_state = canonical_state(
+                mode,
+                test_obj(seed + 2),
+                part_a,
+                part_b,
+                replay,
+                expected.clone(),
+            );
+            let live_state = canonical_state(
+                mode,
+                test_obj(seed + 3),
+                part_a,
+                part_b,
+                live,
+                expected.clone(),
+            );
+            assert_eq!(
+                replay_state, live_state,
+                "replay and live canonical states diverged for subscription mode {mode}, order {order}",
+            );
+        }
+
+        async fn run_zero_part_case(
+            store: &dyn HostPartStore,
+            obj: ObjId,
+            peer: PeerId,
+            live: bool,
+        ) -> Res<Vec<SubEvent>> {
+            store
+                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .await?;
+            if !live {
+                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+            }
+            let rx = store
+                .subscribe(
+                    SubPartsRequest {
+                        lower_bound: 0,
+                        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                            obj_id: obj,
+                        }]),
+                    },
+                    peer,
+                )
+                .await??;
+            if live {
+                let mut events = collect_sub_events(&rx).await?;
+                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+                events.push(recv_sub_event(&rx).await?);
+                Ok(events)
+            } else {
+                collect_sub_events(&rx).await
+            }
+        }
+
+        let zero_replay =
+            run_zero_part_case(store, test_obj(180), PeerId::new([181; 32]), false).await?;
+        let zero_live = {
+            let obj = test_obj(182);
+            let peer = PeerId::new([183; 32]);
+            store
+                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .await?;
+            let rx = store
+                .subscribe(
+                    SubPartsRequest {
+                        lower_bound: 0,
+                        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                            obj_id: obj,
+                        }]),
+                    },
+                    peer,
+                )
+                .await??;
+            let mut events = collect_sub_events(&rx).await?;
+            store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+            events.push(recv_sub_event(&rx).await?);
+            events
+        };
+        let zero_expected = CanonicalState {
+            payload: Some(payload("zero-part", 1)),
+            live_parts: BTreeSet::new(),
+        };
+        let zero_replay_state = canonical_state(
+            1,
+            test_obj(180),
+            test_part(0),
+            test_part(1),
+            zero_replay,
+            zero_expected.clone(),
+        );
+        let zero_live_state = canonical_state(
+            1,
+            test_obj(182),
+            test_part(0),
+            test_part(1),
+            zero_live,
+            zero_expected,
+        );
+        assert_eq!(
+            zero_replay_state, zero_live_state,
+            "zero-real-part object replay and live object subscriptions must converge",
+        );
+
+        async fn run_zero_mixed_case(
+            store: &dyn HostPartStore,
+            obj: ObjId,
+            part: PartId,
+            peer: PeerId,
+            live: bool,
+        ) -> Res<Vec<SubEvent>> {
+            store.ensure_part(part).await?;
+            store
+                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .await?;
+            store.set_obj_payload(obj, payload("mixed", 0)).await?;
+            store.add_obj_to_parts(obj, vec![part]).await?;
+            let baseline = store
+                .list_events(HashSet::from([part]), 0, u32::MAX)
+                .await??
+                .values()
+                .flat_map(|page| page.events.iter())
+                .map(|event| match event {
+                    PartEvent::Changed(inner) => inner.cursor,
+                    PartEvent::Added(inner) => inner.cursor,
+                    PartEvent::Removed(inner) => inner.cursor,
+                })
+                .max()
+                .unwrap_or_default();
+            if !live {
+                store.set_obj_payload(obj, payload("mixed", 1)).await?;
+            }
+            let rx = store
+                .subscribe(
+                    SubPartsRequest {
+                        lower_bound: baseline,
+                        targets: HashSet::from([
+                            big_sync_core::rpc::SubscriptionTarget::Part {
+                                part_id: part,
+                                cursor: baseline,
+                            },
+                            big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj },
+                        ]),
+                    },
+                    peer,
+                )
+                .await??;
+            if live {
+                let mut events = collect_sub_events(&rx).await?;
+                store.set_obj_payload(obj, payload("mixed", 1)).await?;
+                events.push(recv_sub_event(&rx).await?);
+                while let Ok(Ok(event)) =
+                    tokio::time::timeout(Duration::from_millis(150), rx.recv()).await
+                {
+                    events.push(event);
+                }
+                Ok(events)
+            } else {
+                collect_sub_events(&rx).await
+            }
+        }
+
+        async fn run_populated_object_case(
+            store: &dyn HostPartStore,
+            obj: ObjId,
+            part: PartId,
+            peer: PeerId,
+            live: bool,
+        ) -> Res<Vec<SubEvent>> {
+            store.ensure_part(part).await?;
+            store
+                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .await?;
+            store
+                .set_obj_payload(obj, payload("object-only", 0))
+                .await?;
+            store.add_obj_to_parts(obj, vec![part]).await?;
+            let baseline = store
+                .list_events(HashSet::from([part]), 0, u32::MAX)
+                .await??
+                .values()
+                .flat_map(|page| page.events.iter())
+                .map(|event| match event {
+                    PartEvent::Changed(inner) => inner.cursor,
+                    PartEvent::Added(inner) => inner.cursor,
+                    PartEvent::Removed(inner) => inner.cursor,
+                })
+                .max()
+                .unwrap_or_default();
+
+            if !live {
+                store
+                    .set_obj_payload(obj, payload("object-only", 1))
+                    .await?;
+            }
+            let rx = store
+                .subscribe(
+                    SubPartsRequest {
+                        lower_bound: baseline,
+                        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                            obj_id: obj,
+                        }]),
+                    },
+                    peer,
+                )
+                .await??;
+            if live {
+                let mut events = collect_sub_events(&rx).await?;
+                store
+                    .set_obj_payload(obj, payload("object-only", 1))
+                    .await?;
+                events.push(recv_sub_event(&rx).await?);
+                Ok(events)
+            } else {
+                collect_sub_events(&rx).await
+            }
+        }
+
+        let populated_object_replay = run_populated_object_case(
+            store,
+            test_obj(190),
+            test_part(191),
+            PeerId::new([192; 32]),
+            false,
+        )
+        .await?;
+        let populated_object_live = run_populated_object_case(
+            store,
+            test_obj(193),
+            test_part(194),
+            PeerId::new([195; 32]),
+            true,
+        )
+        .await?;
+        let object_expected = CanonicalState {
+            payload: Some(payload("object-only", 1)),
+            live_parts: BTreeSet::new(),
+        };
+        let populated_object_replay_state = canonical_state(
+            1,
+            test_obj(190),
+            test_part(191),
+            test_part(191),
+            populated_object_replay,
+            object_expected.clone(),
+        );
+        let populated_object_live_state = canonical_state(
+            1,
+            test_obj(193),
+            test_part(194),
+            test_part(194),
+            populated_object_live,
+            object_expected,
+        );
+        assert_eq!(
+            populated_object_replay_state, populated_object_live_state,
+            "populated object replay and live subscriptions must converge",
+        );
+
+        let mixed_replay_part = test_part(185);
+        let mixed_replay = run_zero_mixed_case(
+            store,
+            test_obj(184),
+            mixed_replay_part,
+            PeerId::new([186; 32]),
+            false,
+        )
+        .await?;
+        let mixed_live_part = test_part(188);
+        let mixed_live = run_zero_mixed_case(
+            store,
+            test_obj(187),
+            mixed_live_part,
+            PeerId::new([189; 32]),
+            true,
+        )
+        .await?;
+        let mixed_replay_expected = CanonicalState {
+            payload: Some(payload("mixed", 1)),
+            live_parts: BTreeSet::from([mixed_replay_part]),
+        };
+        let mixed_replay_state = canonical_state(
+            2,
+            test_obj(184),
+            mixed_replay_part,
+            mixed_replay_part,
+            mixed_replay,
+            mixed_replay_expected,
+        );
+        let mixed_live_expected = CanonicalState {
+            payload: Some(payload("mixed", 1)),
+            live_parts: BTreeSet::from([mixed_live_part]),
+        };
+        let mixed_live_state = canonical_state(
+            2,
+            test_obj(187),
+            mixed_live_part,
+            mixed_live_part,
+            mixed_live,
+            mixed_live_expected,
+        );
+        assert_eq!(
+            (
+                &mixed_replay_state.payload,
+                mixed_replay_state.live_parts.is_empty(),
+                mixed_replay_state.live_parts.len(),
+            ),
+            (
+                &mixed_live_state.payload,
+                mixed_live_state.live_parts.is_empty(),
+                mixed_live_state.live_parts.len(),
+            ),
+            "mixed object/part replay and live subscriptions must converge semantically",
+        );
 
         Ok(())
     }
@@ -1523,35 +2119,17 @@ pub mod host_contract {
         store.set_obj_payload(obj, payload("per-cursor", 5)).await?;
         // cursor=6: Changed [part_a, part_b]
 
-        // Discover part_a's actual cursor: the cursor of the Added event for
-        // part_a (never coalesced/removed).  Cursors are global so the
-        // absolute value depends on earlier contract cases sharing the store.
-        let part_a_page = store
-            .list_events(HashSet::from([part_a]), 0, u32::MAX)
-            .await??
-            .remove(&part_a)
-            .expect(ERROR_IMPOSSIBLE);
-        let part_a_cursor = part_a_page
-            .events
-            .iter()
-            .filter_map(|evt| match evt {
-                PartEvent::Added(added) if added.obj_id == obj && added.part_id == part_a => {
-                    Some(added.cursor)
-                }
-                _ => None,
-            })
-            .next_back()
-            .expect("must find the Added event for part_a");
-
-        // One immutable grouped stream retains independent per-part cursors while
-        // preserving one wire event for a change spanning both parts.
+        // The request lower bound is shared by all targets. The latest-state
+        // replay returns one Changed event for the payload mutation spanning
+        // both parts, rather than replaying stale Added events.
         let rx = store
             .subscribe(
                 SubPartsRequest {
+                    lower_bound: 0,
                     targets: HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: part_a,
-                            cursor: part_a_cursor,
+                            cursor: 0,
                         },
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: part_b,
@@ -1564,22 +2142,6 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
 
-        assert!(
-            !events.iter().any(|event| matches!(
-                event,
-                SubEvent::Added(added)
-                    if added.obj_id == obj && added.part_id == part_a
-            )),
-            "part_a's caught-up Added event must not replay: {events:?}",
-        );
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                SubEvent::Added(added)
-                    if added.obj_id == obj && added.part_id == part_b
-            )),
-            "part_b's Added event must replay: {events:?}",
-        );
         let changes: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -1604,8 +2166,8 @@ pub mod host_contract {
         H: HostPartStoreContractHarness + Sync,
     {
         let store = harness.store();
-        let part = test_part(91);
-        let objs = [test_obj(92), test_obj(93), test_obj(94)];
+        let part = test_part(151);
+        let objs = [test_obj(152), test_obj(153), test_obj(154)];
 
         store.ensure_part(part).await?;
 

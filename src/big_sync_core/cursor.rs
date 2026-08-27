@@ -47,6 +47,10 @@ structstruck::strike! {
 structstruck::strike! {
 #[derive(Debug, Default)]
 pub struct CursorSyncMachine {
+    /// Object-target events have no real part cursor to advance. Keep the
+    /// last cursor locally so duplicate deliveries do not schedule the same
+    /// object sync twice; durable replay bounds remain request-level.
+    object_cursors: HashMap<ObjId, CursorIndex>,
     cursor_state: HashMap<
         PartId,
         struct CursorStreamState {
@@ -180,6 +184,17 @@ impl CursorSyncMachine {
                     parts.push(part_id);
                 }
                 if parts.is_empty() {
+                    let last_cursor = self.object_cursors.entry(evt.obj_id).or_default();
+                    if evt.cursor <= *last_cursor {
+                        return;
+                    }
+                    *last_cursor = evt.cursor;
+                    out.push(CursorMachineCommand::SyncObj {
+                        obj_id: evt.obj_id,
+                        remote_payload: evt.payload,
+                        cursor: evt.cursor,
+                        parts: Vec::new(),
+                    });
                     return;
                 }
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
@@ -234,19 +249,6 @@ impl CursorSyncMachine {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
                     part_id: evt.part_id,
-                });
-            }
-            SubEvent::ObjectChanged(evt) => {
-                tracing::trace!(
-                    ?evt.obj_id,
-                    payload = !evt.payload.is_null(),
-                    "subscription ObjectChanged event",
-                );
-                out.push(CursorMachineCommand::SyncObj {
-                    obj_id: evt.obj_id,
-                    remote_payload: evt.payload,
-                    cursor: 0,
-                    parts: Vec::new(),
                 });
             }
             SubEvent::ReplayComplete => unreachable!(),

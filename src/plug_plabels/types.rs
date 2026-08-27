@@ -1,4 +1,4 @@
-#![allow(clippy::enum_variant_names)]
+#![expect(clippy::enum_variant_names)]
 
 use crate::interlude::*;
 
@@ -56,14 +56,14 @@ daybook_types::define_enum_and_tag!(
     }
 );
 
-#[allow(unused)]
+#[cfg(any(test, target_arch = "wasm32"))]
 pub fn pseudo_label_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabel.as_str().into(),
     ))
 }
 
-#[allow(unused)]
+#[cfg(any(test, target_arch = "wasm32"))]
 pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey {
         tag: daybook_types::doc::FacetTag::Any(
@@ -73,7 +73,7 @@ pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     }
 }
 
-#[allow(unused)]
+#[expect(unused)]
 pub fn pseudo_label_error_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),

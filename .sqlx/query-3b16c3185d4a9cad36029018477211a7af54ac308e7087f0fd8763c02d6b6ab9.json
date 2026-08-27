@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT access_level\n             FROM big_sync_syncable\n             WHERE scope_id = ?1 AND obj_ref = (\n                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2\n             ) AND principal_id = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "access_level",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_syncable",
+            "name": "access_level"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3b16c3185d4a9cad36029018477211a7af54ac308e7087f0fd8763c02d6b6ab9"
+}

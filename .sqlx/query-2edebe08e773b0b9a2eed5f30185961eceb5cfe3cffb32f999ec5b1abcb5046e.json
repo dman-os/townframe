@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_sync_members SET event_type = ?1, txid = ?2 WHERE scope_id = ?3 AND obj_ref = ?4 AND maybe_part_ref = ?5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "2edebe08e773b0b9a2eed5f30185961eceb5cfe3cffb32f999ec5b1abcb5046e"
+}

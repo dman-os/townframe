@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_bucket_insert\n            BEFORE INSERT ON big_sync_buckets\n            BEGIN SELECT RAISE(ABORT, 'injected bucket failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "485d8045cacc00f846881f5336c37f9eb00d570ec79b7428c604e078bedbba65"
+}

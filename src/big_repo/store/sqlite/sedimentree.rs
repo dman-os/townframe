@@ -1,5 +1,16 @@
 use super::ids::IdCodec;
 use super::*;
+use sqlx::{QueryBuilder, Row};
+
+const REPLAY_RAW_BATCH_SIZE: u32 = 256;
+
+struct ReplayCandidate {
+    txid: CursorIndex,
+    obj_id: ObjId,
+    _maybe_part_id: Option<PartId>,
+    event_type: i64,
+    payload: ObjPayload,
+}
 
 impl SqliteBigRepoStore {
     /// Ensure the part row exists (idempotent). Inherent mirror of the
@@ -19,16 +30,102 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
+    async fn replay_candidates(
+        &self,
+        parts: &HashSet<PartId>,
+        objects: &HashSet<ObjId>,
+        lower_bound: CursorIndex,
+        exact_txid: Option<CursorIndex>,
+        limit: Option<u32>,
+    ) -> Res<Vec<ReplayCandidate>> {
+        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT m.txid, o.obj_id, p.part_id, m.event_type, o.payload_json
+             FROM big_sync_members m
+             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
+             LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+             WHERE m.scope_id = ",
+        );
+        query.push_bind(self.scope().id());
+        if let Some(txid) = exact_txid {
+            query.push(" AND m.txid = ");
+            query.push_bind(i64::try_from(txid).expect(ERROR_IMPOSSIBLE));
+        } else {
+            query.push(" AND m.txid > ");
+            query.push_bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
+        }
+        query.push(" AND (");
+        if parts.is_empty() {
+            query.push("0");
+        } else {
+            query.push(
+                "m.maybe_part_ref IN (
+                    SELECT part_ref FROM big_sync_parts
+                    WHERE scope_id = ",
+            );
+            query.push_bind(self.scope().id());
+            query.push(" AND part_id IN (");
+            let mut separated = query.separated(", ");
+            for part_id in parts {
+                separated.push_bind(Self::part_blob(*part_id));
+            }
+            separated.push_unseparated("))");
+        }
+        query.push(" OR ");
+        if objects.is_empty() {
+            query.push("0");
+        } else {
+            query.push(
+                "m.maybe_part_ref = 0 AND m.obj_ref IN (
+                    SELECT obj_ref FROM big_sync_objs
+                    WHERE scope_id = ",
+            );
+            query.push_bind(self.scope().id());
+            query.push(" AND obj_id IN (");
+            let mut separated = query.separated(", ");
+            for obj_id in objects {
+                separated.push_bind(Self::obj_blob(*obj_id));
+            }
+            separated.push_unseparated("))");
+        }
+        query.push(") ORDER BY m.txid, m.obj_ref, m.maybe_part_ref");
+        if let Some(limit) = limit {
+            query.push(" LIMIT ");
+            query.push_bind(i64::from(limit));
+        }
+
+        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                let payload = row
+                    .try_get::<Option<String>, _>("payload_json")?
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
+                    .transpose()?
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(ReplayCandidate {
+                    txid: u64::try_from(row.try_get::<i64, _>("txid")?).expect(ERROR_IMPOSSIBLE),
+                    obj_id: Self::obj_from_blob(row.try_get("obj_id")?),
+                    _maybe_part_id: row
+                        .try_get::<Option<Vec<u8>>, _>("part_id")?
+                        .map(Self::part_from_blob),
+                    event_type: row.try_get("event_type")?,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) async fn subscribe_with_policy(
         &self,
         reqs: SubPartsRequest,
         subscriber: Option<PeerId>,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        let part_cursors: HashMap<PartId, CursorIndex> = reqs
+        let parts: HashSet<PartId> = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, cursor } => Some((*part_id, *cursor)),
+                SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect();
@@ -40,7 +137,6 @@ impl SqliteBigRepoStore {
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect();
-        let parts: HashSet<_> = part_cursors.keys().copied().collect();
         if subscriber.is_some()
             && let Err(err) = self.summarize_parts(parts.clone()).await?
         {
@@ -49,14 +145,6 @@ impl SqliteBigRepoStore {
 
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
-        if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-            eprintln!(
-                "SUBSCRIBE parts={:?} cursors={:?} objects={}",
-                parts,
-                part_cursors,
-                objects.len()
-            );
-        }
         let sub = Arc::new(BigRepoSubscription {
             sender: tx.clone(),
             principal: subscriber,
@@ -78,7 +166,7 @@ impl SqliteBigRepoStore {
 
         let store = self.clone();
         tokio::spawn(async move {
-            let mut cursor = part_cursors.values().copied().min().unwrap_or_default();
+            let mut cursor = reqs.lower_bound;
             let mut marker_sent = false;
             let mut object_replay_pending = true;
             loop {
@@ -86,96 +174,120 @@ impl SqliteBigRepoStore {
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
                 let page = store
-                    .list_events_with_policy(parts.clone(), cursor, u32::MAX, subscriber.is_some())
+                    .list_events_with_policy(
+                        parts.clone(),
+                        cursor,
+                        REPLAY_RAW_BATCH_SIZE,
+                        subscriber.is_some(),
+                    )
                     .await
                     .expect(ERROR_IMPOSSIBLE)
                     .expect(ERROR_IMPOSSIBLE);
                 let mut output: Vec<SubEvent> = Vec::new();
                 let mut raw_event_count = 0;
                 let mut max_cursor = cursor;
-                for (part_id, part_page) in page {
-                    for event in part_page.events {
-                        raw_event_count += 1;
-                        let event_cursor = match &event {
-                            PartEvent::Changed(inner) => inner.cursor,
-                            PartEvent::Added(inner) => inner.cursor,
-                            PartEvent::Removed(inner) => inner.cursor,
-                        };
-                        max_cursor = max_cursor.max(event_cursor);
-                        if event_cursor <= part_cursors.get(&part_id).copied().unwrap_or_default() {
-                            continue;
-                        }
-                        let obj_id = match &event {
-                            PartEvent::Changed(inner) => inner.obj_id,
-                            PartEvent::Added(inner) => inner.obj_id,
-                            PartEvent::Removed(inner) => inner.obj_id,
-                        };
-                        // A policy-check failure must not masquerade as a
-                        // denial: this spawned task cannot propagate errors,
-                        // so fail loudly instead of silently skipping a
-                        // deliverable event.
-                        let permitted = matches!(event, PartEvent::Removed(_))
-                            || store
-                                .is_event_permitted(Some(part_id), obj_id, subscriber)
-                                .await
-                                .expect(ERROR_IMPOSSIBLE);
-                        if !permitted {
-                            continue;
-                        }
-                        match event {
-                            PartEvent::Changed(inner) => {
-                                if let Some(SubEvent::Changed(existing)) =
-                                    output.iter_mut().find(|candidate| {
-                                        matches!(
-                                            candidate,
-                                            SubEvent::Changed(candidate)
-                                                if candidate.cursor == inner.cursor
-                                                    && candidate.obj_id == inner.obj_id
-                                        )
-                                    })
-                                {
-                                    if !existing.part_ids.contains(&part_id) {
-                                        existing.part_ids.push(part_id);
-                                    }
-                                } else {
-                                    let mut inner = inner;
-                                    inner.part_ids = vec![part_id];
-                                    output.push(SubEvent::Changed(inner));
+                let mut part_events = page
+                    .into_iter()
+                    .flat_map(|(part_id, page)| {
+                        page.events.into_iter().map(move |event| (part_id, event))
+                    })
+                    .collect::<Vec<_>>();
+                part_events.sort_by_key(|(part_id, event)| {
+                    let event_cursor = match event {
+                        PartEvent::Changed(inner) => inner.cursor,
+                        PartEvent::Added(inner) => inner.cursor,
+                        PartEvent::Removed(inner) => inner.cursor,
+                    };
+                    let obj_id = match event {
+                        PartEvent::Changed(inner) => inner.obj_id,
+                        PartEvent::Added(inner) => inner.obj_id,
+                        PartEvent::Removed(inner) => inner.obj_id,
+                    };
+                    (event_cursor, obj_id, *part_id)
+                });
+                for (part_id, event) in part_events {
+                    raw_event_count += 1;
+                    let event_cursor = match &event {
+                        PartEvent::Changed(inner) => inner.cursor,
+                        PartEvent::Added(inner) => inner.cursor,
+                        PartEvent::Removed(inner) => inner.cursor,
+                    };
+                    max_cursor = max_cursor.max(event_cursor);
+                    let obj_id = match &event {
+                        PartEvent::Changed(inner) => inner.obj_id,
+                        PartEvent::Added(inner) => inner.obj_id,
+                        PartEvent::Removed(inner) => inner.obj_id,
+                    };
+                    // A policy-check failure must not masquerade as a
+                    // denial: this spawned task cannot propagate errors,
+                    // so fail loudly instead of silently skipping a
+                    // deliverable event.
+                    let permitted = matches!(event, PartEvent::Removed(_))
+                        || store
+                            .is_event_permitted(Some(part_id), obj_id, subscriber)
+                            .await
+                            .expect(ERROR_IMPOSSIBLE);
+                    if !permitted {
+                        continue;
+                    }
+                    match event {
+                        PartEvent::Changed(inner) => {
+                            if let Some(SubEvent::Changed(existing)) =
+                                output.iter_mut().find(|candidate| {
+                                    matches!(
+                                        candidate,
+                                        SubEvent::Changed(candidate)
+                                            if candidate.cursor == inner.cursor
+                                                && candidate.obj_id == inner.obj_id
+                                    )
+                                })
+                            {
+                                if !existing.part_ids.contains(&part_id) {
+                                    existing.part_ids.push(part_id);
                                 }
+                            } else {
+                                let mut inner = inner;
+                                inner.part_ids = vec![part_id];
+                                output.push(SubEvent::Changed(inner));
                             }
-                            PartEvent::Added(inner) => output.push(SubEvent::Added(inner)),
-                            PartEvent::Removed(inner) => output.push(SubEvent::Removed(inner)),
                         }
+                        PartEvent::Added(inner) => output.push(SubEvent::Added(inner)),
+                        PartEvent::Removed(inner) => output.push(SubEvent::Removed(inner)),
                     }
                 }
                 if object_replay_pending {
-                    for obj_id in &objects {
+                    let no_parts: HashSet<PartId> = HashSet::new();
+                    let object_candidates = store
+                        .replay_candidates(&no_parts, &objects, cursor, None, None)
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                    for candidate in object_candidates {
+                        max_cursor = max_cursor.max(candidate.txid);
+                        raw_event_count += 1;
                         let permitted = store
-                            .is_event_permitted(None, *obj_id, subscriber)
+                            .is_event_permitted(None, candidate.obj_id, subscriber)
                             .await
                             .expect(ERROR_IMPOSSIBLE);
-                        if permitted
-                            && let Some(payload) =
-                                store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
-                        {
-                            output.push(SubEvent::ObjectChanged(
-                                big_sync_core::rpc::ObjChangedWithoutPart {
-                                    obj_id: *obj_id,
-                                    payload,
-                                },
-                            ));
+                        if !permitted || candidate.event_type != EVENT_CHANGED {
+                            continue;
+                        }
+                        // FIXME: use binary search? i imagine the items are in order?
+                        if let Some(SubEvent::Changed(existing)) = output.iter_mut().find(|event| {
+                            matches!(event, SubEvent::Changed(current)
+                                if current.cursor == candidate.txid
+                                    && current.obj_id == candidate.obj_id)
+                        }) {
+                            existing.payload = candidate.payload;
+                        } else {
+                            output.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                                cursor: candidate.txid,
+                                part_ids: Vec::new(),
+                                obj_id: candidate.obj_id,
+                                payload: candidate.payload,
+                            }));
                         }
                     }
                     object_replay_pending = false;
-                }
-                if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-                    eprintln!(
-                        "REPLAY delivered={} cursor={}->{} raw={}",
-                        output.len(),
-                        cursor,
-                        max_cursor,
-                        raw_event_count
-                    );
                 }
                 for event in output {
                     if tx.send(event).await.is_err() {
@@ -218,172 +330,109 @@ impl SqliteBigRepoStore {
         payload: ObjPayload,
     ) -> Res<Vec<SubEvent>> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
-        let old_payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
+        let obj_ref = self.core.ensure_obj_ref(tx, obj_id).await?;
+        let old_payload_json: Option<String> = sqlx::query_scalar!(
+            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
+            obj_ref
         )
-        .bind(self.scope().id())
-        .bind(Self::obj_blob(obj_id))
         .fetch_optional(&mut **tx)
-        .await?;
-        let live_part_ids: Vec<PartId> = sqlx::query_scalar(
-            "SELECT part_id FROM big_sync_members
-             WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
-        )
-        .bind(self.scope().id())
-        .bind(Self::obj_blob(obj_id))
-        .fetch_all(&mut **tx)
         .await?
-        .into_iter()
-        .map(Self::part_from_blob)
-        .collect();
-        let pending_part_ids: Vec<PartId> = sqlx::query_scalar(
-            "SELECT part_id FROM big_sync_pending_members
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope().id())
-        .bind(Self::obj_blob(obj_id))
-        .fetch_all(&mut **tx)
-        .await?
-        .into_iter()
-        .map(Self::part_from_blob)
-        .collect();
+        .flatten();
         sqlx::query!(
-            "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, obj_id) DO UPDATE SET payload_json = excluded.payload_json",
-            self.scope().id(),
-            Self::obj_blob(obj_id),
-            &payload_json
+            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
+            &payload_json,
+            obj_ref
         )
         .execute(&mut **tx)
         .await?;
-
-        if live_part_ids.is_empty() && pending_part_ids.is_empty() {
-            return Ok(vec![SubEvent::ObjectChanged(
-                big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
-            )]);
-        }
-        assert!(
-            live_part_ids.is_empty() || pending_part_ids.is_empty(),
-            "readable object cannot retain latent part memberships"
-        );
-        let cursor = Self::next_cursor(tx).await?;
-        if !pending_part_ids.is_empty() {
-            let mut events = Vec::with_capacity(pending_part_ids.len());
-            for part_id in pending_part_ids {
-                let old_state = self.load_member_state(tx, part_id, obj_id).await?;
-                assert!(
-                    !matches!(old_state, MemberState::Live(_)),
-                    "latent membership cannot already be live"
-                );
-                sqlx::query!(
-                    "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                     VALUES (?1, ?2, 0)
-                     ON CONFLICT(scope_id, part_id) DO NOTHING",
-                    self.scope().id(),
-                    Self::part_blob(part_id)
-                )
-                .execute(&mut **tx)
-                .await?;
-                sqlx::query!(
-                    "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
-                     ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
-                        added_at = excluded.added_at,
-                        added_payload_json = excluded.added_payload_json,
-                        changed_at = excluded.changed_at,
-                        removed_at = NULL,
-                        latest_cursor = excluded.latest_cursor",
+        let parts = sqlx::query!(
+            "SELECT m.maybe_part_ref, p.part_id
+             FROM big_sync_members m JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+             WHERE m.scope_id = ?1 AND m.obj_ref = ?2 AND m.maybe_part_ref > 0 AND m.event_type != ?3",
+            self.scope().id(), obj_ref, EVENT_REMOVED
+        ).fetch_all(&mut **tx).await?;
+        let pending_parts = sqlx::query!(
+            "SELECT m.part_ref, p.part_id
+             FROM big_sync_pending_members m JOIN big_sync_parts p ON p.part_ref = m.part_ref
+             WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
             self.scope().id(),
-            Self::part_blob(part_id),
-            Self::obj_blob(obj_id),
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-            &payload_json
+            obj_ref
         )
-                .execute(&mut **tx)
-                .await?;
-                self.apply_bucket_transition(
+        .fetch_all(&mut **tx)
+        .await?;
+        let cursor = Self::next_cursor(tx).await?;
+        sqlx::query!("INSERT INTO big_sync_members(scope_id,obj_ref,maybe_part_ref,event_type,txid) VALUES (?1,?2,0,?3,?4) ON CONFLICT(obj_ref,maybe_part_ref) DO UPDATE SET event_type=excluded.event_type,txid=excluded.txid", self.scope().id(), obj_ref, EVENT_CHANGED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)).execute(&mut **tx).await?;
+        let old_payload: ObjPayload = old_payload_json
+            .as_deref()
+            .filter(|str| !str.is_empty())
+            .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
+        let mut changed_part_ids = Vec::new();
+        let mut added_events = Vec::new();
+        for row in &parts {
+            let part_id = Self::part_from_blob(row.part_id.clone());
+            changed_part_ids.push(part_id);
+            sqlx::query!("UPDATE big_sync_members SET event_type = ?1, txid = ?2 WHERE scope_id = ?3 AND obj_ref = ?4 AND maybe_part_ref = ?5", EVENT_CHANGED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), obj_ref, row.maybe_part_ref).execute(&mut **tx).await?;
+            self.core
+                .apply_bucket_transition(
                     tx,
                     part_id,
                     obj_id,
                     cursor,
-                    &old_state,
+                    &MemberState::Live(old_payload.clone()),
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-                sqlx::query!(
-                    "UPDATE big_sync_parts SET latest_cursor = ?1
-                             WHERE scope_id = ?2 AND part_id = ?3",
-                    i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                    self.scope().id(),
-                    Self::part_blob(part_id)
-                )
-                .execute(&mut **tx)
-                .await?;
-                sqlx::query!(
-                    "DELETE FROM big_sync_pending_members
-                             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-                    self.scope().id(),
-                    Self::part_blob(part_id),
-                    Self::obj_blob(obj_id)
-                )
-                .execute(&mut **tx)
-                .await?;
-                events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor,
+            sqlx::query!("UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3", i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), row.maybe_part_ref).execute(&mut **tx).await?;
+        }
+        for row in pending_parts {
+            let part_id = Self::part_from_blob(row.part_id);
+            let part_ref = row.part_ref;
+            sqlx::query!(
+                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
+                self.scope().id(), obj_ref, part_ref, EVENT_ADDED,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            )
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query!(
+                "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
+                self.scope().id(), obj_ref, part_ref
+            )
+            .execute(&mut **tx)
+            .await?;
+            self.core
+                .apply_bucket_transition(
+                    tx,
                     part_id,
                     obj_id,
-                    payload: payload.clone(),
-                }));
-            }
-            return Ok(events);
-        }
-
-        let old_payload: ObjPayload = old_payload_json
-            .as_deref()
-            .filter(|payload_json| !payload_json.is_empty())
-            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-            .transpose()?
-            .expect("visible object membership requires an existing payload");
-        for part_id in &live_part_ids {
+                    cursor,
+                    &MemberState::Absent,
+                    &MemberState::Live(payload.clone()),
+                )
+                .await?;
             sqlx::query!(
-                "UPDATE big_sync_members
-                 SET changed_at = ?1, latest_cursor = ?1
-                 WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                self.scope().id(),
-                Self::part_blob(*part_id),
-                Self::obj_blob(obj_id)
-            )
-            .execute(&mut **tx)
-            .await?;
-            self.apply_bucket_transition(
-                tx,
-                *part_id,
-                obj_id,
+                "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3",
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), part_ref
+            ).execute(&mut **tx).await?;
+            added_events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                 cursor,
-                &MemberState::Live(old_payload.clone()),
-                &MemberState::Live(payload.clone()),
-            )
-            .await?;
-            sqlx::query!(
-                "UPDATE big_sync_parts SET latest_cursor = ?1
-                     WHERE scope_id = ?2 AND part_id = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                self.scope().id(),
-                Self::part_blob(*part_id)
-            )
-            .execute(&mut **tx)
-            .await?;
+                part_id,
+                obj_id,
+                payload: payload.clone(),
+            }));
         }
-        Ok(vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+        let mut events = added_events;
+        events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
             cursor,
-            part_ids: live_part_ids,
+            part_ids: changed_part_ids,
             obj_id,
             payload,
-        })])
+        }));
+        Ok(events)
     }
 
     pub(crate) fn cursor_reader(&self, name: &str) -> String {
@@ -434,14 +483,12 @@ impl SqliteBigRepoStore {
         let mut reconciled_docs = HashMap::new();
 
         for mutation in mutations {
-            let doc_blob = Self::obj_blob(mutation.doc);
-            let payload_json: Option<String> = sqlx::query_scalar(
-                "SELECT payload_json FROM big_sync_objs
-                     WHERE scope_id = ?1 AND obj_id = ?2",
+            let obj_ref = self.core.ensure_obj_ref(&mut tx, mutation.doc).await?;
+            let payload_json = sqlx::query_scalar!(
+                "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
+                obj_ref
             )
-            .bind(self.scope().id())
-            .bind(&doc_blob)
-            .fetch_optional(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
             let payload_json = payload_json.filter(|value| !value.is_empty());
             let event_payload: Option<ObjPayload> = payload_json
@@ -450,39 +497,36 @@ impl SqliteBigRepoStore {
                 .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
                 .transpose()?;
             sqlx::query!(
-                "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(scope_id, obj_id) DO NOTHING",
-                self.scope().id(),
-                &doc_blob,
-                payload_json.as_deref()
+                "UPDATE big_sync_objs SET payload_json = COALESCE(payload_json, ?1) WHERE obj_ref = ?2",
+                payload_json.as_deref(),
+                obj_ref
             )
             .execute(&mut *tx)
             .await?;
 
-            let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar(
+            let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar!(
                 "SELECT principal_id FROM big_sync_syncable
-                     WHERE scope_id = ?1 AND obj_id = ?2",
+                     WHERE scope_id = ?1 AND obj_ref = ?2",
+                self.scope().id(),
+                obj_ref
             )
-            .bind(self.scope().id())
-            .bind(&doc_blob)
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
             .collect();
             sqlx::query!(
-                "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2",
+                "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2",
                 self.scope().id(),
-                &doc_blob
+                obj_ref
             )
             .execute(&mut *tx)
             .await?;
             for (principal, access) in &mutation.agents {
                 sqlx::query!(
-                    "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level)
+                    "INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level)
                      VALUES (?1, ?2, ?3, ?4)",
                     self.scope().id(),
-                    &doc_blob,
+                    obj_ref,
                     Self::peer_blob(*principal),
                     encode_access(access)
                 )
@@ -491,21 +535,22 @@ impl SqliteBigRepoStore {
             }
             reconciled_docs.insert(mutation.doc, mutation.agents.clone());
 
-            let current_rows = sqlx::query(
-                "SELECT part_id FROM big_sync_members
-                 WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL
+            let current_rows: Vec<Vec<u8>> = sqlx::query_scalar!(
+                "SELECT p.part_id AS 'part_id: Vec<u8>' FROM big_sync_members m
+                 JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2
+                   AND m.maybe_part_ref > 0 AND m.event_type != 2
                  UNION
-                 SELECT part_id FROM big_sync_pending_members
-                 WHERE scope_id = ?1 AND obj_id = ?2",
+                 SELECT p.part_id FROM big_sync_pending_members m
+                 JOIN big_sync_parts p ON p.part_ref = m.part_ref
+                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
+                self.scope().id(),
+                obj_ref
             )
-            .bind(self.scope().id())
-            .bind(&doc_blob)
             .fetch_all(&mut *tx)
             .await?;
-            let current_parts: HashSet<PartId> = current_rows
-                .into_iter()
-                .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
-                .collect();
+            let current_parts: HashSet<PartId> =
+                current_rows.into_iter().map(Self::part_from_blob).collect();
             let mut desired_parts = mutation.desired_group_parts.clone();
             if mutation.desired_global {
                 desired_parts.insert(crate::GLOBAL_PART_ID);
@@ -550,11 +595,11 @@ impl SqliteBigRepoStore {
                         .execute(&mut *tx)
                         .await?;
                         sqlx::query!(
-                            "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
+                            "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
                              VALUES (?1, ?2, ?3)",
             self.scope().id(),
-            Self::part_blob(part_id),
-            &doc_blob
+            obj_ref,
+            self.core.ensure_part_ref(&mut tx, part_id).await?
         )
                         .execute(&mut *tx)
                         .await?;
@@ -565,10 +610,10 @@ impl SqliteBigRepoStore {
                 } else {
                     sqlx::query!(
                         "DELETE FROM big_sync_pending_members
-                                     WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                                     WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                         self.scope().id(),
-                        Self::part_blob(part_id),
-                        &doc_blob
+                        obj_ref,
+                        self.core.ensure_part_ref(&mut tx, part_id).await?
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -591,12 +636,14 @@ impl SqliteBigRepoStore {
                 .any(|principal| !prior_agent_ids.contains(&Self::peer_blob(*principal)))
                 && let Some(payload) = event_payload.clone()
             {
-                let live_part_rows = sqlx::query_scalar(
-                    "SELECT part_id FROM big_sync_members
-                             WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
+                let live_part_rows = sqlx::query_scalar!(
+                    "SELECT p.part_id FROM big_sync_members m
+                     JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+                     WHERE m.scope_id = ?1 AND m.obj_ref = ?2
+                       AND m.maybe_part_ref > 0 AND m.event_type != 2",
+                    self.scope().id(),
+                    obj_ref
                 )
-                .bind(self.scope().id())
-                .bind(&doc_blob)
                 .fetch_all(&mut *tx)
                 .await?;
                 for part_blob in live_part_rows {
@@ -641,25 +688,15 @@ impl SqliteBigRepoStore {
             match &new {
                 MemberState::Live(_) => {
                     sqlx::query!(
-                        "INSERT INTO big_sync_members(
-                             scope_id, part_id, obj_id, added_at, added_payload_json,
-                             changed_at, removed_at, latest_cursor
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
-                             ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
-                             added_at = excluded.added_at,
-                             added_payload_json = excluded.added_payload_json,
-                             changed_at = excluded.changed_at, removed_at = NULL,
-                             latest_cursor = excluded.latest_cursor",
+                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
+                             VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                               event_type = excluded.event_type, txid = excluded.txid",
                         self.scope().id(),
-                        Self::part_blob(part_id),
-                        Self::obj_blob(doc),
+                        self.core.find_obj_ref(doc).await?.expect(ERROR_IMPOSSIBLE),
+                        self.core.ensure_part_ref(&mut tx, part_id).await?,
+                        EVENT_ADDED,
                         i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                        serde_json::to_string(
-                            transition_event_payloads
-                                .get(&(part_id, doc))
-                                .expect("live transition requires payload"),
-                        )
-                        .expect(ERROR_JSON),
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -667,10 +704,10 @@ impl SqliteBigRepoStore {
                         .await?;
                     sqlx::query!(
                         "DELETE FROM big_sync_pending_members
-                                         WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                                         WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                         self.scope().id(),
-                        Self::part_blob(part_id),
-                        Self::obj_blob(doc)
+                        self.core.find_obj_ref(doc).await?.expect(ERROR_IMPOSSIBLE),
+                        self.core.ensure_part_ref(&mut tx, part_id).await?
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -686,13 +723,15 @@ impl SqliteBigRepoStore {
                 }
                 MemberState::Dead => {
                     sqlx::query!(
-                        "UPDATE big_sync_members
-                             SET removed_at = ?1, changed_at = ?1, latest_cursor = ?1
-                             WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-                        i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
+                             VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                               event_type = excluded.event_type, txid = excluded.txid",
                         self.scope().id(),
-                        Self::part_blob(part_id),
-                        Self::obj_blob(doc)
+                        self.core.find_obj_ref(doc).await?.expect(ERROR_IMPOSSIBLE),
+                        self.core.ensure_part_ref(&mut tx, part_id).await?,
+                        EVENT_REMOVED,
+                        i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -710,10 +749,10 @@ impl SqliteBigRepoStore {
             }
             sqlx::query!(
                 "UPDATE big_sync_parts SET latest_cursor = ?1
-                         WHERE scope_id = ?2 AND part_id = ?3",
+                         WHERE scope_id = ?2 AND part_ref = ?3",
                 i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
                 self.scope().id(),
-                Self::part_blob(part_id)
+                self.core.ensure_part_ref(&mut tx, part_id).await?
             )
             .execute(&mut *tx)
             .await?;
@@ -725,6 +764,12 @@ impl SqliteBigRepoStore {
                 self.cursor_reader("group_part")
             )
             .execute(&mut *tx)
+            .await?;
+            self.advance_keyhive_admission_reader_in_tx(
+                &mut tx,
+                crate::store::sqlite::KEYHIVE_ADMISSION_READER_GROUP_PART,
+                event_cursor,
+            )
             .await?;
         }
         tx.commit().await?;
@@ -783,6 +828,7 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn commit_automerge_keyhive_cursor(&self, cursor: u64) -> Res<()> {
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query!(
             "INSERT INTO cursors(reader, seq) VALUES (?1, ?2)
              ON CONFLICT(reader)
@@ -790,8 +836,15 @@ impl SqliteBigRepoStore {
             self.cursor_reader("automerge_keyhive"),
             i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
         )
-        .execute(&self.sql.write_pool)
+        .execute(&mut *tx)
         .await?;
+        self.advance_keyhive_admission_reader_in_tx(
+            &mut tx,
+            crate::store::sqlite::KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER,
+            cursor,
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -864,20 +917,19 @@ impl SqliteBigRepoStore {
     pub(crate) async fn backfill_causal_ciphertext_index(
         &self,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT sedimentree_id, commit_id AS content_ref, digest, 0 AS kind, blob
              FROM big_repo_subduction_commits WHERE scope_id = ?1
              UNION ALL
              SELECT sedimentree_id, head_id AS content_ref, digest, 1 AS kind, blob
              FROM big_repo_subduction_fragments WHERE scope_id = ?1",
+            self.scope().id()
         )
-        .bind(self.scope().id())
         .fetch_all(&self.sql.read_pool)
         .await?;
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         for row in rows {
-            let blob: Vec<u8> = row.try_get("blob")?;
-            let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(&blob) else {
+            let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(&row.blob) else {
                 continue;
             };
             sqlx::query!(
@@ -885,10 +937,10 @@ impl SqliteBigRepoStore {
                     scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 self.scope().id(),
-                row.try_get::<Vec<u8>, _>("sedimentree_id")?,
-                row.try_get::<Vec<u8>, _>("content_ref")?,
-                row.try_get::<Vec<u8>, _>("digest")?,
-                row.try_get::<i64, _>("kind")?,
+                row.sedimentree_id,
+                row.content_ref,
+                row.digest,
+                row.kind,
                 encrypted.pcs_update_op_hash.raw.as_bytes().as_slice()
             )
             .execute(&mut *tx)
@@ -903,7 +955,7 @@ impl SqliteBigRepoStore {
         sedimentree_id: SedimentreeId,
         pcs_update_hash: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT commits.blob
              FROM big_repo_causal_ciphertext_index AS causal
              JOIN big_repo_subduction_commits AS commits
@@ -923,15 +975,13 @@ impl SqliteBigRepoStore {
               AND fragments.digest = causal.digest
              WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
                AND causal.pcs_update_hash = ?3 AND causal.kind = 1",
+            self.scope().id(),
+            Self::tree_blob(sedimentree_id),
+            pcs_update_hash.as_slice()
         )
-        .bind(self.scope().id())
-        .bind(Self::tree_blob(sedimentree_id))
-        .bind(pcs_update_hash.as_slice())
         .fetch_all(&self.sql.read_pool)
         .await?;
-        rows.into_iter()
-            .map(|row| row.try_get("blob").map_err(Into::into))
-            .collect()
+        rows.into_iter().map(|row| Ok(row.blob)).collect()
     }
 
     pub(crate) async fn index_causal_ciphertext(
@@ -967,28 +1017,36 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         commit_id: Option<CommitId>,
     ) -> Result<Vec<(Signed<LooseCommit>, Blob)>, SqliteBigRepoStoreError> {
-        let query = if commit_id.is_some() {
-            "SELECT signed, blob FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3
-             ORDER BY digest"
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = if let Some(commit_id) = commit_id {
+            sqlx::query!(
+                "SELECT signed, blob FROM big_repo_subduction_commits
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3
+                 ORDER BY digest",
+                self.scope().id(),
+                Self::tree_blob(id),
+                Self::commit_blob(commit_id)
+            )
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(|row| (row.signed, row.blob))
+            .collect()
         } else {
-            "SELECT signed, blob FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest"
+            sqlx::query!(
+                "SELECT signed, blob FROM big_repo_subduction_commits
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2
+                 ORDER BY commit_id, digest",
+                self.scope().id(),
+                Self::tree_blob(id)
+            )
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(|row| (row.signed, row.blob))
+            .collect()
         };
-        // Optional filter clauses make this SQL shape dynamic; retain runtime checking.
-        let mut request = sqlx::query(query)
-            .bind(self.scope().id())
-            .bind(Self::tree_blob(id));
-        if let Some(commit_id) = commit_id {
-            request = request.bind(Self::commit_blob(commit_id));
-        }
-        let rows = request.fetch_all(&self.sql.read_pool).await?;
         rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                let blob: Vec<u8> = row.try_get("blob")?;
-                Ok((Signed::try_decode(&signed)?, Blob::new(blob)))
-            })
+            .map(|(signed, blob)| Ok((Signed::try_decode(&signed)?, Blob::new(blob))))
             .collect()
     }
 
@@ -997,28 +1055,36 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         head_id: Option<CommitId>,
     ) -> Result<Vec<(Signed<Fragment>, Blob)>, SqliteBigRepoStoreError> {
-        let query = if head_id.is_some() {
-            "SELECT signed, blob FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3
-             ORDER BY digest"
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = if let Some(head_id) = head_id {
+            sqlx::query!(
+                "SELECT signed, blob FROM big_repo_subduction_fragments
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3
+                 ORDER BY digest",
+                self.scope().id(),
+                Self::tree_blob(id),
+                Self::commit_blob(head_id)
+            )
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(|row| (row.signed, row.blob))
+            .collect()
         } else {
-            "SELECT signed, blob FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest"
+            sqlx::query!(
+                "SELECT signed, blob FROM big_repo_subduction_fragments
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2
+                 ORDER BY head_id, digest",
+                self.scope().id(),
+                Self::tree_blob(id)
+            )
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(|row| (row.signed, row.blob))
+            .collect()
         };
-        // Optional filter clauses make this SQL shape dynamic; retain runtime checking.
-        let mut request = sqlx::query(query)
-            .bind(self.scope().id())
-            .bind(Self::tree_blob(id));
-        if let Some(head_id) = head_id {
-            request = request.bind(Self::commit_blob(head_id));
-        }
-        let rows = request.fetch_all(&self.sql.read_pool).await?;
         rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                let blob: Vec<u8> = row.try_get("blob")?;
-                Ok((Signed::try_decode(&signed)?, Blob::new(blob)))
-            })
+            .map(|(signed, blob)| Ok((Signed::try_decode(&signed)?, Blob::new(blob))))
             .collect()
     }
 
@@ -1282,18 +1348,17 @@ impl SqliteBigRepoStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
     ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT signed FROM big_repo_subduction_commits
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
+            self.scope().id(),
+            Self::tree_blob(id)
         )
-        .bind(self.scope().id())
-        .bind(Self::tree_blob(id))
         .fetch_all(&mut **tx)
         .await?;
         rows.into_iter()
             .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
+                Ok(Signed::<LooseCommit>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
             })
             .collect()
     }
@@ -1303,18 +1368,17 @@ impl SqliteBigRepoStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
     ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT signed FROM big_repo_subduction_fragments
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
+            self.scope().id(),
+            Self::tree_blob(id)
         )
-        .bind(self.scope().id())
-        .bind(Self::tree_blob(id))
         .fetch_all(&mut **tx)
         .await?;
         rows.into_iter()
             .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
+                Ok(Signed::<Fragment>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
             })
             .collect()
     }
@@ -1408,18 +1472,17 @@ impl SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT signed FROM big_repo_subduction_commits
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
+            self.scope().id(),
+            Self::tree_blob(id)
         )
-        .bind(self.scope().id())
-        .bind(Self::tree_blob(id))
         .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
             .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
+                Ok(Signed::<LooseCommit>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
             })
             .collect()
     }
@@ -1428,18 +1491,17 @@ impl SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT signed FROM big_repo_subduction_fragments
              WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
+            self.scope().id(),
+            Self::tree_blob(id)
         )
-        .bind(self.scope().id())
-        .bind(Self::tree_blob(id))
         .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
             .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
+                Ok(Signed::<Fragment>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
             })
             .collect()
     }
@@ -1519,19 +1581,15 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn load_all_sedimentree_ids(&self) -> BoxFuture<'_, Result<Set<SedimentreeId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query(
+            let rows = sqlx::query!(
                 "SELECT sedimentree_id FROM big_repo_subduction_trees
-                     WHERE scope_id = ?1 ORDER BY sedimentree_id",
+                 WHERE scope_id = ?1 ORDER BY sedimentree_id",
+                self.scope().id()
             )
-            .bind(self.scope().id())
             .fetch_all(&self.sql.read_pool)
             .await?;
             rows.into_iter()
-                .map(|row| {
-                    Ok(SedimentreeId::new(Self::decode_id(
-                        row.try_get("sedimentree_id")?,
-                    )?))
-                })
+                .map(|row| Ok(SedimentreeId::new(Self::decode_id(row.sedimentree_id)?)))
                 .collect()
         })
     }
@@ -1576,16 +1634,16 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query(
+            let rows = sqlx::query!(
                 "SELECT DISTINCT commit_id FROM big_repo_subduction_commits
-                     WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id",
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id",
+                self.scope().id(),
+                Self::tree_blob(id)
             )
-            .bind(self.scope().id())
-            .bind(Self::tree_blob(id))
             .fetch_all(&self.sql.read_pool)
             .await?;
             rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.try_get("commit_id")?)?)))
+                .map(|row| Ok(CommitId::new(Self::decode_id(row.commit_id)?)))
                 .collect()
         })
     }
@@ -1693,9 +1751,16 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query("SELECT DISTINCT head_id FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id").bind(self.scope().id()).bind(Self::tree_blob(id)).fetch_all(&self.sql.read_pool).await?;
+            let rows = sqlx::query!(
+                "SELECT DISTINCT head_id FROM big_repo_subduction_fragments
+                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id",
+                self.scope().id(),
+                Self::tree_blob(id)
+            )
+            .fetch_all(&self.sql.read_pool)
+            .await?;
             rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.try_get("head_id")?)?)))
+                .map(|row| Ok(CommitId::new(Self::decode_id(row.head_id)?)))
                 .collect()
         })
     }

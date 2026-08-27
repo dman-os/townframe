@@ -1,5 +1,4 @@
 use super::*;
-
 use big_sync::{HostPartStoreContractHarness, host_part_store_contract};
 use sedimentree_core::blob::BlobMeta;
 use subduction_crypto::signer::memory::MemorySigner;
@@ -44,6 +43,7 @@ async fn sqlite_big_repo_local_subscription_bypasses_remote_policy_and_hidden_pa
     let rx = HostPartStore::subscribe_local(
         &store,
         SubPartsRequest {
+            lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: part,
                 cursor: 0,
@@ -96,6 +96,7 @@ async fn remote_subscription_delivers_removal_after_policy_revocation() -> Res<(
         .await?;
 
     let subscription_request = |cursor| SubPartsRequest {
+        lower_bound: 0,
         targets: HashSet::from([SubscriptionTarget::Part {
             part_id: part,
             cursor,
@@ -173,6 +174,7 @@ async fn grant_resurrects_denied_added_on_live_subscription() -> Res<()> {
     let rx = HostPartStore::subscribe(
         &store,
         SubPartsRequest {
+            lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: part,
                 cursor: 0,
@@ -193,11 +195,13 @@ async fn grant_resurrects_denied_added_on_live_subscription() -> Res<()> {
         SubEvent::Changed(changed) if changed.obj_id == obj
     ));
 
-    // A fresh replay from cursor 0 now delivers the previously buried
-    // Added, since delivery-time permission passes.
+    // A fresh replay from cursor 0 delivers the current row only. The
+    // payload refresh performed while granting access collapses the historical
+    // Added into one Changed projection.
     let replay = HostPartStore::subscribe(
         &store,
         SubPartsRequest {
+            lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: part,
                 cursor: 0,
@@ -208,12 +212,7 @@ async fn grant_resurrects_denied_added_on_live_subscription() -> Res<()> {
     .await??;
     assert!(matches!(
         replay.recv().await?,
-        SubEvent::Added(added) if added.obj_id == obj && added.part_id == part
-    ));
-    // The grant's resurrection Changed is part of the log as well.
-    assert!(matches!(
-        replay.recv().await?,
-        SubEvent::Changed(changed) if changed.obj_id == obj
+        SubEvent::Changed(changed) if changed.obj_id == obj && changed.part_ids == vec![part]
     ));
     assert!(matches!(replay.recv().await?, SubEvent::ReplayComplete));
     Ok(())
@@ -249,6 +248,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
     let rx = HostPartStore::subscribe(
         &store,
         SubPartsRequest {
+            lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: part,
                 cursor: 0,
@@ -347,6 +347,7 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
     let rx = HostPartStore::subscribe_local(
         &store,
         SubPartsRequest {
+            lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: crate::GLOBAL_PART_ID,
                 cursor: 0,
@@ -674,12 +675,12 @@ async fn fragment_write_durably_prunes_covered_loose_history() -> Res<()> {
 
     assert!(store.load_loose_commit_metas(tree).await?.is_empty());
     assert_eq!(store.load_fragment_metas(tree).await?.len(), 1);
-    let loose_index_rows: i64 = sqlx::query_scalar(
+    let loose_index_rows = sqlx::query_scalar!(
         "SELECT COUNT(*) FROM big_repo_causal_ciphertext_index
             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0",
+        store.scope_id,
+        SqliteBigRepoStore::tree_blob(tree)
     )
-    .bind(store.scope_id)
-    .bind(SqliteBigRepoStore::tree_blob(tree))
     .fetch_one(&store.sql.read_pool)
     .await?;
     assert_eq!(loose_index_rows, 0);
@@ -1373,7 +1374,7 @@ async fn sqlite_big_repo_commit_rolls_back_when_payload_update_fails() -> Res<()
     HostPartStore::set_obj_payload(&store, obj_id, old_payload.clone()).await?;
     HostPartStore::add_obj_to_parts(&store, obj_id, vec![part_id]).await?;
 
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_big_repo_payload_update
             BEFORE UPDATE OF payload_json ON big_sync_objs
             WHEN hex(NEW.obj_id) = '0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E'
@@ -1437,16 +1438,16 @@ async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
         .save_keyhive_event(hash, b"dup".to_vec(), None)
         .await?;
 
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         "SELECT event_hash, source_id
             FROM big_repo_keyhive_event_log
             WHERE scope_id = ?1",
+        store.scope_id
     )
-    .bind(store.scope_id)
     .fetch_all(&store.sql.read_pool)
     .await?;
     assert_eq!(rows.len(), 1, "duplicate hash must not add a row");
-    let source_id: Option<Vec<u8>> = rows[0].try_get("source_id")?;
+    let source_id = rows[0].source_id.clone();
     assert_eq!(source_id, Some(vec![9; 32]), "source must be recorded");
     Ok(())
 }
@@ -1492,11 +1493,12 @@ async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
             )
             .await?;
     }
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1")
-            .bind(store.scope_id)
-            .fetch_one(&store.sql.read_pool)
-            .await?;
+    let count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
+        store.scope_id
+    )
+    .fetch_one(&store.sql.read_pool)
+    .await?;
     assert_eq!(count, 5, "arrival log must never prune rows");
     assert_eq!(store.keyhive_event_log_cursor().await?, 5);
     Ok(())
@@ -1580,51 +1582,58 @@ async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
 }
 
 #[tokio::test]
-async fn sqlite_big_repo_keyhive_event_deletion_prunes_history() -> Res<()> {
+async fn sqlite_big_repo_keyhive_event_deletion_tombstones_until_readers_advance() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
     store
         .save_keyhive_event(hash, b"event".to_vec(), None)
         .await?;
+    store.append_admitted_events(vec![hash], None).await?;
     store.delete_keyhive_event(hash).await?;
+    store.register_keyhive_admission_reader("reader", 0).await?;
 
+    assert_eq!(store.run_maintenance().await?, 0);
+    assert_eq!(store.load_keyhive_events().await?.len(), 1);
+
+    store.advance_keyhive_admission_reader("reader", 1).await?;
+    assert_eq!(store.run_maintenance().await?, 1);
     assert!(store.load_keyhive_events().await?.is_empty());
-    let immutable_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1")
-            .bind(store.scope_id)
-            .fetch_one(&store.sql.read_pool)
-            .await?;
-    assert_eq!(
-        immutable_count, 0,
-        "deleted event must be pruned from the WAL"
-    );
     Ok(())
 }
 
 #[tokio::test]
-async fn sqlite_big_repo_prune_admitted_events_respects_archived_through() -> Res<()> {
+async fn sqlite_big_repo_prune_admitted_events_respects_reader_floor() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-prune", BuckId::MAX_LEVEL).await?;
-    let admitted = subduction_keyhive::storage::StorageHash::new([4; 32]);
-    let pending = subduction_keyhive::storage::StorageHash::new([5; 32]);
+    let first = subduction_keyhive::storage::StorageHash::new([4; 32]);
+    let second = subduction_keyhive::storage::StorageHash::new([5; 32]);
     store
-        .save_keyhive_event(admitted, b"admitted".to_vec(), None)
+        .save_keyhive_event(first, b"first".to_vec(), None)
         .await?;
     store
-        .save_keyhive_event(pending, b"pending".to_vec(), None)
+        .save_keyhive_event(second, b"second".to_vec(), None)
         .await?;
-    store.append_admitted_events(vec![admitted], None).await?;
-    store.set_archived_through(2).await?;
+    store
+        .append_admitted_events(vec![first, second], None)
+        .await?;
+    store.delete_keyhive_event(first).await?;
+    store.register_keyhive_admission_reader("fast", 2).await?;
+    store.register_keyhive_admission_reader("slow", 1).await?;
     assert_eq!(store.run_maintenance().await?, 1);
-    assert!(
-        store
-            .load_keyhive_events()
-            .await?
-            .iter()
-            .all(|(hash, _)| *hash == pending)
+    assert_eq!(
+        store.load_keyhive_events().await?,
+        vec![(second, b"second".to_vec())]
     );
-    assert_eq!(store.archived_through().await?, 2);
+    assert_eq!(store.archived_through().await?, 1);
+
+    store.delete_keyhive_event(second).await?;
+    assert_eq!(store.run_maintenance().await?, 0);
+    assert_eq!(store.load_keyhive_events().await?.len(), 1);
+
+    store.advance_keyhive_admission_reader("slow", 2).await?;
+    assert_eq!(store.run_maintenance().await?, 1);
+    assert!(store.load_keyhive_events().await?.is_empty());
     Ok(())
 }
 
@@ -1698,7 +1707,7 @@ async fn causal_checkpoint_cursor_is_monotonic_and_survives_restart() -> Res<()>
 async fn automerge_cursors_share_durable_cursor_table() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store = SqliteBigRepoStore::new(sql, "automerge-cursor", BuckId::MAX_LEVEL).await?;
-    let cursor_table: Option<String> = sqlx::query_scalar(
+    let cursor_table = sqlx::query_scalar!(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cursors'",
     )
     .fetch_optional(&store.sql.read_pool)
@@ -1937,7 +1946,7 @@ async fn reconcile_group_part_batch_rolls_back_on_cursor_update_failure() -> Res
     HostPartStore::set_obj_payload(&store, doc, serde_json::json!("live")).await?;
     store.ensure_part(part).await?;
 
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_cursor_update
             BEFORE UPDATE OF seq ON cursors
             BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END",
@@ -2254,7 +2263,7 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
         .await?;
 
     // Inject failure on the syncable DELETE (which runs before member UPDATE).
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_syncable_delete
             BEFORE DELETE ON big_sync_syncable
             BEGIN SELECT RAISE(ABORT, 'injected syncable failure'); END",
@@ -2304,7 +2313,7 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
     store.ensure_part(part).await?;
 
     // Inject failure on member INSERT (runs during Live transition).
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_member_insert
             BEFORE INSERT ON big_sync_members
             BEGIN SELECT RAISE(ABORT, 'injected member insert failure'); END",
@@ -2339,11 +2348,13 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
         "no part membership should survive member-insert rollback"
     );
     // The syncable write rolled back too — no agents persisted for this doc.
-    let agents_in_syncable: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2",
+    let agents_in_syncable: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM big_sync_syncable s
+         JOIN big_sync_objs o ON o.obj_ref = s.obj_ref
+         WHERE s.scope_id = ?1 AND o.obj_id = ?2",
+        store.scope_id,
+        SqliteBigRepoStore::obj_blob(doc)
     )
-    .bind(store.scope_id)
-    .bind(SqliteBigRepoStore::obj_blob(doc))
     .fetch_one(&store.sql.read_pool)
     .await?;
     assert_eq!(
@@ -2362,7 +2373,7 @@ async fn reconcile_group_part_batch_rolls_back_on_bucket_write_failure() -> Res<
     let peer = PeerId(Byte32Id::new([112; 32]));
     HostPartStore::set_obj_payload(&store, doc, serde_json::json!("live")).await?;
     store.ensure_part(part).await?;
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_bucket_insert
             BEFORE INSERT ON big_sync_buckets
             BEGIN SELECT RAISE(ABORT, 'injected bucket failure'); END",
@@ -2396,7 +2407,7 @@ async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() ->
     let peer = PeerId(Byte32Id::new([122; 32]));
     HostPartStore::set_obj_payload(&store, doc, serde_json::json!("live")).await?;
     store.ensure_part(part).await?;
-    sqlx::query(
+    sqlx::query!(
         "CREATE TRIGGER fail_part_cursor_update
             BEFORE UPDATE OF latest_cursor ON big_sync_parts
             BEGIN SELECT RAISE(ABORT, 'injected part cursor failure'); END",

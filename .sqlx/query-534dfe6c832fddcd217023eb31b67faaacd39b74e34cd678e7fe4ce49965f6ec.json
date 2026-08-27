@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT live_count\n             FROM big_sync_buckets\n             WHERE scope_id = ?1 AND part_ref = (\n                 SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2\n             ) AND level = 0 AND buck_id = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "live_count",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "live_count"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "534dfe6c832fddcd217023eb31b67faaacd39b74e34cd678e7fe4ce49965f6ec"
+}

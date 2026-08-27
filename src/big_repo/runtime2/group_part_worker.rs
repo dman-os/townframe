@@ -84,7 +84,13 @@ pub fn spawn_group_part_worker(
 
     let fut = async move {
         let cursor = driver.store.keyhive_group_part_cursor().await?;
-
+        driver
+            .store
+            .register_keyhive_admission_reader(
+                crate::store::sqlite::KEYHIVE_ADMISSION_READER_GROUP_PART,
+                cursor,
+            )
+            .await?;
         // Fresh store: no durable cursor means the projection was never
         // built. One initial full build from current Keyhive state, then
         // incremental reconciliation over the admission stream takes over.

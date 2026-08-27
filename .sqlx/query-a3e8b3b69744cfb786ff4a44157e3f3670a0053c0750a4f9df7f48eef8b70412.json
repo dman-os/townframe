@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.part_id AS 'part_id: Vec<u8>' FROM big_sync_members m\n                 JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref\n                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2\n                   AND m.maybe_part_ref > 0 AND m.event_type != 2\n                 UNION\n                 SELECT p.part_id FROM big_sync_pending_members m\n                 JOIN big_sync_parts p ON p.part_ref = m.part_ref\n                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a3e8b3b69744cfb786ff4a44157e3f3670a0053c0750a4f9df7f48eef8b70412"
+}

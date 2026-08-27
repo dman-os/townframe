@@ -58,7 +58,7 @@ mod wit {
 }
 
 pub(crate) mod facet_helper {
-    #[cfg(test)]
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn facet_key_id(facet_key: &str) -> String {
         daybook_types::doc::FacetKey::from(facet_key).id
     }

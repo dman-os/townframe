@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT commit_id FROM big_repo_subduction_commits\n                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "commit_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "commit_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f7757ae7a38ed37336b8696e64996ae7267a1e4c0acf758ce2d570aee11eb91e"
+}

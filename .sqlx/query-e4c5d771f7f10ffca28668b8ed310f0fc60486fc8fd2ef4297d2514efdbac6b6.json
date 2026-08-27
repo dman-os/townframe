@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_ref",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e4c5d771f7f10ffca28668b8ed310f0fc60486fc8fd2ef4297d2514efdbac6b6"
+}

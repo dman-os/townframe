@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_repo_keyhive_event_tombstones(\n                 scope_id, event_hash\n             )\n             VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "afeab9698d90e663e480231ef5072278c373888d6d3a6c26ba73a8ff62252fa2"
+}

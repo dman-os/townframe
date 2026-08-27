@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cursor\n             FROM big_sync_peer_cursors\n             WHERE scope_id = ?1 AND peer_id = ?2 AND part_ref = (\n                 SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3\n             )",
+  "describe": {
+    "columns": [
+      {
+        "name": "cursor",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_peer_cursors",
+            "name": "cursor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "34e1c77f7476ddb58e69b35c9d8e8a1336de350dd30369c43c5d418c4057090f"
+}

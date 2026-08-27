@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_ref, cursor)\n             VALUES (?1, ?2, ?3, ?4)\n             ON CONFLICT(scope_id, peer_id, part_ref) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "27847a1bc3fc241189c551da2756957e4c624bec19b632af52c3f3b3866ae09b"
+}

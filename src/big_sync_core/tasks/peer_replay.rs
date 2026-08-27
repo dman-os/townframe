@@ -72,8 +72,18 @@ impl PeerReplayTask {
         let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_id) else {
             return Err(PeerReplayWorkerErrorDeets::StreamClosed);
         };
+        let lower_bound = self
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                rpc::SubscriptionTarget::Part { cursor, .. } => Some(*cursor),
+                rpc::SubscriptionTarget::Object { .. } => None,
+            })
+            .min()
+            .unwrap_or_default();
         let receiver = peer_rpc
             .sub_parts(rpc::SubPartsRequest {
+                lower_bound,
                 targets: self.targets,
             })
             .await??;

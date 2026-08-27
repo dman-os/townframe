@@ -360,6 +360,7 @@ pub async fn spawn_switch_worker(
                 .rcx
                 .frontier_part_store
                 .subscribe_local(SubPartsRequest {
+                    lower_bound: cursor,
                     targets: std::collections::HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: docs_partition_id,
@@ -441,7 +442,7 @@ pub async fn spawn_switch_worker(
                             SubEvent::Added(inner) => inner.cursor,
                             SubEvent::Changed(inner) => inner.cursor,
                             SubEvent::Removed(inner) => inner.cursor,
-                            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => cursor,
+                            SubEvent::ReplayComplete => cursor,
                         };
                         worker
                             .store
@@ -566,7 +567,6 @@ impl SwitchWorker {
             SubEvent::Added(inner) => inner.obj_id,
             SubEvent::Changed(inner) => inner.obj_id,
             SubEvent::Removed(inner) => inner.obj_id,
-            SubEvent::ObjectChanged(inner) => inner.obj_id,
             SubEvent::ReplayComplete => return Ok(None),
         };
         let branch_doc_id: Arc<str> = big_repo::automerge_obj_to_doc_id(obj_id).to_string().into();
@@ -595,7 +595,7 @@ impl SwitchWorker {
         next_state.branch_name = branch_name.clone();
 
         match event {
-            SubEvent::Added(_) | SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => {
+            SubEvent::Added(_) | SubEvent::Changed(_) => {
                 let Some(handle) = self
                     .rt
                     .drawer

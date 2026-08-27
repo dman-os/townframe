@@ -1319,7 +1319,6 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Apply decrypted plaintexts into the live bundle under the doc lock.
     /// Returns the refs that hit `MissingDeps` (they stay blocked), whether
     /// heads advanced, the resulting heads, and the patches to notify.
-    #[allow(clippy::type_complexity)]
     async fn apply_blobs_to_live(
         &mut self,
         bundle: &Arc<LiveDocBundle>,

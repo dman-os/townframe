@@ -66,6 +66,12 @@ impl SqlCtx {
                     sqlx::query("PRAGMA busy_timeout = 5000")
                         .execute(&mut *conn)
                         .await?;
+                    sqlx::query("PRAGMA synchronous = NORMAL")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA cache_size = -64000;")
+                        .execute(&mut *conn)
+                        .await?;
                     Ok(())
                 })
             })
@@ -84,6 +90,15 @@ impl SqlCtx {
                     sqlx::query("PRAGMA busy_timeout = 5000")
                         .execute(&mut *conn)
                         .await?;
+                    sqlx::query("PRAGMA synchronous = NORMAL")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA cache_size = -64000;")
+                        .execute(&mut *conn)
+                        .await?;
+                    // sqlx::query("PRAGMA mmap_size = 1073741824;")
+                    //     .execute(&mut *conn)
+                    //     .await?;
                     Ok(())
                 })
             })

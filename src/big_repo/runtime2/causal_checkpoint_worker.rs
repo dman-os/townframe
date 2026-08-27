@@ -461,6 +461,12 @@ async fn run_causal_checkpoint_tail(
     scope: WorkerGroupScope,
 ) -> Res<()> {
     let cursor = store.causal_checkpoint_cursor().await?;
+    store
+        .register_keyhive_admission_reader(
+            crate::store::sqlite::KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
+            cursor,
+        )
+        .await?;
     if cursor == 0 {
         // Full build: nothing was ever processed, so close coverage once for
         // every document keyhive knows. Admission-row replays afterwards are

@@ -5,8 +5,7 @@
 //! ([`SqliteBigRepoStore::admission_events_after`]), tailed with an in-memory
 //! cursor: every incorporated event is classified and fanned out exactly
 //! once, in order, regardless of channel races or restarts. The live change
-//! channel (`report` / `try_send_change_event`) is only a wake-up hint whose
-//! loss costs latency bounded by [`ADMISSION_IDLE_POLL`], never a hint.
+//! wake-up notifier whose loss costs latency bounded by [`ADMISSION_IDLE_POLL`].
 //!
 //! Each admitted batch is classified once against the published visibility
 //! cache and enqueued per destination peer in a [`KeyedBatcher`] with a
@@ -37,15 +36,6 @@ const ADMISSION_IDLE_POLL: Duration = Duration::from_millis(250);
 /// Maximum admission rows classified per poll.
 const ADMISSION_BATCH: u32 = 256;
 
-/// A change hint reported by producers. The durable log already carries the
-/// hashes; this only accelerates the next poll.
-pub(crate) struct KeyhiveChangeEvent {
-    #[expect(dead_code)]
-    pub hashes: Vec<EventHash>,
-    #[expect(dead_code)]
-    pub source: Option<KeyhivePeerId>,
-}
-
 #[derive(Clone)]
 pub(crate) struct SubscriptionEntry {
     pub id: Uuid,
@@ -57,33 +47,7 @@ pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerId, Sub
 /// Producer-side handle to the dispatcher task.
 #[derive(Clone)]
 pub(crate) struct KeyhiveChangeDispatcher {
-    // Keeps the hint channel open without creating protocol/task reference cycles.
-    _events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
     subscriptions: SubscriptionMap,
-}
-
-pub(crate) fn try_send_change_event(
-    events_tx: &tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
-    hashes: Vec<EventHash>,
-    source: Option<KeyhivePeerId>,
-) {
-    if hashes.is_empty() {
-        return;
-    }
-    if let Err(err) = events_tx.try_send(KeyhiveChangeEvent { hashes, source }) {
-        match err {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                tracing::debug!(
-                    "keyhive change hint dropped: dispatcher channel full; admission tail will catch up"
-                );
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                panic!(
-                    "{ERROR_CHANNEL}: keyhive change dispatcher channel closed while senders alive"
-                );
-            }
-        }
-    }
 }
 
 impl KeyhiveChangeDispatcher {
@@ -169,22 +133,21 @@ pub(crate) struct SpawnedKeyhiveDispatcher<F: FutureForm> {
 ///
 /// The caller creates the events channel and passes both ends. The protocol's
 /// durable-incorporation hook feeds it for both local and remote events;
-/// `events_rx` is drained by the task as wake-up hints.
+/// The caller supplies a wake-up notifier. The durable admission log is the
+/// source of truth; notification payloads are never carried in memory.
 pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
-    events_tx: tokio::sync::mpsc::Sender<KeyhiveChangeEvent>,
-    events_rx: tokio::sync::mpsc::Receiver<KeyhiveChangeEvent>,
+    notify: Arc<tokio::sync::Notify>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> (KeyhiveChangeDispatcher, SpawnedKeyhiveDispatcher<Sendable>) {
     let handle = KeyhiveChangeDispatcher {
-        _events_tx: events_tx,
         subscriptions: Arc::clone(&subscriptions),
     };
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
-        let fut = run_dispatcher(events_rx, protocol, store, subscriptions, policy);
+        let fut = run_dispatcher(notify, protocol, store, subscriptions, policy);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -202,7 +165,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
 }
 
 async fn run_dispatcher(
-    mut events_rx: tokio::sync::mpsc::Receiver<KeyhiveChangeEvent>,
+    notify: Arc<tokio::sync::Notify>,
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     subscriptions: SubscriptionMap,
@@ -216,7 +179,6 @@ async fn run_dispatcher(
     // and the spawned task unwraps the result so they crash the process.
     let mut cursor = store.admission_head().await?;
     loop {
-        // Tail the durable admission log until dry or blocked.
         loop {
             let rows = store
                 .admission_events_after(cursor, ADMISSION_BATCH)
@@ -230,7 +192,6 @@ async fn run_dispatcher(
                 break;
             }
         }
-
         let deadline = tokio::time::Instant::from_std(
             batcher
                 .next_deadline()
@@ -238,20 +199,13 @@ async fn run_dispatcher(
                 .min(Instant::now() + ADMISSION_IDLE_POLL),
         );
         tokio::select! {
-            evt = events_rx.recv() => {
-                match evt {
-                    // Wake-up hint only: the loop re-tails the durable log.
-                    Some(_) => {}
-                    None => break,
-                }
-            }
+            _ = notify.notified() => {}
             _ = tokio::time::sleep_until(deadline) => {
                 let due = batcher.take_due(Instant::now());
                 deliver(&subscriptions, due).await;
             }
         }
     }
-    Ok(())
 }
 
 /// Classify one admitted batch and enqueue the selected peers for debounced

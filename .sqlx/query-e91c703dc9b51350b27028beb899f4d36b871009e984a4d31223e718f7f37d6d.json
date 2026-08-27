@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_sync_objs SET payload_json = COALESCE(payload_json, ?1) WHERE obj_ref = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e91c703dc9b51350b27028beb899f4d36b871009e984a4d31223e718f7f37d6d"
+}

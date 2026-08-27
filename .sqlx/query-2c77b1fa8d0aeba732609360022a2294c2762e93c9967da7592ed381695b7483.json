@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(seq) AS \"reader_floor: i64\"\n               FROM big_repo_keyhive_admission_readers\n              WHERE scope_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_floor: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2c77b1fa8d0aeba732609360022a2294c2762e93c9967da7592ed381695b7483"
+}

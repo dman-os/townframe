@@ -1480,7 +1480,7 @@ async fn memory_sync_two_node_connect_order_does_not_change_final_state() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(300, Duration::from_secs(15)).await
 }
 
@@ -1543,6 +1543,12 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         );
     }
 
+    let expected_part_cursor = u64::try_from(
+        obj_count
+            .checked_mul(2)
+            .expect("object count overflow while calculating part cursor"),
+    )
+    .expect("object count does not fit in a cursor");
     let cursor_deadline = std::time::Instant::now() + timeout;
     loop {
         let snapshot = node_a.snapshot().await?;
@@ -1550,14 +1556,14 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
             .peer_part_cursors
             .get(&(node_b.peer_id, part_id))
             .copied()
-            == Some(obj_count as u64)
+            == Some(expected_part_cursor)
         {
             break;
         }
         if std::time::Instant::now() >= cursor_deadline {
             return Err(ferr!(
                 "timed out waiting for bucket cursor advance to {}",
-                obj_count
+                expected_part_cursor
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1580,18 +1586,18 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(1_000, Duration::from_secs(30)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(10_000, Duration::from_secs(90)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 // #[ignore = "slow bucket catchup case"]
-async fn memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(100_000, Duration::from_secs(300)).await
 }
 
@@ -1899,6 +1905,7 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let rx = store
         .subscribe(
             SubPartsRequest {
+                lower_bound: 0,
                 targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: part,
                     cursor: 0,
@@ -1913,6 +1920,7 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let err = store
         .subscribe(
             SubPartsRequest {
+                lower_bound: 0,
                 targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: hidden,
                     cursor: 0,

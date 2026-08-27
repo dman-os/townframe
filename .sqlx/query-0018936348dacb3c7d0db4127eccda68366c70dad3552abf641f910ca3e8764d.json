@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_repo_keyhive_admission_readers\n                SET seq = MAX(seq, ?3)\n              WHERE scope_id = ?1 AND reader = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0018936348dacb3c7d0db4127eccda68366c70dad3552abf641f910ca3e8764d"
+}

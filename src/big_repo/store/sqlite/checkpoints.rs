@@ -14,6 +14,7 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn advance_causal_checkpoint_cursor(&self, cursor: u64) -> Res<()> {
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query!(
             "UPDATE cursors
                 SET seq = MAX(seq, ?1)
@@ -21,8 +22,15 @@ impl SqliteBigRepoStore {
             i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
             self.cursor_reader("causal_checkpoint")
         )
-        .execute(&self.sql.write_pool)
+        .execute(&mut *tx)
         .await?;
+        self.advance_keyhive_admission_reader_in_tx(
+            &mut tx,
+            crate::store::sqlite::KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
+            cursor,
+        )
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

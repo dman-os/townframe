@@ -522,7 +522,7 @@ fn big_sync_store_diff(
         snapshot
             .memberships
             .iter()
-            .map(|(part, obj, _, _, removed_at, _)| ((*part, *obj), removed_at.is_none()))
+            .map(|(part, obj, event_type, _)| ((*part, *obj), *event_type != 2))
             .collect::<BTreeMap<_, _>>()
     };
     let left_memberships = semantic_memberships(left);

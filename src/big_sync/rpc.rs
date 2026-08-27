@@ -497,12 +497,6 @@ impl BigSyncRpcWorker {
                                         cursor = inner.cursor,
                                         "rpc forwarding Removed event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::debug!(
-                                        ?subscriber,
-                                        obj_id = %inner.obj_id,
-                                        payload = !inner.payload.is_null(),
-                                        "rpc forwarding ObjectChanged event",
-                                    ),
                                     big_sync_core::rpc::SubEvent::ReplayComplete => tracing::debug!(
                                         ?subscriber,
                                         "rpc forwarding ReplayComplete",
@@ -659,6 +653,7 @@ mod tests {
             store
                 .subscribe(
                     SubPartsRequest {
+                        lower_bound: 0,
                         targets: std::collections::HashSet::from([
                             big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
                         ]),
@@ -749,6 +744,7 @@ mod tests {
             .sub_parts(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: SubPartsRequest {
+                    lower_bound: 0,
                     targets: std::collections::HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
                     ]),

@@ -439,7 +439,17 @@ async fn subscribe_to_parts(
         targets.insert(SubscriptionTarget::Part { part_id, cursor });
     }
     match big_sync_store
-        .subscribe_local(SubPartsRequest { targets })
+        .subscribe_local(SubPartsRequest {
+            lower_bound: targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Part { cursor, .. } => Some(*cursor),
+                    SubscriptionTarget::Object { .. } => None,
+                })
+                .min()
+                .unwrap_or_default(),
+            targets,
+        })
         .await?
     {
         Ok(listener) => Ok(Some(listener)),
@@ -570,6 +580,7 @@ impl FrontierSource {
             SubEvent::Changed(inner) => {
                 // Explicit mode: `All` considers every part event unfiltered;
                 // a selective scope filters by its group-derived part set.
+                let has_part_ids = !inner.part_ids.is_empty();
                 let part_ids: Vec<PartId> = match self.scope.groups() {
                     None => inner.part_ids,
                     Some(groups) => inner
@@ -578,7 +589,7 @@ impl FrontierSource {
                         .filter(|part_id| groups.contains(part_id))
                         .collect(),
                 };
-                if part_ids.is_empty() {
+                if has_part_ids && part_ids.is_empty() {
                     return Ok(None);
                 }
                 Ok(Some(vec![Evt::PartChanged {
@@ -591,7 +602,7 @@ impl FrontierSource {
                 part_id: inner.part_id,
                 cursor: inner.cursor,
             }])),
-            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => Ok(None),
+            SubEvent::ReplayComplete => Ok(None),
         }
     }
 }
@@ -777,6 +788,12 @@ async fn run_automerge_frontier_tail(
         Some(groups) => groups.iter().copied().collect(),
     };
     let kh_read_cursor = store.automerge_keyhive_cursor().await?;
+    store
+        .register_keyhive_admission_reader(
+            crate::store::sqlite::KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER,
+            kh_read_cursor,
+        )
+        .await?;
     let source = FrontierSource {
         kh_read_cursor,
         scope: scope.clone(),
