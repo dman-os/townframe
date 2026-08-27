@@ -49,8 +49,7 @@ fn setup_tracing() -> Res<()> {
     registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
-    let (eyre_panic_hook, eyre_hook) =
-        color_eyre::config::HookBuilder::default().try_into_hooks()?;
+    let (eyre_panic_hook, eyre_hook) = crate::eyre_hook_builder().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         eprintln!("{report}");

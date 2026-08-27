@@ -79,3 +79,6 @@ directories.workspace = true
 qrcode.workspace = true
 big_sync_core = { workspace = true }
 surelock = { workspace = true }
+
+[dev-dependencies]
+trycmd = "1.2.1"
