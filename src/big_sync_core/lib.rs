@@ -31,6 +31,7 @@ mod cursor;
 use cursor::*;
 mod fingerprint;
 mod ids;
+pub mod keyed_frontier;
 /// New-generation stream abstractions (see module docs). Additive only:
 /// existing machines migrate onto these in the upcoming swap, nothing is
 /// rewired yet.
@@ -838,6 +839,57 @@ impl BigSyncMachine {
         for &part_id in &removed_parts {
             peer_state.cursor_machine.remove_part(part_id);
         }
+        // Deferred work is allowed to outlive the event that created it, but
+        // not the peer route that gives its part hints meaning. In particular,
+        // a cancelled removal may leave a re-sync parked in
+        // `pending_removals`; blindly resuming it after SetPeer removed the
+        // part would enqueue a task the worker cannot map to a backend.
+        peer_state.pending_removals.retain(|_, pending| {
+            pending
+                .remaining_hints
+                .retain(|part_id| parts.contains(part_id));
+            pending
+                .re_added_parts
+                .retain(|part_id| parts.contains(part_id));
+            !pending.remaining_hints.is_empty() || !pending.re_added_parts.is_empty()
+        });
+
+        // A queued sync task owns a snapshot of its hints, so mutating only
+        // SyncWorkerState would leave the queued task stale. Stop and replace
+        // every affected task with a fresh snapshot. Object-routed tasks remain
+        // valid with no part hints; part-routed tasks with no surviving hints
+        // are simply obsolete.
+        let affected_sync_workers: Vec<_> = peer_state
+            .sync_workers
+            .iter()
+            .filter(|(_, worker)| !worker.part_hints.is_disjoint(&removed_parts))
+            .map(|(&obj_id, _)| obj_id)
+            .collect();
+        for obj_id in affected_sync_workers {
+            let mut worker = peer_state
+                .sync_workers
+                .remove(&obj_id)
+                .expect(ERROR_IMPOSSIBLE);
+            let _state = self
+                .tasks
+                .stop_task(worker.task_id)
+                .expect(ERROR_UNRECONIZED);
+            worker.part_hints.retain(|part_id| parts.contains(part_id));
+            if worker.part_hints.is_empty() && !objects.contains(&obj_id) {
+                continue;
+            }
+            worker.task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                kind: SyncTaskKind::Sync,
+                part_hints: worker.part_hints.clone(),
+                deets: SyncTaskDeets {
+                    peer_id,
+                    obj_id,
+                    remote_payload: worker.remote_payload.clone(),
+                },
+            }));
+            let old = peer_state.sync_workers.insert(obj_id, worker);
+            assert!(old.is_none(), "fishy");
+        }
         let added_parts: Set<_> = parts.difference(&old_part_ids).copied().collect();
         let decision_parts: Set<_> = pending_parts.union(&added_parts).copied().collect();
         if !decision_parts.is_empty() {
@@ -1616,9 +1668,15 @@ impl BigSyncMachine {
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return;
         };
-        let Some(pending) = peer_state.pending_removals.remove(&obj_id) else {
+        let Some(mut pending) = peer_state.pending_removals.remove(&obj_id) else {
             return;
         };
+        pending
+            .remaining_hints
+            .retain(|part_id| peer_state.parts.contains_key(part_id));
+        pending
+            .re_added_parts
+            .retain(|part_id| peer_state.parts.contains_key(part_id));
         if !pending.remaining_hints.is_empty() {
             let deets = SyncTaskDeets {
                 peer_id,
@@ -2629,6 +2687,122 @@ mod tests {
         assert!(
             !machine.peers[&peer].pending_removals.contains_key(&obj),
             "pending removal must be consumed by the resume"
+        );
+    }
+
+    #[test]
+    fn removed_peer_part_cancels_deferred_readd_before_removal_completes() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [part].into(),
+            objects: Set::new(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            BigSyncMachine::schedule_obj_removal(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                peer,
+                obj,
+                part,
+                Some(1),
+            );
+        }
+        let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        machine.drain_sync_spawn_queue();
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
+                    cursor: 2,
+                    part_id: part,
+                    obj_id: obj,
+                    payload: serde_json::json!({"head": 2}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+        assert_eq!(
+            machine.peers[&peer].pending_removals[&obj].re_added_parts,
+            [part].into()
+        );
+
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: Set::new(),
+            objects: Set::new(),
+        }));
+        assert!(machine.peers[&peer].pending_removals.is_empty());
+
+        machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
+            task_id: removal_task,
+            peer_id: peer,
+            obj_id: obj,
+        }));
+        assert!(machine.peers[&peer].sync_workers.is_empty());
+        assert!(
+            machine.drain_sync_spawn_queue().next().is_none(),
+            "completion must not resurrect a sync route removed by SetPeer"
+        );
+    }
+
+    #[test]
+    fn set_peer_replaces_queued_sync_with_only_live_part_hints() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let removed_part = PartId::random();
+        let retained_part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [removed_part, retained_part].into(),
+            objects: Set::new(),
+        }));
+
+        let task_id = machine.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+            kind: SyncTaskKind::Sync,
+            part_hints: [removed_part, retained_part].into(),
+            deets: SyncTaskDeets {
+                peer_id: peer,
+                obj_id: obj,
+                remote_payload: Some(serde_json::json!({"head": 1})),
+            },
+        }));
+        machine
+            .peers
+            .get_mut(&peer)
+            .expect(ERROR_UNRECONIZED)
+            .sync_workers
+            .insert(
+                obj,
+                SyncWorkerState {
+                    task_id,
+                    cursors: [1].into(),
+                    part_hints: [removed_part, retained_part].into(),
+                    remote_payload: Some(serde_json::json!({"head": 1})),
+                },
+            );
+
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [retained_part].into(),
+            objects: Set::new(),
+        }));
+
+        let tasks: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].part_hints, [retained_part].into());
+        assert_ne!(tasks[0].id, task_id);
+        assert_eq!(
+            machine.peers[&peer].sync_workers[&obj].part_hints,
+            [retained_part].into()
         );
     }
 

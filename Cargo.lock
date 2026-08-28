@@ -1170,6 +1170,7 @@ name = "big_sync_core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "async-trait",
  "autosurgeon",
  "bs58",
  "future_form",

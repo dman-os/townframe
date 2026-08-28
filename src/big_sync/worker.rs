@@ -421,6 +421,39 @@ struct PeerState {
     objects: HashMap<ObjId, BackendId>,
 }
 
+impl PeerState {
+    fn resolve_sync_route(&self, task: &SyncTask) -> Option<(BackendId, Vec<PartId>)> {
+        let object_backend_id = (task.kind != SyncTaskKind::RemoveFromParts)
+            .then(|| self.objects.get(&task.deets.obj_id).cloned())
+            .flatten();
+        if let Some(backend_id) = object_backend_id {
+            return Some((backend_id, Vec::new()));
+        }
+
+        let mut part_ids: Vec<_> = task.part_hints.iter().copied().collect();
+        part_ids.sort_unstable();
+        part_ids.dedup();
+        let mut backend_id = None;
+        for part_id in &part_ids {
+            let part_backend_id = self.parts.get(part_id).unwrap_or_else(|| {
+                panic!(
+                    "sync task requested unknown part {part_id:?} for peer {}",
+                    task.deets.peer_id
+                )
+            });
+            match backend_id {
+                None => backend_id = Some(Arc::clone(part_backend_id)),
+                Some(ref existing) => assert_eq!(
+                    existing, part_backend_id,
+                    "sync task parts mapped to different backend ids for peer {} obj {:?}",
+                    task.deets.peer_id, task.deets.obj_id
+                ),
+            }
+        }
+        backend_id.map(|backend_id| (backend_id, part_ids))
+    }
+}
+
 struct TaskDeets {
     cancel_token: CancellationToken,
     handle: utils_rs::TaskHandle,
@@ -781,43 +814,11 @@ impl BigSyncWorker {
             );
             return Ok(());
         };
-        // Removal tasks evict exactly the hinted parts — never expand via
-        // local membership (that's what we're removing). Empty-hint Sync
-        // tasks resolve the backend from the peer's known object membership:
-        // local `obj_parts` can be empty for an object with no local parts,
-        // which would leave `backend_id` unresolved below.
-        let object_backend_id = if task.kind == SyncTaskKind::RemoveFromParts {
-            None
-        } else {
-            peer_state.objects.get(&task.deets.obj_id).cloned()
-        };
-        let mut part_ids: Vec<PartId> = if object_backend_id.is_some() {
-            Vec::new()
-        } else if task.part_hints.is_empty() && task.kind == SyncTaskKind::Sync {
-            self.part_store.obj_parts(task.deets.obj_id).await?
-        } else {
-            task.part_hints.iter().copied().collect()
-        };
-        part_ids.sort_unstable();
-        part_ids.dedup();
-        let mut backend_id = object_backend_id;
-        for part_id in &part_ids {
-            let Some(part_backend_id) = peer_state.parts.get(part_id) else {
-                panic!(
-                    "sync task requested unknown part {part_id:?} for peer {}",
-                    task.deets.peer_id
-                );
-            };
-            match backend_id {
-                None => backend_id = Some(Arc::clone(part_backend_id)),
-                Some(ref existing) => assert_eq!(
-                    existing, part_backend_id,
-                    "sync task parts mapped to different backend ids for peer {} obj {:?}",
-                    task.deets.peer_id, task.deets.obj_id
-                ),
-            }
-        }
-        let Some(backend_id) = backend_id else {
+        // A task may only use routes configured for this peer. In particular,
+        // an object-target Changed event has empty part hints; expanding those
+        // through local membership would leak unrelated local parts into the
+        // peer task. Without an object route, that event is not actionable.
+        let Some((backend_id, part_ids)) = peer_state.resolve_sync_route(&task) else {
             tracing::debug!(
                 peer_id = %task.deets.peer_id,
                 obj_id = %task.deets.obj_id,
@@ -1028,3 +1029,30 @@ impl SyncTaskWorker {
 //         () = fut => Ok(LoopAction::Cont)
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_part_hints_require_an_explicit_peer_object_route() {
+        let peer_id = PeerId::random();
+        let obj_id = ObjId::random();
+        let peer = PeerState {
+            parts: [(PartId::random(), Arc::from("backend"))].into(),
+            objects: HashMap::new(),
+        };
+        let task = SyncTask {
+            id: 1,
+            kind: SyncTaskKind::Sync,
+            part_hints: default(),
+            deets: SyncTaskDeets {
+                peer_id,
+                obj_id,
+                remote_payload: None,
+            },
+        };
+
+        assert_eq!(peer.resolve_sync_route(&task), None);
+    }
+}

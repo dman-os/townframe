@@ -7,6 +7,7 @@ mod interlude {
 use crate::interlude::*;
 
 pub mod backend;
+pub mod keyed_frontier;
 mod part_store;
 pub mod rpc;
 #[cfg(any(test, feature = "test-support"))]
