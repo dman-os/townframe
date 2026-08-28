@@ -3002,6 +3002,7 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "bytes",
+ "data-encoding",
  "daybook_pdk",
  "daybook_types",
  "directories",

@@ -49,6 +49,7 @@ zstd.workspace = true
 bytes.workspace = true
 sha2.workspace = true
 blake3.workspace = true
+data-encoding.workspace = true
 semver.workspace = true
 atproto-dasl.workspace = true
 
