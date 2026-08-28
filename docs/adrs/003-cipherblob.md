@@ -90,7 +90,6 @@ A cipherBlob facet describes exactly one encrypted physical representation:
     "keyRef": "db+facet:///self/org.example.daybook.jwk/relay",
 
     "encodingParameters": {
-      "salt": "<base64url>",
       "recordSize": 65536,
       "padding": "record"
     }
@@ -114,7 +113,7 @@ Those belong to other layers.
 
 `contentEncoding` is the algorithm pivot: its value is an HTTP content-coding token (e.g. `aes128gcm`), and the schema of `encodingParameters` is defined by `contentEncoding`. A future encryption scheme is a new `contentEncoding` value with its own `encodingParameters` shape; existing `aes128gcm` cipherBlobs remain decryptable without migration. Daybook deliberately does not reify RFC 8188's binary header as a standalone opaque field, because that would bake one scheme's wire format into the abstraction and hurt agility.
 
-For `aes128gcm`, `encodingParameters` carries exactly the per-representation inputs needed to reproduce the ciphertext: `salt` (base64url, 16 octets, the only per-representation entropy), `recordSize` (the RFC 8188 `rs`), and `padding` (the deterministic padding policy, see §17). The RFC 8188 `keyid` is always empty (see §8) and therefore omitted from the facet.
+For `aes128gcm`, `encodingParameters` carries the per-scheme reproduction inputs that are not derivable from elsewhere: `recordSize` (the RFC 8188 `rs`) and `padding` (the deterministic padding policy, see §17). The RFC 8188 `salt` header field is deliberately absent from the facet: it is derived at encryption and serving time as a pure function of the referenced JWK secret and the plaintext content digest (see §9). The RFC 8188 `keyid` is always empty (see §8) and therefore omitted from the facet.
 
 ### 4. Blob → cipherBlob resolution
 
@@ -177,7 +176,7 @@ For blob encryption:
 
 The facet value SHOULD remain a valid JWK rather than wrapping it inside a Daybook-specific key structure.
 
-For RFC 8188 `aes128gcm`, the JWK secret is used as the Input Keying Material (IKM): the AEAD content-encryption key is derived by RFC 8188's own HKDF-SHA256 from `(salt, IKM)`, so Daybook performs no additional key derivation. Because each cipherBlob contributes its own random `salt`, reusing one JWK across many cipherBlobs yields a different content-encryption key per representation and does not correlate their ciphertexts.
+For RFC 8188 `aes128gcm`, the JWK secret is used as the Input Keying Material (IKM). Daybook derives the representation salt from `(IKM, plaintext content digest)` (see §9); the AEAD content-encryption key and nonce base are then derived by RFC 8188's own HKDF-SHA256 from `(salt, IKM)`, so Daybook performs no additional key schedule beyond that derivation. Because the salt depends on both the secret and the plaintext digest, reusing one JWK across many cipherBlobs yields a different content-encryption key per representation and does not correlate their ciphertexts — with no per-representation random state to create, store, or coordinate across devices.
 
 cipherBlob's `keyRef` is a general URI. It does not require the key to live in a Daybook facet.
 
@@ -274,7 +273,7 @@ It provides:
 * streaming encryption and decryption;
 * authenticated fixed-size records;
 * seek/range processing at record boundaries;
-* per-representation random salt;
+* per-representation salt derived from `(key, plaintext digest)`, see §9;
 * authenticated record ordering;
 * padding support.
 
@@ -282,25 +281,30 @@ Daybook leaves the RFC 8188 `keyid` empty. Embedding a Daybook key or facet iden
 
 The key is instead resolved through the private cipherBlob `keyRef`.
 
-### 9. Random representation creation, reproducible generation
+### 9. Representation creation, derived salt, reproducible generation
 
-Encryption is randomized when a representation is created.
+Creating a new cipherBlob selects fresh random keying material and fixed encoding parameters. The RFC 8188 salt is not selected: it is derived per representation as
 
-Creating a new cipherBlob selects:
+```text
+salt = BLAKE3-derive-key("daybook.cipherblob.salt.v1", K || P)[..16]
+```
 
-* fresh random keying material;
-* fresh random salt;
-* fixed encoding parameters.
+where `K` is the referenced JWK secret and `P` the plaintext content digest.
 
-Thus unrelated encryption operations over identical plaintext do not produce the same ciphertext.
+The reason is GCM safety. RFC 8188 derives per-message nonces from the salt, and a `(CEK, nonce)` pair reused over different plaintexts is catastrophic, not an inconvenient collision. Under a shared key, a salt collision could only arise from persisting the same salt for two representations, and no distributed write path in Daybook can enforce binding uniqueness. Deriving the salt from both inputs makes the collision unrepresentable: two different plaintexts under the same key cannot share a salt, on any device, without any coordination.
 
-However, after creation, the representation MUST be reproducible:
+Determinism for serving is preserved: the derivation is a pure function of `(K, P)`, so re-encrypting a given plaintext with a given key reproduces byte-identical ciphertext (see §10, §12).
+
+Because the key is mixed into the derivation, independent encryption domains that mint independent keys still produce uncorrelated ciphertext for identical plaintext (contrast with convergent encryption, below).
+
+An explicit non-goal: rotating only the salt is impossible by design. Rotation means fresh keying material (§15). Salt-only rotation exists in systems where derived keys cross a root-key boundary and persist (KMS-style DEKs); Daybook's derived content-encryption keys never persist, so there is no artifact whose leak a salt rotation would mitigate.
+
+After creation, the representation MUST be reproducible:
 
 ```text
 Encrypt(
     plaintext,
     same key,
-    same salt,
     same record size,
     same padding policy
 )
@@ -308,21 +312,21 @@ Encrypt(
 same ciphertext bytes
 ```
 
-These are exactly the values persisted in `encodingParameters` (`salt`, `recordSize`, `padding`) together with the referenced JWK; reproducing a representation is a pure function of the facet contents and the referenced key.
+The salt is absent from this list because it is a function of the first two inputs. The reproducible inputs are exactly the values persisted in `encodingParameters` (`recordSize`, `padding`) together with the referenced JWK; reproducing a representation is a pure function of the plaintext P and the referenced key. The facet contents alone are deliberately insufficient, since the cipherBlob does not contain the plaintext digest.
 
 This is deliberately different from convergent encryption.
 
 Identical plaintext encrypted independently:
 
 ```text
-Encrypt(P, K1, S1) = C1
-Encrypt(P, K2, S2) = C2
+Encrypt(P, K1) = C1
+Encrypt(P, K2) = C2
 ```
 
 but regenerating an existing representation:
 
 ```text
-Encrypt(P, K1, S1) = C1
+Encrypt(P, K1) = C1
 ```
 
 must always produce the exact same bytes.
@@ -429,7 +433,11 @@ It can be reconstructed from materialized Blob and cipherBlob facets.
 
 Integration with iroh-blobs is implemented on a fork. The intended design, in its implemented shape: iroh-blobs serves verified byte ranges using a BLAKE3 bao outboard alongside the data. For a virtual ciphertext, the outboard is computed during the §11 creation pass — the same streaming pass that produces `representation.digest` — and stored durably by the store (`build_outboard`), so serving does not recompute the hash tree. The outboard is inlined in the store's database, or kept as a file for large blobs, mirroring normal blobs. Each virtual entry durably records the name of the provider that serves it (`add_virtual`); the application registers live providers at startup (provider name → a random-access `ReadBytesAt` factory that resolves `representation_digest` to plaintext + cipherBlob + keyRef on demand). Serving reads data from the registered provider and verifies it against the stored outboard; an entry whose provider is not registered (or whose provider has no data for the hash) is served as not found. A SQLite/object-store iroh-blobs backend (for relay-grade durability and replication) is a separate future addition on the same fork.
 
-The cipherBlob/JWK facet codecs, the virtual provider, the blob sync backend, and the virtual-ciphertext local store are housed in a `big_blobs` crate that does not depend on `daybook_core`. `daybook_core` depends on `big_blobs` and supplies the post-decrypt local-plaintext sink via a trait defined in `big_blobs` (dependency inversion).
+The cipherBlob codec (RFC 8188 `aes128gcm`), the store flows, and the virtual ciphertext provider live in `daybook_core`'s `blobs` module (`daybook_core::blobs::encrypt`). Key storage follows §6: the JWK facet lives in the Keyhive-protected Automerge document, and encrypted-at-rest protection is inherited from the document layer - no key material is ever persisted in the blob store. Key resolution is a `CipherKeySource` over the document layer: ciphertext → cipherBlob facet (matched by `representation.digest`) → `keyRef` → JWK facet → secret. The store flows carry only `ct:`/`pt:` pair tags; key linkage goes through the facet graph. If blob plumbing is later extracted into a dedicated crate, preserve the dependency inversion by which the host application supplies the post-decrypt plaintext sink.
+
+Receiving (download) is resumable: decrypted plaintext records are appended to a temporary spill file as their ciphertext records verify, and an interrupted attempt leaves the spill plus the decryption header facts on disk. The next attempt re-derives the progress watermark from the spill length (plaintext arrives in whole records until the final one) and requests only the missing ciphertext record suffix as a chunk-ranged fetch - the provider serves any byte window.
+
+A resumed download does not reuse the received ciphertext outboard fragments. A range-limited transfer only carries the parent fragments that verify the requested suffix, so the fragment set has gaps and cannot be reassembled by concatenation the way a full transfer's pre-order stream can. Instead, once the plaintext is complete, the receiving node re-generates `C` deterministically (the §11 pass) to install its own virtual outboard. This deliberately trades one extra local sequential read of `P` at resume completion against persisting an outboard scratch file. Warning for future investigation: if a resumed download appears to cost a full extra local read of `P` beyond the plaintext import itself, this re-encryption-for-outboard step is why. If it ever matters (very large blobs, frequent resumes), the alternative is to persist received `(TreeNode, pair)` fragments in the download ledger and scatter-merge them into the outboard via `BaoTree::pre_order_offset` at completion.
 
 ### 13. Blob inventories
 
@@ -470,7 +478,7 @@ for each Blob P:
 
     1. create fresh JWK K
 
-    2. choose representation encryption parameters
+    2. choose the padding policy
 
     3. stream plaintext P through encryptor and hash output
 
@@ -519,7 +527,7 @@ C1 / K1
 C2 / K2
 ```
 
-The cipherBlob facet is updated in place.
+The cipherBlob facet is updated in place. Salt-only rotation is deliberately impossible (§9); every representation rotation mints fresh keying material.
 
 Because the Blob points to cipherBlob X rather than directly to C1, application references do not change.
 
@@ -669,7 +677,7 @@ Rejected because external plaintext files should be allowed to remain canonical 
 
 ### Deterministic/convergent encryption from plaintext identity
 
-Rejected because it would allow unrelated storage domains to correlate identical plaintext through identical ciphertext.
+Rejected because it would allow unrelated storage domains to correlate identical plaintext through identical ciphertext. The salt derivation of §9 stays on the right side of this boundary: the secret is a mandatory derivation input, so domains with independent keys produce uncorrelated ciphertext; only encryption under the *same* key is deterministic.
 
 ### Put Daybook key identifiers in RFC 8188 ciphertext
 
