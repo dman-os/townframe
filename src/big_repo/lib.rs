@@ -104,11 +104,11 @@ pub struct Config {
     pub scope_key: Arc<str>,
     pub hidden_parts: HashSet<PartId>,
     /// Keyhive groups whose documents the Automerge frontier worker processes.
-    pub automerge_frontier_scope: WorkerGroupScope,
+    pub automerge_frontier_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents the causal checkpoint worker processes.
-    pub causal_checkpoint_scope: WorkerGroupScope,
+    pub causal_checkpoint_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents and group parts the group-part worker manages.
-    pub group_part_scope: WorkerGroupScope,
+    pub group_part_group_scope: WorkerGroupScope,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +130,8 @@ pub struct BigRepo {
     sync_policy: runtime2::types::BigRepoSyncPolicy,
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
+    #[educe(Debug(ignore))]
+    frontier_store: SharedPartStore,
     #[educe(Debug(ignore))]
     #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     sqlite_store: SqliteBigRepoStore,
@@ -165,9 +167,9 @@ impl BigRepo {
             storage,
             scope_key,
             hidden_parts,
-            automerge_frontier_scope,
-            causal_checkpoint_scope,
-            group_part_scope,
+            automerge_frontier_group_scope,
+            causal_checkpoint_group_scope,
+            group_part_group_scope,
         } = config;
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
@@ -195,9 +197,9 @@ impl BigRepo {
                 storage,
                 scope_key,
                 hidden_parts,
-                automerge_frontier_scope,
-                causal_checkpoint_scope,
-                group_part_scope,
+                automerge_frontier_group_scope,
+                causal_checkpoint_group_scope,
+                group_part_group_scope,
             },
             store,
         )
@@ -216,6 +218,19 @@ impl BigRepo {
     /// authority-derived partition membership.
     pub fn shared_part_store(&self) -> SharedPartStore {
         Arc::clone(&self.big_sync_store)
+    }
+
+    /// Return the local-only frontier partition store (automerge heads
+    /// payloads). Never registered with the big-sync RPC server.
+    pub fn frontier_part_store(&self) -> SharedPartStore {
+        Arc::clone(&self.frontier_store)
+    }
+
+    /// The SQLite context backing this BigRepo's storage. Consumers that need
+    /// additional scopes in the same database (e.g. the blob partitions)
+    /// construct their scoped store from this context.
+    pub fn sql_ctx(&self) -> SqlCtx {
+        self.sqlite_store.sql.clone()
     }
     #[cfg(feature = "test-support")]
     pub async fn big_sync_store_snapshot(&self) -> Res<BigSyncStoreSnapshot> {
@@ -246,13 +261,26 @@ impl BigRepo {
         let Config {
             node_identity_seed,
             storage,
-            scope_key: _,
+            scope_key,
             hidden_parts: _,
-            automerge_frontier_scope,
-            causal_checkpoint_scope,
-            group_part_scope,
+            automerge_frontier_group_scope,
+            causal_checkpoint_group_scope,
+            group_part_group_scope,
         } = config;
         let big_sync_store: SharedPartStore = Arc::new(store.clone());
+        // Frontier payloads live in their own storage scope so the raw doc_id
+        // object ids cannot collide with the document sedimentree objects in
+        // the main scope. The scope is local-only (never registered with the
+        // big-sync RPC server).
+        let frontier_store: SharedPartStore = Arc::new(
+            SqliteBigRepoStore::new_with_config(
+                store.sql.clone(),
+                format!("{scope_key}:automerge-frontier"),
+                big_sync_core::BuckId::MAX_LEVEL,
+                big_sync::HostPartStoreConfig::default(),
+            )
+            .await?,
+        );
         let keyhive_events = store.clone();
         let subduction_storage = store;
         // `SubductionKeyhive` authorizes peers by matching the peer signing
@@ -301,6 +329,7 @@ impl BigRepo {
             runtime2::native::spawn_native_runtime2(
                 signer,
                 subduction_storage.clone(),
+                Arc::clone(&frontier_store),
                 subduction_storage.clone(),
                 Arc::clone(&policy),
                 sync_policy,
@@ -309,16 +338,11 @@ impl BigRepo {
                 Arc::clone(&change_manager),
                 evt_tx,
                 evt_rx,
-                automerge_frontier_scope,
-                causal_checkpoint_scope,
-                group_part_scope,
+                automerge_frontier_group_scope,
+                causal_checkpoint_group_scope,
+                group_part_group_scope,
             )
             .await?;
-
-        runtime
-            .wait_for_keyhive_reconciliation()
-            .await
-            .inspect_err(|err| warn!(?err, "initial keyhive reconciliation failed"))?;
 
         let connection_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
         let out = Arc::new(Self {
@@ -327,6 +351,7 @@ impl BigRepo {
             keyhive_storage,
             sync_policy,
             big_sync_store,
+            frontier_store,
             sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
@@ -530,6 +555,10 @@ impl BigRepo {
     }
 
     /// Wait until Keyhive event reconciliation currently queued on this repository finishes.
+    ///
+    /// This may block for a long time while Keyhive synchronization and durable
+    /// projection settlement complete. Applications that need a boot deadline should
+    /// apply their timeout at the application boundary.
     pub async fn wait_for_keyhive_reconciliation(&self) -> Res<()> {
         self.runtime.wait_for_keyhive_reconciliation().await
     }

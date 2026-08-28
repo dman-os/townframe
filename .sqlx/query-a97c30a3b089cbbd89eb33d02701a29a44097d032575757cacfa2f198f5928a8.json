@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_buckets(\n                    scope_id, part_ref, buck_id, level, changed_at,\n                    live_count, dead_count, live_fp, dead_fp\n                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)\n                 ON CONFLICT(scope_id, part_ref, buck_id) DO UPDATE SET\n                    level = excluded.level,\n                    changed_at = excluded.changed_at,\n                    live_count = excluded.live_count,\n                    dead_count = excluded.dead_count,\n                    live_fp = excluded.live_fp,\n                    dead_fp = excluded.dead_fp",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "a97c30a3b089cbbd89eb33d02701a29a44097d032575757cacfa2f198f5928a8"
+}

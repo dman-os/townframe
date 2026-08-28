@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT sedimentree_id FROM big_repo_subduction_trees\n                 WHERE scope_id = ?1 ORDER BY sedimentree_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "sedimentree_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_trees",
+            "name": "sedimentree_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5eca055aa08ba33c3b9084cbd48f47a4e541ce4fe9f2309d03ba0579078e12d6"
+}

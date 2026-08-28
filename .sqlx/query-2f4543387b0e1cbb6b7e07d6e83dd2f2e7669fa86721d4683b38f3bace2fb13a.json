@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT signed FROM big_repo_subduction_commits\n             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
+  "describe": {
+    "columns": [
+      {
+        "name": "signed",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "signed"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2f4543387b0e1cbb6b7e07d6e83dd2f2e7669fa86721d4683b38f3bace2fb13a"
+}

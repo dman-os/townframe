@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_scopes(scope_key) VALUES (?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "79ae82d0f80fefdc757c4ce44ae8a8782bb63aa48c709c1a7f406fd53d64de20"
+}

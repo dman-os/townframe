@@ -42,6 +42,7 @@ env:
   DAYBOOK_ANDROID_CLI_TARGET: aarch64-linux-android
   DAYBOOK_PRERELEASE_TAG: dev
   RUST_VERSION: 2026-04-16
+  SQLX_OFFLINE: true
 
 jobs:
   resolve-release-meta:

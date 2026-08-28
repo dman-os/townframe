@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT part_id AS 'part_id: Vec<u8>'\n             FROM big_sync_parts WHERE scope_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c2206c802a17672dca9c79b5338db809aee086deaebafd5d22f23c9964a800d4"
+}

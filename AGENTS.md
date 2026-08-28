@@ -102,6 +102,18 @@ Flag code that is doing:
 We're trying to bump the quality of the code so performance footguns should be eliminated.
 Don't be a stickler but don't let anything pass that would be flagged by a senior engineer.
 
+## SQL query style
+
+- Format every multi-line SQL statement with commas first (one clause/item per line). Keep existing untouched runtime query strings unchanged when the task is not SQL formatting.
+
+```sql
+SELECT event_hash
+     , event_bytes
+  FROM big_repo_keyhive_event_log
+ WHERE scope_id = ?
+ ORDER BY seq
+```
+
 ## Style guide
 
 > [!INFO]

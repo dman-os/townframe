@@ -235,6 +235,7 @@ pub async fn request_clone_provision_from_url(
     big_repo,
     blobs_repo,
     partition_store,
+    blob_part_store,
     iroh_secret_key,
     bootstrap,
     options
@@ -243,6 +244,7 @@ pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     partition_store: &SharedPartStore,
+    blob_part_store: &SharedPartStore,
     iroh_secret_key: iroh::SecretKey,
     bootstrap: &SyncBootstrapState,
     options: &CloneRepoInitOptions,
@@ -254,6 +256,7 @@ pub async fn connect_and_pull_required_partitions_once(
         big_repo,
         blobs_repo,
         partition_store,
+        blob_part_store,
         &endpoint,
         address_lookup,
         bootstrap,
@@ -292,6 +295,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     partition_store: &SharedPartStore,
+    blob_part_store: &SharedPartStore,
     endpoint: &iroh::Endpoint,
     address_lookup: iroh::address_lookup::MemoryLookup,
     bootstrap: &SyncBootstrapState,
@@ -303,33 +307,46 @@ async fn pull_required_partitions_via_big_sync_worker(
     let drawer_partition_id = big_repo::group_part_id(bootstrap.authority_ids.default_drawer);
     let blob_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
         Arc::clone(blobs_repo),
-        Arc::clone(partition_store),
+        Arc::clone(blob_part_store),
         endpoint.clone(),
         address_lookup,
     ));
-    let mut sync_backends = HashMap::new();
+    let mut doc_sync_backends = HashMap::new();
     let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
     let repo_sync_backend = Arc::new(
         big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo))
             .await
             .wrap_err("failed booting big repo sync backend")?,
     );
-    sync_backends.insert(
+    doc_sync_backends.insert(
         Arc::clone(&repo_backend_id),
         Arc::clone(&repo_sync_backend) as _,
     );
-    sync_backends.insert(
+    let mut blob_sync_backends = HashMap::new();
+    blob_sync_backends.insert(
         super::BLOBS_BACKEND_ID.into(),
         Arc::clone(&blob_sync_backend) as _,
     );
     let (big_sync_worker, big_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(partition_store),
-        sync_backends,
-        "daybook-clone-provision",
+        doc_sync_backends,
+        "daybook-docs",
         max_task_backoff,
+        Arc::from("daybook-core"),
+    )?;
+    let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
+        Arc::clone(blob_part_store),
+        blob_sync_backends,
+        "daybook-blobs",
+        max_task_backoff,
+        Arc::from("daybook-blobs"),
     )?;
     let (big_sync_rpc, big_sync_rpc_stop) =
-        big_sync::rpc::spawn_big_sync_rpc(Arc::clone(partition_store)).await?;
+        big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
+            (Arc::from("daybook-core"), Arc::clone(partition_store) as _),
+            (Arc::from("daybook-blobs"), Arc::clone(blob_part_store) as _),
+        ]))
+        .await?;
     let (repo_rpc, repo_rpc_stop_token) =
         big_repo::rpc::spawn_repo_rpc(Arc::clone(big_repo)).await?;
 
@@ -373,7 +390,8 @@ async fn pull_required_partitions_via_big_sync_worker(
     .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
     let big_sync_rpc_client =
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
-    let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
+    let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
+        Arc::new(big_sync_rpc_client);
 
     let initial_partitions: HashMap<PartId, big_sync::BackendId> = [
         (core_docs_partition_id, Arc::clone(&repo_backend_id)),
@@ -388,10 +406,18 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_sync_worker
         .set_peer(
             peer_id,
-            big_sync_rpc_client,
+            Arc::clone(&big_sync_rpc_client),
             initial_partitions.clone(),
             HashMap::new(),
         )
+        .await?;
+    // The blob worker is registered with the peer so blob-scope sync requests
+    // from the seed are served during the clone connection. Blob inventory
+    // parts are populated lazily after the repo finishes booting, so there are
+    // no parts to register here; the seed's blob worker probes our blob scope
+    // via the RPC registry and sees an empty store until then.
+    blob_sync_worker
+        .set_peer(peer_id, big_sync_rpc_client, HashMap::new(), HashMap::new())
         .await?;
 
     let timeout_result = tokio::time::timeout(timeout, async {
@@ -426,6 +452,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_sync_rpc_stop.stop().await?;
     repo_rpc_stop_token.stop().await?;
     big_sync_worker_stop.stop().await?;
+    blob_sync_worker_stop.stop().await?;
 
     Ok(())
 }
@@ -486,9 +513,9 @@ pub async fn clone_repo_init_from_url(
             },
             scope_key: Arc::from("daybook-core"),
             hidden_parts: Default::default(),
-            automerge_frontier_scope: Default::default(),
-            causal_checkpoint_scope: Default::default(),
-            group_part_scope: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
         })
         .await?;
         let provision = request_clone_provision_from_url(
@@ -555,7 +582,7 @@ pub async fn clone_repo_init_from_url(
         }
 
         let part_store = big_repo.shared_part_store();
-        let blob_part_store = crate::repo::open_blob_part_store(&staging).await?;
+        let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
         let blobs_repo =
             crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
@@ -565,6 +592,7 @@ pub async fn clone_repo_init_from_url(
             &big_repo,
             &blobs_repo,
             &part_store,
+            &blob_part_store,
             local_secret.clone(),
             &bootstrap,
             &options,
@@ -591,6 +619,7 @@ pub async fn clone_repo_init_from_url(
             sql: sql.clone(),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            frontier_part_store: big_repo.frontier_part_store(),
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,

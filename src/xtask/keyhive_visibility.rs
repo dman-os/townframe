@@ -20,15 +20,15 @@ use crate::interlude::*;
 pub async fn cli() -> Res<()> {
     let iterations = std::env::var("KEYHIVE_VIS_ITERATIONS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|iterations| iterations.parse().ok())
         .unwrap_or(30);
     let mut failures = 0_usize;
-    for i in 0..iterations {
-        if let Err(err) = one_round(i).await {
+    for iteration in 0..iterations {
+        if let Err(err) = one_round(iteration).await {
             failures += 1;
-            println!("── iteration {i}: FAILED\n{err:#}");
+            println!("── iteration {iteration}: FAILED\n{err:#}");
         } else {
-            println!("── iteration {i}: ok");
+            println!("── iteration {iteration}: ok");
         }
     }
     println!("\n{failures}/{iterations} iterations failed");
@@ -38,7 +38,7 @@ pub async fn cli() -> Res<()> {
     Ok(())
 }
 
-async fn one_round(i: usize) -> Res<()> {
+async fn one_round(iteration: usize) -> Res<()> {
     let alice = make_keyhive().await;
     let bob = make_keyhive().await;
 
@@ -60,7 +60,7 @@ async fn one_round(i: usize) -> Res<()> {
     let group = alice.generate_group(vec![]).await?;
     let bob_ident_on_alice = bob_id
         .to_identifier()
-        .map_err(|e| eyre::eyre!("bob identifier: {e}"))?;
+        .map_err(|error| eyre::eyre!("bob identifier: {error}"))?;
     let bob_agent_on_alice = alice
         .get_agent(bob_ident_on_alice)
         .await
@@ -69,7 +69,7 @@ async fn one_round(i: usize) -> Res<()> {
     alice
         .add_member(
             bob_agent_on_alice.clone(),
-            &Membered::Group(gid, group.clone()),
+            &Membered::Group(gid, Arc::clone(&group)),
             Access::Read,
             &[],
         )
@@ -97,7 +97,10 @@ async fn one_round(i: usize) -> Res<()> {
 
     // The doc creation under test: coparent = the group.
     let doc = alice
-        .generate_doc(vec![Peer::Group(gid, group.clone())], nonempty![[0u8; 32]])
+        .generate_doc(
+            vec![Peer::Group(gid, Arc::clone(&group))],
+            nonempty![[0u8; 32]],
+        )
         .await?;
     let doc_id = doc.lock().await.doc_id();
 
@@ -156,7 +159,7 @@ async fn one_round(i: usize) -> Res<()> {
     }
 
     println!(
-        "   iteration {i}: new_events_visible_to_bob_in_creator_projection={new_visible} \
+        "   iteration {iteration}: new_events_visible_to_bob_in_creator_projection={new_visible} \
          doc_reachable_by_bob_on_creator={doc_reachable} bob_got_doc_after_sync={bob_got_doc} \
          extra_rounds={extra_rounds}"
     );
@@ -190,7 +193,7 @@ async fn verbose_round(
         .recv()
         .await
         .expect("failed to receive sync request");
-    println!("   [{label}] responder <- {}", "signed-message");
+    println!("   [{label}] responder <- signed-message");
     responder_proto
         .handle_message(initiator_id, sync_request, None)
         .await
@@ -201,7 +204,7 @@ async fn verbose_round(
         .recv()
         .await
         .expect("failed to receive sync response");
-    println!("   [{label}] initiator <- {}", "signed-message");
+    println!("   [{label}] initiator <- signed-message");
     initiator_proto
         .handle_message(responder_id, sync_response, None)
         .await
@@ -211,7 +214,7 @@ async fn verbose_round(
         let mut handled = false;
 
         if let Ok(msg) = responder_conn.inbound_rx.try_recv() {
-            println!("   [{label}] responder <- {}", "signed-message");
+            println!("   [{label}] responder <- signed-message");
             responder_proto
                 .handle_message(initiator_id, msg, None)
                 .await
@@ -220,7 +223,7 @@ async fn verbose_round(
         }
 
         if let Ok(msg) = initiator_conn.inbound_rx.try_recv() {
-            println!("   [{label}] initiator <- {}", "signed-message");
+            println!("   [{label}] initiator <- signed-message");
             initiator_proto
                 .handle_message(responder_id, msg, None)
                 .await

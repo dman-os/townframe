@@ -522,7 +522,7 @@ fn big_sync_store_diff(
         snapshot
             .memberships
             .iter()
-            .map(|(part, obj, _, _, removed_at, _)| ((*part, *obj), removed_at.is_none()))
+            .map(|(part, obj, event_type, _)| ((*part, *obj), *event_type != 2))
             .collect::<BTreeMap<_, _>>()
     };
     let left_memberships = semantic_memberships(left);
@@ -1153,7 +1153,7 @@ async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
         return Ok(());
     };
     let root = std::path::PathBuf::from(root);
-    let mut nodes = open_cluster_nodes(&[
+    let nodes = open_cluster_nodes(&[
         root.join("repo-0"),
         root.join("repo-1"),
         root.join("repo-2"),

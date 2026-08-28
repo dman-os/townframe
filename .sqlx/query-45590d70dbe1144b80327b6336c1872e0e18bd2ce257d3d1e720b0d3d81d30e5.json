@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT head_id FROM big_repo_subduction_fragments\n                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "head_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_fragments",
+            "name": "head_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "45590d70dbe1144b80327b6336c1872e0e18bd2ce257d3d1e720b0d3d81d30e5"
+}

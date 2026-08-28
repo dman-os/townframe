@@ -4,8 +4,8 @@
 //! commands/jobs out — see [`big_sync_core::watermark`],
 //! [`big_sync_core::outbox`], [`big_sync_core::scheduler`]) and a driver owns
 //! all I/O: it feeds subscription batches into the core, executes the serial
-//! command outbox front-peek/complete, spawns scheduled seeds as tokio tasks,
-//! and reports completions back as events.
+//! command outbox front-peek/complete, spawns scheduled seeds as abortable
+//! tasks, and reports completions back as events.
 //!
 //! This module extracts the driver loop itself so use sites only supply:
 //!
@@ -46,6 +46,10 @@ pub trait StreamMachine {
     type Cmd;
     /// Concurrent job seeds drained from the scheduler's spawn queue.
     type Seed: Clone;
+    /// Output produced by a successfully completed spawned seed task. The
+    /// driver carries it back over the result channel so sites never need a
+    /// shared completion map.
+    type TaskOutput: Send;
 
     /// Feed one event into the reducer.
     fn on_evt(&mut self, evt: Self::Evt);
@@ -60,13 +64,15 @@ pub trait StreamMachine {
     /// task completion is handed to the runner for job aggregation.
     fn complete_job(&mut self, id: TaskId) -> bool;
     /// Cancel task handles stopped by the machine's keyed scheduler.
-    fn drain_stop_queue(&mut self) -> Vec<TaskId>;
+    fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId>;
     /// The event the driver delivers after the runner reports a completed
     /// reconciliation job.
     fn job_completed_evt(&mut self, job: TaskId) -> Self::Evt;
 
     /// Hand spawned seeds to the driver.
-    fn drain_spawn_queue(&mut self) -> Vec<big_sync_core::scheduler::SpawnedTask<Self::Seed>>;
+    fn drain_spawn_queue(
+        &mut self,
+    ) -> std::vec::Drain<'_, big_sync_core::scheduler::SpawnedTask<Self::Seed>>;
 
     /// Advance the scheduler's retry clock (due backoffs move to the spawn
     /// queue). `now` comes from the driver's janitor tick.
@@ -106,16 +112,22 @@ pub trait CmdExecutor<M: StreamMachine> {
     async fn execute(&mut self, cmd: &M::Cmd) -> Res<ExecOutcome<M>>;
 }
 
-/// Spawns a scheduled seed as concurrent tokio work and reports
-/// `Ok(TaskId)`/errors over the shared result channel. The runner receives
-/// the full [`SpawnedTask`] because completion correlation keys on the
-/// scheduler-assigned task id.
+/// Spawns a scheduled seed as concurrent work on the driver's abortable task
+/// set and reports `Ok((TaskId, TaskOutput))`/errors over the shared result
+/// channel. The runner receives the full [`SpawnedTask`] because completion
+/// correlation keys on the scheduler-assigned task id; the output rides the
+/// same channel so sites never need a shared completion map. The driver owns
+/// the [`utils_rs::AbortableJoinSet`] and drops it on every exit path, which
+/// aborts any still-running seed tasks (stop/shutdown cancellation).
 pub trait SeedRunner<M: StreamMachine> {
     fn spawn_seed(
         &mut self,
         task: SpawnedTask<M::Seed>,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
-        live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<
+            Result<(TaskId, M::TaskOutput), eyre::Report>,
+        >,
+        task_set: &utils_rs::AbortableJoinSet,
+        live: &mut HashMap<TaskId, utils_rs::TaskHandle>,
     );
     /// Observe a successfully completed task. Most sites map each task to
     /// its own machine completion; a site with grouped task execution may
@@ -135,29 +147,31 @@ pub trait SeedRunner<M: StreamMachine> {
 pub trait DriverHooks<M: StreamMachine> {
     /// Janitor tick: site maintenance (generation rebuilds, ...). Runs
     /// before the scheduler clock advances.
-    async fn on_janitor(&mut self, machine: &mut M) -> Res<()> {
-        let _ = machine;
+    async fn on_janitor(&mut self, _machine: &mut M) -> Res<()> {
         Ok(())
     }
 
     /// Pump after every loop iteration: start work that admitted events made
     /// ready (e.g. build seeds from pending rows). Runs after the outbox is
     /// drained and the spawn queue emptied.
-    async fn pump(&mut self, machine: &mut M) -> Res<()> {
-        let _ = machine;
+    async fn pump(&mut self, _machine: &mut M) -> Res<()> {
         Ok(())
     }
 
     /// The machine reported idle.
-    async fn on_idle(&mut self, machine: &mut M) -> Res<()> {
-        let _ = machine;
+    async fn on_idle(&mut self, _machine: &mut M) -> Res<()> {
         Ok(())
     }
     /// Consume a successful task result and optionally feed a derived event
     /// into the machine. This is used by task graphs whose decoder work
-    /// produces keyed follow-up work.
-    async fn on_task_completed(&mut self, machine: &mut M, _task: TaskId) -> Res<()> {
-        let _ = machine;
+    /// produces keyed follow-up work. The task's output arrives directly over
+    /// the result channel.
+    async fn on_task_completed(
+        &mut self,
+        _machine: &mut M,
+        _task: TaskId,
+        _output: M::TaskOutput,
+    ) -> Res<()> {
         Ok(())
     }
 }
@@ -215,8 +229,9 @@ impl EventSource for AdmissionSource {
     }
 }
 
-/// Execute the machine's pending serial commands until quiescent.
-async fn drive_outbox<M, X>(machine: &mut M, executor: &mut X) -> Res<()>
+/// Execute the machine's pending serial commands until quiescent. Returns
+/// `true` when a command requested shutdown, so the driver loop can exit.
+async fn drive_outbox<M, X>(machine: &mut M, executor: &mut X) -> Res<bool>
 where
     M: StreamMachine,
     X: CmdExecutor<M>,
@@ -230,10 +245,10 @@ where
                     machine.on_evt(evt);
                 }
             }
-            ExecOutcome::Shutdown => return Ok(()),
+            ExecOutcome::Shutdown => return Ok(true),
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// The driver loop. See the module docs for the contract.
@@ -254,8 +269,13 @@ where
     D: CmdExecutor<M> + SeedRunner<M> + DriverHooks<M> + Send,
 {
     let (result_tx, mut result_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<TaskId, eyre::Report>>();
-    let mut live_tasks: HashMap<TaskId, tokio::task::JoinHandle<()>> = HashMap::new();
+        tokio::sync::mpsc::unbounded_channel::<Result<(TaskId, M::TaskOutput), eyre::Report>>();
+    // Seed tasks are spawned into an abortable join set so every exit path
+    // (shutdown, error, or the enclosing worker future being aborted) cancels
+    // them: dropping the set aborts all still-running tasks. Individual
+    // replacement cancellations still go through the per-task handle below.
+    let task_set = utils_rs::AbortableJoinSet::new();
+    let mut live_tasks: HashMap<TaskId, utils_rs::TaskHandle> = HashMap::new();
     let mut janitor = tokio::time::interval(janitor_interval);
     janitor.tick().await; // first tick fires immediately; consume it
     let mut shutdown = shutdown;
@@ -272,7 +292,7 @@ where
                 }
             }
             Some(result) = result_rx.recv() => {
-                let task = result?;
+                let (task, output) = result?;
                 let Some(_handle) = live_tasks.remove(&task) else {
                     continue;
                 };
@@ -281,7 +301,7 @@ where
                 if !machine.complete_job(task) {
                     continue;
                 }
-                driver.on_task_completed(&mut machine, task).await?;
+                driver.on_task_completed(&mut machine, task, output).await?;
                 if let Some(job) = driver.task_completed(task) {
                     let evt = machine.job_completed_evt(job);
                     machine.on_evt(evt);
@@ -292,7 +312,9 @@ where
                 machine.tick_scheduler(Instant::now());
             }
         }
-        drive_outbox(&mut machine, driver).await?;
+        if drive_outbox(&mut machine, driver).await? {
+            return Ok(());
+        }
         for task in machine.drain_stop_queue() {
             if let Some(handle) = live_tasks.remove(&task) {
                 handle.abort();
@@ -300,7 +322,7 @@ where
             driver.task_stopped(task);
         }
         for task in machine.drain_spawn_queue() {
-            driver.spawn_seed(task, &result_tx, &mut live_tasks);
+            driver.spawn_seed(task, &result_tx, &task_set, &mut live_tasks);
         }
         driver.pump(&mut machine).await?;
         if machine.is_idle() {
@@ -331,6 +353,7 @@ mod tests {
         type Evt = String;
         type Cmd = String;
         type Seed = ();
+        type TaskOutput = ();
 
         fn on_evt(&mut self, evt: String) {
             if let Some(job) = self.pending_job.take() {
@@ -350,23 +373,25 @@ mod tests {
         }
 
         fn complete_job(&mut self, id: TaskId) -> bool {
-            let completed = self.scheduler.stop(id).is_some();
+            // A completed job never respawns, so `cancel` (not `stop`) keeps
+            // its id out of the `stopped` set.
+            let completed = self.scheduler.cancel(id).is_some();
             if completed {
                 self.completed_jobs_paired.push(id);
                 self.pending_job = Some(id);
             }
             completed
         }
-        fn drain_stop_queue(&mut self) -> Vec<TaskId> {
-            self.scheduler.drain_stop_queue().collect()
+        fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId> {
+            self.scheduler.drain_stop_queue()
         }
 
         fn job_completed_evt(&mut self, job: TaskId) -> String {
             format!("done-{job}")
         }
 
-        fn drain_spawn_queue(&mut self) -> Vec<SpawnedTask<()>> {
-            self.scheduler.drain_spawn_queue().collect()
+        fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, SpawnedTask<()>> {
+            self.scheduler.drain_spawn_queue()
         }
 
         fn tick_scheduler(&mut self, now: Instant) {
@@ -379,53 +404,13 @@ mod tests {
         }
     }
 
-    struct ToySource {
-        batches: Vec<Vec<String>>,
-    }
-
-    #[async_trait::async_trait]
-    impl EventSource for ToySource {
-        type Evt = String;
-
-        async fn next_batch(&mut self) -> Res<Vec<String>> {
-            let Some(batch) = self.batches.pop() else {
-                return Err(ferr!("closed"));
-            };
-            Ok(batch)
-        }
-    }
-
     struct ToyExec;
 
     #[async_trait::async_trait]
     impl CmdExecutor<ToyMachine> for ToyExec {
         async fn execute(&mut self, cmd: &String) -> Res<ExecOutcome<ToyMachine>> {
-            let _ = cmd;
+            let _: &String = cmd;
             Ok(ExecOutcome::Done(None))
-        }
-    }
-
-    struct ToyRunner {
-        spawned: Vec<()>,
-    }
-
-    impl SeedRunner<ToyMachine> for ToyRunner {
-        fn spawn_seed(
-            &mut self,
-            task: SpawnedTask<()>,
-            result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
-            live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
-        ) {
-            self.spawned.push(());
-            let tx = result_tx.clone();
-            let handle = tokio::spawn(async move {
-                // complete immediately with success
-                drop(tx.send(Ok(0)));
-            });
-            // TaskId 0 is fabricated by the toy machine below via seed->id
-            // bookkeeping; for the pairing test we only care that the driver
-            // pairs whatever id arrives.
-            live.insert(u64::MAX, handle);
         }
     }
 
@@ -437,7 +422,7 @@ mod tests {
         machine.outbox.push("first".to_string(), ());
         machine.outbox.push("second".to_string(), ());
         let mut exec = ToyExec;
-        drive_outbox(&mut machine, &mut exec).await.unwrap();
+        assert!(!drive_outbox(&mut machine, &mut exec).await.unwrap());
         assert!(machine.outbox.is_empty());
         assert!(machine.is_idle());
     }

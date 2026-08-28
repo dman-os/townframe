@@ -320,8 +320,14 @@ impl BlobPinsPartWorker {
             );
             query_builder.build().execute(&mut *tx).await?;
         }
-        tx.commit().await?;
-
+        // Part-store writes must complete before the SQL commit: a crash
+        // between the commit and the part-store writes would leave the DB row
+        // present but the object missing from the partition, and the retry's
+        // `prev_hashes` (read from the committed DB) would then suppress the
+        // re-add forever. Both part-store ops are idempotent, so redoing them
+        // after a crash-before-commit is safe. `hash_is_unused_by_other_branches`
+        // reads committed state and excludes the current branch, so it is
+        // unaffected by this transaction's uncommitted DELETE/INSERT.
         for (hash, length_octets) in pins {
             let obj_id = crate::blobs::blob_id_from_hash(hash);
             let payload = serde_json::json!({ "lengthOctets": length_octets });
@@ -345,6 +351,8 @@ impl BlobPinsPartWorker {
             }
         }
 
+        tx.commit().await?;
+
         self.doc_presence_outcome(doc_id).await
     }
 
@@ -356,13 +364,17 @@ impl BlobPinsPartWorker {
             .bind(doc_id)
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
+        // Part-store removal must complete before the SQL commit (see
+        // `reindex_doc_pins`): a crash between the commit and the removal
+        // would orphan the objects in the partition, and the retry's
+        // `prev_hashes` (read from the committed DB) would be empty.
         for hash in &prev_hashes {
             let obj_id = crate::blobs::blob_id_from_hash(hash);
             self.part_store
                 .remove_obj_from_part(obj_id, part_id)
                 .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -379,7 +391,10 @@ impl BlobPinsPartWorker {
             .bind(branch_path.as_str())
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
+        // Part-store removal must complete before the SQL commit (see
+        // `reindex_doc_pins`). `hash_is_unused_by_other_branches` reads
+        // committed state and excludes the current branch, so it is
+        // unaffected by this transaction's uncommitted DELETE.
         for hash in &prev_hashes {
             if self
                 .hash_is_unused_by_other_branches(hash, doc_id, branch_path)
@@ -391,6 +406,7 @@ impl BlobPinsPartWorker {
                     .await?;
             }
         }
+        tx.commit().await?;
         self.doc_presence_outcome(doc_id).await
     }
 

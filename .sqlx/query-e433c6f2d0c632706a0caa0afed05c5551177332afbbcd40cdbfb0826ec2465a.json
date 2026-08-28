@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT changed_at, live_count, dead_count, live_fp, dead_fp\n             FROM big_sync_buckets\n             WHERE scope_id = ?1 AND part_ref = (\n                 SELECT part_ref FROM big_sync_parts\n                  WHERE scope_id = ?1 AND part_id = ?2\n             ) AND level = ?3 AND buck_id = ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "changed_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "changed_at"
+          }
+        }
+      },
+      {
+        "name": "live_count",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "live_count"
+          }
+        }
+      },
+      {
+        "name": "dead_count",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "dead_count"
+          }
+        }
+      },
+      {
+        "name": "live_fp",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "live_fp"
+          }
+        }
+      },
+      {
+        "name": "dead_fp",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_buckets",
+            "name": "dead_fp"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e433c6f2d0c632706a0caa0afed05c5551177332afbbcd40cdbfb0826ec2465a"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT peer_id, parts.part_id, cursor\n             FROM big_sync_peer_cursors\n             JOIN big_sync_parts parts ON parts.part_ref = big_sync_peer_cursors.part_ref\n             WHERE big_sync_peer_cursors.scope_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "peer_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_peer_cursors",
+            "name": "peer_id"
+          }
+        }
+      },
+      {
+        "name": "part_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      },
+      {
+        "name": "cursor",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_peer_cursors",
+            "name": "cursor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4fd22d18cd9e6de16e47170abfbf3ad06e01bfe18c33b16e530867e1b5cbb688"
+}

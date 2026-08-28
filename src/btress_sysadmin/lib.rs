@@ -45,7 +45,7 @@ wit::export!(Component with_types_in wit);
 
 #[cfg(feature = "ssr")]
 impl wit::exports::wasi::http::incoming_handler::Guest for Component {
-    // #[allow(async_fn_in_trait)]
+    // #[expect(async_fn_in_trait)]
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
         any_spawner::Executor::init_tokio().expect(ERROR_TOKIO);
         let rt = tokio::runtime::Builder::new_current_thread()

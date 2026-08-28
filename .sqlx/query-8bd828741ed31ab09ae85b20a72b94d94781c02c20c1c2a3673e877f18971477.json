@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_sync_pending_members\n                                         WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8bd828741ed31ab09ae85b20a72b94d94781c02c20c1c2a3673e877f18971477"
+}

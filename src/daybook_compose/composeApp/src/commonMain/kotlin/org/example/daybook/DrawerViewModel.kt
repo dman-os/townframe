@@ -117,6 +117,7 @@ class DrawerViewModel(
                 viewModelScope.launch {
                     val shouldRefreshLoaded = _loadedDocs.value.containsKey(event.docId)
                     val shouldRefreshSelected = event.docId == _selectedDocId.value
+                    if (!shouldRefreshLoaded && !shouldRefreshSelected) return@launch
                     refreshRunner.submit(
                         DrawerRefreshIntent(
                             refreshDocIds = if (shouldRefreshLoaded) setOf(event.docId) else emptySet(),

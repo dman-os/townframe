@@ -156,11 +156,12 @@ impl MemoryRpcClient {
 }
 
 #[async_trait]
-impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
+impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
     async fn peer_summary(
         &self,
-        req: PeerSummaryRequest,
+        req: crate::rpc::ScopedRequest<PeerSummaryRequest>,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_count = req.parts.len(),
@@ -180,9 +181,10 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn sub_parts(
         &self,
-        req: SubPartsRequest,
+        req: crate::rpc::ScopedRequest<SubPartsRequest>,
     ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
     {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             targets = ?req.targets,
@@ -200,8 +202,9 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn get_changed_buckets(
         &self,
-        req: GetChangedBucketsRequest,
+        req: crate::rpc::ScopedRequest<GetChangedBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_id = %req.part_id,
@@ -219,8 +222,9 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
     async fn leaf_buckets(
         &self,
-        req: LeafBucketsRequest,
+        req: crate::rpc::ScopedRequest<LeafBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
             part_id = %req.part_id,
@@ -311,7 +315,7 @@ impl SyncBackend for MemorySyncBackend {
         if !parts.is_empty() {
             self.local_part_store
                 .add_obj_to_parts(obj_id, parts.clone())
-                .await;
+                .await?;
         }
         Ok(SyncTaskRunOutcome::Completion(outcome))
     }
@@ -746,6 +750,7 @@ where
         Arc::clone(&store_for_worker),
         [(TEST_BACKEND_ID.into(), backend)].into(),
         "big-sync-test",
+        Arc::from("big-sync-test"),
     )?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),
@@ -1475,7 +1480,7 @@ async fn memory_sync_two_node_connect_order_does_not_change_final_state() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(300, Duration::from_secs(15)).await
 }
 
@@ -1538,6 +1543,12 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         );
     }
 
+    let expected_part_cursor = u64::try_from(
+        obj_count
+            .checked_mul(2)
+            .expect("object count overflow while calculating part cursor"),
+    )
+    .expect("object count does not fit in a cursor");
     let cursor_deadline = std::time::Instant::now() + timeout;
     loop {
         let snapshot = node_a.snapshot().await?;
@@ -1545,14 +1556,14 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
             .peer_part_cursors
             .get(&(node_b.peer_id, part_id))
             .copied()
-            == Some(obj_count as u64)
+            == Some(expected_part_cursor)
         {
             break;
         }
         if std::time::Instant::now() >= cursor_deadline {
             return Err(ferr!(
                 "timed out waiting for bucket cursor advance to {}",
-                obj_count
+                expected_part_cursor
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1575,18 +1586,18 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(1_000, Duration::from_secs(30)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(10_000, Duration::from_secs(90)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 // #[ignore = "slow bucket catchup case"]
-async fn memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(100_000, Duration::from_secs(300)).await
 }
 
@@ -1894,6 +1905,7 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let rx = store
         .subscribe(
             SubPartsRequest {
+                lower_bound: 0,
                 targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: part,
                     cursor: 0,
@@ -1908,6 +1920,7 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let err = store
         .subscribe(
             SubPartsRequest {
+                lower_bound: 0,
                 targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: hidden,
                     cursor: 0,

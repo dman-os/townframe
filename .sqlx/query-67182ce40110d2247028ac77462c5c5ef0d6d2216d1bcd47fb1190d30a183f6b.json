@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.obj_id, o.payload_json, m.event_type, m.txid\n                 FROM big_sync_members m\n                 JOIN big_sync_objs o ON o.obj_ref = m.obj_ref\n                 WHERE m.scope_id = ?1\n                   AND m.maybe_part_ref = (\n                       SELECT part_ref FROM big_sync_parts\n                        WHERE scope_id = ?1 AND part_id = ?2\n                   )\n                   AND m.txid > ?3\n                 ORDER BY m.txid, m.obj_ref",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_id"
+          }
+        }
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      },
+      {
+        "name": "event_type",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_members",
+            "name": "event_type"
+          }
+        }
+      },
+      {
+        "name": "txid",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_members",
+            "name": "txid"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "67182ce40110d2247028ac77462c5c5ef0d6d2216d1bcd47fb1190d30a183f6b"
+}

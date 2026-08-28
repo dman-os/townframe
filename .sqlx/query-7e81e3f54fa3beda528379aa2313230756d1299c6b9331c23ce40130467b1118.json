@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE big_sync_objs SET payload_json = NULL WHERE obj_ref = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7e81e3f54fa3beda528379aa2313230756d1299c6b9331c23ce40130467b1118"
+}

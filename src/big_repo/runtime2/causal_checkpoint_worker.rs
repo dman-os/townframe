@@ -240,10 +240,19 @@ impl CausalCheckpointCore {
     }
 
     fn settle_lane(&mut self, seq: u64, key: CausalKey) {
+        // The cursor commit is monotonic (MAX), so when several streams reach
+        // watermarks in one settle only the last one needs to be persisted.
+        let mut watermark: Option<u64> = None;
         for (_, reached) in self.machine.settle(seq, seq, key) {
-            if let Some(watermark) = reached {
-                self.outbox.push(Cmd::AdvanceCursor(watermark), ());
+            if let Some(reached) = reached {
+                watermark = Some(match watermark {
+                    Some(prev) => prev.max(reached),
+                    None => reached,
+                });
             }
+        }
+        if let Some(watermark) = watermark {
+            self.outbox.push(Cmd::AdvanceCursor(watermark), ());
         }
     }
 
@@ -259,6 +268,7 @@ impl crate::runtime2::driver::StreamMachine for CausalCheckpointCore {
     type Evt = Evt;
     type Cmd = Cmd;
     type Seed = CausalSeed;
+    type TaskOutput = CausalTaskOutput;
 
     fn on_evt(&mut self, evt: Evt) {
         CausalCheckpointCore::on_evt(self, evt);
@@ -271,23 +281,23 @@ impl crate::runtime2::driver::StreamMachine for CausalCheckpointCore {
     }
 
     fn complete_cmd(&mut self, id: utils_rs::prelude::Uuid) {
-        drop(self.outbox.complete(id));
+        let (_, _) = self.outbox.complete(id);
     }
 
     fn complete_job(&mut self, id: TaskId) -> bool {
         self.scheduler.complete(id)
     }
 
-    fn drain_stop_queue(&mut self) -> Vec<TaskId> {
-        self.scheduler.drain_stop_queue().collect()
+    fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId> {
+        self.scheduler.drain_stop_queue()
     }
 
     fn job_completed_evt(&mut self, _job: TaskId) -> Evt {
         unreachable!("causal checkpoint tasks complete through keyed task results")
     }
 
-    fn drain_spawn_queue(&mut self) -> Vec<SpawnedTask<CausalSeed>> {
-        self.scheduler.drain_spawn_queue().collect()
+    fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, SpawnedTask<CausalSeed>> {
+        self.scheduler.drain_spawn_queue()
     }
 
     fn tick_scheduler(&mut self, now: Instant) {
@@ -326,7 +336,6 @@ impl crate::runtime2::driver::EventSource for AdmissionSource {
 struct CausalExec {
     store: SqliteBigRepoStore,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
-    completed: Arc<std::sync::Mutex<HashMap<TaskId, CausalTaskOutput>>>,
     keyhive: BigKeyhiveHandle,
     scope: WorkerGroupScope,
 }
@@ -354,15 +363,17 @@ impl driver::SeedRunner<CausalCheckpointCore> for CausalExec {
     fn spawn_seed(
         &mut self,
         task: SpawnedTask<CausalSeed>,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
-        live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<
+            Result<(TaskId, CausalTaskOutput), eyre::Report>,
+        >,
+        task_set: &utils_rs::AbortableJoinSet,
+        live: &mut HashMap<TaskId, utils_rs::TaskHandle>,
     ) {
         let task_id = task.id;
         let seed = task.seed;
         let runtime = self.runtime.clone();
         let keyhive = self.keyhive.clone();
         let scope = self.scope.clone();
-        let completed = self.completed.clone();
         let result_tx = result_tx.clone();
         let fut = async move {
             match seed {
@@ -373,11 +384,17 @@ impl driver::SeedRunner<CausalCheckpointCore> for CausalExec {
                         StaticEvent::CgkaOperation(operation) => {
                             let doc =
                                 crate::DocumentId::new(*operation.payload().doc_id().as_bytes());
-                            scope
-                                .admits_doc_groups(
-                                    &keyhive.group_ids_containing_document(doc).await,
-                                )
-                                .then_some(doc)
+                            // `All` considers every admission event with no group
+                            // lookups; only a selective scope walks the keyhive
+                            // graph to check the document's groups.
+                            match scope.groups() {
+                                None => Some(doc),
+                                Some(_) => scope
+                                    .admits_doc_groups(
+                                        &keyhive.group_ids_containing_document(doc).await?,
+                                    )
+                                    .then_some(doc),
+                            }
                         }
                         _ => None,
                     };
@@ -392,26 +409,16 @@ impl driver::SeedRunner<CausalCheckpointCore> for CausalExec {
                 }
             }
         };
-        let handle = tokio::spawn(async move {
-            let result = fut.await;
-            if let Ok(output) = result.as_ref() {
-                completed
-                    .lock()
-                    .expect("causal completion map poisoned")
-                    .insert(task_id, output.clone());
-            }
-            drop(result_tx.send(result.map(|_| task_id)));
-        });
+        let handle = task_set
+            .spawn(async move {
+                let result = fut.await;
+                drop(result_tx.send(result.map(|output| (task_id, output))));
+            })
+            .expect("driver task set must accept work while the driver runs");
         live.insert(task_id, handle);
     }
     fn task_completed(&mut self, _task: TaskId) -> Option<TaskId> {
         None
-    }
-    fn task_stopped(&mut self, task: TaskId) {
-        self.completed
-            .lock()
-            .expect("causal completion map poisoned")
-            .remove(&task);
     }
 }
 
@@ -420,14 +427,9 @@ impl driver::DriverHooks<CausalCheckpointCore> for CausalExec {
     async fn on_task_completed(
         &mut self,
         machine: &mut CausalCheckpointCore,
-        task: TaskId,
+        _task: TaskId,
+        output: CausalTaskOutput,
     ) -> Res<()> {
-        let output = self
-            .completed
-            .lock()
-            .expect("causal completion map poisoned")
-            .remove(&task)
-            .expect("successful task has no completion output");
         match output {
             CausalTaskOutput::Decoded { seq, doc } => {
                 machine.on_evt(Evt::Decoded { seq, doc });
@@ -459,6 +461,12 @@ async fn run_causal_checkpoint_tail(
     scope: WorkerGroupScope,
 ) -> Res<()> {
     let cursor = store.causal_checkpoint_cursor().await?;
+    store
+        .register_keyhive_admission_reader(
+            crate::store::sqlite::KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
+            cursor,
+        )
+        .await?;
     if cursor == 0 {
         // Full build: nothing was ever processed, so close coverage once for
         // every document keyhive knows. Admission-row replays afterwards are
@@ -468,8 +476,19 @@ async fn run_causal_checkpoint_tail(
                 return Ok(());
             }
             let doc_id = crate::DocumentId::new(*doc_obj.as_bytes());
-            if scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await) {
-                runtime.ensure_causal_coverage(doc_id).await?;
+            // `All` closes coverage for every document with no group lookups;
+            // only a selective scope walks the keyhive graph to check groups.
+            match scope.groups() {
+                None => {
+                    runtime.ensure_causal_coverage(doc_id).await?;
+                }
+                Some(_) => {
+                    if scope
+                        .admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await?)
+                    {
+                        runtime.ensure_causal_coverage(doc_id).await?;
+                    }
+                }
             }
         }
     }
@@ -488,7 +507,6 @@ async fn run_causal_checkpoint_tail(
         runtime,
         keyhive,
         scope,
-        completed: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     crate::runtime2::driver::run_stream_driver(
         CausalCheckpointCore::default(),

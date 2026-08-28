@@ -62,7 +62,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 ));
             }
         }
-        let timeout = repo.sync_policy().doc_sync_timeout;
+        let timeout = repo.sync_policy().backend_doc_sync_timeout;
         let receipt = match tokio::time::timeout(
             timeout,
             repo.runtime.sync_doc_with_peer_receipt(doc_id, peer_id),

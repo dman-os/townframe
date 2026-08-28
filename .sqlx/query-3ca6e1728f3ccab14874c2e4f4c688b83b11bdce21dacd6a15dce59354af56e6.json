@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.part_id FROM big_sync_members m\n                     JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref\n                     WHERE m.scope_id = ?1 AND m.obj_ref = ?2\n                       AND m.maybe_part_ref > 0 AND m.event_type != 2",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3ca6e1728f3ccab14874c2e4f4c688b83b11bdce21dacd6a15dce59354af56e6"
+}

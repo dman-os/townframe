@@ -2,8 +2,8 @@ use crate::interlude::*;
 
 use big_sync::HostPartStore;
 use big_sync::sqlite_core::{
-    MemberState, PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, SqliteCore,
-    encode_access,
+    EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
+    SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
 };
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
@@ -23,215 +23,39 @@ use sedimentree_core::{
     loose_commit::{LooseCommit, id::CommitId},
     sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
-use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
 use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
-use utils_rs::lru::KeyedLruPool;
+mod checkpoints;
+mod events;
+pub(crate) use events::{
+    KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER, KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
+    KEYHIVE_ADMISSION_READER_GROUP_PART,
+};
+mod ids;
+mod parts_cursors;
+mod sedimentree;
+mod tree_cache;
+use tree_cache::{TREE_CACHE_METADATA_CAPACITY, TreeCache, TreeCacheGuard};
+
+#[cfg(test)]
+static FAIL_NEXT_ADMISSION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> = std::sync::LazyLock::new(|| {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.dangerous_set_table_name("_big_repo_migrations");
+    migrator
+});
+struct KeyhiveEventQueryRow {
+    event_hash: Vec<u8>,
+    event_bytes: Vec<u8>,
+    source_id: Option<Vec<u8>>,
+}
 
 #[cfg(test)]
 mod tests;
 
-/// Metadata-weighted capacity of the tree projection cache, in metadata
-/// items (one per loose commit or fragment). SQLite remains authoritative;
-/// eviction is always safe.
-const TREE_CACHE_METADATA_CAPACITY: usize = 4096;
-
-/// Bounded, metadata-only cache of the canonical durable sedimentree trees.
-///
-/// This synchronous mutex is intentional and SQLite-specific.
-///
-/// The tree projection cache is accessed only while holding a successfully
-/// acquired `BEGIN IMMEDIATE` write transaction. SQLite serializes writers
-/// before this mutex is reached, so lock acquisition is uncontended and never
-/// waits for async work performed by another task. The mutex protects ordinary
-/// in-memory access; it is not the write-serialization mechanism.
-///
-/// Do not reuse this design for a backend that permits concurrent write
-/// transactions. Such a backend needs per-tree coordination or another cache
-/// concurrency design.
-///
-/// This cache also assumes exactly one `SqliteBigRepoStore` instance per
-/// (database, scope): clones share the `Arc` and are safe, but two
-/// independently-constructed stores for the same scope would each hold an
-/// incoherent projection cache. The runtime constructs one store per scope.
-struct TreeCache {
-    lru: KeyedLruPool<SedimentreeId>,
-    entries: HashMap<SedimentreeId, MinimizedSedimentree>,
-    epochs: HashMap<SedimentreeId, u64>,
-    next_epoch: u64,
-}
-
-impl TreeCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            lru: KeyedLruPool::new(capacity),
-            entries: HashMap::new(),
-            epochs: HashMap::new(),
-            next_epoch: 1,
-        }
-    }
-
-    /// Look up an entry, marking it most-recently-used.
-    fn get(&mut self, id: &SedimentreeId) -> Option<&MinimizedSedimentree> {
-        self.lru.touch_key(id);
-        self.entries.get(id)
-    }
-
-    /// Advance and return the installation epoch for `id`.
-    fn bump_epoch(&mut self, id: SedimentreeId) -> u64 {
-        let epoch = self.next_epoch;
-        self.next_epoch = self.next_epoch.wrapping_add(1);
-        self.epochs.insert(id, epoch);
-        epoch
-    }
-
-    /// The current installation epoch for `id`, if present.
-    fn current_epoch(&self, id: &SedimentreeId) -> Option<u64> {
-        self.epochs.get(id).copied()
-    }
-
-    /// Insert an entry without touching the LRU. The caller derives heads
-    /// first, then calls [`update_cost`](Self::update_cost) so eviction can
-    /// never remove the entry before heads are captured.
-    fn insert_no_evict(&mut self, id: SedimentreeId, tree: MinimizedSedimentree) -> u64 {
-        let epoch = self.bump_epoch(id);
-        self.entries.insert(id, tree);
-        epoch
-    }
-
-    /// Recompute an entry's LRU cost from its (post-minimization) metadata
-    /// weight and evict as needed. The entry itself may be evicted when its
-    /// cost exceeds capacity — an oversized tree is used transiently for the
-    /// transaction and then left uncached. Callers must have captured heads
-    /// before calling this.
-    fn update_cost(&mut self, id: &SedimentreeId) {
-        let Some(tree) = self.entries.get(id) else {
-            return;
-        };
-        let cost = Self::cost(tree);
-        let pruned = self.lru.insert_key(id, cost);
-        for key in pruned {
-            self.entries.remove(&key);
-            self.epochs.remove(&key);
-        }
-    }
-
-    /// Remove an entry (whole-tree removal, delete-path rebuild, or
-    /// speculative invalidation).
-    fn remove(&mut self, id: &SedimentreeId) {
-        self.lru.remove_key(id);
-        self.entries.remove(id);
-        self.epochs.remove(id);
-    }
-
-    /// Remove an entry only if its installation epoch matches `epoch`.
-    fn remove_if_epoch(&mut self, id: &SedimentreeId, epoch: u64) {
-        if self.epochs.get(id).copied() == Some(epoch) {
-            self.remove(id);
-        }
-    }
-
-    /// Apply a loose commit to the cached tree. No LRU update — the caller
-    /// derives heads and calls [`update_cost`](Self::update_cost) after.
-    fn apply_commit(&mut self, id: &SedimentreeId, commit: LooseCommit) -> u64 {
-        let epoch = self.bump_epoch(*id);
-        if let Some(tree) = self.entries.get_mut(id) {
-            tree.add_commit(commit);
-        }
-        epoch
-    }
-
-    /// Apply a fragment to the cached tree. No LRU update — the caller
-    /// derives heads and calls [`update_cost`](Self::update_cost) after.
-    fn apply_fragment(&mut self, id: &SedimentreeId, fragment: Fragment) -> u64 {
-        let epoch = self.bump_epoch(*id);
-        if let Some(tree) = self.entries.get_mut(id) {
-            tree.add_fragment(fragment);
-        }
-        epoch
-    }
-
-    /// Apply a whole batch to the cached tree. No LRU update — the caller
-    /// derives heads and calls [`update_cost`](Self::update_cost) after.
-    fn apply_batch(
-        &mut self,
-        id: &SedimentreeId,
-        commits: Vec<LooseCommit>,
-        fragments: Vec<Fragment>,
-    ) -> u64 {
-        let epoch = self.bump_epoch(*id);
-        if let Some(tree) = self.entries.get_mut(id) {
-            for commit in commits {
-                tree.add_commit(commit);
-            }
-            for fragment in fragments {
-                tree.add_fragment(fragment);
-            }
-        }
-        epoch
-    }
-
-    /// Metadata weight of a tree: one per loose commit or fragment, plus one
-    /// for the tree itself.
-    fn cost(tree: &MinimizedSedimentree) -> usize {
-        1 + tree.loose_commits().count() + tree.fragments().count()
-    }
-}
-
-/// RAII invalidation guard for a speculative cache entry.
-///
-/// Armed after the entry is obtained or hydrated; the entry is evicted on
-/// drop unless [`disarm`](Self::disarm) is called after the transaction
-/// commits. This covers errors, commit failures, and dropped futures
-/// (cancellation) uniformly: a speculative entry must never survive a
-/// transaction that did not commit.
-///
-/// Guard eviction is epoch-aware: if a subsequent transaction installs a
-/// fresh cache entry after this transaction released the SQLite writer lock,
-/// dropping this guard will not evict that newer entry.
-struct TreeCacheGuard<'a> {
-    cache: &'a std::sync::Mutex<TreeCache>,
-    id: SedimentreeId,
-    epoch: u64,
-    armed: bool,
-}
-
-impl<'a> TreeCacheGuard<'a> {
-    fn arm(cache: &'a std::sync::Mutex<TreeCache>, id: SedimentreeId, epoch: u64) -> Self {
-        Self {
-            cache,
-            id,
-            epoch,
-            armed: true,
-        }
-    }
-
-    /// Mark the transaction as committed; the entry is retained.
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TreeCacheGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            // A poisoned mutex is an invariant break (a thread panicked
-            // while holding it) — never swallow it.
-            self.cache
-                .lock()
-                .expect(ERROR_MUTEX)
-                .remove_if_epoch(&self.id, self.epoch);
-        }
-    }
-}
-
-/// A tree mutation applied inside one `BEGIN IMMEDIATE` write transaction.
-///
-/// Every durable operation that can change a tree funnels through
-/// [`SqliteBigRepoStore::mutate_tree_in_tx`] so the cached projection and the
-/// BigSync payload can never be forgotten by a future write path.
-enum TreeStorageMutation {
+pub(crate) enum TreeStorageMutation {
     InsertCommit(VerifiedMeta<LooseCommit>),
     InsertFragment(VerifiedMeta<Fragment>),
     InsertBatch {
@@ -288,7 +112,6 @@ pub struct SqliteBigRepoStore {
     core: SqliteCore,
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
-    keyhive_event_notify: Arc<tokio::sync::Notify>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
 }
@@ -297,7 +120,7 @@ pub struct SqliteBigRepoStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigSyncStoreSnapshot {
     pub objects: Vec<(ObjId, Option<serde_json::Value>)>,
-    pub memberships: Vec<(PartId, ObjId, i64, i64, Option<i64>, i64)>,
+    pub memberships: Vec<(PartId, ObjId, i64, i64)>,
     pub pending_memberships: Vec<(PartId, ObjId)>,
     pub part_cursors: Vec<(PartId, i64)>,
     pub peer_part_cursors: Vec<(PeerId, PartId, i64)>,
@@ -322,18 +145,18 @@ impl SqliteBigRepoStore {
     /// Capture every convergence-relevant BigSync row plus protocol-volume
     /// counters. Intended for deterministic cross-node test diagnostics.
     pub async fn big_sync_store_snapshot(&self) -> Res<BigSyncStoreSnapshot> {
-        let object_rows = sqlx::query(
+        let object_rows = sqlx::query!(
             "SELECT obj_id, payload_json FROM big_sync_objs
              WHERE scope_id = ?1 ORDER BY obj_id",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_all(&self.sql.read_pool)
         .await?;
         let objects = object_rows
             .into_iter()
             .map(|row| {
-                let payload: Option<String> = row.try_get("payload_json")?;
-                let mut payload = payload
+                let mut payload = row
+                    .payload_json
                     .map(|json| serde_json::from_str::<serde_json::Value>(&json))
                     .transpose()?;
                 if let Some(heads) = payload
@@ -343,85 +166,86 @@ impl SqliteBigRepoStore {
                 {
                     heads.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
                 }
-                Ok((Self::obj_from_blob(row.try_get("obj_id")?), payload))
+                Ok((Self::obj_from_blob(row.obj_id), payload))
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let membership_rows = sqlx::query(
-            "SELECT part_id, obj_id, added_at, changed_at, removed_at, latest_cursor
-             FROM big_sync_members WHERE scope_id = ?1
-             ORDER BY part_id, obj_id",
+        let membership_rows = sqlx::query!(
+            "SELECT p.part_id, o.obj_id, m.event_type, m.txid
+             FROM big_sync_members m
+             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
+             WHERE m.scope_id = ?1 AND m.maybe_part_ref > 0
+             ORDER BY p.part_id, o.obj_id",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_all(&self.sql.read_pool)
         .await?;
         let memberships = membership_rows
             .into_iter()
             .map(|row| {
                 Ok((
-                    Self::part_from_blob(row.try_get("part_id")?),
-                    Self::obj_from_blob(row.try_get("obj_id")?),
-                    row.try_get("added_at")?,
-                    row.try_get("changed_at")?,
-                    row.try_get("removed_at")?,
-                    row.try_get("latest_cursor")?,
+                    Self::part_from_blob(row.part_id),
+                    Self::obj_from_blob(row.obj_id),
+                    row.event_type,
+                    row.txid,
                 ))
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let pending_rows = sqlx::query(
-            "SELECT part_id, obj_id FROM big_sync_pending_members
-             WHERE scope_id = ?1 ORDER BY part_id, obj_id",
+        let pending_rows = sqlx::query!(
+            "SELECT p.part_id, o.obj_id
+             FROM big_sync_pending_members m
+             JOIN big_sync_parts p ON p.part_ref = m.part_ref
+             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
+             WHERE m.scope_id = ?1 ORDER BY p.part_id, o.obj_id",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_all(&self.sql.read_pool)
         .await?;
         let pending_memberships = pending_rows
             .into_iter()
             .map(|row| {
                 Ok((
-                    Self::part_from_blob(row.try_get("part_id")?),
-                    Self::obj_from_blob(row.try_get("obj_id")?),
+                    Self::part_from_blob(row.part_id),
+                    Self::obj_from_blob(row.obj_id),
                 ))
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let part_rows = sqlx::query(
+        let part_rows = sqlx::query!(
             "SELECT part_id, latest_cursor FROM big_sync_parts
              WHERE scope_id = ?1 ORDER BY part_id",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_all(&self.sql.read_pool)
         .await?;
         let part_cursors = part_rows
             .into_iter()
-            .map(|row| {
-                Ok((
-                    Self::part_from_blob(row.try_get("part_id")?),
-                    row.try_get("latest_cursor")?,
-                ))
-            })
+            .map(|row| Ok((Self::part_from_blob(row.part_id), row.latest_cursor)))
             .collect::<Res<Vec<_>>>()?;
 
-        let peer_rows = sqlx::query(
-            "SELECT peer_id, part_id, cursor FROM big_sync_peer_cursors
-             WHERE scope_id = ?1 ORDER BY peer_id, part_id",
+        let peer_rows = sqlx::query!(
+            "SELECT peer_id, p.part_id, cursor
+             FROM big_sync_peer_cursors c
+             JOIN big_sync_parts p ON p.part_ref = c.part_ref
+             WHERE c.scope_id = ?1 ORDER BY peer_id, p.part_id",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_all(&self.sql.read_pool)
         .await?;
         let peer_part_cursors = peer_rows
             .into_iter()
             .map(|row| {
                 Ok((
-                    SqliteCore::peer_from_blob(row.try_get("peer_id")?),
-                    Self::part_from_blob(row.try_get("part_id")?),
-                    row.try_get("cursor")?,
+                    SqliteCore::peer_from_blob(row.peer_id),
+                    Self::part_from_blob(row.part_id),
+                    row.cursor,
                 ))
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let volume = sqlx::query(
+        let volume = sqlx::query!(
             "SELECT
                (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_count,
                (SELECT COALESCE(SUM(length(event_bytes)), 0) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_bytes,
@@ -429,8 +253,8 @@ impl SqliteBigRepoStore {
                 (SELECT COUNT(*) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_count,
                ((SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_commits WHERE scope_id = ?1) +
                 (SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_bytes",
+            self.scope_id
         )
-        .bind(self.scope_id)
         .fetch_one(&self.sql.read_pool)
         .await?;
 
@@ -440,12 +264,12 @@ impl SqliteBigRepoStore {
             pending_memberships,
             part_cursors,
             peer_part_cursors,
-            keyhive_event_count: volume.try_get("kh_count")?,
-            keyhive_event_bytes: volume.try_get("kh_bytes")?,
+            keyhive_event_count: volume.kh_count,
+            keyhive_event_bytes: volume.kh_bytes,
             local_cgka_secret_count: 0,
             local_prekey_secret_count: 0,
-            sedimentree_item_count: volume.try_get("sediment_count")?,
-            sedimentree_blob_bytes: volume.try_get("sediment_bytes")?,
+            sedimentree_item_count: volume.sediment_count,
+            sedimentree_blob_bytes: volume.sediment_bytes,
         })
     }
 }
@@ -459,15 +283,9 @@ pub(crate) struct GroupPartReconciliation {
     pub(crate) desired_global: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct KeyhiveEventRow {
-    pub(crate) seq: u64,
-    pub(crate) bytes: Vec<u8>,
-}
-
 /// Durable record of keyhive event *incorporation*.
 ///
-/// Unlike [`KeyhiveEventRow`] (raw arrivals, some of whose effects may
+/// Unlike a raw event-log row (some of whose effects may
 /// still be pending), a row here means the event's effects are applied to
 /// the keyhive projection. Fed exclusively by the durable incorporation hook;
 /// workers tail this instead of the raw arrival log.
@@ -487,25 +305,21 @@ pub(crate) struct AdmissionEventRow {
 pub(crate) struct KeyhiveIncorporationSink {
     store: SqliteBigRepoStore,
     runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-    /// Dispatcher hint channel; weak because the dispatcher outlives boot but
-    /// may shut down first. Hints are wake-ups only — the durable admission
-    /// log is the truth the dispatcher tails.
-    dispatcher_events:
-        tokio::sync::mpsc::WeakSender<crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent>,
+    /// Dispatcher wake-up signal. The durable admission log is the source
+    /// of truth; this signal only wakes the dispatcher to tail it.
+    dispatcher_notify: std::sync::Weak<tokio::sync::Notify>,
 }
 
 impl KeyhiveIncorporationSink {
     pub(crate) fn new(
         store: SqliteBigRepoStore,
         runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        dispatcher_events: tokio::sync::mpsc::WeakSender<
-            crate::runtime2::keyhive_dispatcher::KeyhiveChangeEvent,
-        >,
+        dispatcher_notify: std::sync::Weak<tokio::sync::Notify>,
     ) -> Self {
         Self {
             store,
             runtime_events,
-            dispatcher_events,
+            dispatcher_notify,
         }
     }
 
@@ -553,8 +367,8 @@ impl subduction_keyhive::DurableIncorporationSink<Sendable> for KeyhiveIncorpora
             self.append(hashes.clone(), source.clone())
                 .await
                 .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
-            if let Some(tx) = self.dispatcher_events.upgrade() {
-                crate::runtime2::keyhive_dispatcher::try_send_change_event(&tx, hashes, source);
+            if let Some(notify) = self.dispatcher_notify.upgrade() {
+                notify.notify_one();
             }
             Ok(())
         })
@@ -585,12 +399,24 @@ impl std::fmt::Debug for SqliteBigRepoStore {
             .finish_non_exhaustive()
     }
 }
+pub(crate) struct ScopeHandle<'a> {
+    store: &'a SqliteBigRepoStore,
+}
+
+impl ScopeHandle<'_> {
+    #[inline]
+    pub(crate) fn id(&self) -> i64 {
+        self.store.scope_id
+    }
+}
 
 impl SqliteBigRepoStore {
-    pub(crate) fn keyhive_event_notifier(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.keyhive_event_notify)
+    /// Return the scope-bound handle used by every store query.
+    /// Keeping the scope token behind this handle makes omission visible in review
+    /// and provides one place to evolve scoped query binding.
+    pub(crate) fn scope(&self) -> ScopeHandle<'_> {
+        ScopeHandle { store: self }
     }
-
     pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
         Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
     }
@@ -602,14 +428,13 @@ impl SqliteBigRepoStore {
         config: big_sync::HostPartStoreConfig,
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
-        Self::init_subduction_tables(&sql.write_pool).await?;
+        MIGRATOR.run(&sql.write_pool).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
 
         let store = Self {
             core,
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
-            keyhive_event_notify: Arc::new(tokio::sync::Notify::new()),
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
@@ -622,103 +447,69 @@ impl SqliteBigRepoStore {
         SqliteCore::next_cursor(tx).await
     }
 
-    fn part_blob(id: PartId) -> Vec<u8> {
-        SqliteCore::part_blob(id)
-    }
-
-    fn obj_blob(id: ObjId) -> Vec<u8> {
-        SqliteCore::obj_blob(id)
-    }
-
-    fn peer_blob(id: PeerId) -> Vec<u8> {
-        SqliteCore::peer_blob(id)
-    }
-
-    fn buck_i64(id: BuckId) -> i64 {
-        SqliteCore::buck_i64(id)
-    }
-
-    fn buck_id(value: i64) -> BuckId {
-        SqliteCore::buck_id(value)
-    }
-
-    fn u64_from_db(value: i64) -> u64 {
-        SqliteCore::u64_from_db(value)
-    }
-
-    fn part_from_blob(blob: Vec<u8>) -> PartId {
-        SqliteCore::part_from_blob(blob)
-    }
-
-    fn obj_from_blob(blob: Vec<u8>) -> ObjId {
-        SqliteCore::obj_from_blob(blob)
-    }
     fn event_part_id(event: &SubEvent) -> Option<PartId> {
         match event {
-            SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => None,
+            SubEvent::Changed(_) => None,
             SubEvent::Added(inner) => Some(inner.part_id),
             SubEvent::Removed(inner) => Some(inner.part_id),
             SubEvent::ReplayComplete => None,
         }
     }
 
-    async fn load_member_state(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
-    ) -> Res<MemberState> {
-        self.core.load_member_state(tx, part_id, obj_id).await
-    }
-
-    async fn apply_bucket_transition(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
-        cursor: CursorIndex,
-        old: &MemberState,
-        new: &MemberState,
-    ) -> Res<()> {
-        self.core
-            .apply_bucket_transition(tx, part_id, obj_id, cursor, old, new)
-            .await
-    }
-
-    async fn bucket_summary_for_path(&self, part_id: PartId, path: BuckId) -> Res<BucketSummary> {
-        self.core.bucket_summary_for_path(part_id, path).await
-    }
-
     async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
         let mut promote = Vec::new();
         let mut dispatch = Vec::new();
+        let mut recipients: HashMap<(Uuid, ObjId, CursorIndex, Option<PartId>), SubEvent> =
+            HashMap::new();
+        let mut push_recipient = |sub_id: Uuid, event: SubEvent| {
+            let (obj_id, cursor, part_id) = match &event {
+                SubEvent::Changed(inner) => (inner.obj_id, inner.cursor, None),
+                SubEvent::Added(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
+                SubEvent::Removed(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
+                SubEvent::ReplayComplete => unreachable!(),
+            };
+            recipients
+                .entry((sub_id, obj_id, cursor, part_id))
+                .and_modify(|existing| {
+                    if let (SubEvent::Changed(existing), SubEvent::Changed(new)) =
+                        (existing, &event)
+                    {
+                        existing.part_ids.extend(new.part_ids.iter().copied());
+                        existing.part_ids.sort_unstable();
+                        existing.part_ids.dedup();
+                        existing.payload = new.payload.clone();
+                    }
+                })
+                .or_insert(event);
+        };
         {
             let bus = self.bus.read().expect(ERROR_MUTEX);
             for event in events {
-                let (obj_id, object_event) = match &event {
-                    SubEvent::Changed(inner) => (
-                        inner.obj_id,
-                        Some(SubEvent::ObjectChanged(
-                            big_sync_core::rpc::ObjChangedWithoutPart {
-                                obj_id: inner.obj_id,
-                                payload: inner.payload.clone(),
-                            },
-                        )),
-                    ),
-                    SubEvent::Added(inner) => (
-                        inner.obj_id,
-                        Some(SubEvent::ObjectChanged(
-                            big_sync_core::rpc::ObjChangedWithoutPart {
-                                obj_id: inner.obj_id,
-                                payload: inner.payload.clone(),
-                            },
-                        )),
-                    ),
-                    SubEvent::Removed(inner) => (inner.obj_id, None),
-                    SubEvent::ObjectChanged(inner) => (inner.obj_id, Some(event.clone())),
+                let obj_id = match &event {
+                    SubEvent::Changed(inner) => inner.obj_id,
+                    SubEvent::Added(inner) => inner.obj_id,
+                    SubEvent::Removed(inner) => inner.obj_id,
                     SubEvent::ReplayComplete => continue,
                 };
-                let mut recipients = Vec::new();
+                let object_event = match &event {
+                    SubEvent::Changed(inner) => {
+                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                            cursor: inner.cursor,
+                            part_ids: Vec::new(),
+                            obj_id: inner.obj_id,
+                            payload: inner.payload.clone(),
+                        }))
+                    }
+                    SubEvent::Added(inner) => {
+                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                            cursor: inner.cursor,
+                            part_ids: Vec::new(),
+                            obj_id: inner.obj_id,
+                            payload: inner.payload.clone(),
+                        }))
+                    }
+                    SubEvent::Removed(_) | SubEvent::ReplayComplete => None,
+                };
                 match &event {
                     SubEvent::Changed(inner) => {
                         for part_id in &inner.part_ids {
@@ -728,7 +519,7 @@ impl SqliteBigRepoStore {
                                     if let SubEvent::Changed(inner) = &mut projected {
                                         inner.part_ids = vec![*part_id];
                                     }
-                                    recipients.push((sub_id, projected));
+                                    push_recipient(sub_id, projected);
                                 }
                             }
                         }
@@ -736,48 +527,48 @@ impl SqliteBigRepoStore {
                     SubEvent::Added(inner) => {
                         if let Some(subs) = bus.by_part.get(&inner.part_id) {
                             for &sub_id in subs {
-                                recipients.push((sub_id, event.clone()));
+                                push_recipient(sub_id, event.clone());
                             }
                         }
                     }
                     SubEvent::Removed(inner) => {
                         if let Some(subs) = bus.by_part.get(&inner.part_id) {
                             for &sub_id in subs {
-                                recipients.push((sub_id, event.clone()));
+                                push_recipient(sub_id, event.clone());
                             }
                         }
                     }
-                    SubEvent::ObjectChanged(_) => {}
                     SubEvent::ReplayComplete => unreachable!(),
                 }
                 if let Some(object_event) = object_event
                     && let Some(subs) = bus.by_obj.get(&obj_id)
                 {
                     for &sub_id in subs {
-                        recipients.push((sub_id, object_event.clone()));
-                    }
-                }
-                for (sub_id, event) in recipients {
-                    let Some(sub) = bus.subs.get(&sub_id) else {
-                        continue;
-                    };
-                    if bus.pending.contains(&sub_id) {
-                        if sub.pending.mark_dirty() {
-                            promote.push((
-                                sub_id,
-                                event,
-                                obj_id,
-                                sub.principal,
-                                sub.sender.clone(),
-                            ));
+                        if matches!(&event, SubEvent::Added(inner)
+                            if bus.parts_by_sub
+                                .get(&sub_id)
+                                .is_some_and(|parts| parts.contains(&inner.part_id)))
+                        {
+                            continue;
                         }
-                        continue;
+                        push_recipient(sub_id, object_event.clone());
                     }
-                    if !bus.live.contains(&sub_id) {
-                        continue;
-                    }
-                    dispatch.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
                 }
+            }
+            for ((sub_id, obj_id, _, _), event) in recipients {
+                let Some(sub) = bus.subs.get(&sub_id) else {
+                    continue;
+                };
+                if bus.pending.contains(&sub_id) {
+                    if sub.pending.mark_dirty() {
+                        promote.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
+                    }
+                    continue;
+                }
+                if !bus.live.contains(&sub_id) {
+                    continue;
+                }
+                dispatch.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
             }
         }
 
@@ -833,16 +624,17 @@ impl SqliteBigRepoStore {
         let Some(peer) = principal else {
             return Ok(true);
         };
-        let obj_blob = Self::obj_blob(obj_id);
         let peer_blob = Self::peer_blob(peer);
-        let access_level: Option<i64> = sqlx::query_scalar(
+        let access_level: Option<i64> = sqlx::query_scalar!(
             "SELECT access_level
              FROM big_sync_syncable
-             WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
+             WHERE scope_id = ?1 AND obj_ref = (
+                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+             ) AND principal_id = ?3",
+            self.scope_id,
+            Self::obj_blob(obj_id),
+            &peer_blob
         )
-        .bind(self.scope_id)
-        .bind(&obj_blob)
-        .bind(&peer_blob)
         .fetch_optional(&self.sql.read_pool)
         .await?;
         let permitted = access_level
@@ -859,937 +651,6 @@ impl SqliteBigRepoStore {
         Ok(permitted)
     }
 }
-#[async_trait]
-impl HostPartStore for SqliteBigRepoStore {
-    async fn is_event_permitted(
-        &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> Res<bool> {
-        Self::is_event_permitted(self, part_id, obj_id, principal).await
-    }
-    async fn summarize_parts(
-        &self,
-        parts: HashSet<PartId>,
-    ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>> {
-        if parts.is_empty() {
-            return Ok(Ok(HashMap::new()));
-        }
-        let mut hidden: Vec<_> = parts.intersection(&self.hidden_parts).copied().collect();
-        if !hidden.is_empty() {
-            hidden.sort_unstable();
-            return Ok(Err(ListPartsError::UnkownParts {
-                unkown_parts: hidden,
-            }));
-        }
-
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT p.part_id, p.latest_cursor, COALESCE(b.live_count, 0) AS member_count
-             FROM big_sync_parts p
-             LEFT JOIN big_sync_buckets b
-               ON b.scope_id = p.scope_id
-              AND b.part_id = p.part_id
-              AND b.level = 0
-              AND b.buck_id = 0
-             WHERE p.scope_id = ",
-        );
-        query.push_bind(self.scope_id);
-        query.push(" AND p.part_id IN (");
-        let mut separated = query.separated(", ");
-        for part_id in &parts {
-            separated.push_bind(Self::part_blob(*part_id));
-        }
-        separated.push_unseparated(")");
-        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
-
-        if rows.len() != parts.len() {
-            let found: HashSet<PartId> = rows
-                .iter()
-                .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
-                .collect();
-            let mut missing: Vec<_> = parts.difference(&found).copied().collect();
-            missing.sort();
-            return Ok(Err(ListPartsError::UnkownParts {
-                unkown_parts: missing,
-            }));
-        }
-
-        let mut out = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let part_id = Self::part_from_blob(row.try_get("part_id")?);
-            let latest_cursor: i64 = row.try_get("latest_cursor")?;
-            let member_count: i64 = row.try_get("member_count")?;
-            out.insert(
-                part_id,
-                PartSummary {
-                    latest_cursor: u64::try_from(latest_cursor).expect(ERROR_IMPOSSIBLE),
-                    member_count: u64::try_from(member_count).expect(ERROR_IMPOSSIBLE),
-                    deepest_bucket_level: self.core.bucket_depth,
-                },
-            );
-        }
-        Ok(Ok(out))
-    }
-
-    async fn member_count(&self, part_id: PartId) -> Res<u64> {
-        let member_count: Option<i64> = sqlx::query_scalar(
-            "SELECT live_count
-             FROM big_sync_buckets
-             WHERE scope_id = ?1 AND part_id = ?2 AND level = 0 AND buck_id = 0",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(member_count
-            .map(|member_count| u64::try_from(member_count).expect(ERROR_IMPOSSIBLE))
-            .unwrap_or_default())
-    }
-
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>> {
-        let row = sqlx::query(
-            "SELECT payload_json
-                 FROM big_sync_objs
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let payload: Option<String> = row.try_get("payload_json")?;
-        payload
-            .as_deref()
-            .filter(|payload| !payload.is_empty())
-            .map(|payload| serde_json::from_str(payload).wrap_err(ERROR_JSON))
-            .transpose()
-    }
-
-    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let events = self.set_obj_payload_in_tx(&mut tx, obj_id, payload).await?;
-        tx.commit().await?;
-        self.publish(events).await?;
-        Ok(())
-    }
-
-    async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>> {
-        let rows = sqlx::query(
-            "SELECT part_id FROM big_sync_members
-             WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL
-             UNION
-             SELECT part_id FROM big_sync_pending_members
-             WHERE scope_id = ?1 AND obj_id = ?2
-             ORDER BY part_id ASC",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
-            .collect())
-    }
-
-    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(exists.is_some())
-    }
-
-    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
-        self.bucket_summary_for_path(part_id, id).await
-    }
-
-    async fn get_changed_buckets(
-        &self,
-        req: GetChangedBucketsRequest,
-    ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
-        if self.hidden_parts.contains(&req.part_id) {
-            return Ok(Err(ListPartsError::UnkownParts {
-                unkown_parts: vec![req.part_id],
-            }));
-        }
-        if req.limit_hint == 0 {
-            return Ok(Ok(Vec::new()));
-        }
-        let part_exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1
-             FROM big_sync_parts
-             WHERE scope_id = ?1 AND part_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(req.part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        let Some(_) = part_exists else {
-            return Ok(Err(ListPartsError::UnkownParts {
-                unkown_parts: vec![req.part_id],
-            }));
-        };
-
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT buck_id, level, changed_at, live_count, dead_count, live_fp, dead_fp
-             FROM big_sync_buckets
-             WHERE scope_id = ",
-        );
-        query.push_bind(self.scope_id);
-        query.push(" AND part_id = ");
-        query.push_bind(Self::part_blob(req.part_id));
-        query.push(" AND level = ");
-        query.push_bind(i64::from(req.offset.level()));
-        query.push(" AND buck_id >= ");
-        query.push_bind(Self::buck_i64(req.offset));
-        query.push(" AND changed_at > ");
-        query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
-        query.push(" ORDER BY buck_id ASC LIMIT ");
-        query.push_bind(i64::from(req.limit_hint) + i64::from(BuckId::ARITY));
-        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
-
-        if rows.is_empty() {
-            return Ok(Ok(Vec::new()));
-        }
-        let mut out = Vec::new();
-        let mut last_parent = None;
-        for row in rows {
-            let bucket = BucketSummary {
-                id: Self::buck_id(row.try_get::<i64, _>("buck_id")?),
-                len: u32::try_from(
-                    u64::try_from(row.try_get::<i64, _>("live_count")?).expect(ERROR_IMPOSSIBLE)
-                        + u64::try_from(row.try_get::<i64, _>("dead_count")?)
-                            .expect(ERROR_IMPOSSIBLE),
-                )
-                .expect(ERROR_IMPOSSIBLE),
-                live_count: u32::try_from(row.try_get::<i64, _>("live_count")?)
-                    .expect(ERROR_IMPOSSIBLE),
-                fp: (
-                    Self::u64_from_db(row.try_get::<i64, _>("live_fp")?),
-                    Self::u64_from_db(row.try_get::<i64, _>("dead_fp")?),
-                ),
-                changed_at: u64::try_from(row.try_get::<i64, _>("changed_at")?)
-                    .expect(ERROR_IMPOSSIBLE),
-            };
-            if out.len() < usize::try_from(req.limit_hint).expect(ERROR_IMPOSSIBLE) {
-                out.push(bucket);
-                continue;
-            }
-            let parent = bucket.id.parent();
-            if last_parent.is_none() {
-                last_parent = Some(out.last().expect(ERROR_IMPOSSIBLE).id.parent());
-            }
-            if Some(parent) != last_parent {
-                break;
-            }
-            out.push(bucket);
-        }
-        Ok(Ok(out))
-    }
-
-    async fn leaf_buckets(
-        &self,
-        req: LeafBucketsRequest,
-    ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
-        if self.hidden_parts.contains(&req.part_id) {
-            return Ok(Err(LeafBucketsError::UnkownPart));
-        }
-        let part_exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1
-             FROM big_sync_parts
-             WHERE scope_id = ?1 AND part_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(req.part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        if part_exists.is_none() {
-            return Ok(Err(LeafBucketsError::UnkownPart));
-        }
-
-        if req.buckets.is_empty() {
-            return Ok(Ok(LeafBucketResult {
-                seed: req.seed,
-                bucks: HashMap::new(),
-            }));
-        }
-
-        struct LeafBucketPageBuilder {
-            buck_id: BuckId,
-            entries: Vec<BucketObjPageEntry>,
-            total_count: u32,
-        }
-
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "WITH requested(req_ord, buck_id, lower_id, upper_id, after_id) AS (",
-        );
-        for (req_ord, buck_req) in req.buckets.iter().enumerate() {
-            let (lower_id, upper_id) = obj_id_bounds_for_bucket(buck_req.buck_id);
-            if req_ord > 0 {
-                query.push(" UNION ALL ");
-            }
-            query.push("SELECT ");
-            query.push_bind(i64::try_from(req_ord).expect(ERROR_IMPOSSIBLE));
-            query.push(" AS req_ord, ");
-            query.push_bind(Self::buck_i64(buck_req.buck_id));
-            query.push(" AS buck_id, ");
-            query.push_bind(Self::obj_blob(lower_id));
-            query.push(" AS lower_id, ");
-            if let Some(upper_id) = upper_id {
-                query.push_bind(Self::obj_blob(upper_id));
-            } else {
-                query.push("NULL");
-            }
-            query.push(" AS upper_id, ");
-            if let Some(after) = buck_req.after {
-                query.push_bind(Self::obj_blob(after));
-            } else {
-                query.push("NULL");
-            }
-            query.push(" AS after_id");
-        }
-        query.push(
-            "), ranked AS (
-                SELECT
-                    r.req_ord,
-                    r.buck_id,
-                    m.obj_id,
-                    m.removed_at,
-                    o.payload_json,
-                    COUNT(*) OVER (PARTITION BY r.req_ord) AS total_count,
-                    ROW_NUMBER() OVER (PARTITION BY r.req_ord ORDER BY m.obj_id ASC) AS row_num
-                FROM requested r
-                JOIN big_sync_members m
-                  ON m.scope_id = ",
-        );
-        query.push_bind(self.scope_id);
-        query.push(" AND m.part_id = ");
-        query.push_bind(Self::part_blob(req.part_id));
-        query.push(" JOIN big_sync_buckets s ON s.scope_id = m.scope_id AND s.part_id = m.part_id AND s.buck_id = r.buck_id AND s.changed_at > ");
-        query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
-        query.push(" AND m.obj_id >= r.lower_id");
-        query.push(" AND (r.upper_id IS NULL OR m.obj_id < r.upper_id)");
-        query.push(" AND (r.after_id IS NULL OR m.obj_id > r.after_id)");
-        query.push(
-            "
-                LEFT JOIN big_sync_objs o
-                  ON o.scope_id = m.scope_id AND o.obj_id = m.obj_id
-            )
-            SELECT req_ord, buck_id, obj_id, removed_at, payload_json, total_count
-            FROM ranked
-            WHERE row_num <= ",
-        );
-        query.push_bind(i64::from(req.limit_hint.max(1)));
-        query.push(" ORDER BY req_ord, obj_id ASC");
-
-        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
-        let mut pages: Vec<_> = req
-            .buckets
-            .iter()
-            .map(|buck_req| LeafBucketPageBuilder {
-                buck_id: buck_req.buck_id,
-                entries: Vec::new(),
-                total_count: 0,
-            })
-            .collect();
-        for row in rows {
-            let req_ord =
-                usize::try_from(row.try_get::<i64, _>("req_ord")?).expect(ERROR_IMPOSSIBLE);
-            let page = pages.get_mut(req_ord).expect(ERROR_IMPOSSIBLE);
-            page.total_count =
-                u32::try_from(row.try_get::<i64, _>("total_count")?).expect(ERROR_IMPOSSIBLE);
-            let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-            let dead = row.try_get::<Option<i64>, _>("removed_at")?.is_some();
-            let fp = if dead {
-                Fingerprint::new(
-                    &req.seed,
-                    &("big-sync-obj-fp-v1", obj_id, serde_json::Value::Null),
-                )
-            } else {
-                let payload_json: Option<String> = row.try_get("payload_json")?;
-                let payload = payload_json
-                    .filter(|payload_json| !payload_json.is_empty())
-                    .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
-                    .transpose()?
-                    .unwrap_or(serde_json::Value::Null);
-                Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id, payload))
-            };
-            page.entries.push(BucketObjPageEntry { obj_id, dead, fp });
-        }
-        let mut bucks = HashMap::with_capacity(pages.len());
-        for page in pages {
-            let done =
-                u32::try_from(page.entries.len()).expect(ERROR_IMPOSSIBLE) == page.total_count;
-            let next_after = if done || page.entries.is_empty() {
-                None
-            } else {
-                Some(page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id)
-            };
-            bucks.insert(
-                page.buck_id,
-                LeafBucketPage {
-                    entries: page.entries,
-                    next_after,
-                    done,
-                },
-            );
-        }
-        Ok(Ok(LeafBucketResult {
-            seed: req.seed,
-            bucks,
-        }))
-    }
-
-    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut parts = parts;
-        // The global partition records local readability decisions made by
-        // group-part reconciliation. Remote membership gossip must never
-        // populate it: big-sync exists here for live updates, not discovery.
-        parts.retain(|part_id| *part_id != crate::GLOBAL_PART_ID);
-        parts.sort();
-        parts.dedup();
-        let mut part_states = Vec::with_capacity(parts.len());
-        for part_id in &parts {
-            part_states.push((
-                *part_id,
-                self.load_member_state(&mut tx, *part_id, obj_id).await?,
-            ));
-        }
-        let payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&mut *tx)
-        .await?;
-        let event_payload: Option<ObjPayload> = payload_json
-            .as_deref()
-            .filter(|payload_json| !payload_json.is_empty())
-            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-            .transpose()?;
-        let payload_json = payload_json.filter(|payload_json| !payload_json.is_empty());
-        sqlx::query(
-            "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, obj_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .bind(payload_json.as_deref())
-        .execute(&mut *tx)
-        .await?;
-        let Some(payload) = event_payload else {
-            for part_id in parts {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
-                     VALUES (?1, ?2, ?3)",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .bind(Self::obj_blob(obj_id))
-                .execute(&mut *tx)
-                .await?;
-            }
-            tx.commit().await?;
-            return Ok(());
-        };
-        let added_payload_json = Some(serde_json::to_string(&payload).wrap_err(ERROR_JSON)?);
-        let changed_parts: Vec<_> = part_states
-            .into_iter()
-            .filter(|(_, old_state)| !matches!(old_state, MemberState::Live(_)))
-            .collect();
-        if changed_parts.is_empty() {
-            tx.commit().await?;
-            return Ok(());
-        }
-        let cursor = Self::next_cursor(&mut tx).await?;
-        let mut events = Vec::with_capacity(changed_parts.len());
-        for (part_id, old_state) in changed_parts {
-            sqlx::query(
-                "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                 VALUES (?1, ?2, 0)
-                 ON CONFLICT(scope_id, part_id) DO NOTHING",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
-                 ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
-                    added_at = excluded.added_at,
-                    added_payload_json = excluded.added_payload_json,
-                    changed_at = excluded.changed_at,
-                    removed_at = NULL,
-                    latest_cursor = excluded.latest_cursor",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .bind(Self::obj_blob(obj_id))
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(added_payload_json.as_deref())
-            .execute(&mut *tx)
-            .await?;
-            self.apply_bucket_transition(
-                &mut tx,
-                part_id,
-                obj_id,
-                cursor,
-                &old_state,
-                &MemberState::Live(payload.clone()),
-            )
-            .await?;
-            sqlx::query(
-                "UPDATE big_sync_parts
-                 SET latest_cursor = ?1
-                 WHERE scope_id = ?2 AND part_id = ?3",
-            )
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "DELETE FROM big_sync_pending_members
-                 WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .bind(Self::obj_blob(obj_id))
-            .execute(&mut *tx)
-            .await?;
-            events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                cursor,
-                part_id,
-                obj_id,
-                payload: payload.clone(),
-            }));
-        }
-        tx.commit().await?;
-        self.publish(events).await?;
-        Ok(())
-    }
-
-    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let obj_exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(_) = obj_exists else {
-            tx.commit().await?;
-            return Ok(());
-        };
-        sqlx::query(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "DELETE FROM big_sync_pending_members
-             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .bind(Self::obj_blob(obj_id))
-        .execute(&mut *tx)
-        .await?;
-        let current_state = self.load_member_state(&mut tx, part_id, obj_id).await?;
-        let MemberState::Live(old_payload) = current_state else {
-            tx.commit().await?;
-            return Ok(());
-        };
-
-        let cursor = Self::next_cursor(&mut tx).await?;
-        sqlx::query(
-            "UPDATE big_sync_members
-             SET removed_at = ?1, changed_at = ?1, latest_cursor = ?1
-             WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-        )
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .bind(Self::obj_blob(obj_id))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE big_sync_parts
-             SET latest_cursor = MAX(latest_cursor, ?1)
-             WHERE scope_id = ?2 AND part_id = ?3",
-        )
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&mut *tx)
-        .await?;
-        self.apply_bucket_transition(
-            &mut tx,
-            part_id,
-            obj_id,
-            cursor,
-            &MemberState::Live(old_payload),
-            &MemberState::Dead,
-        )
-        .await?;
-
-        let live_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM big_sync_members
-             WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_one(&mut *tx)
-        .await?;
-        if live_count == 0 {
-            sqlx::query(
-                "UPDATE big_sync_objs
-                 SET payload_json = NULL
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(Self::obj_blob(obj_id))
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
-        self.publish(vec![SubEvent::Removed(
-            big_sync_core::rpc::ObjRemovedFromPart {
-                cursor,
-                part_id,
-                obj_id,
-            },
-        )])
-        .await?;
-        Ok(())
-    }
-
-    async fn get_peer_part_cursor(&self, peer_id: PeerId, part_id: PartId) -> Res<CursorIndex> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT cursor
-             FROM big_sync_peer_cursors
-             WHERE scope_id = ?1 AND peer_id = ?2 AND part_id = ?3",
-        )
-        .bind(self.scope_id)
-        .bind(Self::peer_blob(peer_id))
-        .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor
-            .map(|cursor| u64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .unwrap_or_default())
-    }
-
-    async fn set_peer_part_cursor(
-        &self,
-        peer_id: PeerId,
-        part_id: PartId,
-        cursor: CursorIndex,
-    ) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&self.sql.write_pool)
-        .await?;
-        sqlx::query(
-            "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_id, cursor)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_id, peer_id, part_id) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::peer_blob(peer_id))
-        .bind(Self::part_blob(part_id))
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn list_events(
-        &self,
-        parts: HashSet<PartId>,
-        cursor: CursorIndex,
-        limit: u32,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
-        self.list_events_with_policy(parts, cursor, limit, true)
-            .await
-    }
-
-    async fn list_events_with_policy(
-        &self,
-        parts: HashSet<PartId>,
-        cursor: CursorIndex,
-        limit: u32,
-        enforce_policy: bool,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
-        if enforce_policy {
-            let summaries = self.summarize_parts(parts.clone()).await?;
-            if let Err(err) = summaries {
-                return Ok(Err(err));
-            }
-        }
-        let mut out = HashMap::new();
-        for part_id in parts {
-            let rows = sqlx::query(
-                "SELECT members.obj_id, members.added_at, members.added_payload_json, members.changed_at, members.removed_at, members.latest_cursor, objs.payload_json
-                 FROM big_sync_members members
-                 LEFT JOIN big_sync_objs objs
-                   ON objs.scope_id = members.scope_id AND objs.obj_id = members.obj_id
-                 WHERE members.scope_id = ?1 AND members.part_id = ?2 AND members.latest_cursor > ?3
-                 ORDER BY latest_cursor ASC
-                 LIMIT ?4",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&self.sql.read_pool)
-            .await?;
-            let mut events = Vec::new();
-            for row in rows {
-                let row_cursor: i64 = row.try_get("latest_cursor")?;
-                let added_at: i64 = row.try_get("added_at")?;
-                let removed_at: Option<i64> = row.try_get("removed_at")?;
-                let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-                let added_payload_json: Option<String> = row.try_get("added_payload_json")?;
-                let added_payload = added_payload_json
-                    .as_deref()
-                    .filter(|payload_json| !payload_json.is_empty())
-                    .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-                    .transpose()?;
-                let payload_json: Option<String> = row.try_get("payload_json")?;
-                let payload = payload_json
-                    .as_deref()
-                    .filter(|payload_json| !payload_json.is_empty())
-                    .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-                    .transpose()?;
-                if let Some(removed_at) = removed_at {
-                    if removed_at > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
-                        events.push((
-                            removed_at,
-                            PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                                cursor: u64::try_from(removed_at).expect(ERROR_IMPOSSIBLE),
-                                part_id,
-                                obj_id,
-                            }),
-                        ));
-                    }
-                    continue;
-                }
-                if added_at > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
-                    events.push((
-                        added_at,
-                        PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                            cursor: u64::try_from(added_at).expect(ERROR_IMPOSSIBLE),
-                            part_id,
-                            obj_id,
-                            payload: added_payload
-                                .clone()
-                                .expect("visible membership requires added payload"),
-                        }),
-                    ));
-                }
-                if row_cursor > added_at
-                    && row_cursor > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-                {
-                    events.push((
-                        row_cursor,
-                        PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
-                            part_ids: vec![part_id],
-                            obj_id,
-                            payload: payload.expect(ERROR_IMPOSSIBLE),
-                        }),
-                    ));
-                }
-            }
-            events.sort_by_key(|(cursor, _)| *cursor);
-            let mut next_cursor = None;
-            let limit_usize = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
-            if limit_usize != 0 && events.len() > limit_usize {
-                let next = events[limit_usize - 1].0;
-                next_cursor = Some(u64::try_from(next).expect(ERROR_IMPOSSIBLE));
-            }
-            let events = events
-                .into_iter()
-                .take(usize::try_from(limit).expect(ERROR_IMPOSSIBLE))
-                .map(|(_, event)| event)
-                .collect();
-            out.insert(
-                part_id,
-                PartPage {
-                    events,
-                    next_cursor,
-                },
-            );
-        }
-        Ok(Ok(out))
-    }
-
-    async fn subscribe(
-        &self,
-        reqs: SubPartsRequest,
-        subscriber: PeerId,
-    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        self.subscribe_with_policy(reqs, Some(subscriber)).await
-    }
-
-    async fn subscribe_local(
-        &self,
-        reqs: SubPartsRequest,
-    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        self.subscribe_with_policy(reqs, None).await
-    }
-
-    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn set_obj_members(
-        &self,
-        doc: ObjId,
-        agents: HashMap<PeerId, keyhive_core::access::Access>,
-    ) -> Res<()> {
-        let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .execute(&mut *tx)
-            .await?;
-        for (principal, access) in &agents {
-            sqlx::query(
-                "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
-            )
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .bind(Self::peer_blob(*principal))
-            .bind(encode_access(access))
-            .execute(&mut *tx)
-            .await?;
-        }
-        let payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(&doc_blob)
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
-        tx.commit().await?;
-        if let Some(payload_json) = payload_json.filter(|value| !value.is_empty()) {
-            let payload = serde_json::from_str(&payload_json).expect(ERROR_JSON);
-            // Re-emit the current object payload after a membership change.
-            // A peer may have previously received the membership event while
-            // unauthorized, leaving a pending object with no payload. The
-            // normal part event promotes that pending object and wakes sync.
-            self.set_obj_payload(doc, payload).await?;
-        }
-        Ok(())
-    }
-    async fn add_obj_member(
-        &self,
-        doc: ObjId,
-        member: PeerId,
-        access: keyhive_core::access::Access,
-    ) -> Res<()> {
-        let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3",
-        )
-        .bind(self.scope_id)
-        .bind(&doc_blob)
-        .bind(Self::peer_blob(member))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind(self.scope_id)
-        .bind(&doc_blob)
-        .bind(Self::peer_blob(member))
-        .bind(encode_access(&access))
-        .execute(&mut *tx)
-        .await?;
-        let payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(&doc_blob)
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
-        // Re-emit the current object payload as a Changed event in the same
-        // transaction as the grant. Delivery-time policy filtering denies
-        // events for not-yet-authorized subscribers while cursors keep
-        // advancing, so without this resurrection event a peer granted later
-        // could never learn an already-advertised object exists.
-        let events = match payload_json
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .map(|value| serde_json::from_str::<ObjPayload>(value).wrap_err(ERROR_JSON))
-            .transpose()?
-        {
-            Some(payload) => self.set_obj_payload_in_tx(&mut tx, doc, payload).await?,
-            None => Vec::new(),
-        };
-        tx.commit().await?;
-        self.publish(events).await?;
-        Ok(())
-    }
-
-    async fn remove_obj_member(&self, doc: ObjId, member: PeerId) -> Res<()> {
-        let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .bind(Self::peer_blob(member))
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-}
-
 fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
     let prefix_bits = u32::from(bucket_id.level()) * u32::from(BuckId::BITS_PER_LEVEL);
     debug_assert!(prefix_bits <= u16::BITS);
@@ -1825,2278 +686,4 @@ pub enum SqliteBigRepoStoreError {
     Decode(#[from] sedimentree_core::codec::error::DecodeError),
     #[error(transparent)]
     Other(#[from] eyre::Report),
-}
-
-impl SqliteBigRepoStore {
-    /// Ensure the part row exists (idempotent). Inherent mirror of the
-    /// `HostPartStore` method so runtime workers can call it without the
-    /// crate-private trait in scope — a part is advertiseable once its row
-    /// exists.
-    pub(crate) async fn ensure_part(&self, part_id: PartId) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn subscribe_with_policy(
-        &self,
-        reqs: SubPartsRequest,
-        subscriber: Option<PeerId>,
-    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        let part_cursors: HashMap<PartId, CursorIndex> = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, cursor } => Some((*part_id, *cursor)),
-                SubscriptionTarget::Object { .. } => None,
-            })
-            .collect();
-        let objects: HashSet<ObjId> = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id } => Some(*obj_id),
-                SubscriptionTarget::Part { .. } => None,
-            })
-            .collect();
-        let parts: HashSet<_> = part_cursors.keys().copied().collect();
-        if subscriber.is_some()
-            && let Err(err) = self.summarize_parts(parts.clone()).await?
-        {
-            return Ok(Err(err));
-        }
-
-        let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
-        let sub_id = uuid::Uuid::new_v4();
-        if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-            eprintln!(
-                "SUBSCRIBE parts={:?} cursors={:?} objects={}",
-                parts,
-                part_cursors,
-                objects.len()
-            );
-        }
-        let sub = Arc::new(BigRepoSubscription {
-            sender: tx.clone(),
-            principal: subscriber,
-            pending: PendingSubscription::new(),
-        });
-        {
-            let mut bus = self.bus.write().expect(ERROR_IMPOSSIBLE);
-            bus.pending.insert(sub_id);
-            bus.subs.insert(sub_id, Arc::clone(&sub));
-            bus.parts_by_sub.insert(sub_id, parts.clone());
-            for part_id in &parts {
-                bus.by_part.entry(*part_id).or_default().insert(sub_id);
-            }
-            bus.objs_by_sub.insert(sub_id, objects.clone());
-            for obj_id in &objects {
-                bus.by_obj.entry(*obj_id).or_default().insert(sub_id);
-            }
-        }
-
-        let store = self.clone();
-        tokio::spawn(async move {
-            let mut cursor = part_cursors.values().copied().min().unwrap_or_default();
-            let mut marker_sent = false;
-            let mut object_replay_pending = true;
-            loop {
-                sub.pending
-                    .state
-                    .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let page = store
-                    .list_events_with_policy(parts.clone(), cursor, u32::MAX, subscriber.is_some())
-                    .await
-                    .expect(ERROR_IMPOSSIBLE)
-                    .expect(ERROR_IMPOSSIBLE);
-                let mut output: Vec<SubEvent> = Vec::new();
-                let mut raw_event_count = 0;
-                let mut max_cursor = cursor;
-                for (part_id, part_page) in page {
-                    for event in part_page.events {
-                        raw_event_count += 1;
-                        let event_cursor = match &event {
-                            PartEvent::Changed(inner) => inner.cursor,
-                            PartEvent::Added(inner) => inner.cursor,
-                            PartEvent::Removed(inner) => inner.cursor,
-                        };
-                        max_cursor = max_cursor.max(event_cursor);
-                        if event_cursor <= part_cursors.get(&part_id).copied().unwrap_or_default() {
-                            continue;
-                        }
-                        let obj_id = match &event {
-                            PartEvent::Changed(inner) => inner.obj_id,
-                            PartEvent::Added(inner) => inner.obj_id,
-                            PartEvent::Removed(inner) => inner.obj_id,
-                        };
-                        // A policy-check failure must not masquerade as a
-                        // denial: this spawned task cannot propagate errors,
-                        // so fail loudly instead of silently skipping a
-                        // deliverable event.
-                        let permitted = matches!(event, PartEvent::Removed(_))
-                            || store
-                                .is_event_permitted(Some(part_id), obj_id, subscriber)
-                                .await
-                                .expect(ERROR_IMPOSSIBLE);
-                        if !permitted {
-                            continue;
-                        }
-                        match event {
-                            PartEvent::Changed(inner) => {
-                                if let Some(SubEvent::Changed(existing)) =
-                                    output.iter_mut().find(|candidate| {
-                                        matches!(
-                                            candidate,
-                                            SubEvent::Changed(candidate)
-                                                if candidate.cursor == inner.cursor
-                                                    && candidate.obj_id == inner.obj_id
-                                        )
-                                    })
-                                {
-                                    if !existing.part_ids.contains(&part_id) {
-                                        existing.part_ids.push(part_id);
-                                    }
-                                } else {
-                                    let mut inner = inner;
-                                    inner.part_ids = vec![part_id];
-                                    output.push(SubEvent::Changed(inner));
-                                }
-                            }
-                            PartEvent::Added(inner) => output.push(SubEvent::Added(inner)),
-                            PartEvent::Removed(inner) => output.push(SubEvent::Removed(inner)),
-                        }
-                    }
-                }
-                if object_replay_pending {
-                    for obj_id in &objects {
-                        let permitted = store
-                            .is_event_permitted(None, *obj_id, subscriber)
-                            .await
-                            .expect(ERROR_IMPOSSIBLE);
-                        if permitted
-                            && let Some(payload) =
-                                store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
-                        {
-                            output.push(SubEvent::ObjectChanged(
-                                big_sync_core::rpc::ObjChangedWithoutPart {
-                                    obj_id: *obj_id,
-                                    payload,
-                                },
-                            ));
-                        }
-                    }
-                    object_replay_pending = false;
-                }
-                if std::env::var("SUBSCRIBE_TRACE").is_ok() {
-                    eprintln!(
-                        "REPLAY delivered={} cursor={}->{} raw={}",
-                        output.len(),
-                        cursor,
-                        max_cursor,
-                        raw_event_count
-                    );
-                }
-                for event in output {
-                    if tx.send(event).await.is_err() {
-                        store.bus.write().expect(ERROR_IMPOSSIBLE).remove(sub_id);
-                        return;
-                    }
-                }
-                cursor = max_cursor;
-                if raw_event_count != 0 {
-                    continue;
-                }
-                if !marker_sent {
-                    if !sub.pending.begin_finalization() {
-                        object_replay_pending = true;
-                        continue;
-                    }
-                    if tx.send(SubEvent::ReplayComplete).await.is_err() {
-                        store.bus.write().expect(ERROR_IMPOSSIBLE).remove(sub_id);
-                        return;
-                    }
-                    marker_sent = true;
-                    if sub.pending.become_ready() {
-                        return;
-                    }
-                    object_replay_pending = true;
-                } else if sub.pending.become_ready() {
-                    return;
-                } else {
-                    object_replay_pending = true;
-                }
-            }
-        });
-        Ok(Ok(rx))
-    }
-
-    async fn set_obj_payload_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        obj_id: ObjId,
-        payload: ObjPayload,
-    ) -> Res<Vec<SubEvent>> {
-        let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
-        let old_payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&mut **tx)
-        .await?;
-        let live_part_ids: Vec<PartId> = sqlx::query_scalar(
-            "SELECT part_id FROM big_sync_members
-             WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_all(&mut **tx)
-        .await?
-        .into_iter()
-        .map(Self::part_from_blob)
-        .collect();
-        let pending_part_ids: Vec<PartId> = sqlx::query_scalar(
-            "SELECT part_id FROM big_sync_pending_members
-             WHERE scope_id = ?1 AND obj_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .fetch_all(&mut **tx)
-        .await?
-        .into_iter()
-        .map(Self::part_from_blob)
-        .collect();
-        sqlx::query(
-            "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, obj_id) DO UPDATE SET payload_json = excluded.payload_json",
-        )
-        .bind(self.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .bind(&payload_json)
-        .execute(&mut **tx)
-        .await?;
-
-        if live_part_ids.is_empty() && pending_part_ids.is_empty() {
-            return Ok(vec![SubEvent::ObjectChanged(
-                big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
-            )]);
-        }
-        assert!(
-            live_part_ids.is_empty() || pending_part_ids.is_empty(),
-            "readable object cannot retain latent part memberships"
-        );
-        let cursor = Self::next_cursor(tx).await?;
-        if !pending_part_ids.is_empty() {
-            let mut events = Vec::with_capacity(pending_part_ids.len());
-            for part_id in pending_part_ids {
-                let old_state = self.load_member_state(tx, part_id, obj_id).await?;
-                assert!(
-                    !matches!(old_state, MemberState::Live(_)),
-                    "latent membership cannot already be live"
-                );
-                sqlx::query(
-                    "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                     VALUES (?1, ?2, 0)
-                     ON CONFLICT(scope_id, part_id) DO NOTHING",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .execute(&mut **tx)
-                .await?;
-                sqlx::query(
-                    "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
-                     ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
-                        added_at = excluded.added_at,
-                        added_payload_json = excluded.added_payload_json,
-                        changed_at = excluded.changed_at,
-                        removed_at = NULL,
-                        latest_cursor = excluded.latest_cursor",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .bind(Self::obj_blob(obj_id))
-                .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                .bind(&payload_json)
-                .execute(&mut **tx)
-                .await?;
-                self.apply_bucket_transition(
-                    tx,
-                    part_id,
-                    obj_id,
-                    cursor,
-                    &old_state,
-                    &MemberState::Live(payload.clone()),
-                )
-                .await?;
-                sqlx::query(
-                    "UPDATE big_sync_parts SET latest_cursor = ?1
-                     WHERE scope_id = ?2 AND part_id = ?3",
-                )
-                .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .execute(&mut **tx)
-                .await?;
-                sqlx::query(
-                    "DELETE FROM big_sync_pending_members
-                     WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .bind(Self::obj_blob(obj_id))
-                .execute(&mut **tx)
-                .await?;
-                events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor,
-                    part_id,
-                    obj_id,
-                    payload: payload.clone(),
-                }));
-            }
-            return Ok(events);
-        }
-
-        let old_payload: ObjPayload = old_payload_json
-            .as_deref()
-            .filter(|payload_json| !payload_json.is_empty())
-            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-            .transpose()?
-            .expect("visible object membership requires an existing payload");
-        for part_id in &live_part_ids {
-            sqlx::query(
-                "UPDATE big_sync_members
-                 SET changed_at = ?1, latest_cursor = ?1
-                 WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-            )
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(self.scope_id)
-            .bind(Self::part_blob(*part_id))
-            .bind(Self::obj_blob(obj_id))
-            .execute(&mut **tx)
-            .await?;
-            self.apply_bucket_transition(
-                tx,
-                *part_id,
-                obj_id,
-                cursor,
-                &MemberState::Live(old_payload.clone()),
-                &MemberState::Live(payload.clone()),
-            )
-            .await?;
-            sqlx::query(
-                "UPDATE big_sync_parts SET latest_cursor = ?1
-                 WHERE scope_id = ?2 AND part_id = ?3",
-            )
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(self.scope_id)
-            .bind(Self::part_blob(*part_id))
-            .execute(&mut **tx)
-            .await?;
-        }
-        Ok(vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-            cursor,
-            part_ids: live_part_ids,
-            obj_id,
-            payload,
-        })])
-    }
-
-    async fn init_subduction_tables(
-        pool: &sqlx::Pool<sqlx::Sqlite>,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        for statement in [
-            "CREATE TABLE IF NOT EXISTS big_repo_subduction_trees (
-                scope_id INTEGER NOT NULL,
-                sedimentree_id BLOB NOT NULL,
-                PRIMARY KEY(scope_id, sedimentree_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_subduction_commits (
-                scope_id INTEGER NOT NULL,
-                sedimentree_id BLOB NOT NULL,
-                commit_id BLOB NOT NULL,
-                digest BLOB NOT NULL,
-                signed BLOB NOT NULL,
-                blob BLOB NOT NULL,
-                PRIMARY KEY(scope_id, sedimentree_id, commit_id, digest),
-                FOREIGN KEY(scope_id, sedimentree_id)
-                    REFERENCES big_repo_subduction_trees(scope_id, sedimentree_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_subduction_fragments (
-                scope_id INTEGER NOT NULL,
-                sedimentree_id BLOB NOT NULL,
-                head_id BLOB NOT NULL,
-                digest BLOB NOT NULL,
-                signed BLOB NOT NULL,
-                blob BLOB NOT NULL,
-                PRIMARY KEY(scope_id, sedimentree_id, head_id, digest),
-                FOREIGN KEY(scope_id, sedimentree_id)
-                    REFERENCES big_repo_subduction_trees(scope_id, sedimentree_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_event_log (
-                scope_id INTEGER NOT NULL,
-                seq INTEGER NOT NULL,
-                event_hash BLOB NOT NULL,
-                event_bytes BLOB NOT NULL,
-                event_kind INTEGER,
-                source_id BLOB,
-                PRIMARY KEY(scope_id, seq),
-                UNIQUE(scope_id, event_hash)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_replay_tail (
-                scope_id INTEGER NOT NULL,
-                event_hash BLOB NOT NULL,
-                PRIMARY KEY(scope_id, event_hash),
-                FOREIGN KEY(scope_id, event_hash)
-                    REFERENCES big_repo_keyhive_event_log(scope_id, event_hash)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_admission_log (
-                scope_id INTEGER NOT NULL,
-                seq INTEGER NOT NULL,
-                event_hash BLOB NOT NULL,
-                event_bytes BLOB NOT NULL,
-                source_id BLOB,
-                PRIMARY KEY(scope_id, seq),
-                UNIQUE(scope_id, event_hash)
-            ) STRICT",
-            // FIXME: let's just have a single table for all cursor wtf
-            "CREATE TABLE IF NOT EXISTS big_repo_group_part_cursor (
-                scope_id INTEGER PRIMARY KEY,
-                cursor INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_causal_checkpoint_cursor (
-                scope_id INTEGER PRIMARY KEY,
-                cursor INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_sync_commits_watermark (
-                scope_id INTEGER NOT NULL,
-                doc_id BLOB NOT NULL,
-                big_sync_txid INTEGER NOT NULL,
-                latest_commit_row_id INTEGER NOT NULL,
-                PRIMARY KEY(scope_id, doc_id, big_sync_txid),
-                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_automerge_part_cursor (
-                scope_id INTEGER NOT NULL,
-                source_part_id BLOB NOT NULL,
-                cursor INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(scope_id, source_part_id),
-                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_automerge_keyhive_cursor (
-                scope_id INTEGER PRIMARY KEY,
-                cursor INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY(scope_id) REFERENCES big_sync_scopes(scope_id)
-            ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_repo_causal_ciphertext_index (
-                scope_id INTEGER NOT NULL,
-                sedimentree_id BLOB NOT NULL,
-                content_ref BLOB NOT NULL,
-                digest BLOB NOT NULL,
-                kind INTEGER NOT NULL,
-                pcs_update_hash BLOB NOT NULL,
-                PRIMARY KEY(scope_id, sedimentree_id, content_ref, digest, kind)
-            ) STRICT",
-            "CREATE INDEX IF NOT EXISTS big_repo_keyhive_event_log_hash_idx
-             ON big_repo_keyhive_event_log(scope_id, event_hash)",
-            "CREATE INDEX IF NOT EXISTS big_repo_keyhive_replay_tail_seq_idx
-             ON big_repo_keyhive_replay_tail(scope_id, event_hash)",
-            "CREATE INDEX IF NOT EXISTS big_repo_causal_ciphertext_update_idx
-             ON big_repo_causal_ciphertext_index(scope_id, sedimentree_id, pcs_update_hash)",
-        ] {
-            sqlx::query(statement).execute(&mut *tx).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        // Migration: the derived heads machinery (incremental heads table,
-        // parent index, fragment-boundary index) was replaced by a
-        // transaction-scoped sedimentree projection cache. Drop the old tables
-        // if a released database still has them; the BigSync payload rows
-        // already hold the canonical heads, and the cache rehydrates from the
-        // authoritative commit/fragment rows.
-        for statement in [
-            "DROP TABLE IF EXISTS big_repo_subduction_tree_heads",
-            "DROP TABLE IF EXISTS big_repo_subduction_commit_parents",
-            "DROP TABLE IF EXISTS big_repo_subduction_fragment_boundaries",
-        ] {
-            sqlx::query(statement).execute(&mut *tx).await?;
-        }
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_group_part_cursor(scope_id, cursor)
-             VALUES (?1, 0)",
-        )
-        .bind(self.scope_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_causal_checkpoint_cursor(scope_id, cursor)
-             VALUES (?1, 0)",
-        )
-        .bind(self.scope_id)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        self.backfill_causal_ciphertext_index().await?;
-        Ok(())
-    }
-    /// Reconcile one bounded document batch transactionally.
-    ///
-    /// Non-final worker batches leave the durable event cursor untouched so a
-    /// crash replays all derived updates safely before the cursor advances.
-    pub(crate) async fn reconcile_group_part_batch(
-        &self,
-        mutations: &[GroupPartReconciliation],
-        event_cursor: u64,
-        advance_cursor: bool,
-    ) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut transitions = Vec::new();
-        let mut transition_event_payloads = HashMap::new();
-        let mut reconciled_docs = HashMap::new();
-
-        for mutation in mutations {
-            let doc_blob = Self::obj_blob(mutation.doc);
-            let payload_json: Option<String> = sqlx::query_scalar(
-                "SELECT payload_json FROM big_sync_objs
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let payload_json = payload_json.filter(|value| !value.is_empty());
-            let event_payload: Option<ObjPayload> = payload_json
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
-                .transpose()?;
-            sqlx::query(
-                "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(scope_id, obj_id) DO NOTHING",
-            )
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .bind(payload_json.as_deref())
-            .execute(&mut *tx)
-            .await?;
-
-            let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar(
-                "SELECT principal_id FROM big_sync_syncable
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .collect();
-            sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
-                .bind(self.scope_id)
-                .bind(&doc_blob)
-                .execute(&mut *tx)
-                .await?;
-            for (principal, access) in &mutation.agents {
-                sqlx::query(
-                    "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .bind(self.scope_id)
-                .bind(&doc_blob)
-                .bind(Self::peer_blob(*principal))
-                .bind(encode_access(access))
-                .execute(&mut *tx)
-                .await?;
-            }
-            reconciled_docs.insert(mutation.doc, mutation.agents.clone());
-
-            let current_rows = sqlx::query(
-                "SELECT part_id FROM big_sync_members
-                 WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL
-                 UNION
-                 SELECT part_id FROM big_sync_pending_members
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(&doc_blob)
-            .fetch_all(&mut *tx)
-            .await?;
-            let current_parts: HashSet<PartId> = current_rows
-                .into_iter()
-                .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
-                .collect();
-            let mut desired_parts = mutation.desired_group_parts.clone();
-            if mutation.desired_global {
-                desired_parts.insert(crate::GLOBAL_PART_ID);
-            }
-            let stale = current_parts
-                .intersection(&mutation.managed_group_parts)
-                .filter(|part| !desired_parts.contains(part))
-                .copied()
-                .chain(
-                    (!mutation.desired_global && current_parts.contains(&crate::GLOBAL_PART_ID))
-                        .then_some(crate::GLOBAL_PART_ID),
-                )
-                .collect::<HashSet<_>>();
-            let additions = desired_parts.difference(&current_parts).copied();
-
-            for part_id in stale.into_iter().chain(additions) {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                     VALUES (?1, ?2, 0)",
-                )
-                .bind(self.scope_id)
-                .bind(Self::part_blob(part_id))
-                .execute(&mut *tx)
-                .await?;
-                let old = self
-                    .load_member_state(&mut tx, part_id, mutation.doc)
-                    .await?;
-                if desired_parts.contains(&part_id) {
-                    let Some(payload) = event_payload.clone() else {
-                        // Pending member: the local principal wants the doc in
-                        // this part but has no payload yet (fetcher/relay). The
-                        // part row must exist anyway — a pending want is pull
-                        // access, and the part must be advertiseable
-                        // (`summarize_parts` succeeds) so a sync route can be
-                        // established and the first pull promotes the member.
-                        sqlx::query(
-                            "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                             VALUES (?1, ?2, 0)",
-                        )
-                        .bind(self.scope_id)
-                        .bind(Self::part_blob(part_id))
-                        .execute(&mut *tx)
-                        .await?;
-                        sqlx::query(
-                            "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
-                             VALUES (?1, ?2, ?3)",
-                        )
-                        .bind(self.scope_id)
-                        .bind(Self::part_blob(part_id))
-                        .bind(&doc_blob)
-                        .execute(&mut *tx)
-                        .await?;
-                        continue;
-                    };
-                    transition_event_payloads.insert((part_id, mutation.doc), payload.clone());
-                    transitions.push((part_id, mutation.doc, old, MemberState::Live(payload)));
-                } else {
-                    sqlx::query(
-                        "DELETE FROM big_sync_pending_members
-                         WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-                    )
-                    .bind(self.scope_id)
-                    .bind(Self::part_blob(part_id))
-                    .bind(&doc_blob)
-                    .execute(&mut *tx)
-                    .await?;
-                    if !matches!(old, MemberState::Absent) {
-                        transitions.push((part_id, mutation.doc, old, MemberState::Dead));
-                    }
-                }
-            }
-
-            // A principal granted here (absent before, present now) may have
-            // missed earlier Added events that delivery-time policy filtering
-            // denied while subscription cursors advanced past them. Re-emit a
-            // Live→Live transition for the parts the doc is already live in so
-            // the subscriber's existing subscription delivers a fresh event it
-            // is now permitted to receive. Every persisted access level grants
-            // fetch, so only absence→presence changes deliverability.
-            if mutation
-                .agents
-                .keys()
-                .any(|principal| !prior_agent_ids.contains(&Self::peer_blob(*principal)))
-                && let Some(payload) = event_payload.clone()
-            {
-                let live_part_rows = sqlx::query_scalar(
-                    "SELECT part_id FROM big_sync_members
-                     WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
-                )
-                .bind(self.scope_id)
-                .bind(&doc_blob)
-                .fetch_all(&mut *tx)
-                .await?;
-                for part_blob in live_part_rows {
-                    let part_id = Self::part_from_blob(part_blob);
-                    if !desired_parts.contains(&part_id)
-                        || transitions
-                            .iter()
-                            .any(|(p, d, _, _)| *p == part_id && *d == mutation.doc)
-                    {
-                        continue;
-                    }
-                    let old = self
-                        .load_member_state(&mut tx, part_id, mutation.doc)
-                        .await?;
-                    transition_event_payloads.insert((part_id, mutation.doc), payload.clone());
-                    transitions.push((
-                        part_id,
-                        mutation.doc,
-                        old,
-                        MemberState::Live(payload.clone()),
-                    ));
-                }
-            }
-        }
-
-        let mut events = Vec::with_capacity(transitions.len());
-        for (part_id, doc, old, new) in transitions {
-            // Part cursors are scalar high-water marks and pagination
-            // resumes with `latest_cursor > cursor`. Sharing one cursor
-            // between sibling transitions would let acknowledging either
-            // sibling permanently skip the others.
-            let cursor = Self::next_cursor(&mut tx).await?;
-            sqlx::query(
-                "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                     VALUES (?1, ?2, 0)
-                     ON CONFLICT(scope_id, part_id) DO NOTHING",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .execute(&mut *tx)
-            .await?;
-            match &new {
-                MemberState::Live(_) => {
-                    sqlx::query(
-                        "INSERT INTO big_sync_members(
-                             scope_id, part_id, obj_id, added_at, added_payload_json,
-                             changed_at, removed_at, latest_cursor
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
-                             ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
-                             added_at = excluded.added_at,
-                             added_payload_json = excluded.added_payload_json,
-                             changed_at = excluded.changed_at, removed_at = NULL,
-                             latest_cursor = excluded.latest_cursor",
-                    )
-                    .bind(self.scope_id)
-                    .bind(Self::part_blob(part_id))
-                    .bind(Self::obj_blob(doc))
-                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                    .bind(
-                        serde_json::to_string(
-                            transition_event_payloads
-                                .get(&(part_id, doc))
-                                .expect("live transition requires payload"),
-                        )
-                        .expect(ERROR_JSON),
-                    )
-                    .execute(&mut *tx)
-                    .await?;
-                    self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
-                        .await?;
-                    sqlx::query(
-                        "DELETE FROM big_sync_pending_members
-                             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
-                    )
-                    .bind(self.scope_id)
-                    .bind(Self::part_blob(part_id))
-                    .bind(Self::obj_blob(doc))
-                    .execute(&mut *tx)
-                    .await?;
-                    events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                        cursor,
-                        part_id,
-                        obj_id: doc,
-                        payload: transition_event_payloads
-                            .get(&(part_id, doc))
-                            .expect("live transition requires payload")
-                            .clone(),
-                    }));
-                }
-                MemberState::Dead => {
-                    sqlx::query(
-                        "UPDATE big_sync_members
-                             SET removed_at = ?1, changed_at = ?1, latest_cursor = ?1
-                             WHERE scope_id = ?2 AND part_id = ?3 AND obj_id = ?4",
-                    )
-                    .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-                    .bind(self.scope_id)
-                    .bind(Self::part_blob(part_id))
-                    .bind(Self::obj_blob(doc))
-                    .execute(&mut *tx)
-                    .await?;
-                    self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
-                        .await?;
-                    events.push(SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                        cursor,
-                        part_id,
-                        obj_id: doc,
-                    }));
-                }
-                MemberState::Absent => {
-                    unreachable!("reconciliation cannot target absent state")
-                }
-            }
-            sqlx::query(
-                "UPDATE big_sync_parts SET latest_cursor = ?1
-                     WHERE scope_id = ?2 AND part_id = ?3",
-            )
-            .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .execute(&mut *tx)
-            .await?;
-        }
-        if advance_cursor {
-            sqlx::query("UPDATE big_repo_group_part_cursor SET cursor = ?1 WHERE scope_id = ?2")
-                .bind(i64::try_from(event_cursor).expect(ERROR_IMPOSSIBLE))
-                .bind(self.scope_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-
-        if !events.is_empty() {
-            self.publish(events).await?;
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn keyhive_group_part_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> =
-            sqlx::query_scalar("SELECT cursor FROM big_repo_group_part_cursor WHERE scope_id = ?1")
-                .bind(self.scope_id)
-                .fetch_optional(&self.sql.read_pool)
-                .await
-                .unwrap_or_default();
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn causal_checkpoint_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT cursor FROM big_repo_causal_checkpoint_cursor WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .unwrap_or_default();
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn advance_causal_checkpoint_cursor(&self, cursor: u64) -> Res<()> {
-        sqlx::query(
-            "UPDATE big_repo_causal_checkpoint_cursor
-             SET cursor = MAX(cursor, ?1)
-             WHERE scope_id = ?2",
-        )
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .bind(self.scope_id)
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn record_sync_commit_watermark(
-        &self,
-        doc_id: crate::DocumentId,
-        big_sync_txid: u64,
-        latest_commit_row_id: i64,
-    ) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_repo_sync_commits_watermark(
-                scope_id, doc_id, big_sync_txid, latest_commit_row_id
-             )
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_id, doc_id, big_sync_txid)
-             DO UPDATE SET latest_commit_row_id = MAX(latest_commit_row_id, excluded.latest_commit_row_id)",
-        )
-        .bind(self.scope_id)
-        .bind(doc_id.as_bytes().as_slice())
-        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
-        .bind(latest_commit_row_id)
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn get_sync_commit_watermark(
-        &self,
-        doc_id: crate::DocumentId,
-        big_sync_txid: u64,
-    ) -> Res<Option<i64>> {
-        let row_id: Option<i64> = sqlx::query_scalar(
-            "SELECT latest_commit_row_id
-             FROM big_repo_sync_commits_watermark
-             WHERE scope_id = ?1 AND doc_id = ?2 AND big_sync_txid = ?3",
-        )
-        .bind(self.scope_id)
-        .bind(doc_id.as_bytes().as_slice())
-        .bind(i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(row_id)
-    }
-
-    pub(crate) async fn automerge_part_cursor(&self, part_id: PartId) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT cursor FROM big_repo_automerge_part_cursor WHERE scope_id = ?1 AND source_part_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn commit_automerge_part_cursor(
-        &self,
-        part_id: PartId,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_repo_automerge_part_cursor(scope_id, source_part_id, cursor)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, source_part_id)
-             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn automerge_keyhive_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT cursor FROM big_repo_automerge_keyhive_cursor WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn commit_automerge_keyhive_cursor(&self, cursor: u64) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_repo_automerge_keyhive_cursor(scope_id, cursor)
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id)
-             DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
-        )
-        .bind(self.scope_id)
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    #[cfg_attr(not(test), expect(dead_code))] // used by sqlite store tests
-    pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {
-        let cursor: Option<Option<i64>> = sqlx::query_scalar(
-            "SELECT MAX(seq) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .ok();
-        Ok(cursor.flatten().map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn save_keyhive_event(
-        &self,
-        hash: subduction_keyhive::storage::StorageHash,
-        data: Vec<u8>,
-        source: Option<subduction_keyhive::KeyhivePeerId>,
-    ) -> Result<bool, SqliteBigRepoStoreError> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let next_seq: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) + 1
-             FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let inserted = sqlx::query(
-            "INSERT INTO big_repo_keyhive_event_log(
-                scope_id, seq, event_hash, event_bytes, source_id
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(scope_id, event_hash) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(next_seq)
-        .bind(hash.as_bytes().as_slice())
-        .bind(&data)
-        .bind(source.map(|peer| peer.verifying_key().to_vec()))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            > 0;
-        sqlx::query(
-            "INSERT INTO big_repo_keyhive_replay_tail(scope_id, event_hash)
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id, event_hash) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(hash.as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await?;
-        // This log retains EVERY event forever: keyhive recovery replays it
-        // wholesale (`ingest_from_storage` → `load_events`), and no snapshot-
-        // boundary marker exists that would make any subset safely prunable.
-        // Workers never consume this log — they tail the separate admission
-        // log, which records events after their effects are applied.
-        tx.commit().await?;
-        if inserted {
-            self.keyhive_event_notify.notify_waiters();
-        }
-        Ok(inserted)
-    }
-
-    /// Append fully incorporated hashes to the durable incorporation log
-    /// inside one transaction.
-    ///
-    /// Every hash must exist in the arrival log — the reporter only fires
-    /// after those rows are committed, so a miss is an invariant break. A
-    /// hash admits at most once (`ON CONFLICT DO NOTHING`); re-reports are
-    /// no-ops. Admission seqs are monotonic but not gap-free by construction:
-    /// gaps are impossible within one scope since each insert allocates
-    /// MAX(seq)+1 under the write transaction.
-    pub(crate) async fn append_admitted_events(
-        &self,
-        mut hashes: Vec<subduction_keyhive::storage::StorageHash>,
-        source: Option<subduction_keyhive::KeyhivePeerId>,
-    ) -> Res<u64> {
-        if hashes.is_empty() {
-            return Ok(self.admission_head().await?);
-        }
-        hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        hashes.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
-        let source_id = source.map(|peer| peer.verifying_key().to_vec());
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-
-        let mut payloads = HashMap::with_capacity(hashes.len());
-        for chunk in hashes.chunks(400) {
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                "SELECT event_hash, event_bytes FROM big_repo_keyhive_event_log \
-                 WHERE scope_id = ",
-            );
-            query.push_bind(self.scope_id).push(" AND event_hash IN (");
-            for (index, hash) in chunk.iter().enumerate() {
-                if index != 0 {
-                    query.push(", ");
-                }
-                query.push_bind(hash.as_bytes().as_slice());
-            }
-            query.push(")");
-            for row in query.build().fetch_all(&mut *tx).await? {
-                let hash: Vec<u8> = row.try_get("event_hash")?;
-                let bytes: Vec<u8> = row.try_get("event_bytes")?;
-                payloads.insert(hash, bytes);
-            }
-        }
-        if payloads.len() != hashes.len() {
-            return Err(ferr!(
-                "reported incorporated hash missing from raw event log"
-            ));
-        }
-
-        let mut existing = HashSet::new();
-        for chunk in hashes.chunks(400) {
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                "SELECT event_hash FROM big_repo_keyhive_admission_log \
-                 WHERE scope_id = ",
-            );
-            query.push_bind(self.scope_id).push(" AND event_hash IN (");
-            for (index, hash) in chunk.iter().enumerate() {
-                if index != 0 {
-                    query.push(", ");
-                }
-                query.push_bind(hash.as_bytes().as_slice());
-            }
-            query.push(")");
-            for row in query.build().fetch_all(&mut *tx).await? {
-                existing.insert(row.try_get::<Vec<u8>, _>("event_hash")?);
-            }
-        }
-        let missing: Vec<_> = hashes
-            .into_iter()
-            .filter(|hash| !existing.contains(hash.as_bytes().as_slice()))
-            .collect();
-        let head: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admission_log WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        for chunk in missing.chunks(160) {
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                "INSERT INTO big_repo_keyhive_admission_log(\
-                 scope_id, seq, event_hash, event_bytes, source_id) VALUES ",
-            );
-            for (offset, hash) in chunk.iter().enumerate() {
-                if offset != 0 {
-                    query.push(", ");
-                }
-                query
-                    .push("(")
-                    .push_bind(self.scope_id)
-                    .push(", ")
-                    .push_bind(head + i64::try_from(offset).expect(ERROR_IMPOSSIBLE) + 1)
-                    .push(", ")
-                    .push_bind(hash.as_bytes().as_slice())
-                    .push(", ")
-                    .push_bind(
-                        payloads
-                            .get(hash.as_bytes().as_slice())
-                            .expect(ERROR_IMPOSSIBLE),
-                    )
-                    .push(", ")
-                    .push_bind(&source_id)
-                    .push(")");
-            }
-            query.push(" ON CONFLICT(scope_id, event_hash) DO NOTHING");
-            query.build().execute(&mut *tx).await?;
-        }
-        tx.commit().await?;
-        Ok(Self::u64_from_db(
-            head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE),
-        ))
-    }
-
-    /// Current admission-log head (0 when empty).
-    pub(crate) async fn admission_head(&self) -> Res<u64> {
-        let head: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admission_log WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_one(&self.sql.read_pool)
-        .await?;
-        Ok(Self::u64_from_db(head))
-    }
-
-    /// Replay admitted events past `cursor`, oldest first. No error
-    /// swallowing: consumers must never silently skip incorporations.
-    pub(crate) async fn admission_events_after(
-        &self,
-        cursor: u64,
-        limit: u32,
-    ) -> Res<Vec<AdmissionEventRow>> {
-        let rows = sqlx::query(
-            "SELECT seq, event_hash, source_id, event_bytes
-             FROM big_repo_keyhive_admission_log
-             WHERE scope_id = ?1 AND seq > ?2
-             ORDER BY seq
-             LIMIT ?3",
-        )
-        .bind(self.scope_id)
-        .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .bind(i64::from(limit))
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(AdmissionEventRow {
-                    seq: Self::u64_from_db(row.try_get("seq")?),
-                    event_hash: row
-                        .try_get::<Vec<u8>, _>("event_hash")?
-                        .try_into()
-                        .expect(ERROR_IMPOSSIBLE),
-                    source_id: row.try_get("source_id")?,
-                    bytes: row.try_get("event_bytes")?,
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) async fn load_keyhive_events(
-        &self,
-    ) -> Result<Vec<(subduction_keyhive::storage::StorageHash, Vec<u8>)>, SqliteBigRepoStoreError>
-    {
-        let rows = sqlx::query(
-            "SELECT event_hash, event_bytes
-             FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?1
-               AND event_hash IN (
-                   SELECT event_hash
-                   FROM big_repo_keyhive_replay_tail
-                   WHERE scope_id = ?1
-               )
-             ORDER BY seq",
-        )
-        .bind(self.scope_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let hash_bytes: Vec<u8> = row.try_get("event_hash")?;
-                let hash = Self::decode_id(hash_bytes)?;
-                let event_bytes: Vec<u8> = row.try_get("event_bytes")?;
-                Ok((
-                    subduction_keyhive::storage::StorageHash::new(hash),
-                    event_bytes,
-                ))
-            })
-            .collect()
-    }
-
-    /// Events present in the retained keyhive WAL (replay tail) that have no
-    /// admission entry, with serialized bytes and original source attribution.
-    ///
-    /// ONE set-diff query: the common boot returns an empty vector because
-    /// admission appends synchronously with persistence. This is the candidate
-    /// feed for crash-window reconciliation — never a full WAL or projection walk.
-    pub(crate) async fn unadmitted_keyhive_events(
-        &self,
-    ) -> Result<
-        Vec<([u8; 32], Vec<u8>, Option<subduction_keyhive::KeyhivePeerId>)>,
-        SqliteBigRepoStoreError,
-    > {
-        let rows = sqlx::query(
-            "SELECT t.event_hash, l.event_bytes, l.source_id
-             FROM big_repo_keyhive_replay_tail t
-             JOIN big_repo_keyhive_event_log l
-               ON l.scope_id = t.scope_id AND l.event_hash = t.event_hash
-             WHERE t.scope_id = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM big_repo_keyhive_admission_log a
-                   WHERE a.scope_id = t.scope_id AND a.event_hash = t.event_hash
-               )",
-        )
-        .bind(self.scope_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let hash = Self::decode_id(row.try_get::<Vec<u8>, _>("event_hash")?)?;
-                let source = row
-                    .try_get::<Option<Vec<u8>>, _>("source_id")?
-                    .map(|bytes| {
-                        subduction_keyhive::KeyhivePeerId::from_bytes(
-                            bytes
-                                .try_into()
-                                .expect("stored Keyhive peer id must be 32 bytes"),
-                        )
-                    });
-                let event_bytes = row.try_get("event_bytes")?;
-                Ok((hash, event_bytes, source))
-            })
-            .collect()
-    }
-
-    pub(crate) async fn load_keyhive_events_with_source(
-        &self,
-    ) -> Result<
-        Vec<(
-            subduction_keyhive::storage::StorageHash,
-            Vec<u8>,
-            Option<subduction_keyhive::KeyhivePeerId>,
-        )>,
-        SqliteBigRepoStoreError,
-    > {
-        let rows = sqlx::query(
-            "SELECT event_hash, event_bytes, source_id
-             FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?1
-               AND event_hash IN (
-                   SELECT event_hash
-                   FROM big_repo_keyhive_replay_tail
-                   WHERE scope_id = ?1
-               )
-             ORDER BY seq",
-        )
-        .bind(self.scope_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let hash = Self::decode_id(row.try_get::<Vec<u8>, _>("event_hash")?)?;
-                let source = row
-                    .try_get::<Option<Vec<u8>>, _>("source_id")?
-                    .map(|bytes| {
-                        subduction_keyhive::KeyhivePeerId::from_bytes(
-                            bytes
-                                .try_into()
-                                .expect("stored Keyhive peer id must be 32 bytes"),
-                        )
-                    });
-                Ok((
-                    subduction_keyhive::storage::StorageHash::new(hash),
-                    row.try_get("event_bytes")?,
-                    source,
-                ))
-            })
-            .collect()
-    }
-
-    pub(crate) async fn delete_keyhive_event(
-        &self,
-        hash: subduction_keyhive::storage::StorageHash,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query(
-            "DELETE FROM big_repo_keyhive_replay_tail
-             WHERE scope_id = ?1 AND event_hash = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(hash.as_bytes().as_slice())
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
-    }
-
-    fn tree_blob(id: SedimentreeId) -> Vec<u8> {
-        id.as_bytes().to_vec()
-    }
-
-    fn obj_id(id: SedimentreeId) -> ObjId {
-        ObjId(Byte32Id::new(*id.as_bytes()))
-    }
-
-    fn commit_blob(id: CommitId) -> Vec<u8> {
-        id.as_bytes().to_vec()
-    }
-
-    fn digest_blob<T>(payload: &T) -> Vec<u8>
-    where
-        T: sedimentree_core::codec::schema::Schema + sedimentree_core::codec::encode::EncodeFields,
-    {
-        Digest::hash(payload).as_bytes().to_vec()
-    }
-
-    fn decode_id(bytes: Vec<u8>) -> Result<[u8; 32], SqliteBigRepoStoreError> {
-        bytes
-            .try_into()
-            .map_err(|_| SqliteBigRepoStoreError::InvalidRecord)
-    }
-
-    async fn save_tree(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_subduction_trees(scope_id, sedimentree_id)
-             VALUES (?1, ?2)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    async fn backfill_causal_ciphertext_index(&self) -> Result<(), SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT sedimentree_id, commit_id AS content_ref, digest, 0 AS kind, blob
-             FROM big_repo_subduction_commits WHERE scope_id = ?1
-             UNION ALL
-             SELECT sedimentree_id, head_id AS content_ref, digest, 1 AS kind, blob
-             FROM big_repo_subduction_fragments WHERE scope_id = ?1",
-        )
-        .bind(self.scope_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        for row in rows {
-            let blob: Vec<u8> = row.try_get("blob")?;
-            let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(&blob) else {
-                continue;
-            };
-            sqlx::query(
-                "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
-                    scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .bind(self.scope_id)
-            .bind(row.try_get::<Vec<u8>, _>("sedimentree_id")?)
-            .bind(row.try_get::<Vec<u8>, _>("content_ref")?)
-            .bind(row.try_get::<Vec<u8>, _>("digest")?)
-            .bind(row.try_get::<i64, _>("kind")?)
-            .bind(encrypted.pcs_update_op_hash.raw.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub(crate) async fn causal_ciphertexts_by_pcs_update(
-        &self,
-        sedimentree_id: SedimentreeId,
-        pcs_update_hash: &[u8; 32],
-    ) -> Result<Vec<Vec<u8>>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT commits.blob
-             FROM big_repo_causal_ciphertext_index AS causal
-             JOIN big_repo_subduction_commits AS commits
-               ON commits.scope_id = causal.scope_id
-              AND commits.sedimentree_id = causal.sedimentree_id
-              AND commits.commit_id = causal.content_ref
-              AND commits.digest = causal.digest
-             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
-               AND causal.pcs_update_hash = ?3 AND causal.kind = 0
-             UNION ALL
-             SELECT fragments.blob
-             FROM big_repo_causal_ciphertext_index AS causal
-             JOIN big_repo_subduction_fragments AS fragments
-               ON fragments.scope_id = causal.scope_id
-              AND fragments.sedimentree_id = causal.sedimentree_id
-              AND fragments.head_id = causal.content_ref
-              AND fragments.digest = causal.digest
-             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
-               AND causal.pcs_update_hash = ?3 AND causal.kind = 1",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(sedimentree_id))
-        .bind(pcs_update_hash.as_slice())
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| row.try_get("blob").map_err(Into::into))
-            .collect()
-    }
-
-    async fn index_causal_ciphertext(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        sedimentree_id: SedimentreeId,
-        content_ref: CommitId,
-        digest: Vec<u8>,
-        kind: i64,
-        blob: &[u8],
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(blob) else {
-            return Ok(());
-        };
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
-                scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(sedimentree_id))
-        .bind(Self::commit_blob(content_ref))
-        .bind(digest)
-        .bind(kind)
-        .bind(encrypted.pcs_update_op_hash.raw.as_bytes().as_slice())
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    async fn commit_rows(
-        &self,
-        id: SedimentreeId,
-        commit_id: Option<CommitId>,
-    ) -> Result<Vec<(Signed<LooseCommit>, Blob)>, SqliteBigRepoStoreError> {
-        let query = if commit_id.is_some() {
-            "SELECT signed, blob FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3
-             ORDER BY digest"
-        } else {
-            "SELECT signed, blob FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest"
-        };
-        let mut request = sqlx::query(query)
-            .bind(self.scope_id)
-            .bind(Self::tree_blob(id));
-        if let Some(commit_id) = commit_id {
-            request = request.bind(Self::commit_blob(commit_id));
-        }
-        let rows = request.fetch_all(&self.sql.read_pool).await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                let blob: Vec<u8> = row.try_get("blob")?;
-                Ok((Signed::try_decode(&signed)?, Blob::new(blob)))
-            })
-            .collect()
-    }
-
-    async fn fragment_rows(
-        &self,
-        id: SedimentreeId,
-        head_id: Option<CommitId>,
-    ) -> Result<Vec<(Signed<Fragment>, Blob)>, SqliteBigRepoStoreError> {
-        let query = if head_id.is_some() {
-            "SELECT signed, blob FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3
-             ORDER BY digest"
-        } else {
-            "SELECT signed, blob FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest"
-        };
-        let mut request = sqlx::query(query)
-            .bind(self.scope_id)
-            .bind(Self::tree_blob(id));
-        if let Some(head_id) = head_id {
-            request = request.bind(Self::commit_blob(head_id));
-        }
-        let rows = request.fetch_all(&self.sql.read_pool).await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                let blob: Vec<u8> = row.try_get("blob")?;
-                Ok((Signed::try_decode(&signed)?, Blob::new(blob)))
-            })
-            .collect()
-    }
-
-    /// Raw SQL row insert for a loose commit (plus its causal ciphertext
-    /// index). Graph semantics live in the cached projection, not here.
-    async fn insert_commit_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-        verified: VerifiedMeta<LooseCommit>,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        let (signed, payload, blob) = verified.into_full_parts();
-        let digest = Self::digest_blob(&payload);
-        let blob = blob.into_contents();
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_subduction_commits
-             (scope_id, sedimentree_id, commit_id, digest, signed, blob)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .bind(Self::commit_blob(payload.head()))
-        .bind(&digest)
-        .bind(signed.as_bytes())
-        .bind(&blob)
-        .execute(&mut **tx)
-        .await?;
-        self.index_causal_ciphertext(tx, id, payload.head(), digest, 0, &blob)
-            .await?;
-        Ok(())
-    }
-
-    /// Raw SQL row insert for a fragment (plus its causal ciphertext index).
-    async fn insert_fragment_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-        verified: VerifiedMeta<Fragment>,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        let (signed, payload, blob) = verified.into_full_parts();
-        let digest = Self::digest_blob(&payload);
-        let blob = blob.into_contents();
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_repo_subduction_fragments
-             (scope_id, sedimentree_id, head_id, digest, signed, blob)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .bind(Self::commit_blob(payload.head()))
-        .bind(&digest)
-        .bind(signed.as_bytes())
-        .bind(&blob)
-        .execute(&mut **tx)
-        .await?;
-        self.index_causal_ciphertext(tx, id, payload.head(), digest, 1, &blob)
-            .await?;
-        Ok(())
-    }
-}
-
-impl SqliteBigRepoStore {
-    /// Apply a tree mutation inside an open `BEGIN IMMEDIATE` write
-    /// transaction.
-    ///
-    /// The cached tree is hydrated/adopted, mutated, durably minimized, and
-    /// used to derive the canonical heads via `sedimentree_core`. Raw SQL row
-    /// mutations, deletion of items covered by minimization, and the BigSync
-    /// payload write happen in the same transaction. Returns the events to
-    /// publish and a guard that evicts the speculative cache entry unless the
-    /// caller commits and disarms it.
-    async fn mutate_tree_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-        mutation: TreeStorageMutation,
-    ) -> Result<(Vec<SubEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
-        let mut guard = match &mutation {
-            TreeStorageMutation::DeleteCommit(_)
-            | TreeStorageMutation::DeleteFragment(_)
-            | TreeStorageMutation::DeleteAllCommits
-            | TreeStorageMutation::DeleteAllFragments => {
-                // Deletes: evict the existing entry — a minimized tree may
-                // have discarded metadata that becomes relevant after
-                // removal — and rebuild from the remaining durable rows.
-                self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
-                TreeCacheGuard::arm(&self.tree_cache, id, 0)
-            }
-            TreeStorageMutation::InsertCommit(_)
-            | TreeStorageMutation::InsertFragment(_)
-            | TreeStorageMutation::InsertBatch { .. } => {
-                // Inserts: adopt the cached entry or hydrate it from the
-                // transaction's view of durable storage.
-                let maybe_epoch = {
-                    let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
-                    if cache.get(&id).is_some() {
-                        Some(cache.current_epoch(&id).unwrap_or(0))
-                    } else {
-                        None
-                    }
-                };
-                let epoch = match maybe_epoch {
-                    Some(epoch) => epoch,
-                    None => {
-                        let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                        self.tree_cache
-                            .lock()
-                            .expect(ERROR_MUTEX)
-                            .insert_no_evict(id, tree)
-                    }
-                };
-                TreeCacheGuard::arm(&self.tree_cache, id, epoch)
-            }
-        };
-
-        guard.epoch = match mutation {
-            TreeStorageMutation::InsertCommit(verified) => {
-                let payload = verified.payload().clone();
-                self.insert_commit_rows(tx, id, verified).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .apply_commit(&id, payload)
-            }
-            TreeStorageMutation::InsertFragment(verified) => {
-                let payload = verified.payload().clone();
-                self.insert_fragment_rows(tx, id, verified).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .apply_fragment(&id, payload)
-            }
-            TreeStorageMutation::InsertBatch { commits, fragments } => {
-                let commit_payloads: Vec<LooseCommit> = commits
-                    .iter()
-                    .map(|commit| commit.payload().clone())
-                    .collect();
-                let fragment_payloads: Vec<Fragment> = fragments
-                    .iter()
-                    .map(|fragment| fragment.payload().clone())
-                    .collect();
-                for commit in commits {
-                    self.insert_commit_rows(tx, id, commit).await?;
-                }
-                for fragment in fragments {
-                    self.insert_fragment_rows(tx, id, fragment).await?;
-                }
-                self.tree_cache.lock().expect(ERROR_MUTEX).apply_batch(
-                    &id,
-                    commit_payloads,
-                    fragment_payloads,
-                )
-            }
-            TreeStorageMutation::DeleteCommit(commit_id) => {
-                self.delete_commit_rows(tx, id, commit_id).await?;
-                let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree)
-            }
-            TreeStorageMutation::DeleteFragment(head_id) => {
-                self.delete_fragment_rows(tx, id, head_id).await?;
-                let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree)
-            }
-            TreeStorageMutation::DeleteAllCommits => {
-                self.delete_all_commit_rows(tx, id).await?;
-                let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree)
-            }
-            TreeStorageMutation::DeleteAllFragments => {
-                self.delete_all_fragment_rows(tx, id).await?;
-                let tree = self.hydrate_tree_in_tx(tx, id).await?;
-                self.tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .insert_no_evict(id, tree)
-            }
-        };
-
-        // Durable state and the resident projection must be the same minimal
-        // tree. Keeping covered rows in SQLite while hiding them in the cache
-        // makes the sync representation depend on cache residency: hydration
-        // can rediscover a proof that a received loose commit is covered,
-        // while an already-minimal cache cannot. Compute the pruning plan via
-        // sedimentree_core (the sole owner of graph semantics), install its
-        // canonical tree speculatively, and remove every discarded row in
-        // this same transaction.
-        let (removed_commits, removed_fragments) = {
-            let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
-            let tree = cache
-                .entries
-                .get_mut(&id)
-                .expect("cached entry present after mutation");
-            tree.ensure_minimized_with_delta(&CountLeadingZeroBytes)
-        };
-        for commit_id in removed_commits {
-            self.delete_commit_rows(tx, id, commit_id).await?;
-        }
-        for head_id in removed_fragments {
-            self.delete_fragment_rows(tx, id, head_id).await?;
-        }
-
-        // Derive canonical heads from the cached projection — sedimentree_core
-        // is the sole implementation of graph semantics.
-        let heads = {
-            let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
-            let heads = {
-                let tree = cache
-                    .entries
-                    .get_mut(&id)
-                    .expect("cached entry present after mutation");
-                tree.heads(&CountLeadingZeroBytes)
-            };
-            // Update the LRU cost from the post-minimization metadata weight.
-            // This may evict the entry itself (an oversized tree is used
-            // transiently for this transaction and then left uncached) —
-            // heads are already captured, so that is safe.
-            cache.update_cost(&id);
-            heads
-        };
-        let payload = serde_json::json!({
-            "heads": am_utils_rs::serialize_commit_heads(
-                &heads
-                    .iter()
-                    .map(|head| automerge::ChangeHash(*head.as_bytes()))
-                    .collect::<Vec<_>>(),
-            ),
-        });
-        let events = self
-            .set_obj_payload_in_tx(tx, Self::obj_id(id), payload)
-            .await?;
-
-        Ok((events, guard))
-    }
-
-    /// Hydrate a metadata-only tree from the transaction's view of durable
-    /// storage (no blobs). Reads through `tx` so it sees the exact state being
-    /// mutated.
-    async fn hydrate_tree_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<MinimizedSedimentree, SqliteBigRepoStoreError> {
-        let commits = self.commit_meta_rows_in_tx(tx, id).await?;
-        let fragments = self.fragment_meta_rows_in_tx(tx, id).await?;
-        Ok(MinimizedSedimentree::new(Sedimentree::new(
-            fragments, commits,
-        )))
-    }
-
-    async fn commit_meta_rows_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT signed FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .fetch_all(&mut **tx)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
-            })
-            .collect()
-    }
-
-    async fn fragment_meta_rows_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT signed FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .fetch_all(&mut **tx)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
-            })
-            .collect()
-    }
-
-    /// Raw SQL row delete for a loose commit (plus its causal ciphertext
-    /// index). The cached projection is rebuilt by the caller.
-    async fn delete_commit_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-        commit_id: CommitId,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
-            .execute(&mut **tx).await?;
-        sqlx::query("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(commit_id))
-            .execute(&mut **tx).await?;
-        Ok(())
-    }
-
-    /// Raw SQL row delete for a fragment (plus its causal ciphertext index).
-    async fn delete_fragment_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-        head_id: CommitId,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 1")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
-            .execute(&mut **tx).await?;
-        sqlx::query("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).bind(Self::commit_blob(head_id))
-            .execute(&mut **tx).await?;
-        Ok(())
-    }
-
-    /// Raw SQL row delete for all loose commits of a tree.
-    async fn delete_all_commit_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut **tx).await?;
-        sqlx::query(
-            "DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    /// Raw SQL row delete for all fragments of a tree.
-    async fn delete_all_fragment_rows(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: SedimentreeId,
-    ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 1")
-            .bind(self.scope_id).bind(Self::tree_blob(id)).execute(&mut **tx).await?;
-        sqlx::query(
-            "DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    async fn commit_meta_rows(
-        &self,
-        id: SedimentreeId,
-    ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT signed FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<LooseCommit>::try_decode(&signed)?.try_decode_trusted_payload()?)
-            })
-            .collect()
-    }
-
-    async fn fragment_meta_rows(
-        &self,
-        id: SedimentreeId,
-    ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query(
-            "SELECT signed FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
-        )
-        .bind(self.scope_id)
-        .bind(Self::tree_blob(id))
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let signed: Vec<u8> = row.try_get("signed")?;
-                Ok(Signed::<Fragment>::try_decode(&signed)?.try_decode_trusted_payload()?)
-            })
-            .collect()
-    }
-
-    /// Durable sedimentree frontier, recomputed from the authoritative SQLite
-    /// rows (metadata only, no blobs). The projection cache is write-only and
-    /// never consulted on read paths.
-    pub(crate) async fn durable_sedimentree_heads(
-        &self,
-        id: SedimentreeId,
-    ) -> Result<Vec<CommitId>, SqliteBigRepoStoreError> {
-        let commits = self.commit_meta_rows(id).await?;
-        let fragments = self.fragment_meta_rows(id).await?;
-        if commits.is_empty() && fragments.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut tree = MinimizedSedimentree::new(Sedimentree::new(fragments, commits));
-        let mut heads = tree.heads(&CountLeadingZeroBytes);
-        heads.sort_unstable();
-        Ok(heads)
-    }
-}
-
-impl Storage<Sendable> for SqliteBigRepoStore {
-    type Error = SqliteBigRepoStoreError;
-
-    fn save_sedimentree_id(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            self.save_tree(&mut tx, id).await?;
-            tx.commit().await?;
-            Ok(())
-        })
-    }
-
-    fn delete_sedimentree_id(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            // Whole-tree removal: acquire the SQLite writer slot FIRST, then
-            // evict the projection cache entry. Evicting before BEGIN
-            // IMMEDIATE would race a concurrent writer that installs its
-            // entry after our eviction but before we delete the durable tree,
-            // leaving a stale entry for a deleted tree. Once we own the
-            // writer slot no other writer can be mid-transaction, so the
-            // eviction is safe; leaving the entry evicted on rollback is also
-            // safe (the next write rehydrates).
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
-            let tree = Self::tree_blob(id);
-            sqlx::query(
-                "DELETE FROM big_repo_subduction_commits
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(&tree)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "DELETE FROM big_repo_subduction_fragments
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(&tree)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "DELETE FROM big_repo_subduction_trees
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(tree)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(())
-        })
-    }
-
-    fn load_all_sedimentree_ids(&self) -> BoxFuture<'_, Result<Set<SedimentreeId>, Self::Error>> {
-        Sendable::from_future(async move {
-            let rows = sqlx::query(
-                "SELECT sedimentree_id FROM big_repo_subduction_trees
-                 WHERE scope_id = ?1 ORDER BY sedimentree_id",
-            )
-            .bind(self.scope_id)
-            .fetch_all(&self.sql.read_pool)
-            .await?;
-            rows.into_iter()
-                .map(|row| {
-                    Ok(SedimentreeId::new(Self::decode_id(
-                        row.try_get("sedimentree_id")?,
-                    )?))
-                })
-                .collect()
-        })
-    }
-
-    fn contains_sedimentree_id(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
-        Sendable::from_future(async move {
-            let found: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM big_repo_subduction_trees
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            )
-            .bind(self.scope_id)
-            .bind(Self::tree_blob(id))
-            .fetch_optional(&self.sql.read_pool)
-            .await?;
-            Ok(found.is_some())
-        })
-    }
-
-    fn save_loose_commit(
-        &self,
-        id: SedimentreeId,
-        verified: VerifiedMeta<LooseCommit>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            self.save_tree(&mut tx, id).await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertCommit(verified))
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn list_commit_ids(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
-        Sendable::from_future(async move {
-            let rows = sqlx::query(
-                "SELECT DISTINCT commit_id FROM big_repo_subduction_commits
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id",
-            )
-            .bind(self.scope_id)
-            .bind(Self::tree_blob(id))
-            .fetch_all(&self.sql.read_pool)
-            .await?;
-            rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.try_get("commit_id")?)?)))
-                .collect()
-        })
-    }
-
-    fn load_loose_commits(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Vec<VerifiedMeta<LooseCommit>>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.commit_rows(id, None)
-                .await?
-                .into_iter()
-                .map(|(signed, blob)| Ok(VerifiedMeta::try_from_trusted(signed, blob)?))
-                .collect()
-        })
-    }
-
-    fn load_loose_commit_metas(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Vec<LooseCommit>, Self::Error>> {
-        Sendable::from_future(async move { self.commit_meta_rows(id).await })
-    }
-
-    fn load_loose_commit(
-        &self,
-        id: SedimentreeId,
-        commit_id: CommitId,
-    ) -> BoxFuture<'_, Result<Option<VerifiedMeta<LooseCommit>>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.commit_rows(id, Some(commit_id))
-                .await?
-                .into_iter()
-                .next()
-                .map(|(signed, blob)| Ok(VerifiedMeta::try_from_trusted(signed, blob)?))
-                .transpose()
-        })
-    }
-
-    fn delete_loose_commit(
-        &self,
-        id: SedimentreeId,
-        commit_id: CommitId,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteCommit(commit_id))
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn delete_loose_commits(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllCommits)
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn save_fragment(
-        &self,
-        id: SedimentreeId,
-        verified: VerifiedMeta<Fragment>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            self.save_tree(&mut tx, id).await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertFragment(verified))
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn load_fragment(
-        &self,
-        id: SedimentreeId,
-        head_id: CommitId,
-    ) -> BoxFuture<'_, Result<Option<VerifiedMeta<Fragment>>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.fragment_rows(id, Some(head_id))
-                .await?
-                .into_iter()
-                .next()
-                .map(|(signed, blob)| Ok(VerifiedMeta::try_from_trusted(signed, blob)?))
-                .transpose()
-        })
-    }
-
-    fn list_fragment_ids(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
-        Sendable::from_future(async move {
-            let rows = sqlx::query("SELECT DISTINCT head_id FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id")
-                .bind(self.scope_id).bind(Self::tree_blob(id)).fetch_all(&self.sql.read_pool).await?;
-            rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.try_get("head_id")?)?)))
-                .collect()
-        })
-    }
-
-    fn load_fragments(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Vec<VerifiedMeta<Fragment>>, Self::Error>> {
-        Sendable::from_future(async move {
-            self.fragment_rows(id, None)
-                .await?
-                .into_iter()
-                .map(|(signed, blob)| Ok(VerifiedMeta::try_from_trusted(signed, blob)?))
-                .collect()
-        })
-    }
-
-    fn load_fragment_metas(
-        &self,
-        id: SedimentreeId,
-    ) -> BoxFuture<'_, Result<Vec<Fragment>, Self::Error>> {
-        Sendable::from_future(async move { self.fragment_meta_rows(id).await })
-    }
-
-    fn delete_fragment(
-        &self,
-        id: SedimentreeId,
-        head_id: CommitId,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteFragment(head_id))
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn delete_fragments(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
-        Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            let (events, guard) = self
-                .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllFragments)
-                .await?;
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(())
-        })
-    }
-
-    fn save_batch(
-        &self,
-        id: SedimentreeId,
-        commits: Vec<VerifiedMeta<LooseCommit>>,
-        fragments: Vec<VerifiedMeta<Fragment>>,
-    ) -> BoxFuture<'_, Result<usize, Self::Error>> {
-        Sendable::from_future(async move {
-            let count = commits.len() + fragments.len();
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            self.save_tree(&mut tx, id).await?;
-            let (events, guard) = if count == 0 {
-                let epoch = self
-                    .tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .current_epoch(&id)
-                    .unwrap_or(0);
-                (Vec::new(), TreeCacheGuard::arm(&self.tree_cache, id, epoch))
-            } else {
-                self.mutate_tree_in_tx(
-                    &mut tx,
-                    id,
-                    TreeStorageMutation::InsertBatch { commits, fragments },
-                )
-                .await?
-            };
-            tx.commit().await?;
-            guard.disarm();
-            self.publish(events).await?;
-            Ok(count)
-        })
-    }
 }

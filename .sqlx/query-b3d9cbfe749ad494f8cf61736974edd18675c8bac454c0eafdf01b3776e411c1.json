@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT objs.obj_id, parts.part_id, objs.payload_json\n             FROM big_sync_members members\n             JOIN big_sync_objs objs ON objs.obj_ref = members.obj_ref\n             JOIN big_sync_parts parts ON parts.part_ref = members.maybe_part_ref\n             WHERE members.scope_id = ?1 AND members.maybe_part_ref > 0\n               AND members.event_type != ?2\n             ORDER BY objs.obj_id ASC, parts.part_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_id"
+          }
+        }
+      },
+      {
+        "name": "part_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b3d9cbfe749ad494f8cf61736974edd18675c8bac454c0eafdf01b3776e411c1"
+}

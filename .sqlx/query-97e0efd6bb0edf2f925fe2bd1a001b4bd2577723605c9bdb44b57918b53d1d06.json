@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)\n             VALUES (?1, ?2, ?3, ?4, ?5)\n             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET\n               event_type = excluded.event_type, txid = excluded.txid",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "97e0efd6bb0edf2f925fe2bd1a001b4bd2577723605c9bdb44b57918b53d1d06"
+}

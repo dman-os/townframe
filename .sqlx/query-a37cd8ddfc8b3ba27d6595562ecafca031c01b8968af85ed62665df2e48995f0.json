@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader, seq)\n             VALUES (?1, ?2, ?3)\n             ON CONFLICT(scope_id, reader) DO UPDATE\n                 SET seq = MAX(seq, excluded.seq)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a37cd8ddfc8b3ba27d6595562ecafca031c01b8968af85ed62665df2e48995f0"
+}

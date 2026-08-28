@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_objs(scope_id, obj_id)\n             VALUES (?1, ?2)\n             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id\n             RETURNING obj_ref",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_ref",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1fed53b6f0f3d468ab4bcb6ff526a4a8ccf13e036d4e81bc917a921823e8f346"
+}
