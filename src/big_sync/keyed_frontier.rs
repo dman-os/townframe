@@ -1,11 +1,16 @@
 //! In-memory and SQLite keyed-frontier implementations.
 
 mod sqlite_frontier;
+mod sqlite_generic;
 mod sqlite_read;
 mod sqlite_write;
 
 pub(crate) use sqlite_frontier::SqlitePartFrontier;
-pub(crate) use sqlite_read::SqlitePartSelector;
+pub use sqlite_generic::{
+    SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier,
+    SqliteKeyedFrontierTransaction,
+};
+pub(crate) use sqlite_read::{SqlitePartSelector, open_sqlite_reader};
 
 use crate::interlude::*;
 use big_sync_core::keyed_frontier::{
@@ -28,6 +33,12 @@ pub trait MemoryKeyedFrontierSelector<K>: Send + Sync + 'static {
     /// `None` excludes the key. `Some(revision)` includes the key during
     /// initial replay only when its latest revision is newer than this bound.
     fn lower_bound(&self, key: &K) -> Option<FrontierRevision>;
+
+    /// Whether a live reader should report source progress when every entry
+    /// in the advanced range is filtered out.
+    fn emit_empty_progress(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -367,9 +378,13 @@ where
 
             self.wakeups.borrow_and_update();
             let view = self.source.view().await?;
+            let previous_after = self.after;
             let (entries, through) = self.read_root(&view.root, self.after, view.through, false);
             self.after = through;
             if !entries.is_empty() {
+                return Ok(FrontierRead::Entries { entries, through });
+            }
+            if self.selector.emit_empty_progress() && through > previous_after {
                 return Ok(FrontierRead::Entries { entries, through });
             }
             self.wakeups

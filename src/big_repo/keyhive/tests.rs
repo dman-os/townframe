@@ -66,6 +66,69 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
 }
 
 #[tokio::test]
+async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
+    let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (evt_tx, _evt_rx) = async_channel::unbounded();
+    let owner = BigKeyhiveHandle::new(
+        [43; 32],
+        BigRepoKeyhiveListener {
+            evt_tx,
+            storage: storage.clone(),
+        },
+    )
+    .await?;
+    let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+        owner.clone_keyhive(),
+        storage,
+        owner.keyhive_peer_id(),
+        owner.contact_card().clone(),
+    ));
+    let (pending_group, _) = owner
+        .create_group_with_parents(Vec::new(), &protocol)
+        .await?;
+    let (intended_group, _) = owner
+        .create_group_with_parents(Vec::new(), &protocol)
+        .await?;
+    let (_doc_authority, doc_id, _) = owner
+        .create_pending_doc(
+            vec![pending_group.clone().into(), intended_group.clone().into()],
+            &protocol,
+        )
+        .await?;
+    assert!(!owner.document_has_content(doc_id).await?);
+    assert!(
+        owner
+            .group_document_ids(&pending_group)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        owner
+            .group_document_ids(&intended_group)
+            .await
+            .contains(&doc_id)
+    );
+
+    owner
+        .revoke_group_from_doc(&pending_group, doc_id, vec![vec![7; 32]], &protocol)
+        .await?;
+    assert!(owner.document_has_content(doc_id).await?);
+    assert!(
+        !owner
+            .group_document_ids(&pending_group)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        owner
+            .group_document_ids(&intended_group)
+            .await
+            .contains(&doc_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();

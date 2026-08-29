@@ -7,7 +7,6 @@ use crate::repos::drawer::DrawerRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 
 use daybook_core::index::DocBlobsIndexRepo;
-use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::repos::RepoStopToken;
 use daybook_core::sync::{IrohSyncRepo, IrohSyncRepoStopToken};
 use qrcode::QrCode;
@@ -18,7 +17,6 @@ pub struct SyncRepoFfi {
     pub repo: Arc<IrohSyncRepo>,
     sync_stop_token: tokio::sync::Mutex<Option<IrohSyncRepoStopToken>>,
     doc_blobs_index_stop_token: tokio::sync::Mutex<Option<RepoStopToken>>,
-    sqlite_local_state_stop_token: tokio::sync::Mutex<Option<RepoStopToken>>,
 }
 
 #[uniffi::export]
@@ -32,15 +30,10 @@ impl SyncRepoFfi {
         drawer_repo: Arc<DrawerRepoFfi>,
         progress_repo: Arc<ProgressRepoFfi>,
     ) -> Result<Arc<Self>, FfiError> {
-        let (sqlite_local_state_repo, sqlite_local_state_stop_token) = fcx
-            .do_on_rt(SqliteLocalStateRepo::boot(
-                fcx.rcx.layout.repo_root.join("local_state"),
-            ))
-            .await?;
+        let sqlite_local_state_repo = Arc::clone(&fcx.rcx.sqlite_local_state_repo);
         let (doc_blobs_index_repo, doc_blobs_index_stop_token) = fcx
             .do_on_rt(DocBlobsIndexRepo::boot(
                 Arc::clone(&drawer_repo.repo),
-                Arc::clone(&blobs_repo.repo),
                 Arc::clone(&sqlite_local_state_repo),
             ))
             .await?;
@@ -60,23 +53,18 @@ impl SyncRepoFfi {
             repo,
             sync_stop_token: Some(sync_stop_token).into(),
             doc_blobs_index_stop_token: Some(doc_blobs_index_stop_token).into(),
-            sqlite_local_state_stop_token: Some(sqlite_local_state_stop_token).into(),
         }))
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
         let sync_stop_token = self.sync_stop_token.lock().await.take();
         let doc_blobs_index_stop_token = self.doc_blobs_index_stop_token.lock().await.take();
-        let sqlite_local_state_stop_token = self.sqlite_local_state_stop_token.lock().await.take();
         self.fcx
             .do_on_rt(async move {
                 if let Some(token) = sync_stop_token {
                     token.stop().await?;
                 }
                 if let Some(token) = doc_blobs_index_stop_token {
-                    token.stop().await?;
-                }
-                if let Some(token) = sqlite_local_state_stop_token {
                     token.stop().await?;
                 }
                 Ok::<(), FfiError>(())

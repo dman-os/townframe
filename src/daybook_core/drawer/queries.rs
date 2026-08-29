@@ -1,17 +1,288 @@
 use crate::interlude::*;
+use big_repo::BigRepoLocalFilter;
 
-use super::DrawerRepo;
+use super::{DrawerRepo, MaterializationWake};
 
 use crate::drawer::{
-    dmeta, facet_recovery,
+    ExactFacetHydration, ExactFacetValueHydration, dmeta, facet_recovery,
     types::{DocBundle, DocEntry, DocNBranches},
 };
+use crate::index::doc_delta::{BranchIdentity, BranchIdentityResolution};
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet};
+use daybook_types::doc::{
+    BranchId, ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
+};
 
 // queries
 impl DrawerRepo {
+    pub(crate) async fn subscribe_materialization_wake(
+        &self,
+        physical_branch_id: Option<&BranchId>,
+    ) -> Res<MaterializationWake> {
+        let doc_id = physical_branch_id
+            .map(|branch_id| branch_id.0.parse::<big_repo::DocumentId>())
+            .transpose()?;
+        let (registration, receiver) = self
+            .big_repo
+            .subscribe_local_listener(BigRepoLocalFilter {
+                doc_id: doc_id.map(big_repo::BigRepoDocIdFilter::new),
+            })
+            .await?;
+        Ok(MaterializationWake {
+            _registration: registration,
+            receiver,
+        })
+    }
+
+    /// Resolve only the system Branch facet at exact heads.
+    ///
+    /// This is intentionally narrower than the ordinary facet hydration APIs:
+    /// DocDelta tracking must not hydrate dmeta or user facets.
+    pub(crate) async fn resolve_system_branch_identity_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        heads: &ChangeHashSet,
+    ) -> Res<BranchIdentityResolution> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(BranchIdentityResolution::Deferred);
+            }
+        };
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch).to_string();
+        let path = vec![
+            "facets".into(),
+            autosurgeon::Prop::Key(branch_key.clone().into()),
+        ];
+        let Some(raw) = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(&heads.0, automerge::ROOT, path)
+            .await
+            .wrap_err("hydrate system Branch facet at exact heads")?
+        else {
+            return Ok(BranchIdentityResolution::Ignored);
+        };
+        let branch = match WellKnownFacet::from_json(raw.0, WellKnownFacetTag::Branch)
+            .wrap_err("decode Branch facet")?
+        {
+            WellKnownFacet::Branch(value) => value,
+            _ => unreachable!("Branch facet decoded to another well-known variant"),
+        };
+        if branch.branch_id != *physical_branch_id {
+            // Merging one branch into another imports the source Automerge changes
+            // into the destination sedimentree. Historical events for those imported
+            // changes still resolve to the source Branch facet until the destination's
+            // identity-restoration commit is reached. They are known foreign history,
+            // not unresolved materialization: skip them and project the complete merged
+            // state when the restoration commit arrives.
+            tracing::debug!(
+                physical_branch_id = %physical_branch_id.0,
+                imported_branch_id = %branch.branch_id.0,
+                "ignoring imported branch-history event in destination sedimentree"
+            );
+            return Ok(BranchIdentityResolution::ImportedHistory);
+        }
+        Ok(BranchIdentityResolution::Found(BranchIdentity {
+            document_id: branch.document_id,
+            branch_id: branch.branch_id,
+        }))
+    }
+
+    /// Hydrate the dmeta-derived current facet state at exact heads.
+    ///
+    /// Only the Branch and Dmeta system facets are read as values. User facet
+    /// values are deliberately not hydrated: dmeta is the source of truth for
+    /// current membership, while `facet_snapshot_metadata` supplies the
+    /// exact heads and provenance needed by downstream projections.
+    pub(crate) async fn hydrate_dmeta_state_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        document_id: &DocId,
+        branch_heads: ChangeHashSet,
+    ) -> Res<Option<crate::drawer::ExactDmetaState>> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(None);
+            }
+        };
+
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+        let branch_raw = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(branch_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate Branch facet at exact heads")?
+            .ok_or_else(|| ferr!("missing mandatory Branch facet"))?;
+        let branch = match WellKnownFacet::from_json(branch_raw.0, WellKnownFacetTag::Branch)
+            .wrap_err("decode Branch facet")?
+        {
+            WellKnownFacet::Branch(value) => value,
+            _ => unreachable!("Branch facet decoded to another well-known variant"),
+        };
+        if branch.branch_id != *physical_branch_id {
+            return Err(ferr!("physical branch id does not match Branch facet"));
+        }
+        if branch.document_id != *document_id {
+            return Err(ferr!("logical document id does not match Branch facet"));
+        }
+
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+        let dmeta_raw = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(dmeta_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate Dmeta facet at exact heads")?
+            .ok_or_else(|| ferr!("missing mandatory Dmeta facet"))?;
+        let dmeta = match WellKnownFacet::from_json(dmeta_raw.0, WellKnownFacetTag::Dmeta)
+            .wrap_err("decode Dmeta facet")?
+        {
+            WellKnownFacet::Dmeta(value) => value,
+            _ => unreachable!("Dmeta facet decoded to another well-known variant"),
+        };
+        if dmeta.id != *document_id {
+            return Err(ferr!("dmeta document id does not match Branch facet"));
+        }
+        let dmeta_id = dmeta.id.clone();
+
+        let all_facet_keys = dmeta
+            .facets
+            .keys()
+            .filter(|key| {
+                **key != branch_key
+                    && **key != FacetKey::from(WellKnownFacetTag::Branches)
+                    && **key != dmeta_key
+            })
+            .cloned()
+            .collect();
+        let mut facets = HashMap::new();
+        for (key, meta) in dmeta.facets {
+            if key == branch_key
+                || key == FacetKey::from(WellKnownFacetTag::Branches)
+                || !meta.deleted_at.is_empty()
+            {
+                continue;
+            }
+            let (facet_heads, actor_id) = handle
+                .with_document_read(|doc| {
+                    crate::drawer::facet_snapshot_metadata(doc, &key, &branch_heads.0)
+                })
+                .await?;
+            facets.insert(key, (facet_heads, actor_id));
+        }
+        let dmeta_actor_id = handle
+            .with_document_read(|doc| {
+                doc.get_changes(&[])
+                    .last()
+                    .map(|change| change.actor_id().clone())
+                    .ok_or_else(|| ferr!("dmeta facet has no write point"))
+            })
+            .await?;
+        let dmeta_heads = branch_heads.clone();
+        facets.insert(dmeta_key, (dmeta_heads, dmeta_actor_id));
+        Ok(Some(crate::drawer::ExactDmetaState {
+            document_id: dmeta_id,
+            branch_id: branch.branch_id,
+            branch_heads,
+            facets,
+            all_facet_keys,
+        }))
+    }
+
+    /// Adapt dmeta-only exact-head hydration to the legacy metadata result
+    /// consumed by the in-flight projection code. No user facet value is read.
+    pub(crate) async fn hydrate_facet_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        document_id: &DocId,
+        branch_heads: ChangeHashSet,
+        facet_key: &FacetKey,
+    ) -> Res<ExactFacetHydration> {
+        let Some(state) = self
+            .hydrate_dmeta_state_at_heads(physical_branch_id, document_id, branch_heads.clone())
+            .await?
+        else {
+            return Ok(ExactFacetHydration::Deferred);
+        };
+        let Some((facet_heads, actor_id)) = state.facets.get(facet_key).cloned() else {
+            return Ok(ExactFacetHydration::Absent);
+        };
+        Ok(ExactFacetHydration::Present {
+            branch_heads,
+            facet_heads,
+            actor_id,
+        })
+    }
+
+    /// Hydrate one user-facet value at exact physical branch heads. The
+    /// drawer owns the BigRepo handle and exposes materialization separately
+    /// so consumers can retain their revision and retry after a wakeup.
+    pub(crate) async fn hydrate_facet_value_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        branch_heads: &ChangeHashSet,
+        facet_key: &FacetKey,
+    ) -> Res<ExactFacetValueHydration> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(ExactFacetValueHydration::Deferred);
+            }
+        };
+        let value = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(facet_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate facet value at exact heads")?;
+        Ok(value.map_or(ExactFacetValueHydration::Absent, |value| {
+            ExactFacetValueHydration::Present(value.0)
+        }))
+    }
+
+    /// Hydrate one physical document at exact heads for DocDelta projection.
+    pub(crate) async fn hydrate_physical_doc_at_heads(
+        &self,
+        physical_id: big_repo::DocumentId,
+        heads: ChangeHashSet,
+    ) -> Res<Option<HashMap<FacetKey, FacetRaw>>> {
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(None);
+            }
+        };
+        handle
+            .hydrate_path_at_heads::<ThroughJson<HashMap<FacetKey, FacetRaw>>>(
+                &heads.0,
+                automerge::ROOT,
+                vec!["facets".into()],
+            )
+            .await
+            .wrap_err("hydrate physical document facets at exact heads")
+            .map(|value| value.map(|value| value.0))
+    }
+
     pub fn get_drawer_heads(&self) -> ChangeHashSet {
         surelock::key::lock_scope(|key| {
             let (heads, _key) = key.lock(&self.current_heads);

@@ -1,5 +1,8 @@
-use super::super::keyed_frontier::{PartFrontierKey, SqlitePartFrontier, SqlitePartSelector};
+use super::super::keyed_frontier::{
+    PartFrontierKey, SqlitePartFrontier, SqlitePartSelector, open_sqlite_reader,
+};
 use super::HostPartStore;
+use super::LocalPartRevisionReader;
 use super::sqlite_core::{EVENT_ADDED, EVENT_REMOVED};
 use crate::interlude::*;
 #[cfg(test)]
@@ -25,6 +28,7 @@ use future_form::{FutureForm, Sendable};
 use futures::future::BoxFuture;
 use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
+use tokio::sync::Notify;
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -42,6 +46,67 @@ pub struct SqlitePartStore {
     pub(crate) core: SqliteCore,
     pub(crate) frontier: SqlitePartFrontier,
     hidden_parts: Arc<HashSet<PartId>>,
+}
+
+/// Open a local revision reader over an existing BigSync SQLite schema.
+/// Callers that own a different store facade can supply its read pool, scope,
+/// and commit wakeup without going through the legacy subscription channel.
+pub async fn open_sqlite_local_revision_reader(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    reqs: SubPartsRequest,
+    limits: big_sync_core::revisioned_store::RevisionReadLimits,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    use big_sync_core::rpc::SubscriptionTarget;
+
+    let objects = reqs
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+            SubscriptionTarget::Part { .. } => None,
+        })
+        .collect::<HashSet<_>>();
+    let parts = reqs
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
+            SubscriptionTarget::Object { .. } => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut selector = SqlitePartSelector::default();
+    for target in reqs.targets {
+        match target {
+            SubscriptionTarget::Part { part_id, cursor } => {
+                selector
+                    .parts
+                    .entry(part_id)
+                    .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
+                    .or_insert(reqs.lower_bound.max(cursor));
+            }
+            SubscriptionTarget::Object { obj_id } => {
+                selector
+                    .objects
+                    .entry(obj_id)
+                    .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
+                    .or_insert(reqs.lower_bound);
+            }
+        }
+    }
+    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let reader = open_sqlite_reader(
+        frontier,
+        selector,
+        big_sync_core::keyed_frontier::FrontierReadLimits {
+            max_entries: limits.max_entries,
+        },
+    )
+    .await?;
+    Ok(Ok(Box::new(super::PartRevisionReader::new(
+        reader, objects, parts,
+    ))))
 }
 
 use super::sqlite_core::MemberState;
@@ -191,6 +256,14 @@ impl SqlitePartStore {
 
 #[async_trait]
 impl HostPartStore for SqlitePartStore {
+    async fn latest_revision(&self) -> Res<CursorIndex> {
+        let revision: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&self.core.sql.read_pool)
+                .await?;
+        Ok(u64::try_from(revision)?)
+    }
+
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -1146,6 +1219,61 @@ impl HostPartStore for SqlitePartStore {
             }
         });
         Ok(Ok(rx))
+    }
+
+    async fn open_local_revision_reader(
+        &self,
+        reqs: SubPartsRequest,
+        limits: big_sync_core::revisioned_store::RevisionReadLimits,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let objects = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+                SubscriptionTarget::Part { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let parts = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut selector = SqlitePartSelector::default();
+        for target in reqs.targets {
+            match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    selector
+                        .parts
+                        .entry(part_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
+                        .or_insert(reqs.lower_bound.max(cursor));
+                }
+                SubscriptionTarget::Object { obj_id } => {
+                    selector
+                        .objects
+                        .entry(obj_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
+                        .or_insert(reqs.lower_bound);
+                }
+            }
+        }
+        let reader = open_sqlite_reader(
+            self.frontier.clone(),
+            selector,
+            big_sync_core::keyed_frontier::FrontierReadLimits {
+                max_entries: limits.max_entries,
+            },
+        )
+        .await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new(
+            reader, objects, parts,
+        ))))
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {

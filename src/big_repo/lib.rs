@@ -30,13 +30,17 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 
 mod runtime2;
+pub use runtime2::doc_revision_store::{
+    AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
+    AutomergeFrontierTarget,
+};
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
     SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt, WorkerGroupScope,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 mod store;
-pub use runtime2::{automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id};
+pub use runtime2::{automerge_doc_obj_id, automerge_obj_to_doc_id};
 #[cfg(feature = "test-support")]
 pub use store::sqlite::BigSyncStoreSnapshot;
 pub use store::sqlite::SqliteBigRepoStore;
@@ -73,10 +77,13 @@ pub use keyhive_core;
 
 pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 pub use changes::{
-    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeNotification, BigRepoChangeOrigin, BigRepoLocalNotification,
+    ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
     DomainListenerRegistration as BigRepoDomainListenerRegistration,
+    LocalFilter as BigRepoLocalFilter,
+    LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
 
@@ -591,6 +598,34 @@ impl BigRepo {
         self.runtime.contains_sedimentree_id(doc_id).await
     }
 
+    /// Return the documents currently administered by `group`.
+    pub async fn documents_in_group(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
+        self.keyhive.group_document_ids(group).await
+    }
+
+    pub async fn allocate_doc(
+        self: &Arc<Self>,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Result<DocumentId, CreateDocError> {
+        Ok(self.runtime.allocate_doc(parents).await?)
+    }
+
+    pub async fn finalize_allocated_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let bundle = self
+            .runtime
+            .finalize_allocated_doc(doc_id, initial_content, pending_group)
+            .await?;
+        Ok(BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        })
+    }
+
     pub async fn create_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
@@ -910,6 +945,22 @@ impl BigRepoConnection {
 
 // change listeners
 impl BigRepo {
+    /// Subscribe to local document lifecycle and materialization notifications.
+    ///
+    /// The returned registration must be retained for as long as the receiver
+    /// is needed; dropping it unregisters the listener. Consumers should use
+    /// these notifications as wakeups and re-read durable state rather than as
+    /// a source of projection data.
+    pub async fn subscribe_local_listener(
+        self: &Arc<Self>,
+        filter: BigRepoLocalFilter,
+    ) -> Res<(
+        BigRepoLocalListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    )> {
+        self.change_manager.subscribe_local_listener(filter).await
+    }
+
     pub async fn subscribe_change_listener(
         self: &Arc<Self>,
         filter: BigRepoChangeFilter,

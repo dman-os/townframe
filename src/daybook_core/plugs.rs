@@ -4,9 +4,22 @@ use tokio_util::sync::CancellationToken;
 use daybook_types::manifest;
 
 use self::cache::PlugsCache;
+use big_sync::keyed_frontier::SqliteFrontierSelector;
+use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteKeyedFrontier};
+use big_sync_core::keyed_frontier::{FrontierRevision, KeyedFrontier, KeyedFrontierTransaction};
+use big_sync_core::live_revision_watch::LiveRevisionWatch;
+use big_sync_core::revisioned_store::{
+    KeyedFrontierRevisionReader, RevisionRead, RevisionReadLimits, RevisionedStore,
+    RevisionedStoreReader,
+};
+use sqlx_utils_rs::SqlCtx;
+use std::collections::BTreeSet;
 
-pub use self::events::PlugsEvent;
-pub(crate) use self::events::{PlugsNotif, PlugsSwitchSink};
+pub(crate) use self::events::{
+    PLUG_MANIFEST_CONSUMER_STATE_ID, PLUGS_CONFIG_CONSUMER_STATE_ID,
+    PlugsConfigFacetSetConsumerStopToken, PlugsManifestConsumerStopToken,
+    spawn_facet_set_plugs_config_consumer, spawn_facet_set_plugs_manifest_consumer,
+};
 pub use self::oci::OciImportOptions;
 
 mod cache;
@@ -68,6 +81,18 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             FacetManifest {
                 key_tag: WellKnownFacetTag::PlugsConfig.into(),
                 value_schema: schemars::schema_for!(daybook_types::doc::PlugsConfig),
+                display_config: default(),
+                references: default(),
+            },
+            FacetManifest {
+                key_tag: WellKnownFacetTag::Branch.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Branch),
+                display_config: default(),
+                references: default(),
+            },
+            FacetManifest {
+                key_tag: WellKnownFacetTag::Branches.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Branches),
                 display_config: default(),
                 references: default(),
             },
@@ -197,7 +222,6 @@ pub enum FacetManifestLookup {
 }
 
 pub struct PlugsRepo {
-    pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     blobs: Arc<crate::blobs::BlobsRepo>,
     doc_config_id: daybook_types::doc::DocId,
@@ -209,7 +233,128 @@ pub struct PlugsRepo {
     local_actor_id: ActorId,
     cancel_token: CancellationToken,
     cache: surelock::mutex::Mutex<PlugsCache>,
-    notif_tx: tokio::sync::mpsc::UnboundedSender<PlugsNotif>,
+    pub(crate) revision_frontier: SqliteKeyedFrontier<PlugRevisionCodec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlugRevisionState {
+    pub manifest_heads: ChangeHashSet,
+    pub manifest: manifest::PlugManifest,
+}
+
+#[derive(Clone)]
+pub(crate) struct PlugRevisionCodec;
+
+#[derive(Debug, Clone)]
+pub enum PlugsRevisionSelector {
+    All,
+    PlugIds(BTreeSet<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PlugsWatchChange {
+    pub plug_id: String,
+    pub active: bool,
+}
+
+impl SqliteFrontierCodec for PlugRevisionCodec {
+    type Key = String;
+    type Value = PlugRevisionState;
+    fn encode_key(&self, key: &String) -> Vec<u8> {
+        key.as_bytes().to_vec()
+    }
+    fn decode_key(&self, bytes: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+    fn encode_value(&self, value: &PlugRevisionState) -> Vec<u8> {
+        serde_json::to_vec(value).expect(ERROR_JSON)
+    }
+    fn decode_value(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PlugRevisionState, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+#[async_trait]
+impl RevisionedStore for PlugsRepo {
+    type Revision = FrontierRevision;
+    type Entry = big_sync_core::keyed_frontier::FrontierEntry<String, PlugRevisionState>;
+    type Selector = PlugsRevisionSelector;
+    type Error = big_sync_core::keyed_frontier::KeyedFrontierError;
+    type Reader<'a>
+        = KeyedFrontierRevisionReader<'a, String, PlugRevisionState>
+    where
+        Self: 'a;
+
+    async fn latest_revision(&self) -> Result<Self::Revision, Self::Error> {
+        self.revision_frontier.latest_revision().await
+    }
+
+    async fn open<'a>(
+        &'a self,
+        selector: Self::Selector,
+        after: Self::Revision,
+        limits: RevisionReadLimits,
+    ) -> Result<Self::Reader<'a>, Self::Error> {
+        let selector = match selector {
+            PlugsRevisionSelector::All => SqliteFrontierSelector::All { after },
+            PlugsRevisionSelector::PlugIds(keys) => {
+                SqliteFrontierSelector::Keys(keys.into_iter().map(|key| (key, after)).collect())
+            }
+        };
+        let inner = self
+            .revision_frontier
+            .open(
+                selector,
+                big_sync_core::keyed_frontier::FrontierReadLimits {
+                    max_entries: limits.max_entries,
+                },
+            )
+            .await?;
+        Ok(KeyedFrontierRevisionReader::new(inner))
+    }
+}
+
+pub struct PlugsWatch<'a> {
+    inner: LiveRevisionWatch<'a, PlugsRepo>,
+}
+
+impl<'a> PlugsWatch<'a> {
+    pub async fn open(
+        source: &'a PlugsRepo,
+        selector: PlugsRevisionSelector,
+        limits: RevisionReadLimits,
+    ) -> Result<Self, big_sync_core::keyed_frontier::KeyedFrontierError> {
+        Ok(Self {
+            inner: LiveRevisionWatch::open(source, selector, limits).await?,
+        })
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Result<
+        big_sync_core::revisioned_store::RevisionRead<FrontierRevision, PlugsWatchChange>,
+        big_sync_core::keyed_frontier::KeyedFrontierError,
+    > {
+        match self.inner.next().await? {
+            RevisionRead::Entries { revision, entries } => Ok(RevisionRead::Entries {
+                revision,
+                entries: entries
+                    .into_iter()
+                    .map(|entry| PlugsWatchChange {
+                        plug_id: entry.key,
+                        active: entry.value.is_some(),
+                    })
+                    .collect(),
+            }),
+            RevisionRead::ReplayComplete { .. } => {
+                unreachable!("LiveRevisionWatch hides replay completion")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -222,21 +367,92 @@ pub struct ImportedPlug {
     pub source_digest: Option<String>,
 }
 
-impl crate::repos::Repo for PlugsRepo {
-    type Event = PlugsEvent;
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
-        &self.registry
-    }
-    fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
-    }
-}
-
 impl PlugsRepo {
-    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
-        crate::event_origin::SwitchEventOrigin::Local {
-            actor_id: self.local_actor_id.to_string(),
+    pub async fn watch<'a>(
+        &'a self,
+        selector: PlugsRevisionSelector,
+        limits: RevisionReadLimits,
+    ) -> Result<PlugsWatch<'a>, big_sync_core::keyed_frontier::KeyedFrontierError> {
+        PlugsWatch::open(self, selector, limits).await
+    }
+
+    pub(crate) async fn reconcile_revision_frontier(&self) -> Res<()> {
+        let mut reader = self
+            .open(PlugsRevisionSelector::All, 0, RevisionReadLimits::default())
+            .await
+            .map_err(|e| eyre::eyre!(e.to_string()))?;
+        let mut current = HashMap::<String, PlugRevisionState>::new();
+        loop {
+            match reader
+                .next()
+                .await
+                .map_err(|e| eyre::eyre!(e.to_string()))?
+            {
+                RevisionRead::Entries { entries, .. } => {
+                    for entry in entries {
+                        if let Some(value) = entry.value {
+                            current.insert(entry.key, value);
+                        } else {
+                            current.remove(&entry.key);
+                        }
+                    }
+                }
+                RevisionRead::ReplayComplete { .. } => break,
+            }
         }
+        drop(reader);
+        let desired = surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache
+                .active_manifests
+                .iter()
+                .map(|(id, (heads, manifest))| {
+                    (
+                        id.clone(),
+                        PlugRevisionState {
+                            manifest_heads: heads.clone(),
+                            manifest: (**manifest).clone(),
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        let mut tx = self
+            .revision_frontier
+            .begin()
+            .await
+            .map_err(|e| eyre::eyre!(e.to_string()))?;
+        let mut changed = false;
+        for (id, state) in &desired {
+            let unchanged = match current.get(id) {
+                Some(existing) => {
+                    existing.manifest_heads == state.manifest_heads
+                        && serde_json::to_vec(&existing.manifest)?
+                            == serde_json::to_vec(&state.manifest)?
+                }
+                None => false,
+            };
+            if !unchanged {
+                changed = true;
+                tx.put(id.clone(), state.clone())
+                    .await
+                    .map_err(|e| eyre::eyre!(e.to_string()))?;
+            }
+        }
+        for id in current.keys().filter(|id| !desired.contains_key(*id)) {
+            changed = true;
+            tx.delete(id.clone())
+                .await
+                .map_err(|e| eyre::eyre!(e.to_string()))?;
+        }
+        if changed {
+            tx.commit().await.map_err(|e| eyre::eyre!(e.to_string()))?;
+        } else {
+            tx.rollback()
+                .await
+                .map_err(|e| eyre::eyre!(e.to_string()))?;
+        }
+        Ok(())
     }
 
     pub async fn load(
@@ -244,13 +460,24 @@ impl PlugsRepo {
         blobs: Arc<crate::blobs::BlobsRepo>,
         doc_config_id: DocumentId,
         local_user_path: daybook_types::doc::UserPathBuf,
+        sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-        let registry = crate::repos::ListenersRegistry::new();
         let cancel_token = CancellationToken::new();
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
+        let frontier_sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx("@daybook/core/plugs-revisions")
+            .await?;
+        let revision_frontier = SqliteKeyedFrontier::new(
+            frontier_sql.read_pool.clone(),
+            frontier_sql.write_pool.clone(),
+            "plugs",
+            PlugRevisionCodec,
+            Arc::new(tokio::sync::Notify::new()),
+        )
+        .await
+        .map_err(|e| eyre::eyre!(e.to_string()))?;
 
         let repo = Arc::new(Self {
             big_repo: Arc::clone(&big_repo),
@@ -260,29 +487,16 @@ impl PlugsRepo {
             config_store: tokio::sync::OnceCell::new(),
             mutation_mutex: tokio::sync::Mutex::new(()),
             local_actor_id,
-            registry: Arc::clone(&registry),
             cancel_token: cancel_token.clone(),
             cache: surelock::mutex::Mutex::new(PlugsCache::default()),
-            notif_tx,
-        });
-
-        // ADR 007 §7: the notif loop maintains the derived cache and emits
-        // enabled-only events; fed by the switch sink (PlugsSwitchSink).
-        let worker_handle = tokio::spawn({
-            let repo = Arc::clone(&repo);
-            let cancel_token = cancel_token.child_token();
-            async move {
-                repo.notif_loop(notif_rx, cancel_token)
-                    .await
-                    .expect("error handling plugs notifs")
-            }
+            revision_frontier,
         });
 
         Ok((
             repo,
             crate::repos::RepoStopToken {
                 cancel_token,
-                worker_handle: Some(worker_handle),
+                worker_handle: None,
             },
         ))
     }
@@ -294,14 +508,66 @@ impl PlugsRepo {
         if self.drawer.set(drawer).is_err() {
             eyre::bail!("drawer already attached to plugs repo");
         }
+        // Ensure the config doc is registered in this drawer. `ensure_core_plug`
+        // only registers it during repo init; on a reopen a fresh DrawerRepo
+        // has no entry for it, so the config store would hydrate to its empty
+        // seed and the derived cache would stay cold. register_existing_doc is
+        // idempotent (no-op when already known) and is required for
+        // FacetStoreHandle::load below to read the persisted config facet.
+        let drawer_ref = self.drawer.get().expect("just set");
+        drawer_ref
+            .register_existing_doc(
+                &self.doc_config_id,
+                self.doc_config_id
+                    .parse()
+                    .map_err(|err| ferr!("invalid doc_config id: {err}"))?,
+                daybook_types::doc::BranchPath::new("main"),
+            )
+            .await?;
         let store = crate::stores::FacetStoreHandle::load(
-            Arc::clone(self.drawer.get().expect("just set")),
+            drawer_ref.clone(),
             self.doc_config_id.clone(),
             daybook_types::doc::BranchPathBuf::from("main"),
         )
         .await?;
         if self.config_store.set(store).is_err() {
             eyre::bail!("plugs config store already attached");
+        }
+        // Warm the derived cache from the durable config so drawer facet
+        // validation (and plug-init queueing at rt boot) works immediately on
+        // this open — including a reopen where the facet-set consumers have
+        // already settled the config/manifest revisions and will not re-apply
+        // them. Unreadable manifest refs are treated as pending (deferred)
+        // exactly like the live consumer, never a fatal error.
+        self.warm_cache().await?;
+        self.reconcile_revision_frontier().await?;
+        Ok(())
+    }
+
+    /// Rebuild the derived cache from the durable config store: every
+    /// known-manifest ref (materializes tag -> plug + tag -> facet manifest)
+    /// and every enabled ref (pins the active manifest). This is the boot-time
+    /// counterpart to the incremental `apply_config_diff`; it is idempotent
+    /// against concurrent consumer writes (`upsert_known`/`set_active` are
+    /// monotonic under the cache lock).
+    async fn warm_cache(&self) -> Res<()> {
+        let (known_plugs, enabled) = match self.config_store() {
+            Ok(store) => store
+                .query_sync(|config| (config.known_plugs.clone(), config.enabled.clone()))
+                .await,
+            Err(_) => return Ok(()),
+        };
+        for (plug_id, track) in &known_plugs {
+            let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await? else {
+                continue;
+            };
+            surelock::key::lock_scope(|key| {
+                let (mut cache, _key) = key.lock(&self.cache);
+                cache.upsert_known(plug_id, &manifest);
+            });
+        }
+        for (plug_id, ref_url) in &enabled {
+            self.activate_from_ref(plug_id, ref_url).await?;
         }
         Ok(())
     }
@@ -312,31 +578,25 @@ impl PlugsRepo {
             .ok_or_eyre("plugs config store not attached")
     }
 
-    /// The `FacetStoreSink` that keeps the config store's projection live
-    /// (registered in the rt switch sinks map).
-    pub fn config_store_sink(&self) -> Option<crate::stores::FacetStoreSink<PlugsConfig>> {
-        self.config_store.get().map(|store| store.sink())
+    pub(crate) fn config_doc_id(&self) -> daybook_types::doc::DocId {
+        self.doc_config_id.clone()
+    }
+
+    pub(crate) fn config_facet_route(&self) -> crate::index::FacetRouteKey {
+        let document_id = self.config_doc_id();
+        crate::index::FacetRouteKey {
+            branch_id: daybook_types::doc::BranchId(document_id.clone()),
+            document_id,
+            facet_key: <PlugsConfig as crate::stores::FacetStore>::facet_key(),
+        }
     }
 
     fn plug_manifest_facet_key() -> daybook_types::doc::FacetKey {
         daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugManifest)
     }
 
-    /// Activate a plug from its enabled ref: materialize the manifest,
-    /// update the active cache, and emit the config-delta event — `added`
-    /// (the ref was newly enabled) → `PlugEnabled`; otherwise the ref
-    /// changed → `EnabledPlugUpdated`. The event type comes from the config
-    /// delta, not the cache; the cache is only the materialization side
-    /// effect (plus the idempotence fast path). A pending (unreadable) ref
-    /// clears the active entry and emits nothing — the config still enables
-    /// the plug; it emits `PlugEnabled` when it resolves.
-    async fn activate_from_ref(
-        &self,
-        plug_id: &str,
-        ref_url: &url::Url,
-        added: bool,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<Option<PlugsEvent>> {
+    /// Activate a plug from its enabled ref and update the active cache.
+    async fn activate_from_ref(&self, plug_id: &str, ref_url: &url::Url) -> Res<()> {
         let parsed = Self::parse_enabled_ref(ref_url)?;
         if let Some(at) = &parsed.at {
             let pinned = ChangeHashSet(am_utils_rs::parse_commit_heads(at)?);
@@ -344,7 +604,7 @@ impl PlugsRepo {
                 let (cache, _key) = key.lock(&self.cache);
                 cache.is_active_at(plug_id, &pinned)
             }) {
-                return Ok(None);
+                return Ok(());
             }
         }
         let Some((heads, manifest)) = self.materialize_active(plug_id, ref_url).await? else {
@@ -353,44 +613,12 @@ impl PlugsRepo {
                 let (mut cache, _key) = key.lock(&self.cache);
                 cache.clear_active(plug_id);
             });
-            return Ok(None);
+            return Ok(());
         };
         surelock::key::lock_scope(|key| {
             let (mut cache, _key) = key.lock(&self.cache);
             cache.set_active(plug_id, heads.clone(), manifest);
         });
-        Ok(Some(if added {
-            PlugsEvent::PlugEnabled {
-                id: plug_id.to_string(),
-                heads,
-                origin: origin.clone(),
-            }
-        } else {
-            PlugsEvent::EnabledPlugUpdated {
-                id: plug_id.to_string(),
-                heads,
-                origin: origin.clone(),
-            }
-        }))
-    }
-
-    /// ADR 007 §7: init snapshot synthesized from the plugg config facet —
-    /// `PlugEnabled` for the active set only (pending plugs emit on
-    /// resolution, §6 — the notif loop's active-set diff covers it).
-    pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
-        self.rebuild_cache().await?;
-        let events = surelock::key::lock_scope(|key| {
-            let (cache, _key) = key.lock(&self.cache);
-            let mut events = Vec::with_capacity(cache.active_manifests.len());
-            for (id, (heads, _)) in &cache.active_manifests {
-                events.push(PlugsEvent::PlugEnabled {
-                    id: id.clone(),
-                    heads: heads.clone(),
-                    origin: self.local_origin(),
-                });
-            }
-            events
-        });
-        Ok(events)
+        Ok(())
     }
 }

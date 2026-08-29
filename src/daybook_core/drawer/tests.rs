@@ -7,8 +7,8 @@ use utils_rs::lru::KeyedLruPool;
 
 use automerge::transaction::Transactable;
 use daybook_types::doc::{
-    AddDocArgs, Body, BranchPath, BranchPathBuf, ChangeHashSet, DocId, DocPatch, FacetKey,
-    UserPathBuf, WellKnownFacet, WellKnownFacetTag,
+    AddDocArgs, AuthorityScope, Body, BranchId, BranchPath, BranchPathBuf, BranchPublication,
+    ChangeHashSet, DocId, DocPatch, FacetKey, UserPathBuf, WellKnownFacet, WellKnownFacetTag,
 };
 use daybook_types::url::build_facet_ref;
 
@@ -43,6 +43,88 @@ fn local_branch(name: &str) -> BranchPathBuf {
 
 async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
     crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn system_facet_validation_requires_privileged_scope() -> Res<()> {
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+    let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+    let facets = [
+        (
+            branch_key.clone(),
+            WellKnownFacet::Branch(daybook_types::doc::Branch {
+                document_id: "doc".into(),
+                branch_id: "branch".into(),
+                created_from: None,
+            })
+            .into(),
+        ),
+        (
+            branches_key.clone(),
+            WellKnownFacet::Branches(daybook_types::doc::Branches {
+                declarations: HashMap::new(),
+            })
+            .into(),
+        ),
+    ]
+    .into();
+    let resulting_keys = [branch_key.clone(), branches_key.clone()]
+        .into_iter()
+        .collect();
+
+    let user_error = repo
+        .validate_facets(&facets, &[], &resulting_keys, super::FacetWriteScope::User)
+        .await
+        .expect_err("ordinary writes must reject system-managed facets");
+    let user_error = user_error.to_string();
+    assert!(user_error.contains("system-managed"));
+
+    let user_error = repo
+        .validate_facets(
+            &HashMap::new(),
+            &[branch_key.clone(), branches_key.clone()],
+            &HashSet::new(),
+            super::FacetWriteScope::User,
+        )
+        .await
+        .expect_err("ordinary removals must reject system-managed facets");
+    let user_error = user_error.to_string();
+    assert!(user_error.contains("system-managed"));
+
+    repo.validate_facets(
+        &facets,
+        &[],
+        &resulting_keys,
+        super::FacetWriteScope::System,
+    )
+    .await?;
+
+    stop_token.stop().await?;
+    acx_stop().await.unwrap();
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -88,6 +170,57 @@ async fn test_v2_smoke() -> Res<()> {
         })
         .await?;
 
+    let branch_ref = repo
+        .get_branch_ref(&doc_id, BranchPath::new("main"))
+        .await?
+        .expect("main branch ref missing after add");
+    let physical_id = branch_ref.branch_doc_id.to_string();
+    assert_eq!(doc_id, physical_id);
+    let branch_handle = repo
+        .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
+        .await?
+        .expect("main branch handle missing after add");
+    let (change_count, head_count) = branch_handle
+        .with_document_read(|doc| (doc.get_changes(&[]).len(), doc.get_heads().len()))
+        .await;
+    assert_eq!(change_count, 1);
+    assert_eq!(head_count, 1);
+    let initial = repo
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            BranchPath::new("main"),
+            Some(vec![
+                FacetKey::from(WellKnownFacetTag::Branch),
+                FacetKey::from(WellKnownFacetTag::Branches),
+            ]),
+        )
+        .await?
+        .expect("main document missing after add");
+    let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+    let branch = serde_json::from_value::<WellKnownFacet>(
+        initial
+            .facets
+            .get(&branch_key)
+            .cloned()
+            .expect("branch facet missing"),
+    )?;
+    let WellKnownFacet::Branch(branch) = branch else {
+        eyre::bail!("initial branch facet has the wrong type");
+    };
+    assert_eq!(branch.document_id, doc_id);
+    assert_eq!(branch.branch_id.0, physical_id);
+    let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+    let branches = serde_json::from_value::<WellKnownFacet>(
+        initial
+            .facets
+            .get(&branches_key)
+            .cloned()
+            .expect("branches facet missing"),
+    )?;
+    let WellKnownFacet::Branches(branches) = branches else {
+        eyre::bail!("initial branches facet has the wrong type");
+    };
+    assert!(branches.declarations.is_empty());
     // 2. List docs
     let list = repo.list().await?;
     assert_eq!(list.len(), 1);
@@ -203,6 +336,79 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         None,
     )
     .await?;
+    let local_branch_ref = repo
+        .get_branch_ref(&doc_id, &BranchPathBuf::from("/tmp/job-1"))
+        .await?
+        .expect("local branch ref missing after creation");
+    // Local branches are checkout-local work and must not enter the
+    // replicated drawer partition.
+    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    let local_branch_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("/tmp/job-1"), None)
+        .await?
+        .expect("local branch missing after creation");
+    let local_branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+    let local_identity = serde_json::from_value::<WellKnownFacet>(
+        local_branch_doc
+            .facets
+            .get(&local_branch_key)
+            .cloned()
+            .expect("local branch facet missing"),
+    )?;
+    let WellKnownFacet::Branch(local_identity) = local_identity else {
+        eyre::bail!("local branch facet has wrong type");
+    };
+    assert_eq!(local_identity.document_id, doc_id);
+    assert_eq!(
+        local_identity.branch_id.0,
+        local_branch_ref.branch_doc_id.to_string()
+    );
+    assert_eq!(
+        local_identity.created_from.as_ref().unwrap().heads,
+        main_heads
+    );
+    assert!(
+        !local_branch_doc
+            .facets
+            .contains_key(&FacetKey::from(WellKnownFacetTag::Branches))
+    );
+    let local_child_path = BranchPathBuf::from("/tmp/job-2");
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_child_path,
+        BranchPath::new("/tmp/job-1"),
+        &main_heads,
+        None,
+    )
+    .await?;
+    let local_child_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, &local_child_path, None)
+        .await?
+        .expect("local child missing after creation");
+    let local_child_dmeta = serde_json::from_value::<WellKnownFacet>(
+        local_child_doc
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Dmeta))
+            .cloned()
+            .expect("local child dmeta missing"),
+    )?;
+    let WellKnownFacet::Dmeta(local_child_dmeta) = local_child_dmeta else {
+        eyre::bail!("local child dmeta has wrong type");
+    };
+    // The child no longer carries the Branches value itself, but dmeta keeps
+    // its tombstoned provenance so the inherited directory removal remains
+    // auditable.
+    assert!(
+        !local_child_doc
+            .facets
+            .contains_key(&FacetKey::from(WellKnownFacetTag::Branches))
+    );
+    let branches_meta = local_child_dmeta
+        .facets
+        .get(&FacetKey::from(WellKnownFacetTag::Branches))
+        .expect("local child must retain Branches tombstone provenance");
+    assert!(!branches_meta.deleted_at.is_empty());
+    assert!(repo.delete_branch(&doc_id, &local_child_path, None).await?);
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -228,6 +434,64 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         None,
     )
     .await?;
+    let replicated_branch_ref = repo
+        .get_branch_ref(&doc_id, &local_branch("branch-a"))
+        .await?
+        .expect("replicated branch ref missing after creation");
+    let replicated_branch_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, &local_branch("branch-a"), None)
+        .await?
+        .expect("replicated branch missing after creation");
+    let replicated_branch = serde_json::from_value::<WellKnownFacet>(
+        replicated_branch_doc
+            .facets
+            .get(&local_branch_key)
+            .cloned()
+            .expect("replicated branch facet missing"),
+    )?;
+    let WellKnownFacet::Branch(replicated_branch) = replicated_branch else {
+        eyre::bail!("replicated branch facet has wrong type");
+    };
+    assert_eq!(replicated_branch.document_id, doc_id);
+    assert_eq!(
+        replicated_branch.branch_id.0,
+        replicated_branch_ref.branch_doc_id.to_string()
+    );
+    assert_eq!(
+        replicated_branch.created_from.as_ref().unwrap().heads,
+        main_heads
+    );
+    assert!(
+        !replicated_branch_doc
+            .facets
+            .contains_key(&FacetKey::from(WellKnownFacetTag::Branches))
+    );
+    let main_doc = repo
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            BranchPath::new("main"),
+            Some(vec![FacetKey::from(WellKnownFacetTag::Branches)]),
+        )
+        .await?
+        .expect("main branch missing after replicated branch creation");
+    let main_branches = serde_json::from_value::<WellKnownFacet>(
+        main_doc
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Branches))
+            .cloned()
+            .expect("main branches facet missing"),
+    )?;
+    let WellKnownFacet::Branches(main_branches) = main_branches else {
+        eyre::bail!("main branches facet has wrong type");
+    };
+    let declaration = main_branches
+        .declarations
+        .get(&replicated_branch_ref.branch_doc_id.to_string().into())
+        .expect("replicated branch declaration missing");
+    assert_eq!(declaration.name.as_deref(), Some("/test-device/branch-a"));
+    assert_eq!(declaration.publication, BranchPublication::Shared);
+    assert_eq!(declaration.scope, AuthorityScope::InheritDocument);
+    assert_eq!(declaration.created_from, replicated_branch.created_from);
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -253,6 +517,99 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
 
     assert!(repo.del(&doc_id).await?);
     assert_eq!(big_sync_host.store.member_count(partition_id).await?, 0);
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn register_existing_doc_initializes_branch_system_facets() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    let mut external_doc = automerge::Automerge::new();
+    let mut tx = external_doc.transaction();
+    tx.put(automerge::ROOT, "version", "0")?;
+    tx.commit();
+    let branch_handle = big_repo.create_doc(external_doc).await?;
+    let branch_doc_id = branch_handle.document_id();
+    let doc_id = DocId::from(branch_doc_id.to_string());
+
+    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+        .await?;
+    let change_count_after_register = branch_handle
+        .with_document_read(|doc| doc.get_changes(&[]).len())
+        .await;
+    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+        .await?;
+    assert_eq!(
+        branch_handle
+            .with_document_read(|doc| doc.get_changes(&[]).len())
+            .await,
+        change_count_after_register,
+        "re-registering a document must not append another mutation"
+    );
+
+    let registered = repo
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            BranchPath::new("main"),
+            Some(vec![
+                FacetKey::from(WellKnownFacetTag::Branch),
+                FacetKey::from(WellKnownFacetTag::Branches),
+            ]),
+        )
+        .await?
+        .expect("registered document missing");
+    let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+    let branch = serde_json::from_value::<WellKnownFacet>(
+        registered
+            .facets
+            .get(&branch_key)
+            .cloned()
+            .expect("registered document missing Branch facet"),
+    )?;
+    let WellKnownFacet::Branch(branch) = branch else {
+        eyre::bail!("registered Branch facet has the wrong type");
+    };
+    assert_eq!(branch.document_id, doc_id);
+    assert_eq!(branch.branch_id.0, branch_doc_id.to_string());
+
+    let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+    let branches = serde_json::from_value::<WellKnownFacet>(
+        registered
+            .facets
+            .get(&branches_key)
+            .cloned()
+            .expect("registered document missing Branches facet"),
+    )?;
+    let WellKnownFacet::Branches(branches) = branches else {
+        eyre::bail!("registered Branches facet has the wrong type");
+    };
+    assert!(branches.declarations.is_empty());
 
     stop_token.stop().await?;
     acx_stop().await?;
@@ -567,6 +924,26 @@ async fn test_v2_merge() -> Res<()> {
     assert_eq!(
         doc.facets.get(&facet_note).unwrap(),
         &serde_json::Value::from(WellKnownFacet::Note("B".into()))
+    );
+    let main_ref = repo
+        .get_branch_ref(&doc_id, BranchPath::new("main"))
+        .await?
+        .expect("main branch ref");
+    let branch_facet = doc
+        .facets
+        .get(&FacetKey::from(WellKnownFacetTag::Branch))
+        .expect("main Branch facet")
+        .clone();
+    let WellKnownFacet::Branch(branch_identity) =
+        serde_json::from_value::<WellKnownFacet>(branch_facet)?
+    else {
+        panic!("main Branch facet decoded to another well-known facet");
+    };
+    assert_eq!(branch_identity.document_id, doc_id);
+    assert_eq!(
+        branch_identity.branch_id,
+        BranchId::from(main_ref.branch_doc_id.to_string()),
+        "merging branch history must preserve the destination's physical identity",
     );
 
     stop_token.stop().await?;
@@ -2365,7 +2742,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
         unreachable!("guard above ensures DocDeleted");
     };
     assert!(
-        matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. }),
+        matches!(origin, crate::event_origin::EventOrigin::Local { .. }),
         "replayed delete should infer local origin from docs.map_deleted tombstone",
     );
     assert!(

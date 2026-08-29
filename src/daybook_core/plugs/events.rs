@@ -1,80 +1,267 @@
 use super::mutations::RecordKnownOutcome;
 use super::*;
 
-/// a doc change forwarded from the switch sink to the notif
-/// loop
-#[derive(Debug, Clone)]
-pub(crate) enum PlugsNotif {
-    ConfigDocChanged {
-        prev_heads: Option<ChangeHashSet>,
-        new_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    ManifestDocChanged {
-        doc_id: daybook_types::doc::DocId,
-        new_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
+use crate::drawer::DrawerRepo;
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use big_sync::SqliteDeltaWalkerStateRepo;
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use daybook_types::doc::{FacetKey, WellKnownFacet, WellKnownFacetTag};
+use sqlx_utils_rs::SqlCtx;
+
+pub(crate) const PLUGS_CONFIG_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-config-facet-set";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFacetApplyOutcome {
+    Applied,
+    Deferred,
 }
 
-// Granular event enum for specific changes (ADR 007 §7: enabled-only).
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum PlugsEvent {
-    /// Config entry added, or pending -> active (ADR 007 §6). Emitted for
-    /// local enables and for remote config writes that add/change an enabled
-    /// ref (via the notif loop's config diff).
-    PlugEnabled {
-        id: String,
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// Config entry removed (local disable or remote drop of an enabled ref).
-    PlugDisabled {
-        id: String,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// The enabled ref was re-pinned to different heads (explicit update to
-    /// a newer version). Same plug, new pinned version.
-    EnabledPlugUpdated {
-        id: String,
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// The plugs config facet moved to `heads`. A coarse state-version
-    /// marker: fires on every config write whether or not a granular
-    /// `PlugEnabled`/`PlugDisabled`/`EnabledPlugUpdated` fired (e.g. a
-    /// remote known-manifest record has no plug-level event). Consumers that
-    /// mirror the whole config (triage's processor refresh, the facet-ref
-    /// index) act on any plugs event; the heads let a consumer re-read the
-    /// config at a known point.
-    PlugsConfigChanged {
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// A manifest update was rejected by the version/compat gate (ADR 007
-    /// §5): republish without a version bump, downgrade, or a breaking
-    /// change in a non-major update. The rejection is also durable in the
-    /// config's per-plug track (latest + latest_rejection).
-    ManifestRejected {
-        id: String,
-        version: String,
-        reason: String,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
+pub(crate) struct PlugsConfigFacetSetConsumerStopToken {
+    cancel_token: CancellationToken,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PlugsConfigFacetSetConsumerStopToken {
+    pub(crate) async fn stop(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.worker_handle.take() {
+            handle.await?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn spawn_facet_set_plugs_config_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    drawer: Arc<DrawerRepo>,
+    plugs_repo: Arc<PlugsRepo>,
+    sql: SqlCtx,
+    parent_cancel_token: CancellationToken,
+) -> Res<PlugsConfigFacetSetConsumerStopToken> {
+    let state = SqliteDeltaWalkerStateRepo::new(
+        sql.read_pool.clone(),
+        sql.write_pool.clone(),
+        PLUGS_CONFIG_CONSUMER_STATE_ID,
+        "facets",
+    )
+    .await?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let route = plugs_repo.config_facet_route();
+    let worker_handle = tokio::spawn(async move {
+        let mut wake = drawer
+            .subscribe_materialization_wake(None)
+            .await
+            .expect(ERROR_IMPOSSIBLE);
+        let mut walker = SerialDeltaWalker::open(
+            facet_set_store.as_ref(),
+            &state,
+            FacetSetSelector::Routes([route.clone()].into_iter().collect()),
+            RevisionReadLimits::default(),
+        )
+        .await
+        .expect(ERROR_IMPOSSIBLE);
+        let mut deferred = None;
+        loop {
+            let read = if let Some((revision, entries)) = deferred.take() {
+                RevisionRead::Entries { revision, entries }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = worker_cancel_token.cancelled() => break,
+                    read = walker.next() => read.expect(ERROR_IMPOSSIBLE),
+                }
+            };
+            match read {
+                RevisionRead::ReplayComplete { .. } => {}
+                RevisionRead::Entries { revision, entries } => {
+                    let mut retry = false;
+                    for delta in entries.iter().cloned() {
+                        assert_eq!(
+                            delta.key, route,
+                            "unexpected route in PlugsConfig FacetSet consumer"
+                        );
+                        match plugs_repo
+                            .process_config_facet_delta(&drawer, delta)
+                            .await
+                            .expect(ERROR_IMPOSSIBLE)
+                        {
+                            ConfigFacetApplyOutcome::Applied => {}
+                            ConfigFacetApplyOutcome::Deferred => retry = true,
+                        }
+                    }
+                    if retry {
+                        deferred = Some((revision, entries));
+                        tokio::select! {
+                            biased;
+                            _ = worker_cancel_token.cancelled() => break,
+                            result = wake.wait() => result.expect(ERROR_IMPOSSIBLE),
+                        }
+                        continue;
+                    }
+                    walker.settle(revision).await.expect(ERROR_IMPOSSIBLE);
+                }
+            }
+        }
+    });
+    Ok(PlugsConfigFacetSetConsumerStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
+}
+
+pub(crate) const PLUG_MANIFEST_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-manifest-delta";
+
+pub(crate) struct PlugsManifestConsumerStopToken {
+    cancel_token: CancellationToken,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PlugsManifestConsumerStopToken {
+    pub(crate) async fn stop(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.worker_handle.take() {
+            handle.await?;
+        }
+        Ok(())
+    }
+}
+
+/// Consume PlugManifest facet membership from the durable FacetSet source.
+/// Manifest values are hydrated at the exact membership heads before the
+/// existing PlugsRepo reconciliation updates its cache and frontier.
+pub(crate) async fn spawn_facet_set_plugs_manifest_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    drawer: Arc<DrawerRepo>,
+    plugs_repo: Arc<PlugsRepo>,
+    manifest_sql: SqlCtx,
+    parent_cancel_token: CancellationToken,
+) -> Res<PlugsManifestConsumerStopToken> {
+    let state = SqliteDeltaWalkerStateRepo::new(
+        manifest_sql.read_pool.clone(),
+        manifest_sql.write_pool.clone(),
+        PLUG_MANIFEST_CONSUMER_STATE_ID,
+        "facets",
+    )
+    .await
+    .map_err(|error| ferr!("initializing Plugs manifest walker state: {error}"))?;
+    let wake = drawer.subscribe_materialization_wake(None).await?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let worker_handle = tokio::spawn(async move {
+        run_facet_set_plugs_manifest_consumer(
+            facet_set_store,
+            drawer,
+            plugs_repo,
+            state,
+            wake,
+            worker_cancel_token,
+        )
+        .await
+        .unwrap();
+    });
+    Ok(PlugsManifestConsumerStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
+}
+
+async fn run_facet_set_plugs_manifest_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    drawer: Arc<DrawerRepo>,
+    plugs_repo: Arc<PlugsRepo>,
+    state: SqliteDeltaWalkerStateRepo,
+    mut wake: crate::drawer::MaterializationWake,
+    cancel_token: CancellationToken,
+) -> Res<()> {
+    let mut walker = SerialDeltaWalker::open(
+        facet_set_store.as_ref(),
+        &state,
+        FacetSetSelector::Tag(WellKnownFacetTag::PlugManifest),
+        RevisionReadLimits::default(),
+    )
+    .await
+    .map_err(|error| ferr!("opening Plugs manifest FacetSet walker: {error}"))?;
+    let mut deferred: Option<(u64, Vec<FacetDelta>)> = None;
+    loop {
+        let read = if let Some((revision, entries)) = deferred.take() {
+            RevisionRead::Entries { revision, entries }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                read = walker.next() => read.map_err(|error| ferr!("reading Plugs manifest FacetSet walker: {error}"))?,
+            }
+        };
+        match read {
+            RevisionRead::ReplayComplete { .. } => {}
+            RevisionRead::Entries { revision, entries } => {
+                if !apply_manifest_entries(&drawer, &plugs_repo, &entries).await? {
+                    deferred = Some((revision, entries));
+                } else {
+                    walker.settle(revision).await.map_err(|error| {
+                        ferr!("settling Plugs manifest FacetSet walker: {error}")
+                    })?;
+                }
+            }
+        }
+        if deferred.is_some() {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                result = wake.wait() => result?,
+            }
+        }
+    }
+}
+
+async fn apply_manifest_entries(
+    drawer: &DrawerRepo,
+    plugs_repo: &Arc<PlugsRepo>,
+    entries: &[FacetDelta],
+) -> Res<bool> {
+    let manifest_key = FacetKey::from(WellKnownFacetTag::PlugManifest);
+    for delta in entries {
+        if delta.key.facet_key != manifest_key
+            || delta.key.branch_id.0.as_str() != delta.key.document_id.as_str()
+        {
+            continue;
+        }
+        let Some(snapshot) = &delta.current else {
+            plugs_repo
+                .process_manifest_doc_tombstone(&delta.key.document_id)
+                .await?;
+            continue;
+        };
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch_heads(
+                &delta.key.document_id,
+                &daybook_types::doc::BranchPath::new("main"),
+                &snapshot.branch_heads,
+                Some(vec![manifest_key.clone()]),
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some(raw) = doc.facets.get(&manifest_key) else {
+            continue;
+        };
+        drop(serde_json::from_value::<
+            daybook_types::manifest::PlugManifest,
+        >(raw.clone())?);
+        plugs_repo
+            .process_manifest_doc_change(&delta.key.document_id, &snapshot.branch_heads)
+            .await?;
+    }
+    Ok(true)
 }
 
 impl PlugsRepo {
-    /// ADR 007 §7: diff two config versions of the write series into
-    /// enabled-only events, maintaining the derived cache incrementally.
-    /// Unchanged refs no-op via the fast paths in the cache helpers.
-    async fn apply_config_diff(
-        &self,
-        prev: Option<&PlugsConfig>,
-        cur: &PlugsConfig,
-        out: &mut Vec<PlugsEvent>,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<()> {
+    /// Reconcile derived cache state from two config versions.
+    async fn apply_config_diff(&self, prev: Option<&PlugsConfig>, cur: &PlugsConfig) -> Res<()> {
         // known_plugs: added/changed last_valid refs refresh the manifest
         // cache for that plug only; removed entries drop it. A rejected
         // latest or a last_enabled_version-only change has no cache effect
@@ -102,21 +289,13 @@ impl PlugsRepo {
                 }
             }
         }
-        // enabled: the event type comes from the config delta — a ref that
-        // was absent is `PlugEnabled`, a changed ref is
-        // `EnabledPlugUpdated`, a removed ref is `PlugDisabled`. The cache
-        // is only the materialization side effect.
+        // enabled: the cache is only the materialization side effect.
         for (id, ref_url) in &cur.enabled {
             let prev_ref = prev.as_ref().and_then(|plug| plug.enabled.get(id));
             if prev_ref == Some(ref_url) {
                 continue; // unchanged — no event, no read
             }
-            if let Some(event) = self
-                .activate_from_ref(id, ref_url, prev_ref.is_none(), origin)
-                .await?
-            {
-                out.push(event);
-            }
+            self.activate_from_ref(id, ref_url).await?;
         }
         if let Some(prev) = prev {
             for id in prev.enabled.keys() {
@@ -124,10 +303,6 @@ impl PlugsRepo {
                     surelock::key::lock_scope(|key| {
                         let (mut cache, _key) = key.lock(&self.cache);
                         cache.clear_active(id);
-                    });
-                    out.push(PlugsEvent::PlugDisabled {
-                        id: id.clone(),
-                        origin: origin.clone(),
                     });
                 }
             }
@@ -138,11 +313,64 @@ impl PlugsRepo {
     /// ADR 007 §7: a manifest doc moved (remote). Re-record the known ref
     /// (which updates the derived cache incrementally for this plug) and
     /// resolve a pending plug whose pinned heads became readable.
+    pub(crate) async fn process_config_facet_delta(
+        &self,
+        drawer: &DrawerRepo,
+        delta: crate::index::FacetDelta,
+    ) -> Res<ConfigFacetApplyOutcome> {
+        let store = self.config_store()?;
+        let previous = store.query_sync(|config| config.clone()).await;
+        let (current, current_heads, actor_id) = match delta.current {
+            Some(snapshot) => {
+                let raw = match drawer
+                    .hydrate_facet_value_at_heads(
+                        &delta.key.branch_id,
+                        &snapshot.branch_heads,
+                        &delta.key.facet_key,
+                    )
+                    .await?
+                {
+                    crate::drawer::ExactFacetValueHydration::Deferred => {
+                        return Ok(ConfigFacetApplyOutcome::Deferred);
+                    }
+                    crate::drawer::ExactFacetValueHydration::Absent => {
+                        eyre::bail!(
+                            "PlugsConfig FacetSet membership has no value at exact branch heads"
+                        );
+                    }
+                    crate::drawer::ExactFacetValueHydration::Present(raw) => raw,
+                };
+                let config = match WellKnownFacet::from_json(raw, WellKnownFacetTag::PlugsConfig)? {
+                    WellKnownFacet::PlugsConfig(config) => config,
+                    _ => unreachable!("PlugsConfig facet decoded as another well-known facet"),
+                };
+                (config, snapshot.branch_heads, Some(snapshot.actor_id))
+            }
+            None => (
+                <PlugsConfig as crate::stores::FacetStore>::seed(),
+                delta.current_branch_heads.unwrap_or_default(),
+                None,
+            ),
+        };
+        store
+            .apply_external_snapshot(current.clone(), current_heads.clone())
+            .await?;
+        let local_actor = store.local_writer_actor().await;
+        let is_local = actor_id
+            .as_ref()
+            .zip(local_actor.as_ref())
+            .is_some_and(|(actor, local)| actor == local);
+        if !is_local {
+            self.apply_config_diff(Some(&previous), &current).await?;
+        }
+        self.reconcile_revision_frontier().await?;
+        Ok(ConfigFacetApplyOutcome::Applied)
+    }
+
     async fn process_manifest_doc_change(
         &self,
         doc_id: &daybook_types::doc::DocId,
         new_heads: &ChangeHashSet,
-        origin: &crate::event_origin::SwitchEventOrigin,
     ) -> Res<()> {
         match self.record_known_manifest_doc(doc_id, new_heads).await? {
             RecordKnownOutcome::Recorded { plug_id } => {
@@ -162,12 +390,8 @@ impl PlugsRepo {
                 });
                 if let Some(ref_url) = enabled_ref.filter(|_| is_pending) {
                     // Pending -> active: the pinned heads became readable.
-                    if let Some(event) = self
-                        .activate_from_ref(&plug_id, &ref_url, true, origin)
-                        .await?
-                    {
-                        self.registry.notify([event]);
-                    }
+                    self.activate_from_ref(&plug_id, &ref_url).await?;
+                    self.reconcile_revision_frontier().await?;
                 }
             }
             RecordKnownOutcome::Rejected {
@@ -181,176 +405,50 @@ impl PlugsRepo {
                     reason,
                     "manifest update rejected by version/compat gate"
                 );
-                self.registry.notify([PlugsEvent::ManifestRejected {
-                    id: plug_id,
-                    version: version.to_string(),
-                    reason,
-                    origin: origin.clone(),
-                }]);
             }
             RecordKnownOutcome::Unreadable => {}
         }
         Ok(())
     }
 
-    /// ADR 007 §7: the notif loop, fed by the switch sink. Config changes
-    /// are processed as a series of facet write versions (drawer dmeta
-    /// snapshots) — basic diffing between consecutive versions; manifest
-    /// doc changes update the derived cache incrementally. No store reload.
-    pub(crate) async fn notif_loop(
-        &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<PlugsNotif>,
-        cancel_token: CancellationToken,
-    ) -> Res<()> {
-        loop {
-            let notif = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => break,
-                msg = notif_rx.recv() => match msg {
-                    Some(notif) => notif,
-                    None => break,
-                },
-            };
-            match notif {
-                PlugsNotif::ConfigDocChanged {
-                    prev_heads,
-                    new_heads,
-                    origin,
-                } => {
-                    self.process_config_doc_change(prev_heads.as_ref(), &new_heads, &origin)
-                        .await?;
-                }
-                PlugsNotif::ManifestDocChanged {
-                    doc_id,
-                    new_heads,
-                    origin,
-                } => {
-                    self.process_manifest_doc_change(&doc_id, &new_heads, &origin)
-                        .await?;
-                }
-            }
+    /// Remove the derived manifest state for a manifest document whose
+    /// current facet membership was tombstoned. The config track remains the
+    /// durable history of the plug; a later readable manifest revision can
+    /// repopulate the cache through the same consumer.
+    async fn process_manifest_doc_tombstone(&self, doc_id: &daybook_types::doc::DocId) -> Res<()> {
+        let _guard = self.mutation_mutex.lock().await;
+        let tracked = self
+            .config_store()?
+            .query_sync(|config| {
+                config
+                    .known_plugs
+                    .iter()
+                    .map(|(plug_id, track)| (plug_id.clone(), track.last_valid.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        let plug_ids = tracked
+            .into_iter()
+            .filter_map(|(plug_id, ref_url)| {
+                let parsed = Self::parse_enabled_ref(&ref_url)
+                    .expect("known plug refs must be valid manifest refs");
+                (&parsed.doc_id == doc_id).then_some(plug_id)
+            })
+            .collect::<Vec<_>>();
+        if plug_ids.is_empty() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    /// ADR 007 §7: a config facet change between the before/after heads.
-    /// Enumerate the write versions (each with its author), skip local
-    /// writes (applied synchronously by the mutators), and basic-diff each
-    /// remaining version against the previous one.
-    async fn process_config_doc_change(
-        &self,
-        prev_heads: Option<&ChangeHashSet>,
-        new_heads: &ChangeHashSet,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<()> {
-        let store = self.config_store()?;
-        let versions = store.versions(prev_heads, new_heads).await?;
-        let local_store = store.local_writer_actor().await;
-        let mut events = vec![];
-        let mut prev_config = match prev_heads {
-            Some(prev) => store.at(prev).await?,
-            None => None,
-        };
-        for version in versions {
-            let is_local = local_store
-                .as_ref()
-                .is_some_and(|actor| actor == &version.actor_id);
-            if is_local {
-                // Applied synchronously by the mutator; advance the baseline.
-                prev_config = Some(version.value);
-                continue;
-            }
-            self.apply_config_diff(prev_config.as_ref(), &version.value, &mut events, origin)
-                .await?;
-            prev_config = Some(version.value);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: origin.clone(),
+        let changed = surelock::key::lock_scope(|key| {
+            let (mut cache, _key) = key.lock(&self.cache);
+            plug_ids.into_iter().fold(false, |changed, plug_id| {
+                let active_changed = cache.clear_active(&plug_id);
+                let known_changed = cache.drop_known(&plug_id);
+                changed || active_changed || known_changed
+            })
         });
-        self.registry.notify(events);
+        if changed {
+            self.reconcile_revision_frontier().await?;
+        }
         Ok(())
-    }
-}
-
-pub(crate) struct PlugsSwitchSink {
-    repo: Arc<PlugsRepo>,
-}
-
-impl PlugsSwitchSink {
-    pub(crate) fn new(repo: Arc<PlugsRepo>) -> Self {
-        Self { repo }
-    }
-}
-
-#[async_trait]
-impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
-    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        use daybook_types::manifest::DocPredicateClause;
-        crate::rt::switch::SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: false,
-            consume_plugs: false,
-            consume_dispatch: false,
-            consume_config: false,
-            // Only docs whose diff touches the plug facets reach on_event.
-            drawer_predicate: Some(DocPredicateClause::Or(vec![
-                DocPredicateClause::HasTag(
-                    daybook_types::doc::WellKnownFacetTag::PlugsConfig.into(),
-                ),
-                DocPredicateClause::HasTag(
-                    daybook_types::doc::WellKnownFacetTag::PlugManifest.into(),
-                ),
-            ])),
-        }
-    }
-
-    async fn on_event(
-        &mut self,
-        event: &crate::rt::switch::SwitchEvent,
-        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
-    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
-        let crate::rt::switch::SwitchEvent::Doc(evt) = event else {
-            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
-        };
-        let Some(diff) = &evt.diff else {
-            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
-        };
-        // Forward to the notif loop with distinct config vs manifest
-        // variants plus before/after heads (the loop diffs value-level
-        // patches via the drawer API). Cheap — no reads in the sink.
-        let changed: Vec<&daybook_types::doc::FacetKey> = diff
-            .changed_facet_keys
-            .iter()
-            .chain(diff.added_facet_keys.iter())
-            .chain(diff.removed_facet_keys.iter())
-            .collect();
-        let plugs_config_tag = daybook_types::doc::FacetTag::WellKnown(
-            daybook_types::doc::WellKnownFacetTag::PlugsConfig,
-        );
-        let plug_manifest_tag = daybook_types::doc::FacetTag::WellKnown(
-            daybook_types::doc::WellKnownFacetTag::PlugManifest,
-        );
-        if changed.iter().any(|key| key.tag == plugs_config_tag) {
-            self.repo
-                .notif_tx
-                .send(PlugsNotif::ConfigDocChanged {
-                    prev_heads: evt.prev_heads.clone(),
-                    new_heads: evt.new_heads.clone(),
-                    origin: evt.origin.clone(),
-                })
-                .map_err(|_| ferr!("plugs notif channel closed"))?;
-        }
-        if changed.iter().any(|key| key.tag == plug_manifest_tag) {
-            self.repo
-                .notif_tx
-                .send(PlugsNotif::ManifestDocChanged {
-                    doc_id: evt.doc_id.clone(),
-                    new_heads: evt.new_heads.clone(),
-                    origin: evt.origin.clone(),
-                })
-                .map_err(|_| ferr!("plugs notif channel closed"))?;
-        }
-        Ok(crate::rt::switch::SwitchSinkOutcome::default())
     }
 }

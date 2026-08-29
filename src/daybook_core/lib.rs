@@ -102,8 +102,7 @@ pub fn part_id_from_label(label: &str) -> PartId {
 }
 
 pub use blobs::{
-    BlobPinWorkItem, BlobPinWorker, BlobPinsPartEvent, BlobPinsPartWorker, blob_inventory_part_id,
-    blob_inventory_part_id_from_doc_id,
+    BlobPinWorker, BlobPinsPartWorker, blob_inventory_part_id, blob_inventory_part_id_from_doc_id,
 };
 
 pub mod app;

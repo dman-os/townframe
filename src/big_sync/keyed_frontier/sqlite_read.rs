@@ -60,7 +60,9 @@ pub(crate) struct SqliteFrontierRow {
 /// matching storage row is relevant to that typed frontier.  Returning
 /// `Ok(None)` is filtering, not an error; the reader still advances through
 /// the source revision and can therefore emit an empty progress batch.
-pub(crate) trait SqliteReadSource: Send + Sync {
+pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
+    type Selector: Clone + Send + Sync + 'static;
+    type Row: Send + 'static;
     type Key: Send + Sync + 'static;
     type Value: Send + Sync + 'static;
 
@@ -68,10 +70,29 @@ pub(crate) trait SqliteReadSource: Send + Sync {
     fn scope_id(&self) -> i64;
     fn changed(&self) -> &Notify;
 
+    /// Return the source cursor represented by a selector's lower bound.
+    /// Selectors with independent per-key bounds retain the shared cursor at
+    /// zero; the collapsed `All` selector can initialize directly at its
+    /// requested bound and avoid an empty replay-progress batch.
+    fn initial_after(&self, _selector: &Self::Selector) -> FrontierRevision {
+        0
+    }
+
+    fn fetch_rows<'a>(
+        &'a self,
+        selector: &'a Self::Selector,
+        after: FrontierRevision,
+        through: FrontierRevision,
+        exact_revision: Option<FrontierRevision>,
+        limit: Option<usize>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Self::Row>, SqliteReadError>> + Send + 'a>>;
+
+    fn row_revision(&self, row: &Self::Row) -> FrontierRevision;
+
     #[expect(clippy::type_complexity)]
     fn decode_row(
         &self,
-        row: SqliteFrontierRow,
+        row: Self::Row,
     ) -> Result<Option<FrontierEntry<Self::Key, Self::Value>>, SqliteReadError>;
 
     /// Reads one committed cursor after the write transaction has committed.
@@ -89,16 +110,16 @@ pub(crate) trait SqliteReadSource: Send + Sync {
     }
 }
 
-struct SqliteRows {
-    rows: Vec<SqliteFrontierRow>,
+struct SqliteRows<R> {
+    rows: Vec<R>,
     /// The source cursor represented by this read, independent of how many
     /// rows survive typed decoding.
     through: FrontierRevision,
 }
 
-struct SqliteReader<'source, S> {
-    source: &'source S,
-    selector: SqlitePartSelector,
+struct SqliteReader<S: SqliteReadSource> {
+    source: S,
+    selector: S::Selector,
     limits: FrontierReadLimits,
     initial_through: Option<FrontierRevision>,
     after: FrontierRevision,
@@ -163,6 +184,22 @@ fn push_selector_predicate(
 
 async fn query_rows<S>(
     source: &S,
+    selector: &S::Selector,
+    after: FrontierRevision,
+    through: FrontierRevision,
+    exact_revision: Option<FrontierRevision>,
+    limit: Option<usize>,
+) -> Result<Vec<S::Row>, SqliteReadError>
+where
+    S: SqliteReadSource,
+{
+    source
+        .fetch_rows(selector, after, through, exact_revision, limit)
+        .await
+}
+
+pub(crate) async fn part_query_rows<S>(
+    source: &S,
     selector: &SqlitePartSelector,
     after: FrontierRevision,
     through: FrontierRevision,
@@ -175,7 +212,6 @@ where
     if selector.is_empty() || after >= through && exact_revision.is_none() {
         return Ok(Vec::new());
     }
-
     let mut query = QueryBuilder::<Sqlite>::new(
         "SELECT m.obj_ref
              , m.maybe_part_ref
@@ -229,11 +265,11 @@ where
 
 async fn read_page<S>(
     source: &S,
-    selector: &SqlitePartSelector,
+    selector: &S::Selector,
     after: FrontierRevision,
     through: FrontierRevision,
     max_entries: usize,
-) -> Result<SqliteRows, SqliteReadError>
+) -> Result<SqliteRows<S::Row>, SqliteReadError>
 where
     S: SqliteReadSource,
 {
@@ -244,9 +280,9 @@ where
 
     // A page may stop in the middle of one atomic revision.  Re-read that
     // revision and include it in full; the limit is soft by contract.
-    let cutoff = rows.last().expect("limited query returned a row").revision;
+    let cutoff = source.row_revision(rows.last().expect("limited query returned a row"));
     let boundary_rows = query_rows(source, selector, after, through, Some(cutoff), None).await?;
-    rows.retain(|row| row.revision < cutoff);
+    rows.retain(|row| source.row_revision(row) < cutoff);
     rows.extend(boundary_rows);
     Ok(SqliteRows {
         rows,
@@ -255,11 +291,11 @@ where
 }
 
 /// Opens a reader after capturing exactly one committed replay boundary.
-pub(crate) async fn open_sqlite_reader<'source, S>(
-    source: &'source S,
-    selector: SqlitePartSelector,
+pub(crate) async fn open_sqlite_reader<S>(
+    source: S,
+    selector: S::Selector,
     limits: FrontierReadLimits,
-) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<S::Key, S::Value> + 'source>>
+) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<S::Key, S::Value>>>
 where
     S: SqliteReadSource,
 {
@@ -267,17 +303,18 @@ where
         return Err(KeyedFrontierError::EmptyReadLimit);
     }
     let initial_through = source.committed_revision().await.map_err(backend_error)?;
+    let after = source.initial_after(&selector);
     Ok(Box::new(SqliteReader {
         source,
         selector,
         limits,
         initial_through: Some(initial_through),
-        after: 0,
+        after,
     }))
 }
 
 #[async_trait]
-impl<S> KeyedFrontierReader<S::Key, S::Value> for SqliteReader<'_, S>
+impl<S> KeyedFrontierReader<S::Key, S::Value> for SqliteReader<S>
 where
     S: SqliteReadSource,
 {
@@ -297,7 +334,7 @@ where
                     .map_err(backend_error)?;
                 let previous_after = self.after;
                 let page = read_page(
-                    self.source,
+                    &self.source,
                     &self.selector,
                     self.after,
                     current,
@@ -315,7 +352,7 @@ where
 
             let previous_after = self.after;
             let page = read_page(
-                self.source,
+                &self.source,
                 &self.selector,
                 self.after,
                 phase_through,
@@ -335,11 +372,14 @@ where
     }
 }
 
-impl<S> SqliteReader<'_, S>
+impl<S> SqliteReader<S>
 where
     S: SqliteReadSource,
 {
-    fn decode_page(&self, page: SqliteRows) -> KeyedFrontierResult<FrontierRead<S::Key, S::Value>> {
+    fn decode_page(
+        &self,
+        page: SqliteRows<S::Row>,
+    ) -> KeyedFrontierResult<FrontierRead<S::Key, S::Value>> {
         let mut entries = Vec::with_capacity(page.rows.len());
         for row in page.rows {
             if let Some(entry) = self.source.decode_row(row).map_err(backend_error)? {

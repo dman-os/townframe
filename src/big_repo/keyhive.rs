@@ -377,6 +377,14 @@ impl BigKeyhiveHandle {
             .collect()
     }
 
+    pub(crate) async fn document_has_content(&self, doc_id: DocumentId) -> Res<bool> {
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
+            return Ok(false);
+        };
+        Ok(doc.lock().await.has_content())
+    }
+
     pub(crate) async fn document_ids_containing_group(
         &self,
         group_id: Identifier,
@@ -461,10 +469,67 @@ impl BigKeyhiveHandle {
             .generate_doc(coparents, initial_content_heads)
             .await
             .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
-        let (doc_id, cgka_ops, delegations) = {
+        let doc_id = {
+            let locked = doc.lock().await;
+            locked.doc_id().to_bytes()
+        };
+        let hashes = self.persist_document_events(&doc, protocol).await?;
+        Ok((DocumentId::new(doc_id), hashes))
+    }
+
+    pub(crate) async fn create_pending_doc(
+        &self,
+        coparents: Vec<BigKeyhiveAuthority>,
+        protocol: &BigRepoKeyhiveProtocol,
+    ) -> Res<(BigKeyhiveAuthority, DocumentId, Vec<EventHash>)> {
+        let coparents = coparents
+            .into_iter()
+            .map(BigKeyhiveAuthority::into_peer)
+            .collect::<Res<Vec<_>>>()?;
+        let doc = self
+            .keyhive
+            .generate_pending_doc(coparents)
+            .await
+            .map_err(|err| ferr!("failed creating pending keyhive document: {err}"))?;
+        let (kh_doc_id, authority) = {
+            let locked = doc.lock().await;
+            let kh_doc_id = locked.doc_id();
+            let authority =
+                BigKeyhiveAuthority::Agent(BigKeyhiveAgent::Document(kh_doc_id, doc.clone()));
+            (kh_doc_id, authority)
+        };
+        let hashes = self.persist_document_events(&doc, protocol).await?;
+        Ok((authority, DocumentId::new(kh_doc_id.to_bytes()), hashes))
+    }
+
+    pub(crate) async fn revoke_group_from_doc(
+        &self,
+        pending_group: &BigKeyhiveGroup,
+        doc_id: DocumentId,
+        after_content: Vec<Vec<u8>>,
+        protocol: &BigRepoKeyhiveProtocol,
+    ) -> Res<Vec<EventHash>> {
+        self.revoke_doc_access(pending_group.clone(), doc_id, true, after_content, protocol)
+            .await
+    }
+
+    async fn persist_document_events(
+        &self,
+        doc: &Arc<
+            futures::lock::Mutex<
+                keyhive_core::principal::document::Document<
+                    future_form::Sendable,
+                    MemorySigner,
+                    Vec<u8>,
+                    BigRepoKeyhiveListener,
+                >,
+            >,
+        >,
+        protocol: &BigRepoKeyhiveProtocol,
+    ) -> Res<Vec<EventHash>> {
+        let (cgka_ops, delegations) = {
             let locked = doc.lock().await;
             (
-                locked.doc_id().to_bytes(),
                 locked
                     .cgka_ops()
                     .map_err(|err| ferr!("failed reading initial doc cgka ops: {err}"))?
@@ -484,7 +549,7 @@ impl BigKeyhiveHandle {
                 hashes.push(hash);
             }
         }
-        Ok((DocumentId::new(doc_id), hashes))
+        Ok(hashes)
     }
 
     pub(crate) async fn create_group_with_parents(

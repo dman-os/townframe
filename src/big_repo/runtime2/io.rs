@@ -249,6 +249,18 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
 
+    fn allocate_document(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+    ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
+
+    fn finalize_document_authority(
+        &self,
+        doc_id: crate::DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        content_heads: nonempty::NonEmpty<[u8; 32]>,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
     /// Check whether the sedimentree for `sed_id` is resident in storage.
     fn contains_sedimentree(
         &self,

@@ -95,20 +95,28 @@ impl MemoryKeyedFrontierSource<PartFrontierKey, PartEvent> for MemoryPartEventSo
 struct MemoryPartEventSelector {
     part_cursors: HashMap<PartId, CursorIndex>,
     objects: HashSet<ObjId>,
+    object_bounds: HashMap<ObjId, CursorIndex>,
 }
 
 impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
     fn lower_bound(&self, key: &PartFrontierKey) -> Option<FrontierRevision> {
         match key {
-            PartFrontierKey::Object(obj_id) => self.objects.contains(obj_id).then_some(0),
+            PartFrontierKey::Object(obj_id) => self.object_bounds.get(obj_id).copied(),
             PartFrontierKey::Part { obj_id, part_id } => {
-                if self.objects.contains(obj_id) {
-                    Some(0)
-                } else {
-                    self.part_cursors.get(part_id).copied()
+                match (
+                    self.object_bounds.get(obj_id).copied(),
+                    self.part_cursors.get(part_id).copied(),
+                ) {
+                    (Some(object_bound), Some(part_bound)) => Some(object_bound.min(part_bound)),
+                    (Some(bound), None) | (None, Some(bound)) => Some(bound),
+                    (None, None) => None,
                 }
             }
         }
+    }
+
+    fn emit_empty_progress(&self) -> bool {
+        true
     }
 }
 
@@ -383,7 +391,7 @@ impl MemorySubsBus {
     }
 }
 impl GlobalCursor {
-    fn get(&mut self) -> CursorIndex {
+    fn get(&self) -> CursorIndex {
         self.counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1
@@ -392,6 +400,13 @@ impl GlobalCursor {
 
 #[async_trait]
 impl HostPartStore for MemoryPartStore {
+    async fn latest_revision(&self) -> Res<CursorIndex> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard.global_cursor.get()
+        }))
+    }
+
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -904,7 +919,9 @@ impl HostPartStore for MemoryPartStore {
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, cursor } => Some((*part_id, *cursor)),
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    Some((*part_id, reqs.lower_bound.max(*cursor)))
+                }
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect();
@@ -935,6 +952,14 @@ impl HostPartStore for MemoryPartStore {
         let selector = MemoryPartEventSelector {
             part_cursors,
             objects,
+            object_bounds: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Object { obj_id } => Some((*obj_id, reqs.lower_bound)),
+                    SubscriptionTarget::Part { .. } => None,
+                })
+                .collect(),
         };
         let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
             Arc::new(MemoryPartEventSource {
@@ -1009,6 +1034,75 @@ impl HostPartStore for MemoryPartStore {
         });
         Ok(Ok(rx))
     }
+
+    async fn open_local_revision_reader(
+        &self,
+        reqs: SubPartsRequest,
+        limits: big_sync_core::revisioned_store::RevisionReadLimits,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let part_cursors = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    Some((*part_id, reqs.lower_bound.max(*cursor)))
+                }
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let parts = part_cursors.keys().copied().collect::<HashSet<_>>();
+        let objects = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+                SubscriptionTarget::Part { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let unknown_parts = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            part_cursors
+                .keys()
+                .filter(|part_id| !guard.parts.contains_key(part_id))
+                .copied()
+                .collect::<Vec<_>>()
+        });
+        if !unknown_parts.is_empty() {
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: unknown_parts,
+            }));
+        }
+        let selector = MemoryPartEventSelector {
+            part_cursors,
+            objects: objects.clone(),
+            object_bounds: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Object { obj_id } => Some((*obj_id, reqs.lower_bound)),
+                    SubscriptionTarget::Part { .. } => None,
+                })
+                .collect(),
+        };
+        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
+            Arc::new(MemoryPartEventSource {
+                state: Arc::clone(&self.inner),
+            });
+        let reader = crate::keyed_frontier::open_memory_keyed_frontier(
+            source,
+            selector,
+            big_sync_core::keyed_frontier::FrontierReadLimits {
+                max_entries: limits.max_entries,
+            },
+        )
+        .await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new(
+            reader, objects, parts,
+        ))))
+    }
+
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);

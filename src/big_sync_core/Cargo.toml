@@ -47,3 +47,6 @@ tracing.workspace = true
 #
 # ffi
 uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures.workspace = true

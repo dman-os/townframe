@@ -131,17 +131,17 @@ pub enum DispatchEvent {
     DispatchAdded {
         id: String,
         heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
     DispatchUpdated {
         id: String,
         heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
     DispatchDeleted {
         id: String,
         heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
 }
 
@@ -178,8 +178,8 @@ impl crate::repos::Repo for DispatchRepo {
 }
 
 impl DispatchRepo {
-    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
-        crate::event_origin::SwitchEventOrigin::Local {
+    fn local_origin(&self) -> crate::event_origin::EventOrigin {
+        crate::event_origin::EventOrigin::Local {
             actor_id: self.local_actor_id.to_string(),
         }
     }
@@ -1117,7 +1117,7 @@ mod tests {
             &*event,
             DispatchEvent::DispatchAdded { id, origin, .. }
             if id == "disp-1"
-                && matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
+                && matches!(origin, crate::event_origin::EventOrigin::Local { .. })
         ));
         assert!(repo.get_active("disp-1").await.is_some());
         assert!(matches!(
@@ -1142,7 +1142,7 @@ mod tests {
             &*event,
             DispatchEvent::DispatchUpdated { id, origin, .. }
             if id == "disp-1"
-                && matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
+                && matches!(origin, crate::event_origin::EventOrigin::Local { .. })
         ));
         assert!(repo.get_active("disp-1").await.is_none());
         assert!(repo.get_by_wflow_job("job-1").await.is_none());
@@ -1214,7 +1214,7 @@ mod tests {
             repo.events_for_init().await?.first(),
             Some(DispatchEvent::DispatchAdded { id, origin, .. })
                 if id == "disp-a"
-                    && matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
+                    && matches!(origin, crate::event_origin::EventOrigin::Local { .. })
         ));
         Ok(())
     }

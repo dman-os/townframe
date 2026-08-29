@@ -513,6 +513,8 @@ pub async fn clone_repo_init_from_url(
         let local_public = local_secret.public();
         let sqlite_path = staging.join("sqlite.db");
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(staging.join("local_state")).await?;
         let checkout_id = {
             let id = Uuid::new_v4();
             let id = utils_rs::hash::encode_base58_multibase(id);
@@ -633,6 +635,8 @@ pub async fn clone_repo_init_from_url(
             lock_guard,
             options: options.repo_options.clone(),
             sql: sql.clone(),
+            sqlite_local_state_repo,
+            sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),

@@ -46,6 +46,10 @@ type SignedRevocation = Arc<
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub enum Runtime2Cmd {
+    AllocateDoc {
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
+    },
     /// Create a document. The handle sends this; the hub asynchronously calls
     /// [`RuntimeIo::create_document`], then enqueues a [`PutDoc`] to itself.
     ///
@@ -67,6 +71,16 @@ pub enum Runtime2Cmd {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
+    },
+    FinalizeAllocatedDoc {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        initial_content: Box<automerge::Automerge>,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,

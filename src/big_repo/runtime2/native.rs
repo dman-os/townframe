@@ -1125,6 +1125,39 @@ where
         })
     }
 
+    fn allocate_document(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
+        Sendable::from_future(async move {
+            let (_authority, doc_id, _hashes) = self
+                .keyhive
+                .create_pending_doc(parents, &self.keyhive_protocol)
+                .await?;
+            Ok(doc_id)
+        })
+    }
+
+    fn finalize_document_authority(
+        &self,
+        doc_id: DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        content_heads: NonEmpty<[u8; 32]>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            let after_content = content_heads.iter().map(|head| head.to_vec()).collect();
+            self.keyhive
+                .revoke_group_from_doc(
+                    &pending_group,
+                    doc_id,
+                    after_content,
+                    &self.keyhive_protocol,
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
     fn contains_sedimentree(
         &self,
         sed_id: SedimentreeId,
@@ -2076,6 +2109,7 @@ where
         frontier_store,
         handle.clone(),
         evt_tx.clone(),
+        Arc::clone(&change_manager),
         keyhive.clone(),
         automerge_frontier_group_scope,
     );

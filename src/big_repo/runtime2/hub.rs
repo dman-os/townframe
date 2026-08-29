@@ -148,6 +148,23 @@ struct QuiescenceProbe {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(crate) trait HubCommandFuture<F: FutureForm> {
+    fn allocate_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn finalize_allocated_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        doc_id: crate::DocumentId,
+        initial_content: Box<automerge::Automerge>,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn create_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -180,6 +197,102 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
 
 #[future_form::future_form(Sendable, Local)]
 impl<F: FutureForm> HubCommandFuture<F> for F {
+    fn allocate_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = runtime_io.allocate_document(parents).await;
+            resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
+            Ok(())
+        })
+    }
+
+    fn finalize_allocated_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        doc_id: crate::DocumentId,
+        initial_content: Box<automerge::Automerge>,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = async {
+                let content_heads = nonempty::NonEmpty::from_vec(
+                    initial_content
+                        .get_heads()
+                        .into_iter()
+                        .map(|head| head.0)
+                        .collect(),
+                )
+                .ok_or_else(|| ferr!("automerge document has no content heads"))?;
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                let bundle = if runtime_io.contains_sedimentree(sed_id).await? {
+                    let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
+                    cmd_tx
+                        .send(Runtime2Cmd::GetDocHandle {
+                            doc_id,
+                            resp: handle_resp,
+                        })
+                        .await
+                        .map_err(|_| ferr!(ERROR_ACTOR))?;
+                    let lookup = handle_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??;
+                    let bundle = match lookup {
+                        crate::runtime2::types::DocLookup::Ready(bundle) => bundle,
+                        crate::runtime2::types::DocLookup::Missing => {
+                            return Err(ferr!(
+                                "persisted document has no materialized handle: {doc_id}"
+                            ));
+                        }
+                        crate::runtime2::types::DocLookup::PendingMaterialization => {
+                            return Err(ferr!(
+                                "persisted document is pending materialization: {doc_id}"
+                            ));
+                        }
+                    };
+                    let persisted_heads = surelock::key::lock_scope(|key| {
+                        let (doc, _key) = key.lock(&bundle.doc);
+                        doc.get_heads()
+                            .into_iter()
+                            .map(|head| head.0)
+                            .collect::<std::collections::BTreeSet<_>>()
+                    });
+                    let requested_heads = content_heads
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if persisted_heads != requested_heads {
+                        return Err(ferr!(
+                            "persisted document initial content mismatch: {doc_id}"
+                        ));
+                    }
+                    bundle
+                } else {
+                    let (put_resp, put_rx) = futures::channel::oneshot::channel();
+                    cmd_tx
+                        .send(Runtime2Cmd::PutDoc {
+                            doc_id,
+                            initial_content,
+                            resp: put_resp,
+                        })
+                        .await
+                        .map_err(|_| ferr!(ERROR_ACTOR))?;
+                    put_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??
+                };
+                runtime_io
+                    .finalize_document_authority(doc_id, pending_group, content_heads)
+                    .await?;
+                eyre::Ok(bundle)
+            }
+            .await;
+            resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
+            Ok(())
+        })
+    }
+
     fn create_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -410,6 +523,12 @@ where
             self.note_activity();
         }
         match cmd {
+            Runtime2Cmd::AllocateDoc { parents, resp } => {
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CreateDoc,
+                    F::allocate_doc(Arc::clone(&self.runtime_io), parents, resp),
+                )?;
+            }
             Runtime2Cmd::CreateDoc {
                 initial_content,
                 parents,
@@ -441,6 +560,24 @@ where
                         _lease,
                     })
                     .wrap_err(ERROR_CHANNEL)?;
+            }
+            Runtime2Cmd::FinalizeAllocatedDoc {
+                doc_id,
+                initial_content,
+                pending_group,
+                resp,
+            } => {
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CreateDoc,
+                    F::finalize_allocated_doc(
+                        Arc::clone(&self.runtime_io),
+                        self.cmd_tx.clone(),
+                        doc_id,
+                        initial_content,
+                        pending_group,
+                        resp,
+                    ),
+                )?;
             }
             Runtime2Cmd::GetDocHandle { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;

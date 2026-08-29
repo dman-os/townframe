@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use super::{BranchKind, DrawerRepo};
+use super::{BranchKind, DrawerRepo, FacetRaw, FacetWriteScope};
 
 use crate::drawer::{
     dmeta,
@@ -12,7 +12,11 @@ use crate::drawer::{
 
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey, WellKnownFacetTag};
+use daybook_types::doc::{
+    AddDocArgs, AuthorityScope, Branch, BranchDeclaration, BranchId, BranchPublication,
+    BranchVersion, Branches, ChangeHashSet, DocId, DocPatch, FacetKey, WellKnownFacet,
+    WellKnownFacetTag,
+};
 
 struct PreparedAddDoc {
     doc_id: DocId,
@@ -22,78 +26,103 @@ struct PreparedAddDoc {
     branch_doc_id: DocumentId,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AddValidation {
+    Registered,
+    Bootstrap,
+}
+
 // mutations
 impl DrawerRepo {
     async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
         if args.branch_path != "main" {
             Err(ferr!("new docs must be created on main"))?;
         }
-        let doc_am = {
-            let bytes = crate::drawer::doc_version_updates::version_latest()?;
-            automerge::Automerge::load(&bytes)
-                .map_err(|err| ferr!("error loading doc_version_updates: {err:?}"))?
-        };
-        let handle = match self
+        let branch_doc_id = self
             .big_repo
-            .create_doc_with_parents(
-                doc_am,
-                vec![
-                    self.content_docs_group.clone().into(),
-                    self.drawer_group.clone().into(),
-                ],
-            )
+            .allocate_doc(vec![
+                self.pending_documents_group.clone().into(),
+                self.content_docs_group.clone().into(),
+                self.drawer_group.clone().into(),
+            ])
             .await
-        {
-            Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
-                panic!("keyhive document ID conflict")
-            }
-            Err(err) => {
-                return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
-            }
-        };
-        let doc_id = DocId::from(Uuid::new_v4().bs58());
-        let branch_doc_id = handle.document_id();
+            .map_err(|err| eyre::eyre!("{err}"))
+            .wrap_err("error allocating doc in big repo")?;
+        let doc_id = DocId::from(branch_doc_id.to_string());
+        let branch_id = BranchId::from(branch_doc_id.to_string());
         let mutation_actor_id = self.content_actor_id(args.user_path.as_deref(), branch_doc_id);
         let now = Timestamp::now();
 
-        let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+        let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+        let branch_facet: serde_json::Value = WellKnownFacet::Branch(Branch {
+            document_id: doc_id.clone(),
+            branch_id,
+            created_from: None,
+        })
+        .into();
+        let branches_facet: serde_json::Value = WellKnownFacet::Branches(Branches {
+            declarations: HashMap::new(),
+        })
+        .into();
+        let system_facets = [
+            (branch_key.clone(), branch_facet.clone()),
+            (branches_key.clone(), branches_facet.clone()),
+        ]
+        .into();
+        let resulting_keys: HashSet<_> = args
+            .facets
+            .keys()
+            .cloned()
+            .chain([branch_key.clone(), branches_key.clone()])
+            .collect();
+        self.validate_facets(
+            &system_facets,
+            &[],
+            &resulting_keys,
+            FacetWriteScope::System,
+        )
+        .await?;
 
-        let heads = handle
-            .with_document(|am_doc| {
-                am_doc.set_actor(mutation_actor_id.clone());
-                let mut tx = am_doc.transaction();
-                tx.put(automerge::ROOT, "id", &doc_id)?;
+        let facet_keys: Vec<_> = resulting_keys.iter().cloned().collect();
+        let mut doc_am = automerge::Automerge::new();
 
-                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                    _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
-                };
+        let heads = (|| -> Result<ChangeHashSet, eyre::Report> {
+            doc_am.set_actor(mutation_actor_id.clone());
+            let mut tx = doc_am.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+            tx.put(automerge::ROOT, "id", &doc_id)?;
 
-                for (key, value) in &args.facets {
-                    let key_str = key.to_string();
-                    autosurgeon::reconcile_prop(
-                        &mut tx,
-                        &facets_obj,
-                        &*key_str,
-                        ThroughJson(value.clone()),
-                    )?;
-                }
+            let facets_obj = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
 
-                dmeta::ensure_for_add(
-                    &mut tx,
-                    &facets_obj,
-                    &facet_keys,
-                    now,
-                    args.user_path.as_deref(),
-                    &mutation_actor_id,
-                )?;
+            for (key, value) in args.facets {
+                let key_str = key.to_string();
+                autosurgeon::reconcile_prop(&mut tx, &facets_obj, &*key_str, ThroughJson(value))?;
+            }
+            for (key, value) in system_facets {
+                let key_str = key.to_string();
+                autosurgeon::reconcile_prop(&mut tx, &facets_obj, &*key_str, ThroughJson(value))?;
+            }
 
-                let (heads, _) = tx.commit();
-                let heads = heads.expect("commit failed");
-                eyre::Ok(ChangeHashSet(Arc::from([heads])))
-            })
-            .await??;
+            dmeta::ensure_for_add(
+                &mut tx,
+                &facets_obj,
+                &facet_keys,
+                now,
+                args.user_path.as_deref(),
+                &mutation_actor_id,
+            )?;
+
+            let (heads, _) = tx.commit();
+            Ok(ChangeHashSet(Arc::from([heads.expect("commit failed")])))
+        })()?;
+        let handle = self
+            .big_repo
+            .finalize_allocated_doc(branch_doc_id, doc_am, self.pending_documents_group.clone())
+            .await
+            .map_err(|err| eyre::eyre!("{err}"))
+            .wrap_err("error finalizing allocated doc in big repo")?;
 
         let entry = DocEntry {
             branches: [(
@@ -116,14 +145,17 @@ impl DrawerRepo {
     }
 
     pub async fn batch_add(&self, args_batch: Vec<AddDocArgs>) -> Result<Vec<DocId>, DrawerError> {
-        self.batch_add_inner(args_batch, true).await
+        self.batch_add_inner(args_batch, AddValidation::Registered)
+            .await
     }
 
     /// ADR 007 §4: the first manifest write (the core manifest doc at repo init)
     /// is the single write in the system that must skip facet validation — no
     /// manifest is registered yet. Everything after validates normally.
     pub async fn add_unchecked(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
-        let mut created = self.batch_add_inner(vec![args], false).await?;
+        let mut created = self
+            .batch_add_inner(vec![args], AddValidation::Bootstrap)
+            .await?;
         if created.len() != 1 {
             Err(ferr!(
                 "batch_add returned invalid result for single add call"
@@ -135,7 +167,7 @@ impl DrawerRepo {
     async fn batch_add_inner(
         &self,
         args_batch: Vec<AddDocArgs>,
-        validate: bool,
+        validation: AddValidation,
     ) -> Result<Vec<DocId>, DrawerError> {
         if self.cancel_token.is_cancelled() {
             Err(ferr!("repo is stopped"))?;
@@ -145,10 +177,15 @@ impl DrawerRepo {
             return Ok(Vec::new());
         }
 
-        if validate {
+        for args in &args_batch {
+            Self::validate_facet_write_scope(&args.facets, &[], FacetWriteScope::User)?;
+        }
+
+        if matches!(validation, AddValidation::Registered) {
             for args in &args_batch {
                 let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
-                self.validate_facets(&args.facets, &resulting_keys).await?;
+                self.validate_facets(&args.facets, &[], &resulting_keys, FacetWriteScope::User)
+                    .await?;
             }
         }
 
@@ -297,8 +334,9 @@ impl DrawerRepo {
 
         // Adopted content docs (e.g. the repo config doc) are created outside
         // the drawer's `add` flow, so they lack the root `id` and the dmeta
-        // facet that every content doc carries. Bootstrap both now so later
-        // drawer writes (update_at_heads etc.) validate normally.
+        // and branch facets that every content doc carries. Bootstrap them
+        // together so later drawer writes (update_at_heads etc.) validate
+        // normally.
         let branch_handle = match self.big_repo.get_doc(&branch_doc_id).await? {
             big_repo::DocLookup::Ready(handle) => handle,
             big_repo::DocLookup::PendingMaterialization => {
@@ -310,6 +348,18 @@ impl DrawerRepo {
         };
         let mutation_actor_id = self.content_actor_id(None, branch_doc_id);
         let now = Timestamp::now();
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+        let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+        let branch_facet: serde_json::Value = WellKnownFacet::Branch(Branch {
+            document_id: doc_id.clone(),
+            branch_id: BranchId::from(branch_doc_id.to_string()),
+            created_from: None,
+        })
+        .into();
+        let branches_facet: serde_json::Value = WellKnownFacet::Branches(Branches {
+            declarations: HashMap::new(),
+        })
+        .into();
         let dmeta_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Dmeta);
         branch_handle
             .with_document(|am_doc| {
@@ -323,11 +373,23 @@ impl DrawerRepo {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                     _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
                 };
+                for (key, value) in [
+                    (branch_key.clone(), branch_facet.clone()),
+                    (branches_key.clone(), branches_facet.clone()),
+                ] {
+                    let key_str = key.to_string();
+                    autosurgeon::reconcile_prop(
+                        &mut tx,
+                        &facets_obj,
+                        &*key_str,
+                        ThroughJson(value),
+                    )?;
+                }
                 if !has_dmeta {
                     dmeta::ensure_for_add(
                         &mut tx,
                         &facets_obj,
-                        &[],
+                        &[branch_key.clone(), branches_key.clone()],
                         now,
                         None,
                         &mutation_actor_id,
@@ -347,6 +409,17 @@ impl DrawerRepo {
         patch: DocPatch,
         branch_path: &daybook_types::doc::BranchPath,
         heads: Option<ChangeHashSet>,
+    ) -> Result<(), DrawerError> {
+        self.update_at_heads_with_scope(patch, branch_path, heads, FacetWriteScope::User)
+            .await
+    }
+
+    async fn update_at_heads_with_scope(
+        &self,
+        patch: DocPatch,
+        branch_path: &daybook_types::doc::BranchPath,
+        heads: Option<ChangeHashSet>,
+        write_scope: FacetWriteScope,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
             Err(ferr!("repo is stopped"))?;
@@ -408,8 +481,13 @@ impl DrawerRepo {
         for facet_key in &patch.facets_remove {
             resulting_keys.remove(facet_key);
         }
-        self.validate_facets(&patch.facets_set, &resulting_keys)
-            .await?;
+        self.validate_facets(
+            &patch.facets_set,
+            &patch.facets_remove,
+            &resulting_keys,
+            write_scope,
+        )
+        .await?;
 
         // 1. Update content doc
         let (new_heads, invalidated_uuids) = handle
@@ -500,6 +578,7 @@ impl DrawerRepo {
             heads = ?am_utils_rs::serialize_commit_heads(from_heads.as_ref()),
             "create_branch_at_heads_from_branch: starting"
         );
+        let branch_kind = self.branch_kind_for_path(to_branch)?;
         let Some(from_handle) = self
             .resolve_handle_for_branch_heads(id, from_branch, from_heads)
             .await?
@@ -508,7 +587,7 @@ impl DrawerRepo {
                 name: from_branch.to_string(),
             });
         };
-        let branch_doc = from_handle
+        let mut branch_doc = from_handle
             .with_document_read(|am_doc| {
                 let current_heads = am_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
@@ -582,26 +661,147 @@ impl DrawerRepo {
                 }
             })
             .await?;
-        let heads = ChangeHashSet(branch_doc.get_heads().into());
-        let branch_kind = self.branch_kind_for_path(to_branch)?;
-        let mut parents = vec![self.content_docs_group.clone().into()];
+        let mut allocation_parents = vec![
+            self.pending_documents_group.clone().into(),
+            self.content_docs_group.clone().into(),
+        ];
         if branch_kind == BranchKind::Replicated {
-            parents.push(self.drawer_group.clone().into());
+            allocation_parents.push(self.drawer_group.clone().into());
         }
-        let handle = match self
+        let branch_doc_id = self
             .big_repo
-            .create_doc_with_parents(branch_doc, parents)
+            .allocate_doc(allocation_parents)
             .await
-        {
-            Ok(val) => val,
-            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccupied { .. })) => {
-                panic!("keyhive document ID conflict")
-            }
-            Err(err) => {
-                return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
-            }
+            .map_err(|err| eyre::eyre!("{err}"))
+            .wrap_err("error allocating branch doc in big repo")?;
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+        let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
+        let created_from = BranchVersion {
+            branch_id: BranchId::from(from_handle.document_id().to_string()),
+            heads: from_heads.clone(),
         };
-        let branch_doc_id = handle.document_id();
+        let branch_facet: serde_json::Value = WellKnownFacet::Branch(Branch {
+            document_id: id.clone(),
+            branch_id: BranchId::from(branch_doc_id.to_string()),
+            created_from: Some(created_from.clone()),
+        })
+        .into();
+        let inherited_facet_keys = (|| -> Result<HashSet<FacetKey>, eyre::Report> {
+            let Some((automerge::Value::Object(automerge::ObjType::Map), facets_obj)) =
+                branch_doc.get(automerge::ROOT, "facets")?
+            else {
+                return Ok(HashSet::new());
+            };
+            let mut keys = HashSet::new();
+            for item in automerge::ReadDoc::map_range(&branch_doc, &facets_obj, ..) {
+                keys.insert(FacetKey::from(item.key.to_string().as_str()));
+            }
+            Ok(keys)
+        })()?;
+        let branches_present = inherited_facet_keys.contains(&branches_key);
+        let facet_keys_remove = if branches_present {
+            vec![branches_key.clone()]
+        } else {
+            Vec::new()
+        };
+        let mut resulting_facet_keys = inherited_facet_keys;
+        resulting_facet_keys.insert(branch_key.clone());
+        for key in &facet_keys_remove {
+            resulting_facet_keys.remove(key);
+        }
+        let system_facets = HashMap::from([(branch_key.clone(), branch_facet.clone())]);
+        self.validate_facets(
+            &system_facets,
+            &facet_keys_remove,
+            &resulting_facet_keys,
+            FacetWriteScope::System,
+        )
+        .await?;
+        let mutation_actor_id = self.content_actor_id(user_path, branch_doc_id);
+        let heads = (|| -> Result<ChangeHashSet, eyre::Report> {
+            branch_doc.set_actor(mutation_actor_id.clone());
+            let mut tx = branch_doc.transaction();
+            let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                _ => eyre::bail!("facets object not found in branch doc"),
+            };
+            let branch_key_str = branch_key.to_string();
+            autosurgeon::reconcile_prop(
+                &mut tx,
+                &facets_obj,
+                &*branch_key_str,
+                ThroughJson(branch_facet),
+            )?;
+            if branches_present {
+                let branches_key_str = branches_key.to_string();
+                tx.delete(&facets_obj, &*branches_key_str)?;
+            }
+            dmeta::apply_update(
+                &mut tx,
+                &facets_obj,
+                std::slice::from_ref(&branch_key),
+                &facet_keys_remove,
+                Timestamp::now(),
+                user_path,
+                &mutation_actor_id,
+            )?;
+            let (heads, _) = tx.commit();
+            Ok(ChangeHashSet(Arc::from([heads.expect("commit failed")])))
+        })()?;
+        let handle = self
+            .big_repo
+            .finalize_allocated_doc(
+                branch_doc_id,
+                branch_doc,
+                self.pending_documents_group.clone(),
+            )
+            .await
+            .map_err(|err| eyre::eyre!("{err}"))
+            .wrap_err("error finalizing allocated branch doc in big repo")?;
+        if branch_kind == BranchKind::Replicated {
+            let mut branches = self
+                .get_doc_with_facets_at_branch(
+                    id,
+                    daybook_types::doc::BranchPath::new("main"),
+                    Some(vec![branches_key.clone()]),
+                )
+                .await?
+                .ok_or_else(|| ferr!("main branch missing for document '{id}'"))?
+                .facets
+                .clone()
+                .remove(&branches_key)
+                .map(serde_json::from_value::<WellKnownFacet>)
+                .transpose()
+                .map_err(|err| eyre::eyre!(err))?
+                .map(|facet| match facet {
+                    WellKnownFacet::Branches(branches) => branches,
+                    other => panic!("main branches facet has wrong type: {:?}", other.tag()),
+                })
+                .unwrap_or(Branches {
+                    declarations: HashMap::new(),
+                });
+            branches.declarations.insert(
+                BranchId::from(branch_doc_id.to_string()),
+                BranchDeclaration {
+                    name: Some(to_branch.to_string()),
+                    publication: BranchPublication::Shared,
+                    scope: AuthorityScope::InheritDocument,
+                    created_from: Some(created_from),
+                },
+            );
+            self.update_at_heads_with_scope(
+                DocPatch {
+                    id: id.clone(),
+                    facets_set: [(branches_key, WellKnownFacet::Branches(branches).into())].into(),
+                    facets_remove: vec![],
+                    user_path: user_path.map(ToOwned::to_owned),
+                },
+                daybook_types::doc::BranchPath::new("main"),
+                None,
+                FacetWriteScope::System,
+            )
+            .await?;
+        }
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &heads)
             .await?;
 
@@ -794,6 +994,20 @@ impl DrawerRepo {
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
             .with_document(move |am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
+                // A branch merge imports the source history, but branch identity belongs
+                // to the physical destination document. Snapshot it before the CRDT merge
+                // so a concurrent source `Branch` facet cannot win Automerge's conflict
+                // resolution and relabel the destination as the source branch.
+                let branch_key = FacetKey::from(WellKnownFacetTag::Branch).to_string();
+                let target_branch_facet: ThroughJson<FacetRaw> = {
+                    let facets_obj = match am_doc.get(automerge::ROOT, "facets")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                        _ => eyre::bail!("facets object not found in target content doc"),
+                    };
+                    let target: Option<ThroughJson<FacetRaw>> =
+                        autosurgeon::hydrate_prop(am_doc, &facets_obj, &*branch_key)?;
+                    target.ok_or_else(|| ferr!("target content doc is missing its Branch facet"))?
+                };
                 let (patches, new_heads) = match std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| -> Res<(Vec<automerge::Patch>, ChangeHashSet)> {
                         let mut patch_log = automerge::PatchLog::active();
@@ -851,6 +1065,12 @@ impl DrawerRepo {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                         _ => { eyre::bail!("facets object not found in content doc"); }
                     };
+                    autosurgeon::reconcile_prop(
+                        &mut tx,
+                        &facets_obj,
+                        &*branch_key,
+                        target_branch_facet,
+                    )?;
                     let now = Timestamp::now();
                     let invalidated = dmeta::apply_merge(
                         &mut tx,

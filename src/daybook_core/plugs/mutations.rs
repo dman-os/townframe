@@ -91,40 +91,31 @@ impl PlugsRepo {
 
         // Write the plugg config facet with core enabled at the core doc's
         // initial heads (validated against core's own plugConfig facet).
-        let (_, heads) = self
-            .config_store()?
-            .mutate_sync(|config| {
-                config
-                    .enabled
-                    .insert(CORE_PLUG_ID.to_string(), ref_url.clone());
-                let version = core_manifest.version.to_string();
-                config.known_plugs.insert(
-                    CORE_PLUG_ID.to_string(),
-                    KnownPlug {
-                        latest: ref_url.clone(),
-                        latest_version: version.clone(),
-                        latest_rejection: None,
-                        last_valid: ref_url.clone(),
-                        last_valid_version: version.clone(),
-                        last_enabled_version: Some(version),
-                    },
-                );
-            })
-            .await?;
+        drop(
+            self.config_store()?
+                .mutate_sync(|config| {
+                    config
+                        .enabled
+                        .insert(CORE_PLUG_ID.to_string(), ref_url.clone());
+                    let version = core_manifest.version.to_string();
+                    config.known_plugs.insert(
+                        CORE_PLUG_ID.to_string(),
+                        KnownPlug {
+                            latest: ref_url.clone(),
+                            latest_version: version.clone(),
+                            latest_rejection: None,
+                            last_valid: ref_url.clone(),
+                            last_valid_version: version.clone(),
+                            last_enabled_version: Some(version),
+                        },
+                    );
+                })
+                .await?,
+        );
         // The manual cache seed above already made core active; re-apply
-        // from the ref for consistency (idempotent — no duplicate event).
-        let mut events = vec![];
-        if let Some(event) = self
-            .activate_from_ref(CORE_PLUG_ID, &ref_url, true, &self.local_origin())
-            .await?
-        {
-            events.push(event);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        // from the ref for consistency.
+        self.activate_from_ref(CORE_PLUG_ID, &ref_url).await?;
+        self.reconcile_revision_frontier().await?;
         Ok(())
     }
 
@@ -221,27 +212,10 @@ impl PlugsRepo {
                 }
             })
             .await?;
-        // Config-delta event: newly enabled → `PlugEnabled`; re-pinned to a
-        // different ref → `EnabledPlugUpdated`; same ref re-enable → no-op.
-        // The cache is only the materialization side effect.
-        let mut events = vec![];
-        if already_enabled.as_ref() != Some(&ref_url)
-            && let Some(event) = self
-                .activate_from_ref(
-                    &plug_id,
-                    &ref_url,
-                    already_enabled.is_none(),
-                    &self.local_origin(),
-                )
-                .await?
-        {
-            events.push(event);
+        if already_enabled.as_ref() != Some(&ref_url) {
+            self.activate_from_ref(&plug_id, &ref_url).await?;
         }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -261,22 +235,11 @@ impl PlugsRepo {
                 config.enabled.remove(plug_id);
             })
             .await?;
-        // Config-delta event: the enabled entry was removed → `PlugDisabled`
-        // (regardless of whether it was materialized). The cache is only the
-        // side effect.
         surelock::key::lock_scope(|key| {
             let (mut cache, _key) = key.lock(&self.cache);
             cache.clear_active(plug_id);
         });
-        let mut events = vec![PlugsEvent::PlugDisabled {
-            id: plug_id.to_string(),
-            origin: self.local_origin(),
-        }];
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -345,18 +308,8 @@ impl PlugsRepo {
                 }
             })
             .await?;
-        let mut events = vec![];
-        if let Some(event) = self
-            .activate_from_ref(plug_id, &new_ref, false, &self.local_origin())
-            .await?
-        {
-            events.push(event);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        self.activate_from_ref(plug_id, &new_ref).await?;
+        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -587,7 +540,8 @@ impl PlugsRepo {
 
     /// ADR 007 §5: ensure a manifest doc is recorded in the config facet's
     /// known_plugs (plug id -> track at the given heads). Called by the
-    /// authoring/import paths and by the notif loop on manifest doc changes.
+    /// authoring/import paths and by the durable manifest-doc revision
+    /// consumer on manifest doc changes.
     /// Updates the derived cache incrementally for this plug.
     ///
     /// Gate (ADR 007 §5): a manifest update must bump the version over the
@@ -597,7 +551,7 @@ impl PlugsRepo {
     /// or rejection reason) is recorded in the track, so it is durable and
     /// queryable without collecting events, and "update to latest" can be
     /// blocked. Rejections return `Rejected` — never an error — so a bad
-    /// remote manifest cannot take down the notif loop.
+    /// remote manifest cannot take down the manifest consumer.
     pub(crate) async fn record_known_manifest_doc(
         &self,
         doc_id: &daybook_types::doc::DocId,

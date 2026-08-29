@@ -3,12 +3,13 @@ use future_form::FutureForm;
 
 pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
+pub mod doc_revision_store;
 pub(crate) mod driver;
 mod group_part_worker;
 
 pub use automerge_frontier_worker::{
-    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_docs_part_id,
-    automerge_obj_to_doc_id, spawn_automerge_frontier_worker,
+    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_obj_to_doc_id,
+    spawn_automerge_frontier_worker,
 };
 pub(crate) use causal_checkpoint_worker::{
     CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,

@@ -453,6 +453,8 @@ impl<F: FutureForm> DocWorker2<F> {
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager
             .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
+        self.change_manager
+            .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
 
         self.register_bundle_lease().await?;
 
@@ -878,6 +880,10 @@ impl<F: FutureForm> DocWorker2<F> {
             .notify_sedimentree_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
+        if matches!(&origin, BigRepoChangeOrigin::Local) {
+            self.change_manager
+                .notify_local_doc_heads_updated(self.doc_id, Arc::clone(&heads))?;
+        }
 
         // Fire patches even if heads didn't change (delta can have content
         // changes within the same head set — e.g. tombstone compaction).
@@ -1161,6 +1167,14 @@ impl<F: FutureForm> DocWorker2<F> {
                 // keys/deps may unlock content from an earlier session. Precise
                 // retry of the held set; no coarse full-tree rewalk.
                 self.retry_blocked_refs(&bundle, &origin).await?;
+                if self.blocked_refs.is_empty() {
+                    let heads = surelock::key::lock_scope(|key| {
+                        let (doc, _key) = key.lock(&bundle.doc);
+                        Arc::from(doc.get_heads())
+                    });
+                    self.change_manager
+                        .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                }
             }
 
             // No eager rematerialization here: without a live handle, received

@@ -34,6 +34,25 @@
               allowUnfree = true;
             };
           };
+          gitignoreFilter = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
+          cleanWorkspace = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.intersection
+              # Base directory
+              ./.
+              (pkgs.lib.fileset.fromSource gitignoreFilter);
+              # # Explicitly match only files that are NOT part of your heavy folders
+              # (lib.fileset.difference
+              #   ./.
+              #   (lib.fileset.unions [
+              #     ./.jj
+              #     ./.git
+              #     ./node_modules
+              #     ./target
+              #     ./.venv
+              #   ])
+              # );
+          };
 
           androidBuildToolsVersion = "37.0.0";
           androidApiLevel = "31";
@@ -301,6 +320,7 @@
 
           ciRustShell = pkgs.mkShell ({
             name = "ci-rust";
+            # src = cleanWorkspace;
             buildInputs =
               baseBuildInputs
               ++ rustLintInputs
@@ -324,11 +344,13 @@
           ciAndroidShell =
             pkgs.mkShell ({
               name = "ci-android";
+              # src = cleanWorkspace;
               buildInputs = baseBuildInputs ++ androidBuildInputs ++ [ rustAndroid ];
             } // ghjkMainEnv // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
 
           ciDesktopShell = pkgs.mkShell ({
             name = "ci-desktop";
+            # src = cleanWorkspace;
             buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
             shellHook = ''
               export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
@@ -340,12 +362,14 @@
 
           ciComposeShell = pkgs.mkShell ({
             name = "ci-compose";
+            # src = cleanWorkspace;
             buildInputs = baseBuildInputs ++ [ pkgs.openjdk21 rustRust ];
           } // ghjkMainEnv);
 
           devShell =
             pkgs.mkShell ({
               name = "dev";
+              # src = cleanWorkspace;
 
               buildInputs = devShellBuildInputs;
 

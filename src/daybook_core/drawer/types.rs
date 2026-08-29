@@ -157,13 +157,13 @@ pub enum DrawerEvent {
         id: DocId,
         entry: DocNBranches,
         drawer_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
     DocDeleted {
         id: DocId,
         drawer_heads: ChangeHashSet,
         deleted_facet_keys: Vec<FacetKey>,
         entry: Option<DocEntry>,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
 }

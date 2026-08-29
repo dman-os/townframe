@@ -72,6 +72,37 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     // ── doc lifecycle ──────────────────────────────────────────────────────
 
+    pub async fn allocate_doc(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+    ) -> eyre::Result<DocumentId> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::AllocateDoc { parents, resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    pub async fn finalize_allocated_doc(
+        &self,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+    ) -> eyre::Result<std::sync::Arc<crate::runtime2::types::LiveDocBundle>> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::FinalizeAllocatedDoc {
+                doc_id,
+                initial_content: Box::new(initial_content),
+                pending_group,
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
     /// Create a new document with `initial_content` and the given keyhive
     /// `parents` (co-creators).
     ///

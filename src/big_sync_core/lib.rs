@@ -29,13 +29,17 @@ mod bucket;
 use bucket::*;
 mod cursor;
 use cursor::*;
+pub mod delta_walker_state;
 mod fingerprint;
 mod ids;
 pub mod keyed_frontier;
+pub mod live_revision_watch;
 /// New-generation stream abstractions (see module docs). Additive only:
 /// existing machines migrate onto these in the upcoming swap, nothing is
 /// rewired yet.
 pub mod outbox;
+pub mod revisioned_store;
+pub mod serial_delta_walker;
 use bucket::BucketMachine;
 pub mod mpsc;
 pub mod part_store;

@@ -723,32 +723,41 @@ async fn reconcile_doc(
 ) -> Res<GroupPartReconciliation> {
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.into_bytes())
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
-    let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);
-    let agents = keyhive
-        .agents_for_membered(identifier)
-        .await
-        .into_iter()
-        .map(|(principal, access)| (PeerId::new(principal), access))
-        .collect::<HashMap<_, _>>();
-    let desired_group_parts: HashSet<PartId> = keyhive
-        .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
-        .await?
-        .into_iter()
-        // `All` keeps every group the document belongs to; a selective scope
-        // filters by its explicit group-part set (the set is the group list,
-        // never a keyhive enumeration; the `group_part_id` conversion is done
-        // once at scope construction).
-        .map(group_part_id)
-        .filter(|part| match scope.groups() {
-            None => true,
-            Some(groups) => groups.contains(part),
-        })
-        .collect();
-    let mut reconciled_group_parts = affected_group_parts.clone();
-    reconciled_group_parts.extend(desired_group_parts.iter().copied());
+    let has_content = keyhive
+        .document_has_content(crate::DocumentId::new(doc.into_bytes()))
+        .await?;
+    let (agents, candidate_group_parts) = if has_content {
+        let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);
+        let agents = keyhive
+            .agents_for_membered(identifier)
+            .await
+            .into_iter()
+            .map(|(principal, access)| (PeerId::new(principal), access))
+            .collect::<HashMap<_, _>>();
+        let candidate_group_parts = keyhive
+            .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+            .await?
+            .into_iter()
+            // `All` keeps every group the document belongs to; a selective scope
+            // filters by its explicit group-part set (the set is the group list,
+            // never a keyhive enumeration; the `group_part_id` conversion is done
+            // once at scope construction).
+            .map(group_part_id)
+            .filter(|part| match scope.groups() {
+                None => true,
+                Some(groups) => groups.contains(part),
+            })
+            .collect();
+        (agents, candidate_group_parts)
+    } else {
+        (HashMap::new(), HashSet::new())
+    };
+    let desired_group_parts = candidate_group_parts;
     let desired_global = agents
         .get(&local_principal)
         .is_some_and(|access| access.is_reader());
+    let mut reconciled_group_parts = affected_group_parts.clone();
+    reconciled_group_parts.extend(desired_group_parts.iter().copied());
     tracing::debug!(
         ?doc,
         agent_count = agents.len(),
@@ -875,6 +884,7 @@ mod tests {
             "B1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
         );
     }
+
     fn doc(n: u64) -> ObjId {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&n.to_be_bytes());

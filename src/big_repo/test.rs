@@ -577,6 +577,88 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
 }
 
 #[tokio::test]
+async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
+    let temp_root = tempdir()?;
+    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 191, true).await?;
+    let pending = owner.repo.create_group_with_parents(vec![]).await?;
+    let intended = owner.repo.create_group_with_parents(vec![]).await?;
+    let doc_id = owner
+        .repo
+        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
+        .await?;
+
+    assert!(!owner.repo.contains_sedimentree_id(doc_id).await?);
+    assert!(!owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .group_document_ids(&pending)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .group_document_ids(&intended)
+            .await
+            .contains(&doc_id)
+    );
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
+        .expect("failed creating initial document commit");
+    let retry_initial = initial.clone();
+    owner
+        .repo
+        .finalize_allocated_doc(doc_id, initial, pending.clone())
+        .await?;
+
+    owner
+        .repo
+        .finalize_allocated_doc(doc_id, retry_initial, pending.clone())
+        .await?;
+
+    assert!(owner.repo.contains_sedimentree_id(doc_id).await?);
+    assert!(owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(
+        !owner
+            .repo
+            .keyhive()
+            .group_document_ids(&pending)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .group_document_ids(&intended)
+            .await
+            .contains(&doc_id)
+    );
+
+    let mut mismatch = automerge::Automerge::new();
+    mismatch
+        .transact(|tx| tx.put(automerge::ROOT, "different", true))
+        .expect("failed creating mismatched document content");
+    let mismatch_error = owner
+        .repo
+        .finalize_allocated_doc(doc_id, mismatch, pending)
+        .await
+        .expect_err("different persisted content must be rejected");
+    assert!(
+        mismatch_error
+            .to_string()
+            .contains("initial content mismatch")
+    );
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ephemeral_roundtrip_between_two_nodes() -> Res<()> {
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");

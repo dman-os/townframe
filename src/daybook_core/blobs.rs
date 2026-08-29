@@ -11,8 +11,12 @@ pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
 
-pub use pin_worker::{BlobPinWorkItem, BlobPinWorker};
-pub use pins_part_worker::{BlobPinsPartEvent, BlobPinsPartWorker};
+pub use pin_worker::BlobPinWorker;
+pub(crate) use pin_worker::{BlobPinConsumerStopToken, spawn_blob_pin_consumer};
+pub use pins_part_worker::BlobPinsPartWorker;
+pub(crate) use pins_part_worker::{
+    BlobPinsPartConsumerStopToken, spawn_facet_set_blob_pins_part_consumer,
+};
 
 pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartId {
     let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");

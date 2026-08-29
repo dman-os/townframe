@@ -1,8 +1,10 @@
 use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
-use daybook_core::plugs::{OciImportOptions, PlugsEvent, PlugsRepo};
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use daybook_core::plugs::{OciImportOptions, PlugsRepo, PlugsRevisionSelector, PlugsWatchChange};
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PlugSummary {
@@ -23,21 +25,24 @@ pub struct PlugSummary {
 pub struct PlugsRepoFfi {
     fcx: SharedFfiCtx,
     pub repo: Arc<PlugsRepo>,
+    registry: Arc<daybook_core::repos::ListenersRegistry>,
+    watch_cancel_token: CancellationToken,
+    watch_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
 
 impl daybook_core::repos::Repo for PlugsRepoFfi {
-    type Event = PlugsEvent;
+    type Event = PlugsWatchChange;
     fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
-        &self.repo.registry
+        &self.registry
     }
 
     fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
-        self.repo.cancel_token()
+        &self.watch_cancel_token
     }
 }
 
-crate::uniffi_repo_listeners!(PlugsRepoFfi, PlugsEvent);
+crate::uniffi_repo_listeners!(PlugsRepoFfi, PlugsWatchChange);
 
 #[uniffi::export]
 impl PlugsRepoFfi {
@@ -53,20 +58,58 @@ impl PlugsRepoFfi {
                 Arc::clone(&blobs_repo.repo),
                 fcx.rcx.doc_app.document_id(),
                 daybook_types::doc::UserPathBuf::from(fcx.rcx.local_user_path.clone()),
+                Arc::clone(&fcx.rcx.sqlite_local_state_repo),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
+        let registry = daybook_core::repos::ListenersRegistry::new();
+        let watch_cancel_token = CancellationToken::new();
+        let watch_repo = Arc::clone(&repo);
+        let watch_registry = Arc::clone(&registry);
+        let watch_cancel = watch_cancel_token.clone();
+        let watch_handle = fcx
+            .do_on_rt(async move {
+                Some(tokio::spawn(async move {
+                    let mut watch = watch_repo
+                        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                    loop {
+                        let read = tokio::select! {
+                            _ = watch_cancel.cancelled() => return,
+                            read = watch.next() => read.expect(ERROR_IMPOSSIBLE),
+                        };
+                        let big_sync_core::revisioned_store::RevisionRead::Entries {
+                            entries, ..
+                        } = read
+                        else {
+                            unreachable!("PlugsWatch hides replay completion")
+                        };
+                        watch_registry.notify(entries);
+                    }
+                }))
+            })
+            .await
+            .expect(ERROR_IMPOSSIBLE);
         Ok(Arc::new(Self {
             fcx,
             repo,
+            registry,
+            watch_cancel_token,
+            watch_handle: Some(watch_handle).into(),
             stop_token: Some(stop_token).into(),
         }))
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
+        self.watch_cancel_token.cancel();
+        let watch_handle = self.watch_handle.lock().await.take();
         let stop_token = self.stop_token.lock().await.take();
         self.fcx
             .do_on_rt(async move {
+                if let Some(handle) = watch_handle {
+                    handle.await.expect(ERROR_IMPOSSIBLE);
+                }
                 if let Some(token) = stop_token {
                     token.stop().await?;
                 }

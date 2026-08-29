@@ -208,12 +208,15 @@ pub async fn test_cx_with_options(
     let blobs =
         crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
             .await?;
+    let (sqlite_local_state_repo, sqlite_local_state_stop) =
+        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_state")).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&blobs),
         config_doc_id,
         local_user_path.clone(),
+        Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
     let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
@@ -384,6 +387,8 @@ pub async fn test_cx_with_options(
             lock_guard,
             options: crate::repo::RepoOpenOptions::default(),
             sql: sql_ctx.clone(),
+            sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
+            sqlite_local_state_stop: std::sync::Mutex::new(None),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),
@@ -431,9 +436,6 @@ pub async fn test_cx_with_options(
     config_repo
         .upsert_actor_user_path(init_actor_id, init_user_path)
         .await?;
-
-    let (sqlite_local_state_repo, sqlite_local_state_stop) =
-        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_state")).await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {

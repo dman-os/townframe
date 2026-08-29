@@ -79,6 +79,10 @@ pub mod doc {
         // ADR 007 §1: JSON-string manifest + the plug config facet.
         PlugManifest(String),
         PlugsConfig(PlugsConfig),
+        // System facet payloads remain JSON strings here, matching the existing
+        // PlugManifest WIT convention while preserving their typed Rust schema.
+        Branch(String),
+        Branches(String),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -377,6 +381,12 @@ pub mod doc {
                         .collect(),
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 }),
+                root_doc::WellKnownFacet::Branch(val) => {
+                    Self::Branch(serde_json::to_string(&val).expect(ERROR_JSON))
+                }
+                root_doc::WellKnownFacet::Branches(val) => {
+                    Self::Branches(serde_json::to_string(&val).expect(ERROR_JSON))
+                }
             }
         }
     }
@@ -515,6 +525,8 @@ pub mod doc {
                         .collect::<Result<_, eyre::Report>>()?,
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 }),
+                WellKnownFacet::Branch(json) => Self::Branch(serde_json::from_str(&json)?),
+                WellKnownFacet::Branches(json) => Self::Branches(serde_json::from_str(&json)?),
             })
         }
     }

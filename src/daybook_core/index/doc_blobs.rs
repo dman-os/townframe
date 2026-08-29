@@ -1,10 +1,15 @@
 use crate::blobs::BLOB_SCHEME;
+#[cfg(test)]
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
+use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
+use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
-use crate::repos::Repo;
+use big_sync::SqliteDeltaWalkerStateRepo;
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{
-    BranchPathBuf, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
+    BranchId, BranchPathBuf, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
 };
 use sqlx::QueryBuilder;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +19,7 @@ const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/core/doc-blobs-index";
 #[derive(Debug, Clone)]
 pub struct DocBlobMembership {
     pub doc_id: DocId,
+    pub branch_id: BranchId,
     pub branch_path: BranchPathBuf,
     pub blob_hash: String,
     pub length_octets: u64,
@@ -26,18 +32,23 @@ pub struct DocBlobRef {
     pub length_octets: u64,
 }
 
-#[derive(Debug, Clone)]
-pub enum DocBlobsIndexEvent {
-    Updated { doc_id: DocId },
-    Deleted { doc_id: DocId },
+pub(crate) struct FacetSetDocBlobsConsumerStopToken {
+    cancel_token: CancellationToken,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl FacetSetDocBlobsConsumerStopToken {
+    pub(crate) async fn stop(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.worker_handle.take() {
+            utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)).await?;
+        }
+        Ok(())
+    }
 }
 
 pub struct DocBlobsIndexRepo {
-    pub registry: Arc<crate::repos::ListenersRegistry>,
-    pub cancel_token: CancellationToken,
     drawer_repo: Arc<DrawerRepo>,
-    _blobs_repo: Arc<BlobsRepo>,
-    work_tx: tokio::sync::mpsc::UnboundedSender<DocBlobsIndexWorkItem>,
     sql: SqlCtx,
 }
 
@@ -56,67 +67,134 @@ fn record_blob_length(
     true
 }
 
-impl Repo for DocBlobsIndexRepo {
-    type Event = DocBlobsIndexEvent;
+enum BlobRefsHydration {
+    Replace(HashMap<Arc<str>, u64>),
+    Deferred,
+}
 
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
-        &self.registry
-    }
+enum PreparedFacetBranch {
+    Tombstone,
+    Live {
+        heads: ChangeHashSet,
+        blobs: HashMap<Arc<str>, u64>,
+    },
+}
 
-    fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
+pub(crate) async fn spawn_facet_set_doc_blobs_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    doc_blobs_repo: Arc<DocBlobsIndexRepo>,
+    parent_cancel_token: CancellationToken,
+) -> Res<FacetSetDocBlobsConsumerStopToken> {
+    let state = SqliteDeltaWalkerStateRepo::new(
+        doc_blobs_repo.sql.read_pool.clone(),
+        doc_blobs_repo.sql.write_pool.clone(),
+        DOC_BLOBS_LOCAL_STATE_ID,
+        "facets",
+    )
+    .await
+    .map_err(|error| ferr!("initializing doc-blobs FacetSet walker state: {error}"))?;
+    let wake = doc_blobs_repo
+        .drawer_repo
+        .subscribe_materialization_wake(None)
+        .await?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let worker_handle = tokio::spawn(async move {
+        run_facet_set_doc_blobs_consumer(
+            facet_set_store,
+            doc_blobs_repo,
+            state,
+            wake,
+            worker_cancel_token,
+        )
+        .await
+        .unwrap();
+    });
+    Ok(FacetSetDocBlobsConsumerStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
+}
+
+async fn run_facet_set_doc_blobs_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    doc_blobs_repo: Arc<DocBlobsIndexRepo>,
+    state: SqliteDeltaWalkerStateRepo,
+    mut wake: crate::drawer::MaterializationWake,
+    cancel_token: CancellationToken,
+) -> Res<()> {
+    let mut walker = SerialDeltaWalker::open(
+        facet_set_store.as_ref(),
+        &state,
+        FacetSetSelector::Tags(vec![WellKnownFacetTag::Blob, WellKnownFacetTag::BlobPin]),
+        RevisionReadLimits::default(),
+    )
+    .await
+    .map_err(|error| ferr!("opening doc-blobs FacetSet walker: {error}"))?;
+    let mut deferred: Option<(u64, Vec<FacetDelta>)> = None;
+    loop {
+        let read = if let Some((revision, entries)) = deferred.take() {
+            RevisionRead::Entries { revision, entries }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                read = walker.next() => read.map_err(|error| ferr!("reading doc-blobs FacetSet walker: {error}"))?,
+            }
+        };
+        match read {
+            RevisionRead::ReplayComplete { .. } => {}
+            RevisionRead::Entries { revision, entries } => {
+                let prepared = doc_blobs_repo.prepare_facet_set_revision(&entries).await?;
+                if prepared.is_none() {
+                    deferred = Some((revision, entries));
+                } else {
+                    let mut settlement =
+                        walker.begin_settlement(revision).await.map_err(|error| {
+                            ferr!("beginning doc-blobs FacetSet settlement: {error}")
+                        })?;
+                    doc_blobs_repo
+                        .apply_facet_set_revision_in_tx(
+                            settlement.context_mut(),
+                            prepared.expect("prepared facet-set revision"),
+                        )
+                        .await?;
+                    settlement
+                        .settle()
+                        .await
+                        .map_err(|error| ferr!("settling doc-blobs FacetSet walker: {error}"))?;
+                }
+            }
+        }
+        if deferred.is_some() {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                result = wake.wait() => result?,
+            }
+        }
     }
 }
 
 impl DocBlobsIndexRepo {
     pub async fn boot(
         drawer_repo: Arc<DrawerRepo>,
-        blobs_repo: Arc<BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let sql = sqlite_local_state_repo
             .ensure_sqlite_ctx(DOC_BLOBS_LOCAL_STATE_ID)
             .await?;
         Self::init_schema(&sql).await?;
-        let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let registry = crate::repos::ListenersRegistry::new();
         let cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            registry,
-            cancel_token: cancel_token.child_token(),
             drawer_repo: Arc::clone(&drawer_repo),
-            _blobs_repo: blobs_repo,
-            work_tx,
             sql,
         });
-
-        let worker_handle = tokio::spawn({
-            let repo = Arc::clone(&repo);
-            let cancel_token = cancel_token.clone();
-            async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => break,
-                        item = work_rx.recv() => {
-                            let Some(item) = item else {
-                                break;
-                            };
-                            repo.handle_worker_item(item)
-                                .await
-                                .expect("doc blobs worker item handling failed");
-                        }
-                    }
-                }
-            }
-        });
-
         Ok((
             repo,
             crate::repos::RepoStopToken {
                 cancel_token,
-                worker_handle: Some(worker_handle),
+                worker_handle: None,
             },
         ))
     }
@@ -126,11 +204,12 @@ impl DocBlobsIndexRepo {
             r#"
             CREATE TABLE IF NOT EXISTS doc_blob_refs (
                 doc_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL,
                 branch_path TEXT NOT NULL,
                 blob_hash TEXT NOT NULL,
                 length_octets INTEGER NOT NULL DEFAULT 0,
                 origin_heads TEXT NOT NULL,
-                PRIMARY KEY(doc_id, branch_path, blob_hash)
+                PRIMARY KEY(doc_id, branch_id, blob_hash)
             ) STRICT
             "#,
         )
@@ -155,7 +234,23 @@ impl DocBlobsIndexRepo {
         )
         .fetch_optional(&sql.write_pool)
         .await?;
-        if has_branch_path_col.is_none() {
+        let has_branch_id_col: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('doc_blob_refs') WHERE name = 'branch_id'",
+        )
+        .fetch_optional(&sql.write_pool)
+        .await?;
+        if has_branch_id_col.is_none() && has_branch_path_col.is_some() {
+            let has_legacy_non_main: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM doc_blob_refs WHERE branch_path != 'main')",
+            )
+            .fetch_one(&sql.read_pool)
+            .await?;
+            eyre::ensure!(
+                has_legacy_non_main == 0,
+                "cannot infer physical BranchId for legacy non-main blob references"
+            );
+        }
+        if has_branch_path_col.is_none() || has_branch_id_col.is_none() {
             let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query("ALTER TABLE doc_blob_refs RENAME TO doc_blob_refs_old")
                 .execute(&mut *tx)
@@ -164,25 +259,36 @@ impl DocBlobsIndexRepo {
                 r#"
                 CREATE TABLE doc_blob_refs (
                     doc_id TEXT NOT NULL,
+                    branch_id TEXT NOT NULL,
                     branch_path TEXT NOT NULL,
                     blob_hash TEXT NOT NULL,
                     length_octets INTEGER NOT NULL DEFAULT 0,
                     origin_heads TEXT NOT NULL,
-                    PRIMARY KEY(doc_id, branch_path, blob_hash)
+                    PRIMARY KEY(doc_id, branch_id, blob_hash)
                 ) STRICT
                 "#,
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            let copy_query = if has_branch_path_col.is_some() {
                 r#"
-                INSERT INTO doc_blob_refs (doc_id, branch_path, blob_hash, length_octets, origin_heads)
-                SELECT doc_id, 'main', blob_hash, length_octets, origin_heads
-                FROM doc_blob_refs_old
-                "#,
-            )
-            .execute(&mut *tx)
-            .await?;
+                INSERT INTO doc_blob_refs (doc_id, branch_id, branch_path, blob_hash, length_octets, origin_heads)
+                SELECT doc_id
+                     , CASE WHEN branch_path = 'main' THEN doc_id ELSE branch_path END
+                     , branch_path
+                     , blob_hash
+                     , length_octets
+                     , origin_heads
+                  FROM doc_blob_refs_old
+                "#
+            } else {
+                r#"
+                INSERT INTO doc_blob_refs (doc_id, branch_id, branch_path, blob_hash, length_octets, origin_heads)
+                SELECT doc_id, doc_id, 'main', blob_hash, length_octets, origin_heads
+                  FROM doc_blob_refs_old
+                "#
+            };
+            sqlx::query(copy_query).execute(&mut *tx).await?;
             sqlx::query("DROP TABLE doc_blob_refs_old")
                 .execute(&mut *tx)
                 .await?;
@@ -195,7 +301,7 @@ impl DocBlobsIndexRepo {
         .execute(&sql.write_pool)
         .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_branch ON doc_blob_refs(doc_id, branch_path)",
+            "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_branch ON doc_blob_refs(doc_id, branch_id)",
         )
         .execute(&sql.write_pool)
         .await?;
@@ -203,59 +309,18 @@ impl DocBlobsIndexRepo {
         Ok(())
     }
 
-    async fn handle_worker_item(&self, item: DocBlobsIndexWorkItem) -> Res<()> {
-        match item {
-            DocBlobsIndexWorkItem::Upsert {
-                doc_id,
-                branch_path,
-                heads,
-            } => match self.reindex_doc(&doc_id, &branch_path, &heads).await? {
-                ReindexDocOutcome::Present => {
-                    self.registry
-                        .notify([DocBlobsIndexEvent::Updated { doc_id }]);
-                }
-                ReindexDocOutcome::Evicted => {
-                    self.registry
-                        .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
-                }
-            },
-            DocBlobsIndexWorkItem::DeleteDoc { doc_id } => {
-                self.delete_doc(&doc_id).await?;
-                self.registry
-                    .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
-            }
-            DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
-                doc_id,
-                branch_paths,
-            } => match self
-                .delete_doc_branches_not_in(&doc_id, &branch_paths)
-                .await?
-            {
-                ReindexDocOutcome::Present => {
-                    self.registry
-                        .notify([DocBlobsIndexEvent::Updated { doc_id }]);
-                }
-                ReindexDocOutcome::Evicted => {
-                    self.registry
-                        .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
-                }
-            },
-        }
-        Ok(())
-    }
-
-    pub async fn reindex_doc(
+    async fn hydrate_blob_refs(
         &self,
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
-    ) -> Res<ReindexDocOutcome> {
+    ) -> Res<BlobRefsHydration> {
         let Some(facet_keys) = self
             .drawer_repo
             .facet_keys_at_branch_heads(doc_id, branch_path, heads)
             .await?
         else {
-            return self.delete_doc_branch(doc_id, branch_path).await;
+            return Ok(BlobRefsHydration::Deferred);
         };
         let selected_blob_keys: Vec<FacetKey> = facet_keys
             .into_iter()
@@ -265,7 +330,7 @@ impl DocBlobsIndexRepo {
             })
             .collect();
         if selected_blob_keys.is_empty() {
-            return self.delete_doc_branch(doc_id, branch_path).await;
+            return Ok(BlobRefsHydration::Replace(HashMap::new()));
         }
         let Some((facets, _)) = self
             .drawer_repo
@@ -277,8 +342,8 @@ impl DocBlobsIndexRepo {
             )
             .await?
         else {
-            tracing::debug!(%doc_id, %branch_path, "doc heads changed during index update");
-            return self.doc_presence_outcome(doc_id).await;
+            tracing::debug!(%doc_id, %branch_path, "doc heads are not materialized for index update");
+            return Ok(BlobRefsHydration::Deferred);
         };
 
         let mut blobs = HashMap::<Arc<str>, u64>::new();
@@ -295,7 +360,7 @@ impl DocBlobsIndexRepo {
                             ?err,
                             "failed to parse blob pin facet while indexing; evicting stale blob refs"
                         );
-                        return self.delete_doc_branch(doc_id, branch_path).await;
+                        return Ok(BlobRefsHydration::Replace(HashMap::new()));
                     }
                 };
                 if facet_key.id.parse::<crate::blobs::BlobId>().is_ok() {
@@ -308,7 +373,7 @@ impl DocBlobsIndexRepo {
                             new_length = pin.length_octets,
                             "inconsistent blob length indexed for hash; evicting stale blob refs"
                         );
-                        return self.delete_doc_branch(doc_id, branch_path).await;
+                        return Ok(BlobRefsHydration::Replace(HashMap::new()));
                     }
                 } else {
                     warn!(
@@ -317,7 +382,7 @@ impl DocBlobsIndexRepo {
                         facet_id = %facet_key.id,
                         "invalid blob pin facet id; evicting stale blob refs"
                     );
-                    return self.delete_doc_branch(doc_id, branch_path).await;
+                    return Ok(BlobRefsHydration::Replace(HashMap::new()));
                 }
             } else if facet_key.tag == WellKnownFacetTag::Blob.into() {
                 let facet = match WellKnownFacet::from_json(
@@ -332,7 +397,7 @@ impl DocBlobsIndexRepo {
                             ?err,
                             "failed to parse blob facet while indexing; evicting stale blob refs"
                         );
-                        return self.delete_doc_branch(doc_id, branch_path).await;
+                        return Ok(BlobRefsHydration::Replace(HashMap::new()));
                     }
                 };
                 let WellKnownFacet::Blob(blob) = facet else {
@@ -356,7 +421,7 @@ impl DocBlobsIndexRepo {
                                     new_length = blob.length_octets,
                                     "inconsistent blob length indexed for hash in blob urls; evicting stale blob refs"
                                 );
-                                return self.delete_doc_branch(doc_id, branch_path).await;
+                                return Ok(BlobRefsHydration::Replace(HashMap::new()));
                             }
                         }
                     }
@@ -374,35 +439,123 @@ impl DocBlobsIndexRepo {
                             new_length = blob.length_octets,
                             "inconsistent blob length indexed for hash in blob digest; evicting stale blob refs"
                         );
-                        return self.delete_doc_branch(doc_id, branch_path).await;
+                        return Ok(BlobRefsHydration::Replace(HashMap::new()));
                     }
                 }
             }
         }
 
         info!(%doc_id, %branch_path, ?blobs, "reindex_doc_hashes called");
-        self.reindex_doc_hashes(doc_id, branch_path, heads, &blobs)
-            .await
+        Ok(BlobRefsHydration::Replace(blobs))
     }
 
-    async fn reindex_doc_hashes(
+    async fn branch_path_for_id(
         &self,
         doc_id: &DocId,
+        branch_id: &BranchId,
+    ) -> Res<Option<BranchPathBuf>> {
+        if branch_id.0 == doc_id.to_string() {
+            return Ok(Some(BranchPathBuf::from("main")));
+        }
+        if let Some(entry) = self.drawer_repo.get_entry(doc_id).await?
+            && let Some((path, _)) = entry
+                .branches
+                .iter()
+                .find(|(_, branch)| branch.branch_doc_id.to_string() == branch_id.0.as_str())
+        {
+            return Ok(Some(BranchPathBuf::from(path)));
+        }
+        Ok(None)
+    }
+
+    async fn prepare_facet_set_revision(
+        &self,
+        entries: &[FacetDelta],
+    ) -> Res<Option<Vec<(DocId, BranchId, Option<BranchPathBuf>, PreparedFacetBranch)>>> {
+        let mut affected = HashMap::<(DocId, String), Option<ChangeHashSet>>::new();
+        for entry in entries {
+            let tag = &entry.key.facet_key.tag;
+            if tag != &WellKnownFacetTag::Blob.into() && tag != &WellKnownFacetTag::BlobPin.into() {
+                continue;
+            }
+            let key = (entry.key.document_id.clone(), entry.key.branch_id.0.clone());
+            let heads = entry.current_branch_heads.clone();
+            if let Some(previous) = affected.get(&key) {
+                if previous != &heads {
+                    return Err(ferr!("conflicting Blob branch heads in one facet revision"));
+                }
+            } else {
+                affected.insert(key, heads);
+            }
+        }
+
+        let mut prepared = Vec::with_capacity(affected.len());
+        for ((doc_id, branch_id), branch_heads) in affected {
+            let branch_id = BranchId(branch_id);
+            let (branch_path, delta) = match branch_heads {
+                Some(heads) => {
+                    let Some(branch_path) = self.branch_path_for_id(&doc_id, &branch_id).await?
+                    else {
+                        return Ok(None);
+                    };
+                    match self
+                        .hydrate_blob_refs(&doc_id, &branch_path, &heads)
+                        .await?
+                    {
+                        BlobRefsHydration::Replace(blobs) => (
+                            Some(branch_path),
+                            PreparedFacetBranch::Live { heads, blobs },
+                        ),
+                        BlobRefsHydration::Deferred => return Ok(None),
+                    }
+                }
+                None => (None, PreparedFacetBranch::Tombstone),
+            };
+            prepared.push((doc_id, branch_id, branch_path, delta));
+        }
+        Ok(Some(prepared))
+    }
+
+    async fn apply_facet_set_revision_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        prepared: Vec<(DocId, BranchId, Option<BranchPathBuf>, PreparedFacetBranch)>,
+    ) -> Res<()> {
+        for (doc_id, branch_id, branch_path, delta) in prepared {
+            match delta {
+                PreparedFacetBranch::Tombstone => {
+                    Self::delete_doc_branch_id_in_tx(tx, &doc_id, &branch_id).await?
+                }
+                PreparedFacetBranch::Live { heads, blobs } => {
+                    let branch_path = branch_path.expect("live branch path prepared");
+                    Self::reindex_doc_hashes_in_tx(
+                        tx,
+                        &doc_id,
+                        &branch_id,
+                        &branch_path,
+                        &heads,
+                        &blobs,
+                    )
+                    .await?
+                }
+            };
+        }
+        Ok(())
+    }
+
+    async fn reindex_doc_hashes_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        doc_id: &DocId,
+        branch_id: &BranchId,
         branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
         blobs: &HashMap<Arc<str>, u64>,
     ) -> Res<ReindexDocOutcome> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
+        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_id = ?2")
             .bind(doc_id)
-            .bind(branch_path.as_str())
-            .execute(&mut *tx)
+            .bind(&branch_id.0)
+            .execute(&mut **tx)
             .await?;
-
-        if blobs.is_empty() {
-            tx.commit().await?;
-            return self.doc_presence_outcome(doc_id).await;
-        }
 
         let serialized_heads =
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
@@ -421,32 +574,24 @@ impl DocBlobsIndexRepo {
             rows.push((&hash[..], length_octets_i64));
         }
 
-        let mut query_builder = QueryBuilder::new(
-            "INSERT INTO doc_blob_refs (doc_id, branch_path, blob_hash, length_octets, origin_heads) ",
-        );
-        query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
-            row.push_bind(doc_id)
-                .push_bind(branch_path.as_str())
-                .push_bind(hash)
-                .push_bind(*length_octets_i64)
-                .push_bind(&serialized_heads);
-        });
-        query_builder.push(
-            " ON CONFLICT(doc_id, branch_path, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
-        );
-        query_builder.build().execute(&mut *tx).await?;
-        tx.commit().await?;
-        self.doc_presence_outcome(doc_id).await
-    }
-
-    pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
-            .bind(doc_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
+        if !rows.is_empty() {
+            let mut query_builder = QueryBuilder::new(
+                "INSERT INTO doc_blob_refs (doc_id, branch_id, branch_path, blob_hash, length_octets, origin_heads) ",
+            );
+            query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
+                row.push_bind(doc_id)
+                    .push_bind(&branch_id.0)
+                    .push_bind(branch_path.as_str())
+                    .push_bind(hash)
+                    .push_bind(*length_octets_i64)
+                    .push_bind(&serialized_heads);
+            });
+            query_builder.push(
+                " ON CONFLICT(doc_id, branch_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets, branch_path = excluded.branch_path",
+            );
+            query_builder.build().execute(&mut **tx).await?;
+        }
+        Self::doc_presence_outcome_in_tx(tx, doc_id).await
     }
 
     async fn delete_doc_branch(
@@ -455,13 +600,35 @@ impl DocBlobsIndexRepo {
         branch_path: &BranchPathBuf,
     ) -> Res<ReindexDocOutcome> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let outcome = Self::delete_doc_branch_in_tx(&mut tx, doc_id, branch_path).await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn delete_doc_branch_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        doc_id: &DocId,
+        branch_path: &BranchPathBuf,
+    ) -> Res<ReindexDocOutcome> {
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
             .bind(doc_id)
             .bind(branch_path.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
-        self.doc_presence_outcome(doc_id).await
+        Self::doc_presence_outcome_in_tx(tx, doc_id).await
+    }
+
+    async fn delete_doc_branch_id_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        doc_id: &DocId,
+        branch_id: &BranchId,
+    ) -> Res<ReindexDocOutcome> {
+        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_id = ?2")
+            .bind(doc_id)
+            .bind(&branch_id.0)
+            .execute(&mut **tx)
+            .await?;
+        Self::doc_presence_outcome_in_tx(tx, doc_id).await
     }
 
     async fn doc_presence_outcome(&self, doc_id: &DocId) -> Res<ReindexDocOutcome> {
@@ -476,6 +643,29 @@ impl DocBlobsIndexRepo {
         )
         .bind(doc_id)
         .fetch_one(&self.sql.read_pool)
+        .await?;
+        if exists == 0 {
+            Ok(ReindexDocOutcome::Evicted)
+        } else {
+            Ok(ReindexDocOutcome::Present)
+        }
+    }
+
+    async fn doc_presence_outcome_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        doc_id: &DocId,
+    ) -> Res<ReindexDocOutcome> {
+        let exists: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM doc_blob_refs
+                WHERE doc_id = ?1
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .fetch_one(&mut **tx)
         .await?;
         if exists == 0 {
             Ok(ReindexDocOutcome::Evicted)
@@ -562,9 +752,9 @@ impl DocBlobsIndexRepo {
     }
 
     pub async fn list_docs_for_hash(&self, hash: &str) -> Res<Vec<DocBlobMembership>> {
-        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, branch_path, origin_heads, length_octets
+            SELECT doc_id, branch_id, branch_path, origin_heads, length_octets
             FROM doc_blob_refs
             WHERE blob_hash = ?1
             ORDER BY doc_id ASC, branch_path ASC
@@ -575,18 +765,23 @@ impl DocBlobsIndexRepo {
         .await?;
 
         rows.into_iter()
-            .map(|(doc_id, branch_path, origin_heads, length_octets)| {
-                let head_strings: Vec<String> = serde_json::from_str(&origin_heads)?;
-                let length_octets = u64::try_from(length_octets)
-                    .map_err(|_| ferr!("invalid negative blob length for hash {hash}"))?;
-                Ok(DocBlobMembership {
-                    doc_id,
-                    branch_path: BranchPathBuf::from(branch_path),
-                    blob_hash: hash.to_string(),
-                    length_octets,
-                    origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
-                })
-            })
+            .map(
+                |(doc_id, branch_id, branch_path, origin_heads, length_octets)| {
+                    let head_strings: Vec<String> = serde_json::from_str(&origin_heads)?;
+                    let length_octets = u64::try_from(length_octets)
+                        .map_err(|_| ferr!("invalid negative blob length for hash {hash}"))?;
+                    Ok(DocBlobMembership {
+                        doc_id,
+                        branch_id: BranchId(branch_id),
+                        branch_path: BranchPathBuf::from(branch_path),
+                        blob_hash: hash.to_string(),
+                        length_octets,
+                        origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(
+                            &head_strings,
+                        )?),
+                    })
+                },
+            )
             .collect()
     }
 
@@ -603,10 +798,12 @@ impl DocBlobsIndexRepo {
         Ok(hashes)
     }
 
-    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, BranchPathBuf, String, u64)>> {
-        let rows: Vec<(DocId, String, String, i64)> = sqlx::query_as(
+    pub async fn list_all_memberships(
+        &self,
+    ) -> Res<Vec<(DocId, BranchId, BranchPathBuf, String, u64)>> {
+        let rows: Vec<(DocId, String, String, String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, branch_path, blob_hash, length_octets
+            SELECT doc_id, branch_id, branch_path, blob_hash, length_octets
             FROM doc_blob_refs
             ORDER BY doc_id ASC, branch_path ASC, blob_hash ASC
             "#,
@@ -614,63 +811,20 @@ impl DocBlobsIndexRepo {
         .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
-            .map(|(doc_id, branch_path, blob_hash, length_octets)| {
-                let length_octets = u64::try_from(length_octets)
-                    .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
-                Ok((
-                    doc_id,
-                    BranchPathBuf::from(branch_path),
-                    blob_hash,
-                    length_octets,
-                ))
-            })
+            .map(
+                |(doc_id, branch_id, branch_path, blob_hash, length_octets)| {
+                    let length_octets = u64::try_from(length_octets)
+                        .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
+                    Ok((
+                        doc_id,
+                        BranchId(branch_id),
+                        BranchPathBuf::from(branch_path),
+                        blob_hash,
+                        length_octets,
+                    ))
+                },
+            )
             .collect()
-    }
-
-    pub fn triage_listener(
-        self: &Arc<Self>,
-    ) -> Box<dyn crate::rt::switch::SwitchSink + Send + Sync> {
-        Box::new(DocBlobsTriageListener {
-            drawer_repo: Arc::clone(&self.drawer_repo),
-            index_repo: Arc::clone(self),
-        })
-    }
-
-    pub fn enqueue_upsert(
-        &self,
-        doc_id: DocId,
-        branch_path: BranchPathBuf,
-        heads: ChangeHashSet,
-    ) -> Res<()> {
-        self.work_tx
-            .send(DocBlobsIndexWorkItem::Upsert {
-                doc_id,
-                branch_path,
-                heads,
-            })
-            .wrap_err(ERROR_ACTOR)?;
-        Ok(())
-    }
-
-    pub fn enqueue_delete(&self, doc_id: DocId) -> Res<()> {
-        self.work_tx
-            .send(DocBlobsIndexWorkItem::DeleteDoc { doc_id })
-            .wrap_err(ERROR_ACTOR)?;
-        Ok(())
-    }
-
-    pub fn enqueue_delete_branches_not_in(
-        &self,
-        doc_id: DocId,
-        branch_paths: Vec<BranchPathBuf>,
-    ) -> Res<()> {
-        self.work_tx
-            .send(DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
-                doc_id,
-                branch_paths,
-            })
-            .wrap_err(ERROR_ACTOR)?;
-        Ok(())
     }
 
     async fn delete_doc_branches_not_in(
@@ -726,108 +880,18 @@ pub enum ReindexDocOutcome {
     Evicted,
 }
 
-#[derive(Debug, Clone)]
-enum DocBlobsIndexWorkItem {
-    Upsert {
-        doc_id: DocId,
-        branch_path: BranchPathBuf,
-        heads: ChangeHashSet,
-    },
-    DeleteDoc {
-        doc_id: DocId,
-    },
-    DeleteDocBranchesNotIn {
-        doc_id: DocId,
-        branch_paths: Vec<BranchPathBuf>,
-    },
-}
-
-struct DocBlobsTriageListener {
-    drawer_repo: Arc<DrawerRepo>,
-    index_repo: Arc<DocBlobsIndexRepo>,
-}
-
-#[async_trait]
-impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
-    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        crate::rt::switch::SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: true,
-            consume_plugs: false,
-            consume_dispatch: false,
-            consume_config: false,
-            drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::Or(vec![
-                daybook_types::manifest::DocPredicateClause::HasTag(WellKnownFacetTag::Blob.into()),
-                daybook_types::manifest::DocPredicateClause::HasTag(
-                    WellKnownFacetTag::BlobPin.into(),
-                ),
-            ])),
-        }
-    }
-
-    async fn on_event(
-        &mut self,
-        event: &crate::rt::switch::SwitchEvent,
-        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
-    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
-        let outcome = crate::rt::switch::SwitchSinkOutcome::default();
-        match event {
-            crate::rt::switch::SwitchEvent::Doc(event) => {
-                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
-                self.index_repo
-                    .handle_worker_item(DocBlobsIndexWorkItem::Upsert {
-                        doc_id: event.doc_id.clone(),
-                        branch_path,
-                        heads: event.new_heads.clone(),
-                    })
-                    .await?;
-            }
-            crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
-                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                    self.index_repo
-                        .handle_worker_item(DocBlobsIndexWorkItem::DeleteDoc { doc_id: id.clone() })
-                        .await?;
-                }
-                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                    let mut retain_branches = Vec::new();
-                    for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPathBuf::from(branch_name.as_str());
-                        retain_branches.push(branch_path.clone());
-                        let Some(_keys) = self
-                            .drawer_repo
-                            .get_facet_keys_if_latest(id, &branch_path, heads)
-                            .await?
-                        else {
-                            continue;
-                        };
-                        self.index_repo
-                            .handle_worker_item(DocBlobsIndexWorkItem::Upsert {
-                                doc_id: id.clone(),
-                                branch_path,
-                                heads: heads.clone(),
-                            })
-                            .await?;
-                    }
-                    self.index_repo
-                        .handle_worker_item(DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
-                            doc_id: id.clone(),
-                            branch_paths: retain_branches,
-                        })
-                        .await?;
-                }
-            },
-            _ => {}
-        }
-        Ok(outcome)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::repos::SubscribeOpts;
     use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, BlobPin, FacetRaw};
+
+    struct RouteChange {
+        facet_key: FacetKey,
+        #[expect(dead_code)]
+        added: bool,
+    }
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {
         let deadline = tokio::time::Instant::now()
@@ -900,7 +964,6 @@ mod tests {
                 .await?;
         let (repo, repo_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
-            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
@@ -916,6 +979,46 @@ mod tests {
             big_repo_stop: Box::new(move || Box::pin(big_repo_stop())),
             _temp_dir: temp_dir,
         })
+    }
+
+    async fn apply_doc_revision(
+        repo: &DocBlobsIndexRepo,
+        _revision: u64,
+        doc_id: DocId,
+        heads: Option<ChangeHashSet>,
+        route_changes: Vec<RouteChange>,
+    ) -> Res<()> {
+        let branch_id = BranchId(doc_id.to_string());
+        let facet_keys = if route_changes.is_empty() {
+            vec![FacetKey::from(WellKnownFacetTag::Blob)]
+        } else {
+            route_changes
+                .into_iter()
+                .map(|change| change.facet_key)
+                .collect()
+        };
+        let entries = facet_keys
+            .into_iter()
+            .map(|facet_key| FacetDelta {
+                key: FacetRouteKey {
+                    document_id: doc_id.clone(),
+                    branch_id: branch_id.clone(),
+                    facet_key,
+                },
+                current: None,
+                current_branch_heads: heads.clone(),
+                removed_local: false,
+            })
+            .collect::<Vec<_>>();
+        let prepared = repo
+            .prepare_facet_set_revision(&entries)
+            .await?
+            .ok_or_eyre("blob revision could not be prepared")?;
+        let mut tx = repo.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        repo.apply_facet_set_revision_in_tx(&mut tx, prepared)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -971,29 +1074,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn upsert_for_missing_doc_emits_deleted_event() -> Res<()> {
+    async fn tombstone_for_missing_doc_leaves_no_memberships() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
         let repo = Arc::clone(&test_context.rt.doc_blobs_index_repo);
-        let listener = repo.subscribe(SubscribeOpts::new(16));
         let missing_doc_id = "doc-missing-for-blob-index".to_string();
 
-        repo.enqueue_upsert(
-            missing_doc_id.clone(),
-            BranchPathBuf::from("main"),
-            ChangeHashSet(default()),
-        )?;
+        apply_doc_revision(&repo, 1, missing_doc_id.clone(), None, vec![]).await?;
 
-        let evt = listener
-            .recv_async()
-            .await
-            .map_err(|_| ferr!(ERROR_CHANNEL))?;
-        assert!(
-            matches!(
-                &*evt,
-                DocBlobsIndexEvent::Deleted { doc_id } if *doc_id == missing_doc_id
-            ),
-            "upsert for a missing doc should emit Deleted, got: {evt:?}"
-        );
+        assert!(repo.list_hashes_for_doc(&missing_doc_id).await?.is_empty());
 
         test_context.stop().await?;
         Ok(())
@@ -1040,8 +1128,17 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        env.repo
-            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+        apply_doc_revision(
+            &env.repo,
+            1,
+            doc_id.clone(),
+            Some(heads),
+            vec![RouteChange {
+                facet_key: FacetKey::from(WellKnownFacetTag::BlobPin),
+                added: true,
+            }],
+        )
+        .await?;
 
         wait_for_hash(&env.repo, &doc_id, &hash_a).await?;
         wait_for_hash(&env.repo, &doc_id, &hash_b).await?;
@@ -1114,8 +1211,17 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        env.repo
-            .enqueue_upsert(doc_id_1.clone(), BranchPathBuf::from("main"), heads_1)?;
+        apply_doc_revision(
+            &env.repo,
+            1,
+            doc_id_1.clone(),
+            Some(heads_1),
+            vec![RouteChange {
+                facet_key: FacetKey::from(WellKnownFacetTag::Blob),
+                added: true,
+            }],
+        )
+        .await?;
 
         wait_for_hash(&env.repo, &doc_id_1, &hash_none_urls).await?;
         let hashes_1 = env.repo.list_hashes_for_doc(&doc_id_1).await?;
@@ -1151,8 +1257,17 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        env.repo
-            .enqueue_upsert(doc_id_2.clone(), BranchPathBuf::from("main"), heads_2)?;
+        apply_doc_revision(
+            &env.repo,
+            2,
+            doc_id_2.clone(),
+            Some(heads_2),
+            vec![RouteChange {
+                facet_key: FacetKey::from(WellKnownFacetTag::Blob),
+                added: true,
+            }],
+        )
+        .await?;
 
         wait_for_hash(&env.repo, &doc_id_2, &hash_empty_urls).await?;
         let hashes_2 = env.repo.list_hashes_for_doc(&doc_id_2).await?;
@@ -1196,8 +1311,17 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads")?;
-        env.repo
-            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+        apply_doc_revision(
+            &env.repo,
+            1,
+            doc_id.clone(),
+            Some(heads),
+            vec![RouteChange {
+                facet_key: key_pin_a.clone(),
+                added: true,
+            }],
+        )
+        .await?;
 
         wait_for_hash(&env.repo, &doc_id, &hash_a).await?;
         assert_eq!(
@@ -1216,11 +1340,11 @@ mod tests {
                 daybook_types::doc::DocPatch {
                     id: doc_id.clone(),
                     facets_set: [(
-                        key_pin_invalid,
+                        key_pin_invalid.clone(),
                         FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 100 })),
                     )]
                     .into(),
-                    facets_remove: vec![key_pin_a],
+                    facets_remove: vec![key_pin_a.clone()],
                     user_path: None,
                 },
                 daybook_types::doc::BranchPath::new("main"),
@@ -1233,8 +1357,23 @@ mod tests {
             .get_branch_heads_for_path(&doc_id, daybook_types::doc::BranchPath::new("main"))
             .await?
             .ok_or_eyre("expected main branch heads")?;
-        env.repo
-            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads_invalid)?;
+        apply_doc_revision(
+            &env.repo,
+            2,
+            doc_id.clone(),
+            Some(heads_invalid),
+            vec![
+                RouteChange {
+                    facet_key: key_pin_a.clone(),
+                    added: false,
+                },
+                RouteChange {
+                    facet_key: key_pin_invalid,
+                    added: true,
+                },
+            ],
+        )
+        .await?;
 
         let start = std::time::Instant::now();
         while !env.repo.list_hashes_for_doc(&doc_id).await?.is_empty() {
@@ -1289,8 +1428,26 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads")?;
-        env.repo
-            .enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
+        apply_doc_revision(
+            &env.repo,
+            1,
+            doc_id.clone(),
+            Some(heads),
+            vec![
+                RouteChange {
+                    facet_key: FacetKey {
+                        tag: WellKnownFacetTag::BlobPin.into(),
+                        id: hash.clone(),
+                    },
+                    added: true,
+                },
+                RouteChange {
+                    facet_key: FacetKey::from(WellKnownFacetTag::Blob),
+                    added: true,
+                },
+            ],
+        )
+        .await?;
 
         let start = std::time::Instant::now();
         while !env.repo.list_hashes_for_doc(&doc_id).await?.is_empty() {

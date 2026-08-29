@@ -3,6 +3,7 @@
 use super::PartFrontierKey;
 use super::sqlite_read::{
     SqliteFrontierRow, SqlitePartSelector, SqliteReadError, SqliteReadSource, open_sqlite_reader,
+    part_query_rows,
 };
 use super::sqlite_write::SqliteFrontierWrite;
 use big_sync_core::keyed_frontier::{
@@ -11,6 +12,8 @@ use big_sync_core::keyed_frontier::{
 };
 use big_sync_core::rpc::{ObjAddedToPart, ObjChanged, PartEvent};
 use sqlx::{Sqlite, SqlitePool, Transaction};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::{async_trait, serde_json};
@@ -60,6 +63,8 @@ fn payload(row: &SqliteFrontierRow) -> Result<serde_json::Value, SqliteReadError
 }
 
 impl SqliteReadSource for SqlitePartFrontier {
+    type Selector = SqlitePartSelector;
+    type Row = SqliteFrontierRow;
     type Key = PartFrontierKey;
     type Value = PartEvent;
 
@@ -73,6 +78,29 @@ impl SqliteReadSource for SqlitePartFrontier {
 
     fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    fn row_revision(&self, row: &SqliteFrontierRow) -> FrontierRevision {
+        row.revision
+    }
+
+    fn fetch_rows<'a>(
+        &'a self,
+        selector: &'a SqlitePartSelector,
+        after: FrontierRevision,
+        through: FrontierRevision,
+        exact_revision: Option<FrontierRevision>,
+        limit: Option<usize>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SqliteFrontierRow>, SqliteReadError>> + Send + 'a>>
+    {
+        Box::pin(part_query_rows(
+            self,
+            selector,
+            after,
+            through,
+            exact_revision,
+            limit,
+        ))
     }
 
     fn decode_row(
@@ -171,6 +199,6 @@ impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
         selector: Self::Selector,
         limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent> + '_>> {
-        open_sqlite_reader(self, selector, limits).await
+        open_sqlite_reader(self.clone(), selector, limits).await
     }
 }

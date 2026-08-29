@@ -1,13 +1,20 @@
 use crate::interlude::*;
 
 use crate::drawer::DrawerRepo;
-use crate::plugs::PlugsRepo;
-use crate::repos::Repo;
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 
-use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRef};
-use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use daybook_types::doc::{
+    ArcFacetRaw, BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef,
+};
+use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
+use sqlx::{Sqlite, Transaction};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
 const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-ref-index";
@@ -22,45 +29,53 @@ pub struct DocFacetRefEdge {
     pub origin_heads: ChangeHashSet,
 }
 
-#[derive(Debug, Clone)]
-pub enum DocFacetRefIndexEvent {
-    Updated { doc_id: DocId },
-    Deleted { doc_id: DocId },
-    Reindexed,
-}
-
 pub struct DocFacetRefIndexRepo {
-    pub registry: Arc<crate::repos::ListenersRegistry>,
-    pub cancel_token: CancellationToken,
     drawer_repo: Arc<DrawerRepo>,
     plugs_repo: Arc<PlugsRepo>,
     work_tx: tokio::sync::mpsc::UnboundedSender<DocFacetRefIndexWorkItem>,
+    work_rx:
+        tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<DocFacetRefIndexWorkItem>>>,
     sql: SqlCtx,
     reference_specs: tokio::sync::RwLock<HashMap<String, Vec<FacetReferenceManifest>>>,
 }
 
-impl Repo for DocFacetRefIndexRepo {
-    type Event = DocFacetRefIndexEvent;
+pub struct DocFacetRefIndexStopToken {
+    cancel_token: CancellationToken,
+}
 
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
-        &self.registry
-    }
+enum FacetSetPreparation {
+    Ready(Vec<FacetSetBranchPreparation>),
+    Deferred,
+}
 
-    fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
+enum FacetSetBranchPreparation {
+    Live {
+        document_id: DocId,
+        heads: ChangeHashSet,
+        facets: HashMap<FacetKey, ArcFacetRaw>,
+    },
+    Tombstone {
+        document_id: DocId,
+    },
+}
+
+impl DocFacetRefIndexStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.cancel_token.cancel();
+        Ok(())
     }
 }
 
-pub struct DocFacetRefIndexStopToken {
+pub struct DocFacetRefMachineStopToken {
     cancel_token: CancellationToken,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl DocFacetRefIndexStopToken {
-    pub async fn stop(mut self) -> Res<()> {
+impl DocFacetRefMachineStopToken {
+    pub(crate) async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         if let Some(handle) = self.worker_handle.take() {
-            utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)).await?;
+            handle.await?;
         }
         Ok(())
     }
@@ -76,48 +91,21 @@ impl DocFacetRefIndexRepo {
             .ensure_sqlite_ctx(FACET_REF_LOCAL_STATE_ID)
             .await?;
         Self::init_schema(&sql).await?;
-        let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (work_tx, work_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let registry = crate::repos::ListenersRegistry::new();
         let cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            registry,
-            cancel_token: cancel_token.child_token(),
             drawer_repo: Arc::clone(&drawer_repo),
             plugs_repo: Arc::clone(&plugs_repo),
             work_tx,
+            work_rx: tokio::sync::Mutex::new(Some(work_rx)),
             sql,
             reference_specs: tokio::sync::RwLock::new(HashMap::new()),
         });
 
         repo.refresh_reference_specs().await?;
 
-        let worker_handle = tokio::spawn({
-            let repo = Arc::clone(&repo);
-            let cancel_token = cancel_token.clone();
-            async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => break,
-                        item = work_rx.recv() => {
-                            let Some(item) = item else {
-                                break;
-                            };
-                            repo.handle_worker_item(item).await.unwrap_or_log();
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok((
-            repo,
-            DocFacetRefIndexStopToken {
-                cancel_token,
-                worker_handle: Some(worker_handle),
-            },
-        ))
+        Ok((repo, DocFacetRefIndexStopToken { cancel_token }))
     }
 
     async fn init_schema(sql: &SqlCtx) -> Res<()> {
@@ -154,24 +142,9 @@ impl DocFacetRefIndexRepo {
 
     async fn handle_worker_item(&self, item: DocFacetRefIndexWorkItem) -> Res<()> {
         match item {
-            DocFacetRefIndexWorkItem::Upsert {
-                doc_id,
-                branch_path,
-                heads,
-            } => {
-                self.reindex_doc(&doc_id, &branch_path, &heads).await?;
-                self.registry
-                    .notify([DocFacetRefIndexEvent::Updated { doc_id }]);
-            }
-            DocFacetRefIndexWorkItem::DeleteDoc { doc_id } => {
-                self.delete_doc(&doc_id).await?;
-                self.registry
-                    .notify([DocFacetRefIndexEvent::Deleted { doc_id }]);
-            }
             DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll => {
                 self.refresh_reference_specs().await?;
                 self.reindex_all_docs().await?;
-                self.registry.notify([DocFacetRefIndexEvent::Reindexed]);
             }
         }
         Ok(())
@@ -195,6 +168,18 @@ impl DocFacetRefIndexRepo {
         let mut guard = self.reference_specs.write().await;
         *guard = next_specs;
         Ok(())
+    }
+
+    async fn reference_tags(&self) -> Vec<String> {
+        let mut tags = self
+            .reference_specs
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        tags.sort();
+        tags
     }
 
     async fn reindex_all_docs(&self) -> Res<()> {
@@ -250,50 +235,25 @@ impl DocFacetRefIndexRepo {
         Ok(())
     }
 
-    pub async fn reindex_doc(
-        &self,
-        doc_id: &DocId,
-        branch_path: &BranchPathBuf,
-        heads: &ChangeHashSet,
-    ) -> Res<()> {
-        let specs = self.reference_specs.read().await.clone();
-        let reference_tags: HashSet<String> = specs.keys().cloned().collect();
-        drop(specs);
-        if reference_tags.is_empty() {
-            self.delete_doc(doc_id).await?;
-            return Ok(());
-        }
-
-        let Some(facet_keys) = self
-            .drawer_repo
-            .facet_keys_at_branch_heads(doc_id, branch_path, heads)
-            .await?
-        else {
-            self.delete_doc(doc_id).await?;
-            return Ok(());
-        };
-        let selected_keys: Vec<FacetKey> = facet_keys
-            .into_iter()
-            .filter(|facet_key| reference_tags.contains(&facet_key.tag.to_string()))
-            .collect();
-        if selected_keys.is_empty() {
-            self.delete_doc(doc_id).await?;
-            return Ok(());
-        }
-        let facets = self
-            .drawer_repo
-            .get_at_branch_heads_with_facets_arc(doc_id, branch_path, heads, Some(selected_keys))
-            .await?
-            .map(|(facets, _)| facets)
-            .unwrap_or_default();
-        self.reindex_doc_from_facets(doc_id, heads, &facets).await
-    }
-
     async fn reindex_doc_from_facets(
         &self,
         doc_id: &DocId,
         heads: &ChangeHashSet,
-        facets: &HashMap<FacetKey, daybook_types::doc::ArcFacetRaw>,
+        facets: &HashMap<FacetKey, ArcFacetRaw>,
+    ) -> Res<()> {
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.replace_outgoing_edges_in_tx(&mut tx, doc_id, heads, facets)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn replace_outgoing_edges_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+        facets: &HashMap<FacetKey, ArcFacetRaw>,
     ) -> Res<()> {
         let serialized_heads =
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
@@ -301,7 +261,7 @@ impl DocFacetRefIndexRepo {
 
         sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.sql.write_pool)
+            .execute(&mut **tx)
             .await?;
 
         let specs = self.reference_specs.read().await.clone();
@@ -334,20 +294,12 @@ impl DocFacetRefIndexRepo {
                     .bind(reference.target_facet_key.to_string())
                     .bind(reference_kind_to_db_value(&spec.reference_kind()))
                     .bind(&serialized_heads)
-                    .execute(&self.sql.write_pool)
+                    .execute(&mut **tx)
                     .await?;
                 }
             }
         }
 
-        Ok(())
-    }
-
-    pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
-        sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1 OR target_doc_id = ?1")
-            .bind(doc_id)
-            .execute(&self.sql.write_pool)
-            .await?;
         Ok(())
     }
 
@@ -400,45 +352,62 @@ impl DocFacetRefIndexRepo {
         rows.into_iter().map(row_to_edge).collect()
     }
 
-    pub fn triage_listener(
-        self: &Arc<Self>,
-    ) -> Box<dyn crate::rt::switch::SwitchSink + Send + Sync> {
-        Box::new(FacetRefTriageListener {
-            drawer_repo: Arc::clone(&self.drawer_repo),
-            plugs_repo: Arc::clone(&self.plugs_repo),
-            index_repo: Arc::clone(self),
-        })
-    }
-
-    pub fn enqueue_upsert(
-        &self,
-        doc_id: DocId,
-        branch_path: BranchPathBuf,
-        heads: ChangeHashSet,
-    ) -> Res<()> {
-        self.work_tx
-            .send(DocFacetRefIndexWorkItem::Upsert {
-                doc_id,
-                branch_path,
-                heads,
-            })
-            .map_err(|err| ferr!("doc_facet_ref_index work queue closed: {err}"))?;
-        Ok(())
-    }
-
-    pub fn enqueue_delete(&self, doc_id: DocId) -> Res<()> {
-        self.work_tx
-            .send(DocFacetRefIndexWorkItem::DeleteDoc { doc_id })
-            .map_err(|err| ferr!("doc_facet_ref_index work queue closed: {err}"))?;
-        Ok(())
-    }
-
     pub fn enqueue_refresh_specs_and_reindex_all(&self) -> Res<()> {
         self.work_tx
             .send(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll)
             .map_err(|err| ferr!("doc_facet_ref_index work queue closed: {err}"))?;
         Ok(())
     }
+}
+
+/// Spawn the unified FacetSet/Plugs/work-queue reference machine.
+pub(crate) async fn spawn_facet_ref_machine(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    facet_ref_repo: Arc<DocFacetRefIndexRepo>,
+    parent_cancel_token: CancellationToken,
+) -> Res<DocFacetRefMachineStopToken> {
+    let work_rx = facet_ref_repo
+        .work_rx
+        .lock()
+        .await
+        .take()
+        .expect("facet-ref machine spawned once");
+    let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+        facet_ref_repo.sql.read_pool.clone(),
+        facet_ref_repo.sql.write_pool.clone(),
+        FACET_REF_LOCAL_STATE_ID,
+        "facets",
+    )
+    .await
+    .map_err(|error| ferr!("initializing facet-ref FacetSet walker state: {error}"))?;
+    let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+        facet_ref_repo.sql.read_pool.clone(),
+        facet_ref_repo.sql.write_pool.clone(),
+        FACET_REF_LOCAL_STATE_ID,
+        "plugs",
+    )
+    .await
+    .map_err(|error| ferr!("initializing facet-ref Plugs walker state: {error}"))?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let drawer = Arc::clone(&facet_ref_repo.drawer_repo);
+    let worker_handle = tokio::spawn(async move {
+        facet_ref_repo
+            .run_machine(
+                drawer,
+                facet_set_store,
+                facet_state,
+                plugs_state,
+                work_rx,
+                worker_cancel_token,
+            )
+            .await
+            .unwrap();
+    });
+    Ok(DocFacetRefMachineStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -526,6 +495,201 @@ fn append_url_references(
         }
     }
     Ok(())
+}
+
+impl DocFacetRefIndexRepo {
+    async fn prepare_facet_set_revision(&self, entries: &[FacetDelta]) -> Res<FacetSetPreparation> {
+        let reference_tags = self.reference_tags().await;
+        if reference_tags.is_empty() {
+            return Ok(FacetSetPreparation::Ready(Vec::new()));
+        }
+        let mut branches = BTreeSet::new();
+        for delta in entries {
+            if delta.key.branch_id.0 != delta.key.document_id {
+                continue;
+            }
+            branches.insert((delta.key.document_id.clone(), delta.key.branch_id.clone()));
+        }
+        let mut prepared = Vec::with_capacity(branches.len());
+        for (document_id, branch_id) in branches {
+            let branch_entries = entries.iter().filter(|delta| {
+                delta.key.document_id == document_id && delta.key.branch_id == branch_id
+            });
+            let mut removed = false;
+            let mut heads = None;
+            for delta in branch_entries {
+                match &delta.current_branch_heads {
+                    Some(current_heads) => {
+                        if heads.as_ref().is_some_and(|seen| seen != current_heads) {
+                            return Err(ferr!(
+                                "FacetRef facet deltas disagree on branch heads in one revision"
+                            ));
+                        }
+                        heads = Some(current_heads.clone());
+                    }
+                    None => removed = true,
+                }
+            }
+            if removed && heads.is_none() {
+                prepared.push(FacetSetBranchPreparation::Tombstone { document_id });
+                continue;
+            }
+            let heads = heads.expect("live FacetRef route has branch heads");
+            let physical_id = branch_id.0.parse::<big_repo::DocumentId>()?;
+            let Some(facets) = self
+                .drawer_repo
+                .hydrate_physical_doc_at_heads(physical_id, heads.clone())
+                .await?
+            else {
+                return Ok(FacetSetPreparation::Deferred);
+            };
+            prepared.push(FacetSetBranchPreparation::Live {
+                document_id,
+                heads,
+                facets: facets
+                    .into_iter()
+                    .map(|(key, value)| (key, Arc::new(value)))
+                    .collect(),
+            });
+        }
+        Ok(FacetSetPreparation::Ready(prepared))
+    }
+
+    async fn run_machine(
+        self: Arc<Self>,
+        drawer: Arc<DrawerRepo>,
+        facet_set_store: Arc<FacetSetRevisionStore>,
+        facet_state: big_sync::SqliteDeltaWalkerStateRepo,
+        plugs_state: big_sync::SqliteDeltaWalkerStateRepo,
+        mut work_rx: tokio::sync::mpsc::UnboundedReceiver<DocFacetRefIndexWorkItem>,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
+        let mut wake = drawer.subscribe_materialization_wake(None).await?;
+        let mut plugs_walker = SerialDeltaWalker::open(
+            self.plugs_repo.as_ref(),
+            &plugs_state,
+            PlugsRevisionSelector::All,
+            RevisionReadLimits::default(),
+        )
+        .await
+        .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
+        'reopen: loop {
+            let tags = self.reference_tags().await;
+            let mut walker = SerialDeltaWalker::open(
+                facet_set_store.as_ref(),
+                &facet_state,
+                FacetSetSelector::FacetTags(tags),
+                RevisionReadLimits::default(),
+            )
+            .await
+            .map_err(|error| ferr!("opening facet-ref FacetSet walker: {error}"))?;
+            let mut deferred: Option<(u64, Vec<FacetDelta>)> = None;
+            loop {
+                let read = if let Some((revision, entries)) = deferred.take() {
+                    RevisionRead::Entries { revision, entries }
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return Ok(()),
+                        item = work_rx.recv() => {
+                            let item = item.ok_or_else(|| ferr!("facet-ref work queue closed"))?;
+                            self.handle_worker_item(item).await?;
+                            continue 'reopen;
+                        }
+                        plug_read = plugs_walker.next() => {
+                            match plug_read.map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))? {
+                                RevisionRead::ReplayComplete { .. } => continue,
+                                RevisionRead::Entries { revision, entries } => {
+                                    if !entries.is_empty() {
+                                        self.handle_worker_item(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll).await?;
+                                        plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
+                                        continue 'reopen;
+                                    }
+                                    plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
+                                    continue;
+                                }
+                            }
+                        }
+                        read = walker.next() => read.map_err(|error| ferr!("reading facet-ref FacetSet walker: {error}"))?,
+                    }
+                };
+                match read {
+                    RevisionRead::ReplayComplete { .. } => {}
+                    RevisionRead::Entries { revision, entries } => {
+                        let prepared = self.prepare_facet_set_revision(&entries).await?;
+                        if matches!(&prepared, FacetSetPreparation::Deferred) {
+                            deferred = Some((revision, entries));
+                            tokio::select! {
+                                biased;
+                                _ = cancel_token.cancelled() => return Ok(()),
+                                item = work_rx.recv() => {
+                                    let item = item.ok_or_else(|| ferr!("facet-ref work queue closed"))?;
+                                    self.handle_worker_item(item).await?;
+                                    continue 'reopen;
+                                }
+                                plug_read = plugs_walker.next() => {
+                                    match plug_read.map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))? {
+                                        RevisionRead::ReplayComplete { .. } => {}
+                                        RevisionRead::Entries { revision, entries } => {
+                                            if !entries.is_empty() {
+                                                self.handle_worker_item(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll).await?;
+                                                plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
+                                                continue 'reopen;
+                                            }
+                                            plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
+                                        }
+                                    }
+                                }
+                                result = wake.wait() => result?,
+                            }
+                            continue;
+                        }
+                        let FacetSetPreparation::Ready(prepared) = prepared else {
+                            unreachable!("Deferred preparation handled above")
+                        };
+                        let mut settlement = walker
+                            .begin_settlement(revision)
+                            .await
+                            .map_err(|error| ferr!("beginning facet-ref settlement: {error}"))?;
+                        self.apply_facet_set_revision_in_tx(settlement.context_mut(), &prepared)
+                            .await?;
+                        settlement.settle().await.map_err(|error| {
+                            ferr!("settling facet-ref FacetSet revision: {error}")
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn apply_facet_set_revision_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        prepared: &[FacetSetBranchPreparation],
+    ) -> Res<()> {
+        for preparation in prepared {
+            match preparation {
+                FacetSetBranchPreparation::Tombstone { document_id } => {
+                    sqlx::query(
+                        "DELETE FROM facet_ref_edges WHERE origin_doc_id = ? OR target_doc_id = ?",
+                    )
+                    .bind(document_id)
+                    .bind(document_id)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+                FacetSetBranchPreparation::Live {
+                    document_id,
+                    heads,
+                    facets,
+                } => {
+                    self.replace_outgoing_edges_in_tx(tx, document_id, heads, facets)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn append_object_references(
@@ -641,124 +805,7 @@ fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<Doc
 }
 
 enum DocFacetRefIndexWorkItem {
-    Upsert {
-        doc_id: DocId,
-        branch_path: BranchPathBuf,
-        heads: ChangeHashSet,
-    },
-    DeleteDoc {
-        doc_id: DocId,
-    },
     RefreshSpecsAndReindexAll,
-}
-
-struct FacetRefTriageListener {
-    drawer_repo: Arc<DrawerRepo>,
-    plugs_repo: Arc<PlugsRepo>,
-    index_repo: Arc<DocFacetRefIndexRepo>,
-}
-
-impl FacetRefTriageListener {
-    async fn build_drawer_predicate(&self) -> Res<Option<DocPredicateClause>> {
-        let plugs = self.plugs_repo.list_plugs().await;
-        let mut clauses = Vec::new();
-        for plug in plugs {
-            for facet in &plug.facets {
-                if facet.references.is_empty() {
-                    continue;
-                }
-                clauses.push(DocPredicateClause::HasTag(facet.key_tag.clone()));
-            }
-        }
-        if clauses.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(DocPredicateClause::Or(clauses)))
-    }
-}
-
-#[async_trait]
-impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
-    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        crate::rt::switch::SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: true,
-            consume_plugs: true,
-            consume_dispatch: false,
-            consume_config: false,
-            drawer_predicate: None,
-        }
-    }
-
-    async fn on_event(
-        &mut self,
-        event: &crate::rt::switch::SwitchEvent,
-        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
-    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
-        let mut outcome = crate::rt::switch::SwitchSinkOutcome::default();
-        match event {
-            crate::rt::switch::SwitchEvent::Doc(event) => {
-                if event.branch_name != "main" {
-                    return Ok(outcome);
-                }
-                let branch_path = BranchPathBuf::from("main");
-                self.index_repo
-                    .handle_worker_item(DocFacetRefIndexWorkItem::Upsert {
-                        doc_id: event.doc_id.clone(),
-                        branch_path,
-                        heads: event.new_heads.clone(),
-                    })
-                    .await?;
-            }
-            crate::rt::switch::SwitchEvent::Plugs(_) => {
-                outcome.drawer_predicate_update = self.build_drawer_predicate().await?;
-                self.index_repo
-                    .handle_worker_item(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll)
-                    .await?;
-            }
-            crate::rt::switch::SwitchEvent::Drawer(event) => match &**event {
-                crate::drawer::DrawerEvent::DocDeleted { id, .. } => {
-                    self.index_repo
-                        .handle_worker_item(DocFacetRefIndexWorkItem::DeleteDoc {
-                            doc_id: id.clone(),
-                        })
-                        .await?;
-                }
-                crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                    let Some(heads) = entry.branches.get("main") else {
-                        self.index_repo
-                            .handle_worker_item(DocFacetRefIndexWorkItem::DeleteDoc {
-                                doc_id: id.clone(),
-                            })
-                            .await?;
-                        return Ok(outcome);
-                    };
-                    let branch_path = BranchPathBuf::from("main");
-                    let Some(_keys) = self
-                        .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads)
-                        .await?
-                    else {
-                        self.index_repo
-                            .handle_worker_item(DocFacetRefIndexWorkItem::DeleteDoc {
-                                doc_id: id.clone(),
-                            })
-                            .await?;
-                        return Ok(outcome);
-                    };
-                    self.index_repo
-                        .handle_worker_item(DocFacetRefIndexWorkItem::Upsert {
-                            doc_id: id.clone(),
-                            branch_path,
-                            heads: heads.clone(),
-                        })
-                        .await?;
-                }
-            },
-            _ => {}
-        }
-        Ok(outcome)
-    }
 }
 
 #[cfg(test)]

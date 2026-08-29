@@ -1,20 +1,25 @@
 use crate::interlude::*;
 
-use crate::drawer::DrawerEvent;
-use crate::rt::dispatch::{DispatchEvent, DispatchOnSuccessHook, DispatchStatus};
-use crate::rt::switch::{
-    SwitchEvent, SwitchSink, SwitchSinkCtx, SwitchSinkOutcome, SwtchSinkInterest,
-    facet_keys_set_to_meta_doc,
-};
+use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
+use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::plugs::PlugsRepo;
+use crate::repos::Repo;
+use crate::rt::dispatch::DispatchOnSuccessHook;
 use crate::rt::{DispatchArgs, Rt};
-use daybook_types::doc::BranchPathBuf;
-use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
+use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
+use big_sync_core::revisioned_store::{
+    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
+};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
 
 use daybook_types::manifest::{
     ChangeOriginDeets, DocChangeKind, DocPredicateEvalMode, DocPredicateEvalRequirement,
     DocPredicateEvalResolved, FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets,
     ProcessorEventPredicate, ProcessorManifest,
 };
+use std::collections::BTreeMap;
+use tokio_util::sync::CancellationToken;
 
 struct PreparedProcessor {
     processor_full_id: String,
@@ -36,32 +41,22 @@ struct DocProcessorTriageListener {
     facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
-    dispatch_to_job: HashMap<String, String>,
-    job_to_dispatch: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessorDispatchPlan {
+    doc_id: DocId,
+    branch_path: BranchPathBuf,
+    heads: ChangeHashSet,
+    plug_id: String,
+    routine_name: String,
+    processor_full_id: String,
+    changed_facet_keys: Vec<String>,
+    done_token: String,
+    dispatch_id: String,
 }
 
 impl DocProcessorTriageListener {
-    fn inflight_job_key(
-        doc_id: &DocId,
-        processor_full_id: &str,
-        branch_path: &BranchPathBuf,
-        doc_heads: &ChangeHashSet,
-    ) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            doc_id,
-            processor_full_id,
-            branch_path,
-            am_utils_rs::serialize_commit_heads(doc_heads.as_ref()).join(",")
-        )
-    }
-
-    fn clear_inflight_dispatch(&mut self, dispatch_id: &str) {
-        if let Some(job_key) = self.dispatch_to_job.remove(dispatch_id) {
-            self.job_to_dispatch.remove(&job_key);
-        }
-    }
-
     #[tracing::instrument(skip(self, rt))]
     async fn refresh_processors(&mut self, rt: &Arc<Rt>) -> Res<()> {
         // ADR 007 §6: processors register for active plugs only.
@@ -131,24 +126,24 @@ impl DocProcessorTriageListener {
 
     #[expect(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, doc, doc_heads))]
-    async fn triage_doc(
+    async fn plan_doc(
         &mut self,
         doc_id: &DocId,
         doc_heads: &ChangeHashSet,
         doc: &Doc,
         branch_path: daybook_types::doc::BranchPathBuf,
-        _event_origin: &crate::event_origin::SwitchEventOrigin,
         change_kind: DocChangeKind,
         changed_facet_keys: Option<&HashSet<FacetKey>>,
         added_facet_keys: Option<&HashSet<FacetKey>>,
         removed_facet_keys: Option<&HashSet<FacetKey>>,
         local_changed_facet_keys: Option<&HashSet<FacetKey>>,
-    ) -> Res<()> {
+    ) -> Res<Option<Vec<ProcessorDispatchPlan>>> {
         let rt = &self.rt;
         debug!(
             processor_count = self.cached_processors.len(),
             "triaging doc"
         );
+        let mut plans = Vec::new();
         let mut full_doc_for_reference_predicates: Option<Option<Arc<Doc>>> = None;
         for processor in &self.cached_processors {
             let is_local_for_processor = local_changed_facet_keys
@@ -175,13 +170,14 @@ impl DocProcessorTriageListener {
             self.predicate_requirements.clear();
             predicate.append_requirements(&mut self.predicate_requirements);
 
-            let needs_full_doc = self.predicate_requirements.iter().any(|req| {
-                matches!(
-                    req,
-                    DocPredicateEvalRequirement::FullDoc
-                        | DocPredicateEvalRequirement::FacetsOfTag(_)
-                )
-            });
+            let needs_full_doc = change_kind != DocChangeKind::Deleted
+                && self.predicate_requirements.iter().any(|req| {
+                    matches!(
+                        req,
+                        DocPredicateEvalRequirement::FullDoc
+                            | DocPredicateEvalRequirement::FacetsOfTag(_)
+                    )
+                });
 
             let predicate_doc_arc = if needs_full_doc {
                 if full_doc_for_reference_predicates.is_none() {
@@ -197,7 +193,7 @@ impl DocProcessorTriageListener {
                     .and_then(|opt| opt.as_ref())
                 {
                     Some(doc) => Some(doc),
-                    None => continue,
+                    None => return Ok(None),
                 }
             } else {
                 None
@@ -253,7 +249,7 @@ impl DocProcessorTriageListener {
                 ?doc_id,
                 branch_path = %branch_path,
                 heads = ?am_utils_rs::serialize_commit_heads(doc_heads.as_ref()),
-                "dispatching job"
+                "planning processor dispatch"
             );
             let changed_facet_keys: Vec<String> = {
                 let mut keys = std::collections::BTreeSet::new();
@@ -275,317 +271,35 @@ impl DocProcessorTriageListener {
                 extend_keys(removed_facet_keys);
                 keys.into_iter().collect()
             };
-            let args = DispatchArgs::DocRoutine {
-                doc_id: doc_id.clone(),
-                branch_path: branch_path.clone(),
-                heads: doc_heads.clone(),
-                invocation: crate::rt::dispatch::RoutineInvocation::Processor(
-                    crate::rt::dispatch::ProcessorInvocation {
-                        trigger_doc_id: doc_id.clone(),
-                        changed_facet_keys: changed_facet_keys.clone(),
-                    },
-                ),
-                changed_facet_keys,
-                wflow_args_json: None,
-            };
-            let job_key = Self::inflight_job_key(
-                doc_id,
-                &processor.processor_full_id,
-                &branch_path,
-                doc_heads,
-            );
-            let old_dispatch = self.job_to_dispatch.get(&job_key).cloned();
-            if let Some(dispatch_id) = old_dispatch {
-                info!(
-                    ?dispatch_id,
-                    "inflight job already exists; skipping redispatch"
-                );
-                continue;
-            }
             let done_token = make_processor_done_token(
                 doc_id,
                 &processor.processor_full_id,
                 &branch_path,
                 doc_heads,
             );
-            let dispatch_id = rt
-                .dispatch_raw(
-                    &processor.plug_id,
-                    &processor.routine_name.0,
-                    args,
-                    vec![DispatchOnSuccessHook::ProcessorRunLog {
-                        doc_id: doc_id.clone(),
-                        processor_full_id: processor.processor_full_id.clone(),
-                        done_token,
-                    }],
-                )
-                .await?;
-            self.job_to_dispatch
-                .insert(job_key.clone(), dispatch_id.clone());
-            self.dispatch_to_job.insert(dispatch_id, job_key);
+            let dispatch_id = processor_dispatch_id(
+                doc_id,
+                &branch_path,
+                doc_heads,
+                &processor.plug_id,
+                &processor.routine_name.0,
+            );
+            plans.push(ProcessorDispatchPlan {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                heads: doc_heads.clone(),
+                plug_id: processor.plug_id.clone(),
+                routine_name: processor.routine_name.0.clone(),
+                processor_full_id: processor.processor_full_id.clone(),
+                changed_facet_keys,
+                done_token,
+                dispatch_id,
+            });
         }
-        Ok(())
+        Ok(Some(plans))
     }
 }
 
-#[async_trait]
-impl SwitchSink for DocProcessorTriageListener {
-    fn interest(&self) -> SwtchSinkInterest {
-        SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: true,
-            consume_plugs: true,
-            consume_dispatch: true,
-            consume_config: true,
-            drawer_predicate: None,
-        }
-    }
-
-    async fn on_event(
-        &mut self,
-        event: &SwitchEvent,
-        _ctx: &SwitchSinkCtx<'_>,
-    ) -> Res<SwitchSinkOutcome> {
-        match event {
-            SwitchEvent::Doc(event) => {
-                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
-                if branch_path.to_string().starts_with("/tmp/") {
-                    return Ok(SwitchSinkOutcome::default());
-                }
-                let rt = &self.rt;
-                let Some(facet_keys_set) = rt
-                    .drawer
-                    .get_facet_keys_if_latest(&event.doc_id, &branch_path, &event.new_heads)
-                    .await?
-                else {
-                    debug!(id = ?event.doc_id, ?branch_path, "skipping triage for stale heads");
-                    return Ok(SwitchSinkOutcome::default());
-                };
-                let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-                if let Some(diff) = &event.diff {
-                    let non_dmeta_changed: HashSet<FacetKey> = diff
-                        .changed_facet_keys
-                        .iter()
-                        .cloned()
-                        .chain(diff.added_facet_keys.iter().cloned())
-                        .chain(diff.removed_facet_keys.iter().cloned())
-                        .filter(|facet_key| facet_key != &dmeta_key)
-                        .collect();
-                    let has_non_dmeta_change = !non_dmeta_changed.is_empty();
-                    let moved_any_branch = !diff.moved_branch_names.is_empty();
-                    let changed_facet_keys_set: Option<HashSet<FacetKey>> = if has_non_dmeta_change
-                    {
-                        if !changed_intersects_read_set(
-                            &non_dmeta_changed,
-                            &self.triage_read_tags,
-                            &self.triage_read_keys,
-                        ) {
-                            return Ok(SwitchSinkOutcome::default());
-                        }
-                        Some(non_dmeta_changed)
-                    } else if moved_any_branch {
-                        None
-                    } else {
-                        return Ok(SwitchSinkOutcome::default());
-                    };
-                    let added_facet_keys_set: Option<HashSet<FacetKey>> =
-                        if diff.added_facet_keys.is_empty() {
-                            None
-                        } else {
-                            Some(diff.added_facet_keys.iter().cloned().collect())
-                        };
-                    let removed_facet_keys_set: Option<HashSet<FacetKey>> =
-                        if diff.removed_facet_keys.is_empty() {
-                            None
-                        } else {
-                            Some(diff.removed_facet_keys.iter().cloned().collect())
-                        };
-                    let local_changed_facet_keys_set = rt
-                        .drawer
-                        .facet_keys_touched_by_local_actor(
-                            &event.doc_id,
-                            &branch_path,
-                            &event.new_heads,
-                            &diff
-                                .changed_facet_keys
-                                .iter()
-                                .cloned()
-                                .chain(diff.added_facet_keys.iter().cloned())
-                                .chain(diff.removed_facet_keys.iter().cloned())
-                                .filter(|key| *key != dmeta_key)
-                                .collect::<Vec<_>>(),
-                        )
-                        .await?;
-                    let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
-                    let change_kind = if event.prev_heads.is_none() {
-                        DocChangeKind::Added
-                    } else {
-                        DocChangeKind::Updated
-                    };
-                    self.triage_doc(
-                        &event.doc_id,
-                        &event.new_heads,
-                        &meta_doc,
-                        branch_path,
-                        &event.origin,
-                        change_kind,
-                        changed_facet_keys_set.as_ref(),
-                        added_facet_keys_set.as_ref(),
-                        removed_facet_keys_set.as_ref(),
-                        Some(&local_changed_facet_keys_set),
-                    )
-                    .await
-                    .wrap_err("error triaging doc")?;
-                } else {
-                    let changed_facet_keys_set: HashSet<FacetKey> =
-                        facet_keys_set.iter().cloned().collect();
-                    let local_changed_facet_keys_set = rt
-                        .drawer
-                        .facet_keys_touched_by_local_actor(
-                            &event.doc_id,
-                            &branch_path,
-                            &event.new_heads,
-                            &changed_facet_keys_set
-                                .iter()
-                                .filter(|key| **key != dmeta_key)
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                        )
-                        .await?;
-                    let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
-                    self.triage_doc(
-                        &event.doc_id,
-                        &event.new_heads,
-                        &meta_doc,
-                        branch_path,
-                        &event.origin,
-                        DocChangeKind::Added,
-                        Some(&changed_facet_keys_set),
-                        Some(&changed_facet_keys_set),
-                        None,
-                        Some(&local_changed_facet_keys_set),
-                    )
-                    .await
-                    .wrap_err("error triaging doc")?;
-                }
-            }
-            SwitchEvent::Plugs(_) => {
-                let rt = Arc::clone(&self.rt);
-                self.refresh_processors(&rt).await?;
-            }
-            SwitchEvent::Config(_) => {}
-            SwitchEvent::Dispatch(event) => match &**event {
-                DispatchEvent::DispatchDeleted { id, .. } => {
-                    self.clear_inflight_dispatch(id);
-                }
-                DispatchEvent::DispatchUpdated { id, .. } => {
-                    let rt = &self.rt;
-                    let Some(dispatch) = rt.dispatch_repo.get_any(id).await else {
-                        self.clear_inflight_dispatch(id);
-                        return Ok(SwitchSinkOutcome::default());
-                    };
-                    if matches!(
-                        dispatch.status,
-                        DispatchStatus::Succeeded
-                            | DispatchStatus::Failed
-                            | DispatchStatus::Cancelled
-                    ) {
-                        self.clear_inflight_dispatch(id);
-                    }
-                }
-                DispatchEvent::DispatchAdded { .. } => {}
-            },
-            SwitchEvent::Drawer(event) => match &**event {
-                DrawerEvent::DocDeleted {
-                    id,
-                    deleted_facet_keys,
-                    drawer_heads,
-                    origin,
-                    ..
-                } => {
-                    let deleted_set: HashSet<FacetKey> =
-                        deleted_facet_keys.iter().cloned().collect();
-                    if !changed_intersects_read_set(
-                        &deleted_set,
-                        &self.triage_read_tags,
-                        &self.triage_read_keys,
-                    ) {
-                        return Ok(SwitchSinkOutcome::default());
-                    }
-                    let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
-                    let pseudo_branch = BranchPathBuf::from("main");
-                    self.triage_doc(
-                        id,
-                        drawer_heads,
-                        &meta_doc,
-                        pseudo_branch,
-                        origin,
-                        DocChangeKind::Deleted,
-                        Some(&deleted_set),
-                        None,
-                        Some(&deleted_set),
-                        None,
-                    )
-                    .await
-                    .wrap_err("error triaging deleted doc")?;
-                }
-                DrawerEvent::DocAdded {
-                    id,
-                    entry,
-                    drawer_heads: _,
-                    origin,
-                } => {
-                    for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPathBuf::from(branch_name.as_str());
-                        if branch_path.to_string().starts_with("/tmp/") {
-                            continue;
-                        }
-                        let rt = &self.rt;
-                        let Some(facet_keys_set) = rt
-                            .drawer
-                            .get_facet_keys_if_latest(id, &branch_path, heads)
-                            .await?
-                        else {
-                            continue;
-                        };
-                        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-                        let changed_facet_keys_set: HashSet<FacetKey> =
-                            facet_keys_set.iter().cloned().collect();
-                        let local_changed_facet_keys_set = rt
-                            .drawer
-                            .facet_keys_touched_by_local_actor(
-                                id,
-                                &branch_path,
-                                heads,
-                                &changed_facet_keys_set
-                                    .iter()
-                                    .filter(|key| **key != dmeta_key)
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                            )
-                            .await?;
-                        let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
-                        self.triage_doc(
-                            id,
-                            heads,
-                            &meta_doc,
-                            branch_path,
-                            origin,
-                            DocChangeKind::Added,
-                            Some(&changed_facet_keys_set),
-                            Some(&changed_facet_keys_set),
-                            None,
-                            Some(&local_changed_facet_keys_set),
-                        )
-                        .await
-                        .wrap_err("error triaging doc")?;
-                    }
-                }
-            },
-        }
-        Ok(SwitchSinkOutcome::default())
-    }
-}
 /// Returns true if any changed key matches this processor's read set (by tag or by full key).
 fn changed_intersects_read_set(
     changed: &HashSet<FacetKey>,
@@ -662,8 +376,307 @@ fn make_processor_done_token(
     utils_rs::hash::blake3_hash_bytes_multibase(fingerprint.as_bytes())
 }
 
-pub fn doc_processor_triage_listener(rt: Arc<Rt>) -> Box<dyn SwitchSink + Send + Sync> {
-    Box::new(DocProcessorTriageListener {
+fn processor_dispatch_id(
+    doc_id: &DocId,
+    branch_path: &BranchPathBuf,
+    heads: &ChangeHashSet,
+    plug_id: &str,
+    routine_name: &str,
+) -> String {
+    let mut identity = String::new();
+    use std::fmt::Write as _;
+    write!(
+        &mut identity,
+        "{}|{}|{}|{}|{}|processor",
+        doc_id,
+        branch_path,
+        am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
+        plug_id,
+        routine_name,
+    )
+    .expect("writing to string should never fail");
+    let digest = utils_rs::hash::blake3_hash_bytes_multibase(identity.as_bytes());
+    format!("{plug_id}/{routine_name}/{branch_path}-{digest}")
+}
+
+async fn enqueue_processor_plan(rt: &Rt, plan: &ProcessorDispatchPlan) -> Res<()> {
+    if rt.dispatch_repo.get_any(&plan.dispatch_id).await.is_some() {
+        return Ok(());
+    }
+    let args = DispatchArgs::DocRoutine {
+        doc_id: plan.doc_id.clone(),
+        branch_path: plan.branch_path.clone(),
+        heads: plan.heads.clone(),
+        invocation: crate::rt::dispatch::RoutineInvocation::Processor(
+            crate::rt::dispatch::ProcessorInvocation {
+                trigger_doc_id: plan.doc_id.clone(),
+                changed_facet_keys: plan.changed_facet_keys.clone(),
+            },
+        ),
+        changed_facet_keys: plan.changed_facet_keys.clone(),
+        wflow_args_json: None,
+    };
+    rt.dispatch_raw(
+        &plan.plug_id,
+        &plan.routine_name,
+        args,
+        vec![DispatchOnSuccessHook::ProcessorRunLog {
+            doc_id: plan.doc_id.clone(),
+            processor_full_id: plan.processor_full_id.clone(),
+            done_token: plan.done_token.clone(),
+        }],
+    )
+    .await?;
+    Ok(())
+}
+
+fn processor_meta_doc(doc_id: &DocId, keys: &HashSet<FacetKey>) -> Doc {
+    Doc {
+        id: doc_id.clone(),
+        facets: keys
+            .iter()
+            .cloned()
+            .map(|key| (key, serde_json::Value::Null))
+            .collect(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessorDocState {
+    heads: Option<ChangeHashSet>,
+}
+
+struct ProcessorFacetGroup {
+    document_id: DocId,
+    branch_id: BranchId,
+    deltas: Vec<FacetDelta>,
+}
+
+fn processor_facet_state_key(key: &FacetRouteKey) -> Vec<u8> {
+    let mut encoded = b"facet:".to_vec();
+    encoded.extend(serde_json::to_vec(key).expect(ERROR_JSON));
+    encoded
+}
+
+fn processor_doc_state_key(document_id: &DocId, branch_id: &str) -> Vec<u8> {
+    let mut encoded = b"doc:".to_vec();
+    encoded.extend(serde_json::to_vec(&(document_id, branch_id)).expect(ERROR_JSON));
+    encoded
+}
+
+fn processor_snapshot_changed(previous: &FacetSnapshot, current: &FacetSnapshot) -> bool {
+    previous.facet_heads != current.facet_heads || previous.actor_id != current.actor_id
+}
+
+async fn plan_processor_group(
+    triage: &mut DocProcessorTriageListener,
+    group: ProcessorFacetGroup,
+    previous: &HashMap<Vec<u8>, FacetSnapshot>,
+    previous_doc: Option<&ProcessorDocState>,
+) -> Res<Option<(Vec<ProcessorDispatchPlan>, Vec<(Vec<u8>, Option<Vec<u8>>)>)>> {
+    let branch_path = BranchPathBuf::from("main");
+    let mut changed = HashSet::new();
+    let mut added = HashSet::new();
+    let mut removed = HashSet::new();
+    let mut local_candidates = HashSet::new();
+    let mut current_heads = None;
+    let dmeta_key = FacetKey::from(daybook_types::doc::WellKnownFacetTag::Dmeta);
+    for delta in &group.deltas {
+        let is_dmeta = delta.key.facet_key == dmeta_key;
+        if let Some(snapshot) = &delta.current {
+            current_heads = Some(snapshot.branch_heads.clone());
+            let state_key = processor_facet_state_key(&delta.key);
+            match previous.get(&state_key) {
+                Some(prior) if processor_snapshot_changed(prior, snapshot) => {
+                    if !is_dmeta {
+                        changed.insert(delta.key.facet_key.clone());
+                        local_candidates.insert(delta.key.facet_key.clone());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    if !is_dmeta {
+                        added.insert(delta.key.facet_key.clone());
+                        local_candidates.insert(delta.key.facet_key.clone());
+                    }
+                }
+            }
+        } else if previous.contains_key(&processor_facet_state_key(&delta.key)) {
+            if !is_dmeta {
+                removed.insert(delta.key.facet_key.clone());
+                if delta.removed_local {
+                    local_candidates.insert(delta.key.facet_key.clone());
+                }
+            }
+        }
+    }
+    let current_heads = current_heads.or_else(|| {
+        group
+            .deltas
+            .iter()
+            .find_map(|delta| delta.current_branch_heads.clone())
+    });
+    let change_kind = if current_heads.is_none() {
+        DocChangeKind::Deleted
+    } else if previous_doc.is_some_and(|state| state.heads.is_some()) {
+        DocChangeKind::Updated
+    } else {
+        DocChangeKind::Added
+    };
+    let mut local_changed = if let Some(current_heads) = &current_heads {
+        let mut keys = local_candidates.iter().cloned().collect::<Vec<_>>();
+        keys.sort();
+        triage
+            .rt
+            .drawer
+            .facet_keys_touched_by_local_actor(
+                &group.document_id,
+                &branch_path,
+                current_heads,
+                &keys,
+            )
+            .await?
+    } else {
+        HashSet::new()
+    };
+    if current_heads.is_none() {
+        local_changed.extend(local_candidates);
+    }
+    let all_changed = changed
+        .iter()
+        .chain(added.iter())
+        .chain(removed.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    let doc = Arc::new(processor_meta_doc(&group.document_id, &all_changed));
+    let Some(plans) = triage
+        .plan_doc(
+            &group.document_id,
+            &current_heads.clone().unwrap_or_default(),
+            &doc,
+            branch_path,
+            change_kind,
+            (!changed.is_empty()).then_some(&changed),
+            (!added.is_empty()).then_some(&added),
+            (!removed.is_empty()).then_some(&removed),
+            current_heads.as_ref().map(|_| &local_changed),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let mut state_updates = Vec::new();
+    for delta in group.deltas {
+        let state_key = processor_facet_state_key(&delta.key);
+        if let Some(snapshot) = delta.current {
+            state_updates.push((
+                state_key,
+                Some(serde_json::to_vec(&snapshot).expect(ERROR_JSON)),
+            ));
+        } else {
+            state_updates.push((state_key, None));
+        }
+    }
+    state_updates.push((
+        processor_doc_state_key(&group.document_id, &group.branch_id.0),
+        Some(
+            serde_json::to_vec(&ProcessorDocState {
+                heads: current_heads,
+            })
+            .expect(ERROR_JSON),
+        ),
+    ));
+    Ok(Some((plans, state_updates)))
+}
+
+async fn apply_processor_revision(
+    triage: &mut DocProcessorTriageListener,
+    state: &big_sync::SqliteDeltaWalkerStateRepo,
+    walker: &mut SerialDeltaWalker<'_, FacetSetRevisionStore, big_sync::SqliteDeltaWalkerStateRepo>,
+    source_revision: u64,
+    entries: Vec<FacetDelta>,
+) -> Res<bool> {
+    let mut groups = BTreeMap::<(DocId, String), ProcessorFacetGroup>::new();
+    for delta in entries {
+        if delta.key.branch_id.0 != delta.key.document_id {
+            continue;
+        }
+        groups
+            .entry((delta.key.document_id.clone(), delta.key.branch_id.0.clone()))
+            .or_insert_with(|| ProcessorFacetGroup {
+                document_id: delta.key.document_id.clone(),
+                branch_id: delta.key.branch_id.clone(),
+                deltas: Vec::new(),
+            })
+            .deltas
+            .push(delta);
+    }
+    let mut lookup_keys = Vec::new();
+    for group in groups.values() {
+        lookup_keys.push(processor_doc_state_key(
+            &group.document_id,
+            &group.branch_id.0,
+        ));
+        lookup_keys.extend(
+            group
+                .deltas
+                .iter()
+                .map(|delta| processor_facet_state_key(&delta.key)),
+        );
+    }
+    let prior_rows = state
+        .get_many(&lookup_keys)
+        .await
+        .map_err(|error| ferr!("reading DocProcessor sparse state: {error}"))?;
+    let mut prior_snapshots = HashMap::new();
+    let mut prior_docs = HashMap::new();
+    for (key, value) in prior_rows {
+        if key.starts_with(b"facet:") {
+            prior_snapshots.insert(key, serde_json::from_slice::<FacetSnapshot>(&value)?);
+        } else {
+            prior_docs.insert(key, serde_json::from_slice::<ProcessorDocState>(&value)?);
+        }
+    }
+    let mut plans = Vec::new();
+    let mut state_updates = Vec::new();
+    for group in groups.into_values() {
+        let doc_key = processor_doc_state_key(&group.document_id, &group.branch_id.0);
+        let Some((group_plans, group_updates)) =
+            plan_processor_group(triage, group, &prior_snapshots, prior_docs.get(&doc_key)).await?
+        else {
+            return Ok(false);
+        };
+        plans.extend(group_plans);
+        state_updates.extend(group_updates);
+    }
+    for plan in &plans {
+        enqueue_processor_plan(&triage.rt, plan).await?;
+    }
+    let mut settlement = walker
+        .begin_settlement(source_revision)
+        .await
+        .map_err(|error| ferr!("beginning DocProcessor FacetSet settlement: {error}"))?;
+    for (key, value) in state_updates {
+        match value {
+            Some(value) => settlement
+                .put(key, value)
+                .await
+                .map_err(|error| ferr!("persisting DocProcessor sparse state: {error}"))?,
+            None => settlement
+                .delete(&key)
+                .await
+                .map_err(|error| ferr!("deleting DocProcessor sparse state: {error}"))?,
+        }
+    }
+    settlement
+        .settle()
+        .await
+        .map_err(|error| ferr!("settling DocProcessor FacetSet revision: {error}"))?;
+    Ok(true)
+}
+
+fn new_doc_processor_listener(rt: Arc<Rt>) -> DocProcessorTriageListener {
+    DocProcessorTriageListener {
         rt,
         cached_processors: Vec::new(),
         triage_read_tags: HashSet::new(),
@@ -671,9 +684,141 @@ pub fn doc_processor_triage_listener(rt: Arc<Rt>) -> Box<dyn SwitchSink + Send +
         facet_reference_specs: Arc::new(HashMap::new()),
         predicate_requirements: HashSet::new(),
         predicate_resolved: HashMap::new(),
-        dispatch_to_job: HashMap::new(),
-        job_to_dispatch: HashMap::new(),
+    }
+}
+
+pub(crate) struct DocProcessorStopToken {
+    cancel_token: CancellationToken,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DocProcessorStopToken {
+    pub(crate) async fn stop(mut self) -> Res<()> {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.worker_handle.take() {
+            handle.await?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn spawn_doc_processor_driver(
+    rt: Arc<Rt>,
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    plugs_repo: Arc<PlugsRepo>,
+    parent_cancel_token: CancellationToken,
+) -> Res<DocProcessorStopToken> {
+    let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+        rt.rcx.sql.read_pool.clone(),
+        rt.rcx.sql.write_pool.clone(),
+        "@daybook/core/doc-processor",
+        "plugs",
+    )
+    .await
+    .map_err(|error| ferr!("initializing DocProcessor Plugs walker state: {error}"))?;
+    let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+        rt.rcx.sql.read_pool.clone(),
+        rt.rcx.sql.write_pool.clone(),
+        "@daybook/core/doc-processor",
+        "facets",
+    )
+    .await?;
+    let wake = rt.drawer.subscribe_materialization_wake(None).await?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let worker_handle = tokio::spawn(async move {
+        run_doc_processor_driver(
+            rt,
+            facet_set_store,
+            plugs_repo,
+            facet_state,
+            plugs_state,
+            worker_cancel_token,
+            wake,
+        )
+        .await
+        .unwrap();
+    });
+    Ok(DocProcessorStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
     })
+}
+
+async fn run_doc_processor_driver(
+    rt: Arc<Rt>,
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    plugs_repo: Arc<PlugsRepo>,
+    facet_state: big_sync::SqliteDeltaWalkerStateRepo,
+    plugs_state: big_sync::SqliteDeltaWalkerStateRepo,
+    cancel_token: CancellationToken,
+    mut wake: crate::drawer::MaterializationWake,
+) -> Res<()> {
+    let mut triage = new_doc_processor_listener(Arc::clone(&rt));
+    let mut plugs_walker = SerialDeltaWalker::open(
+        plugs_repo.as_ref(),
+        &plugs_state,
+        crate::plugs::PlugsRevisionSelector::All,
+        RevisionReadLimits::default(),
+    )
+    .await
+    .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
+    let mut facet_walker = SerialDeltaWalker::open(
+        facet_set_store.as_ref(),
+        &facet_state,
+        FacetSetSelector::All,
+        RevisionReadLimits::default(),
+    )
+    .await
+    .map_err(|error| ferr!("opening DocProcessor FacetSet walker: {error}"))?;
+    let mut deferred = None;
+    loop {
+        let read = if let Some((revision, entries)) = deferred.take() {
+            RevisionRead::Entries { revision, entries }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                plug_read = plugs_walker.next() => {
+                    match plug_read.map_err(|error| ferr!("reading DocProcessor Plugs walker: {error:?}"))? {
+                        RevisionRead::ReplayComplete { .. } => continue,
+                        RevisionRead::Entries { revision, entries } => {
+                            if !entries.is_empty() {
+                                triage.refresh_processors(&rt).await?;
+                            }
+                            plugs_walker
+                                .settle(revision)
+                                .await
+                                .map_err(|error| ferr!("settling DocProcessor Plugs walker: {error}"))?;
+                            continue;
+                        }
+                    }
+                }
+                read = facet_walker.next() => read.map_err(|error| ferr!("reading DocProcessor FacetSet walker: {error:?}"))?,
+            }
+        };
+        match read {
+            RevisionRead::ReplayComplete { .. } => {}
+            RevisionRead::Entries { revision, entries } => {
+                if !apply_processor_revision(
+                    &mut triage,
+                    &facet_state,
+                    &mut facet_walker,
+                    revision,
+                    entries.clone(),
+                )
+                .await?
+                {
+                    deferred = Some((revision, entries));
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return Ok(()),
+                        result = wake.wait() => result?,
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@
 //! published — the fresh part subscription then replays every stored object
 //! at cursor 0, which *is* the full build; otherwise both streams tail from
 //! their cursors. There is no gap handling: neither log is pruned.
+use crate::changes::{BigRepoLocalNotification, LocalFilter};
 use crate::interlude::*;
 use crate::runtime2::{WorkerGroupScope, driver};
 use crate::store::sqlite::SqliteBigRepoStore;
@@ -40,8 +41,10 @@ use std::time::{Duration, Instant};
 const EVENT_BATCH_SIZE: u32 = 64;
 const IDLE_POLL: Duration = Duration::from_millis(25);
 
-pub fn automerge_docs_part_id() -> PartId {
-    PartId::new(*blake3::hash(b"big_repo:automerge_docs_partition").as_bytes())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishOutcome {
+    Published,
+    Deferred,
 }
 
 /// The frontier payload object id for a document.
@@ -79,6 +82,7 @@ pub fn spawn_automerge_frontier_worker(
     frontier_store: Arc<dyn HostPartStore>,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
     keyhive: crate::keyhive::BigKeyhiveHandle,
     scope: WorkerGroupScope,
 ) -> SpawnedAutomergeFrontierWorker<Sendable> {
@@ -92,6 +96,7 @@ pub fn spawn_automerge_frontier_worker(
             runtime,
             keyhive,
             scope,
+            change_manager,
         );
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
@@ -112,9 +117,14 @@ pub fn spawn_automerge_frontier_worker(
 enum Cmd {
     PublishHeadsWatermarked {
         doc_id: crate::DocumentId,
-        cursor: u64,
+        cursor: Option<u64>,
     },
     CommitPartCursor {
+        part_id: PartId,
+        cursor: u64,
+    },
+    RemoveFrontierMembership {
+        doc_id: crate::DocumentId,
         part_id: PartId,
         cursor: u64,
     },
@@ -123,6 +133,16 @@ enum Cmd {
 
 #[derive(Debug)]
 enum Evt {
+    DocumentReady {
+        doc_id: crate::DocumentId,
+    },
+    Published {
+        doc_id: crate::DocumentId,
+        through: Option<u64>,
+    },
+    Deferred {
+        doc_id: crate::DocumentId,
+    },
     KhRows(Vec<driver::AdmittedRow>),
     Decoded {
         seq: u64,
@@ -143,6 +163,7 @@ enum Evt {
         part_ids: Vec<PartId>,
     },
     PartRemoved {
+        doc_id: crate::DocumentId,
         part_id: PartId,
         cursor: u64,
     },
@@ -213,6 +234,9 @@ enum FrontierTaskOutput {
         key: FrontierKey,
         covered: BTreeSet<u64>,
     },
+    Deferred {
+        doc: crate::DocumentId,
+    },
 }
 
 #[derive(Default)]
@@ -222,12 +246,42 @@ struct AutomergeFrontierCore {
     scheduler: KeyedScheduler<FrontierKey, FrontierSeed>,
     pending_rows: BTreeMap<u64, driver::AdmittedRow>,
     ready_seeds: Vec<FrontierSeed>,
+    pending_parts: HashMap<crate::DocumentId, BTreeMap<PartId, u64>>,
+    queued_docs: HashSet<crate::DocumentId>,
 }
 
 impl AutomergeFrontierCore {
     fn on_evt(&mut self, evt: Evt) {
         match evt {
             Evt::KhRows(rows) => self.on_rows(rows),
+            Evt::DocumentReady { doc_id } => {
+                let cursor = self
+                    .pending_parts
+                    .get(&doc_id)
+                    .and_then(|parts| parts.values().copied().max());
+                self.queue_publish(doc_id, cursor);
+            }
+            Evt::Published { doc_id, through } => {
+                self.queued_docs.remove(&doc_id);
+                if let Some(parts) = self.pending_parts.remove(&doc_id) {
+                    let mut remaining = BTreeMap::new();
+                    for (part_id, cursor) in parts {
+                        if through.is_none_or(|limit| cursor > limit) {
+                            remaining.insert(part_id, cursor);
+                            continue;
+                        }
+                        self.outbox
+                            .push(Cmd::CommitPartCursor { part_id, cursor }, ());
+                    }
+                    if let Some(cursor) = remaining.values().copied().max() {
+                        self.pending_parts.insert(doc_id, remaining);
+                        self.queue_publish(doc_id, Some(cursor));
+                    }
+                }
+            }
+            Evt::Deferred { doc_id } => {
+                self.queued_docs.remove(&doc_id);
+            }
             Evt::Decoded { seq, doc } => self.on_decoded(seq, doc),
             Evt::TaskSettled { key, covered } => {
                 for seq in covered {
@@ -239,32 +293,67 @@ impl AutomergeFrontierCore {
                 part_id,
                 cursor,
             } => {
-                self.outbox
-                    .push(Cmd::PublishHeadsWatermarked { doc_id, cursor }, ());
-                self.outbox
-                    .push(Cmd::CommitPartCursor { part_id, cursor }, ());
+                self.pending_parts
+                    .entry(doc_id)
+                    .or_default()
+                    .entry(part_id)
+                    .and_modify(|old| *old = (*old).max(cursor))
+                    .or_insert(cursor);
+                self.queue_publish(doc_id, Some(cursor));
             }
             Evt::PartChanged {
                 doc_id,
                 cursor,
                 part_ids,
             } => {
-                self.outbox
-                    .push(Cmd::PublishHeadsWatermarked { doc_id, cursor }, ());
                 for part_id in part_ids {
-                    self.outbox
-                        .push(Cmd::CommitPartCursor { part_id, cursor }, ());
+                    self.pending_parts
+                        .entry(doc_id)
+                        .or_default()
+                        .entry(part_id)
+                        .and_modify(|old| *old = (*old).max(cursor))
+                        .or_insert(cursor);
                 }
+                self.queue_publish(doc_id, Some(cursor));
             }
-            Evt::PartRemoved { part_id, cursor } => {
-                self.outbox
-                    .push(Cmd::CommitPartCursor { part_id, cursor }, ());
+            Evt::PartRemoved {
+                doc_id,
+                part_id,
+                cursor,
+            } => {
+                let empty = self.pending_parts.get_mut(&doc_id).is_some_and(|parts| {
+                    parts.remove(&part_id);
+                    parts.is_empty()
+                });
+                if empty {
+                    self.pending_parts.remove(&doc_id);
+                }
+                self.outbox.push(
+                    Cmd::RemoveFrontierMembership {
+                        doc_id,
+                        part_id,
+                        cursor,
+                    },
+                    (),
+                );
             }
             Evt::CursorPersisted => {
                 // The cursor commit is the side effect (executed by the
                 // outbox); the machine has nothing to do with the
                 // acknowledgment.
             }
+        }
+    }
+
+    fn queue_publish(&mut self, doc_id: crate::DocumentId, cursor: Option<u64>) {
+        if self.queued_docs.insert(doc_id) {
+            let cursor = self
+                .pending_parts
+                .get(&doc_id)
+                .and_then(|parts| parts.values().copied().max())
+                .or(cursor);
+            self.outbox
+                .push(Cmd::PublishHeadsWatermarked { doc_id, cursor }, ());
         }
     }
 
@@ -391,38 +480,64 @@ async fn publish_heads(
     doc_id: crate::DocumentId,
     runtime: &crate::runtime2::Runtime2Handle<Sendable>,
     store: &SqliteBigRepoStore,
+    big_sync_store: &Arc<dyn HostPartStore>,
     frontier_store: &Arc<dyn HostPartStore>,
     commit_watermark_cursor: Option<u64>,
     keyhive_watermark: Option<u64>,
-    automerge_part_id: PartId,
-) -> Res<()> {
+    scope: &WorkerGroupScope,
+) -> Res<PublishOutcome> {
     let watermark = if let Some(cursor) = commit_watermark_cursor {
-        store.get_sync_commit_watermark(doc_id, cursor).await?
+        let Some(watermark) = store.get_sync_commit_watermark(doc_id, cursor).await? else {
+            return Ok(PublishOutcome::Deferred);
+        };
+        Some(watermark)
     } else {
         None
     };
-    if let Ok(crate::runtime2::types::DocLookup::Ready(bundle)) =
-        runtime.get_doc_handle(doc_id).await
-    {
-        if let Some(target_seq) = keyhive_watermark {
-            bundle.await_keyhive_watermark(target_seq).await?;
-        }
-        if let Some(target_row_id) = watermark {
-            bundle.await_commit_watermark(target_row_id).await?;
-        }
-        let heads = surelock::key::lock_scope(|key| {
-            let (doc, _key) = key.lock(&bundle.doc);
-            doc.get_heads()
-        });
-        let heads_formatted = am_utils_rs::serialize_commit_heads(&heads);
-        let am_obj_id = automerge_doc_obj_id(doc_id);
-        let payload = serde_json::json!({ "heads": heads_formatted });
-        frontier_store.set_obj_payload(am_obj_id, payload).await?;
+    let Ok(crate::runtime2::types::DocLookup::Ready(bundle)) = runtime.get_doc_handle(doc_id).await
+    else {
+        return Ok(PublishOutcome::Deferred);
+    };
+    if let Some(target_seq) = keyhive_watermark {
+        bundle.await_keyhive_watermark(target_seq).await?;
+    }
+    if let Some(target_row_id) = watermark {
+        bundle.await_commit_watermark(target_row_id).await?;
+    }
+    let heads = surelock::key::lock_scope(|key| {
+        let (doc, _key) = key.lock(&bundle.doc);
+        doc.get_heads()
+    });
+    let heads_formatted = am_utils_rs::serialize_commit_heads(&heads);
+    let am_obj_id = automerge_doc_obj_id(doc_id);
+    let payload = serde_json::json!({ "heads": heads_formatted });
+    frontier_store.set_obj_payload(am_obj_id, payload).await?;
+    let desired_parts = big_sync_store
+        .obj_parts(am_obj_id)
+        .await?
+        .into_iter()
+        .filter(|part_id| scope_includes_part(scope, *part_id))
+        .collect::<Vec<_>>();
+    let current_parts = frontier_store.obj_parts(am_obj_id).await?;
+    if !desired_parts.is_empty() {
         frontier_store
-            .add_obj_to_parts(am_obj_id, vec![automerge_part_id])
+            .add_obj_to_parts(am_obj_id, desired_parts.clone())
             .await?;
     }
-    Ok(())
+    for part_id in current_parts {
+        if !desired_parts.contains(&part_id) {
+            frontier_store
+                .remove_obj_from_part(am_obj_id, part_id)
+                .await?;
+        }
+    }
+    Ok(PublishOutcome::Published)
+}
+
+fn scope_includes_part(scope: &WorkerGroupScope, part_id: PartId) -> bool {
+    scope
+        .groups()
+        .is_none_or(|groups| part_id == crate::GLOBAL_PART_ID || groups.contains(&part_id))
 }
 
 async fn subscribe_to_parts(
@@ -468,6 +583,8 @@ struct FrontierSource {
     /// selective scope filters by its group-derived part set.
     scope: WorkerGroupScope,
     part_listener: Option<big_sync_core::mpsc::Receiver<SubEvent>>,
+    _local_registration: crate::changes::LocalListenerRegistration,
+    local_listener: tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
     /// Round-robin flag: when true the admission poll runs before the part
     /// listener wait, otherwise the listener is polled first. Toggled every
     /// `next_batch` iteration so a continuously busy admission stream cannot
@@ -488,6 +605,9 @@ impl FrontierSource {
             self.admission_first = !self.admission_first;
 
             if admission_first {
+                if let Some(evt) = self.poll_local_listener_nowait()? {
+                    return Ok(evt);
+                }
                 if let Some(rows) = self.poll_admission().await? {
                     return Ok(vec![Evt::KhRows(rows)]);
                 }
@@ -495,6 +615,9 @@ impl FrontierSource {
                     return Ok(evt);
                 }
             } else {
+                if let Some(evt) = self.poll_local_listener_nowait()? {
+                    return Ok(evt);
+                }
                 if let Some(evt) = self.poll_part_listener_nowait()? {
                     return Ok(evt);
                 }
@@ -506,8 +629,20 @@ impl FrontierSource {
             // Both sources empty: block on the part subscription for the
             // idle window (or sleep when no parts are watched) before
             // re-checking.
-            if let Some(evt) = self.poll_part_listener_blocking().await? {
-                return Ok(evt);
+            tokio::select! {
+                biased;
+                evt = Self::poll_part_listener_blocking(&mut self.part_listener) => {
+                    if let Some(evt) = evt?
+                        && let Some(evt) = self.part_event_to_evt(evt)?
+                    {
+                        return Ok(evt);
+                    }
+                }
+                evt = self.local_listener.recv() => {
+                    let Some(evt) = evt else { return Err(ferr!("AutomergeFrontierWorker local listener closed")); };
+                    let evt = self.local_event_to_evt(evt)?;
+                    if !evt.is_empty() { return Ok(evt); }
+                }
             }
         }
     }
@@ -551,8 +686,10 @@ impl FrontierSource {
     }
 
     /// Blocking wait on the part subscription (up to `IDLE_POLL`).
-    async fn poll_part_listener_blocking(&mut self) -> Res<Option<Vec<Evt>>> {
-        let wait = match &mut self.part_listener {
+    async fn poll_part_listener_blocking(
+        listener: &mut Option<big_sync_core::mpsc::Receiver<SubEvent>>,
+    ) -> Res<Option<SubEvent>> {
+        let wait = match listener {
             Some(listener) => tokio::time::timeout(IDLE_POLL, listener.recv()).await.ok(),
             None => {
                 tokio::time::sleep(IDLE_POLL).await;
@@ -567,26 +704,31 @@ impl FrontierSource {
         let Ok(part_event) = part_event else {
             return Err(ferr!("AutomergeFrontierWorker partition listener closed"));
         };
-        self.part_event_to_evt(part_event)
+        Ok(Some(part_event))
     }
 
     fn part_event_to_evt(&mut self, part_event: SubEvent) -> Res<Option<Vec<Evt>>> {
         match part_event {
-            SubEvent::Added(inner) => Ok(Some(vec![Evt::PartAdded {
-                doc_id: crate::DocumentId::new(*inner.obj_id.as_bytes()),
-                part_id: inner.part_id,
-                cursor: inner.cursor,
-            }])),
+            SubEvent::Added(inner) => {
+                if !scope_includes_part(&self.scope, inner.part_id) {
+                    return Ok(None);
+                }
+                Ok(Some(vec![Evt::PartAdded {
+                    doc_id: crate::DocumentId::new(*inner.obj_id.as_bytes()),
+                    part_id: inner.part_id,
+                    cursor: inner.cursor,
+                }]))
+            }
             SubEvent::Changed(inner) => {
                 // Explicit mode: `All` considers every part event unfiltered;
                 // a selective scope filters by its group-derived part set.
                 let has_part_ids = !inner.part_ids.is_empty();
                 let part_ids: Vec<PartId> = match self.scope.groups() {
                     None => inner.part_ids,
-                    Some(groups) => inner
+                    Some(_) => inner
                         .part_ids
                         .into_iter()
-                        .filter(|part_id| groups.contains(part_id))
+                        .filter(|part_id| scope_includes_part(&self.scope, *part_id))
                         .collect(),
                 };
                 if has_part_ids && part_ids.is_empty() {
@@ -598,11 +740,45 @@ impl FrontierSource {
                     part_ids,
                 }]))
             }
-            SubEvent::Removed(inner) => Ok(Some(vec![Evt::PartRemoved {
-                part_id: inner.part_id,
-                cursor: inner.cursor,
-            }])),
+            SubEvent::Removed(inner) => {
+                if !scope_includes_part(&self.scope, inner.part_id) {
+                    return Ok(None);
+                }
+                Ok(Some(vec![Evt::PartRemoved {
+                    doc_id: crate::DocumentId::new(*inner.obj_id.as_bytes()),
+                    part_id: inner.part_id,
+                    cursor: inner.cursor,
+                }]))
+            }
             SubEvent::ReplayComplete => Ok(None),
+        }
+    }
+
+    fn local_event_to_evt(&self, notifications: Vec<BigRepoLocalNotification>) -> Res<Vec<Evt>> {
+        Ok(notifications
+            .into_iter()
+            .filter_map(|notification| match notification {
+                BigRepoLocalNotification::DocMaterializationReady { doc_id, .. }
+                | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => {
+                    Some(Evt::DocumentReady { doc_id })
+                }
+                BigRepoLocalNotification::DocCreated { .. }
+                | BigRepoLocalNotification::DocImported { .. }
+                | BigRepoLocalNotification::DocMaterializationPending { .. } => None,
+            })
+            .collect())
+    }
+
+    fn poll_local_listener_nowait(&mut self) -> Res<Option<Vec<Evt>>> {
+        match self.local_listener.try_recv() {
+            Ok(events) => {
+                let events = self.local_event_to_evt(events)?;
+                Ok((!events.is_empty()).then_some(events))
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                Err(ferr!("AutomergeFrontierWorker local listener closed"))
+            }
         }
     }
 }
@@ -619,9 +795,9 @@ impl crate::runtime2::driver::EventSource for FrontierSource {
 /// Executes serial source-part/cursor commands and owns keyed task effects.
 struct FrontierExec {
     store: SqliteBigRepoStore,
+    big_sync_store: Arc<dyn HostPartStore>,
     frontier_store: Arc<dyn HostPartStore>,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
-    automerge_part_id: PartId,
     keyhive: crate::keyhive::BigKeyhiveHandle,
     scope: WorkerGroupScope,
 }
@@ -634,19 +810,41 @@ impl crate::runtime2::driver::CmdExecutor<AutomergeFrontierCore> for FrontierExe
     ) -> Res<crate::runtime2::driver::ExecOutcome<AutomergeFrontierCore>> {
         match *cmd {
             Cmd::PublishHeadsWatermarked { doc_id, cursor } => {
-                publish_heads(
+                let outcome = publish_heads(
                     doc_id,
                     &self.runtime,
                     &self.store,
+                    &self.big_sync_store,
                     &self.frontier_store,
-                    Some(cursor),
+                    cursor,
                     None,
-                    self.automerge_part_id,
+                    &self.scope,
                 )
                 .await?;
-                Ok(crate::runtime2::driver::ExecOutcome::Done(None))
+                Ok(crate::runtime2::driver::ExecOutcome::Done(Some(
+                    match outcome {
+                        PublishOutcome::Published => Evt::Published {
+                            doc_id,
+                            through: cursor,
+                        },
+                        PublishOutcome::Deferred => Evt::Deferred { doc_id },
+                    },
+                )))
             }
             Cmd::CommitPartCursor { part_id, cursor } => {
+                self.store
+                    .commit_automerge_part_cursor(part_id, cursor)
+                    .await?;
+                Ok(crate::runtime2::driver::ExecOutcome::Done(None))
+            }
+            Cmd::RemoveFrontierMembership {
+                doc_id,
+                part_id,
+                cursor,
+            } => {
+                self.frontier_store
+                    .remove_obj_from_part(automerge_doc_obj_id(doc_id), part_id)
+                    .await?;
                 self.store
                     .commit_automerge_part_cursor(part_id, cursor)
                     .await?;
@@ -678,8 +876,8 @@ impl driver::SeedRunner<AutomergeFrontierCore> for FrontierExec {
         let seed = task.seed;
         let runtime = self.runtime.clone();
         let store = self.store.clone();
+        let big_sync_store = Arc::clone(&self.big_sync_store);
         let frontier_store = Arc::clone(&self.frontier_store);
-        let automerge_part_id = self.automerge_part_id;
         let keyhive = self.keyhive.clone();
         let scope = self.scope.clone();
         let result_tx = result_tx.clone();
@@ -709,20 +907,24 @@ impl driver::SeedRunner<AutomergeFrontierCore> for FrontierExec {
                     Ok(FrontierTaskOutput::Decoded { seq, doc })
                 }
                 FrontierSeed::Document { doc, covered } => {
-                    let target_seq = *covered
-                        .last()
-                        .expect("document frontier seed must cover an admission sequence");
-                    runtime.apply_keyhive_to_doc(doc, target_seq).await?;
-                    publish_heads(
+                    let target_seq = covered.last().copied();
+                    if let Some(target_seq) = target_seq {
+                        runtime.apply_keyhive_to_doc(doc, target_seq).await?;
+                    }
+                    let outcome = publish_heads(
                         doc,
                         &runtime,
                         &store,
+                        &big_sync_store,
                         &frontier_store,
                         None,
-                        Some(target_seq),
-                        automerge_part_id,
+                        target_seq,
+                        &scope,
                     )
                     .await?;
+                    if matches!(outcome, PublishOutcome::Deferred) {
+                        return Ok(FrontierTaskOutput::Deferred { doc });
+                    }
                     Ok(FrontierTaskOutput::Settled {
                         key: FrontierKey::Document(doc),
                         covered,
@@ -756,6 +958,9 @@ impl driver::DriverHooks<AutomergeFrontierCore> for FrontierExec {
             FrontierTaskOutput::Settled { key, covered } => {
                 machine.on_evt(Evt::TaskSettled { key, covered })
             }
+            FrontierTaskOutput::Deferred { doc } => {
+                machine.queued_docs.remove(&doc);
+            }
         }
         Ok(())
     }
@@ -779,13 +984,19 @@ async fn run_automerge_frontier_tail(
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     keyhive: crate::keyhive::BigKeyhiveHandle,
     scope: WorkerGroupScope,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
 ) -> Res<()> {
     let initial_source_parts: HashSet<PartId> = match scope.groups() {
         // `All` watches every part currently in the store (never a keyhive
         // enumeration, so parts for groups not yet in the hive are watched
         // too); a selective scope uses its explicit group set directly.
         None => store.list_parts().await?,
-        Some(groups) => groups.iter().copied().collect(),
+        Some(groups) if groups.is_empty() => HashSet::new(),
+        Some(groups) => groups
+            .iter()
+            .copied()
+            .chain(std::iter::once(crate::GLOBAL_PART_ID))
+            .collect(),
     };
     let kh_read_cursor = store.automerge_keyhive_cursor().await?;
     store
@@ -794,18 +1005,23 @@ async fn run_automerge_frontier_tail(
             kh_read_cursor,
         )
         .await?;
+    let (local_registration, local_listener) = change_manager
+        .subscribe_local_listener(LocalFilter { doc_id: None })
+        .await?;
     let source = FrontierSource {
         kh_read_cursor,
         scope: scope.clone(),
         part_listener: subscribe_to_parts(&big_sync_store, &store, &initial_source_parts).await?,
         store: store.clone(),
+        _local_registration: local_registration,
+        local_listener,
         admission_first: true,
     };
     let mut exec = FrontierExec {
         store,
+        big_sync_store,
         frontier_store,
         runtime: runtime.clone(),
-        automerge_part_id: automerge_docs_part_id(),
         keyhive,
         scope,
     };
@@ -872,5 +1088,106 @@ mod tests {
             core.outbox.front().map(|(_, cmd)| cmd),
             Some(Cmd::AdvanceKhCursor(1))
         ));
+    }
+
+    #[test]
+    fn part_cursor_waits_for_publication_and_wakes_once() {
+        let mut core = AutomergeFrontierCore::default();
+        let document = doc(11);
+        let part = PartId::new([3; 32]);
+        let later_part = PartId::new([4; 32]);
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: part,
+            cursor: 4,
+        });
+        core.on_evt(Evt::DocumentReady { doc_id: document });
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: later_part,
+            cursor: 7,
+        });
+        assert_eq!(core.outbox.iter().count(), 1);
+        assert!(matches!(
+            core.outbox.front().map(|(_, cmd)| cmd),
+            Some(Cmd::PublishHeadsWatermarked {
+                cursor: Some(4),
+                ..
+            })
+        ));
+        assert!(core.pending_parts[&document][&part] == 4);
+        assert!(core.pending_parts[&document][&later_part] == 7);
+        core.on_evt(Evt::Published {
+            doc_id: document,
+            through: Some(4),
+        });
+        assert!(!core.pending_parts[&document].contains_key(&part));
+        assert!(core.pending_parts[&document][&later_part] == 7);
+        assert!(core.outbox.iter().any(|(_, cmd, _)| matches!(cmd,
+            Cmd::CommitPartCursor { part_id, cursor: 4 } if *part_id == part)));
+        core.on_evt(Evt::Published {
+            doc_id: document,
+            through: Some(7),
+        });
+        assert!(core.outbox.iter().any(|(_, cmd, _)| matches!(cmd,
+            Cmd::CommitPartCursor { part_id, cursor: 7 } if *part_id == later_part)));
+    }
+
+    #[test]
+    fn duplicate_part_events_merge_by_max_cursor() {
+        let mut core = AutomergeFrontierCore::default();
+        let document = doc(12);
+        let part = PartId::new([4; 32]);
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: part,
+            cursor: 2,
+        });
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: part,
+            cursor: 9,
+        });
+        assert_eq!(core.outbox.iter().count(), 1);
+        assert_eq!(core.pending_parts[&document][&part], 9);
+    }
+
+    #[test]
+    fn scoped_frontier_mirroring_always_keeps_global_membership() {
+        let group = PartId::new([8; 32]);
+        let scope = WorkerGroupScope::Groups([group].into_iter().collect());
+        assert!(scope_includes_part(&scope, crate::GLOBAL_PART_ID));
+        assert!(scope_includes_part(&scope, group));
+        assert!(!scope_includes_part(&scope, PartId::new([9; 32])));
+    }
+
+    #[test]
+    fn removing_one_part_does_not_discard_other_pending_memberships() {
+        let mut core = AutomergeFrontierCore::default();
+        let document = doc(13);
+        let retained = PartId::new([10; 32]);
+        let removed = PartId::new([11; 32]);
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: retained,
+            cursor: 3,
+        });
+        core.on_evt(Evt::PartAdded {
+            doc_id: document,
+            part_id: removed,
+            cursor: 3,
+        });
+        core.on_evt(Evt::PartRemoved {
+            doc_id: document,
+            part_id: removed,
+            cursor: 4,
+        });
+        assert_eq!(core.pending_parts[&document][&retained], 3);
+        assert!(!core.pending_parts[&document].contains_key(&removed));
+        assert!(core.outbox.iter().any(|(_, cmd, _)| matches!(
+            cmd,
+            Cmd::RemoveFrontierMembership { doc_id, part_id, cursor }
+                if *doc_id == document && *part_id == removed && *cursor == 4
+        )));
     }
 }

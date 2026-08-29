@@ -867,29 +867,8 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SyncNodeOptions {
-    #[expect(dead_code)]
-    enable_switch: bool,
-}
-
-impl Default for SyncNodeOptions {
-    fn default() -> Self {
-        Self {
-            enable_switch: true,
-        }
-    }
-}
-
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    open_sync_node_with_options(repo_root, SyncNodeOptions::default()).await
-}
-
-async fn open_sync_node_with_options(
-    repo_root: &std::path::Path,
-    options: SyncNodeOptions,
-) -> Res<SyncTestNode> {
-    info!(repo_root = %repo_root.display(), ?options, "opening sync test node");
+    info!(repo_root = %repo_root.display(), "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {
@@ -903,8 +882,9 @@ async fn open_sync_node_with_options(
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&rtx.big_repo),
         Arc::clone(&blobs_repo),
-        rtx.doc_app.document_id(),
+        rtx.doc_config.document_id(),
         daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
+        Arc::clone(&rtx.sqlite_local_state_repo),
     )
     .await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
