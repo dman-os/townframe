@@ -149,18 +149,18 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "65df21e0ab6ef83c328649f02cd5afa96e6f12d4" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "306627e0f908d49db66a11eaf8dc908deb132469" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "306627e0f908d49db66a11eaf8dc908deb132469" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "306627e0f908d49db66a11eaf8dc908deb132469" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -231,21 +231,21 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
-[patch."https://github.com/dman-os/subduction"]
-subduction_core = { path = "../subduction/subduction_core" }
-subduction_iroh = { path = "../subduction/subduction_iroh" }
-subduction_websocket = { path = "../subduction/subduction_websocket" }
-subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
-sedimentree_core = { path = "../subduction/sedimentree_core" }
-subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-subduction_crypto = { path = "../subduction/subduction_crypto" }
-subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+# [patch."https://github.com/dman-os/subduction"]
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+# #
+# [patch."https://github.com/dman-os/keyhive"]
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# beekem = { path = "../keyhive/beekem" }
 #
-[patch."https://github.com/dman-os/keyhive"]
-keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-keyhive_core = { path = "../keyhive/keyhive_core" }
-beekem = { path = "../keyhive/beekem" }
-
 # Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
 # # NOTE: the comment above is now stale
 [profile.wasm-release]

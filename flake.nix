@@ -220,6 +220,7 @@
             libarchive
             prek
             zizmor
+            sqlx-cli
           ];
 
           rustLintInputs = with pkgs; [
@@ -270,7 +271,6 @@
             tailwindcss_4
             watchexec
 
-            sqlx-cli
             # maestro
           ];
 
@@ -389,7 +389,7 @@
                 if [ -e .env ]; then
                   source "$PWD/x/load-dotenv-safe.sh" .env
                 fi
-                if [[ -t 0 ]]; then
+                if [[ -t 0 && -z "$NIX_SHELL_NO_EXEC" ]]; then
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi
               '';
