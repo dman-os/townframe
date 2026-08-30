@@ -475,5 +475,6 @@ pub enum TrackedWorkKind {
     InspectStoredDocBlobs,
     EmitMembershipChange,
     MaterializationRetry,
+    PrekeyHousekeeping,
     WorkerFence,
 }

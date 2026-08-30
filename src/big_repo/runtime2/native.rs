@@ -96,6 +96,9 @@ where
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
     local_peer_id: PeerId,
+    /// Prekey janitor state: rotates consumed prekeys, keeps the pool at or
+    /// above the floor.
+    prekey_janitor: crate::runtime2::prekey_janitor::PrekeyJanitor,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -1378,6 +1381,26 @@ where
             }
         })
     }
+
+    fn prekey_housekeeping(
+        &self,
+        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, ()> {
+        Sendable::from_future(async move {
+            let beekem::operation::CgkaOperation::Add { added_id, pk, .. } = op.payload() else {
+                // Only Add operations consume prekeys.
+                return;
+            };
+            let (added_id, pk) = (*added_id, *pk);
+            crate::runtime2::prekey_janitor::housekeep_after_add(
+                &self.prekey_janitor,
+                &self.keyhive,
+                &added_id,
+                &pk,
+            )
+            .await;
+        })
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2120,6 +2143,7 @@ where
         keyhive_storage: keyhive_storage.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        prekey_janitor: crate::runtime2::prekey_janitor::PrekeyJanitor::new(),
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
     });
 

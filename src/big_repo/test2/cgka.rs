@@ -1296,3 +1296,246 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+// ─── Prekey janitor: rotate on use, refill at floor ──────────────────────────
+
+/// The prekey janitor must rotate a prekey the moment a replayed CGKA Add
+/// consumes it (someone invited us to a document while we were offline) and
+/// keep the published pool at the floor so later inviters keep finding
+/// distinct slots.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crate::Res<()> {
+    use keyhive_core::access::Access;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(246, 247, "PrekeyOwner", "PrekeyJoiner").await?;
+    let joiner_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "join-me"))
+        .map_err(|err| crate::ferr!("failed creating base document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    let joiner_before = pair.right().repo.keyhive().prekeys().await;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    assert!(
+        !joiner_before.is_empty(),
+        "joiner must start with a published prekey pool"
+    );
+
+    pair.left()
+        .repo
+        .add_member_to_group(joiner_agent, &group, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+
+    // The joiner's runtime observes the Add naming one of its published
+    // prekeys and rotates it; the floor refill keeps the pool at the floor.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let (consumed, pool_after) = loop {
+        let prekeys_now = pair.right().repo.keyhive().prekeys().await;
+        let consumed: HashSet<_> = joiner_before.difference(&prekeys_now).copied().collect();
+        if !consumed.is_empty()
+            && prekeys_now.len()
+                >= crate::runtime2::prekey_janitor::PREKEY_POOL_FLOOR
+        {
+            break (consumed, prekeys_now);
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "joiner must rotate the consumed prekey and refill the pool; \
+                 consumed={consumed:?} pool={} (before={:?} now={:?})",
+                prekeys_now.len(),
+                joiner_before,
+                prekeys_now
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        consumed.len(),
+        1,
+        "exactly one prekey must have been rotated on use; consumed={consumed:?}"
+    );
+    assert!(
+        pool_after.len() >= crate::runtime2::prekey_janitor::PREKEY_POOL_FLOOR,
+        "pool must be refilled to the floor after the rotation"
+    );
+
+    // The joiner joined through the consumed key, so the invite must still
+    // have been openable at the time the janitor observed it (implicit: the
+    // join materialized at all).
+    let member_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    let phase = member_doc
+        .with_document_read(|doc| {
+            doc.get(automerge::ROOT, "phase")
+                .ok()
+                .flatten()
+                .and_then(|(value, _)| match value {
+                    automerge::Value::Scalar(value) => match value.as_ref() {
+                        ScalarValue::Str(value) => Some(value.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        })
+        .await;
+    assert_eq!(
+        phase.as_deref(),
+        Some("join-me"),
+        "joiner must decrypt the pre-join head via the snapshot entry"
+    );
+    kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Joiner bootstrap + forward secrecy of pre-join epochs ──────────────────
+
+/// A joiner reads full history through the post-join snapshot entry envelope,
+/// while pre-join chunks remain undecryptable *directly* (forward secrecy:
+/// pre-join roots are never reconstructable from the CGKA DAG by the joiner).
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> crate::Res<()> {
+    use keyhive_core::access::Access;
+
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(248, 249, "HistoryOwner", "HistoryJoiner").await?;
+    let joiner_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "one"))
+        .map_err(|err| crate::ferr!("failed phase one: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "two"))
+                .map_err(|err| crate::ferr!("failed phase two: {err:?}"))
+        })
+        .await??;
+
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+
+    // Blobs written strictly before the join: the forward-secrecy set.
+    let prejoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+
+    pair.left()
+        .repo
+        .add_member_to_group(joiner_agent, &group, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+
+    // Owner writes AFTER the join: the loose snapshot in this staged ingest
+    // is the joiner's bootstrap entry into history.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "post-join"))
+                .map_err(|err| crate::ferr!("failed post-join write: {err:?}"))
+        })
+        .await??;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+
+    let member_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    let phase = member_doc
+        .with_document_read(|doc| {
+            doc.get(automerge::ROOT, "phase")
+                .ok()
+                .flatten()
+                .and_then(|(value, _)| match value {
+                    automerge::Value::Scalar(value) => match value.as_ref() {
+                        ScalarValue::Str(value) => Some(value.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        })
+        .await;
+    assert_eq!(
+        phase.as_deref(),
+        Some("post-join"),
+        "joiner must materialize the post-join write"
+    );
+    kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
+
+    // Forward secrecy: every blob written strictly before the join stays
+    // undecryptable *directly* by the joiner — its epoch keys are not
+    // reconstructable from the CGKA DAG because the joiner was not covered
+    // by any wrap at those epochs.
+    let joiner_keyhive = pair.right().repo.keyhive().clone_keyhive();
+    let postjoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let prejoin_ids: std::collections::HashSet<_> = prejoin_blobs.iter().collect();
+    let kh_doc = joiner_keyhive
+        .get_document(kh_document_id(doc_id)?)
+        .await
+        .ok_or_else(|| crate::ferr!("joiner document missing"))?;
+    let mut saw_undecryptable_prejoin = 0usize;
+    let mut saw_decryptable_postjoin = 0usize;
+    for raw in &postjoin_blobs {
+        let Ok(encrypted_blob) = crate::encrypted_blob::decode_encrypted_blob(raw) else {
+            // Checkpoint/key-only nodes: no content envelope to decrypt.
+            continue;
+        };
+        if prejoin_ids.contains(raw) {
+            let ok = {
+                let mut doc = kh_doc.lock().await;
+                doc.try_decrypt_content(&encrypted_blob).is_ok()
+            };
+            assert!(
+                !ok,
+                "pre-join blob must be undecryptable directly by the joiner"
+            );
+            saw_undecryptable_prejoin += 1;
+        } else {
+            let ok = {
+                let mut doc = kh_doc.lock().await;
+                doc.try_decrypt_content(&encrypted_blob).is_ok()
+            };
+            if ok {
+                saw_decryptable_postjoin += 1;
+            }
+        }
+    }
+    assert!(
+        saw_undecryptable_prejoin > 0,
+        "expected pre-join fragments to exist and fail direct decryption"
+    );
+    assert!(
+        saw_decryptable_postjoin > 0,
+        "post-join fragments must be joiner-decryptable"
+    );
+    drop(owner_doc);
+    Ok(())
+}
+
+fn kh_document_id(
+    doc_id: crate::DocumentId,
+) -> crate::Res<keyhive_core::principal::document::id::DocumentId> {
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        .map_err(|err| crate::ferr!("doc_id is not a valid Ed25519 point: {err:?}"))?;
+    Ok(keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    ))
+}

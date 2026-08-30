@@ -21,6 +21,7 @@ mod io;
 pub(crate) mod keyhive_dispatcher;
 mod lease;
 mod messages;
+pub(crate) mod prekey_janitor;
 pub(crate) mod native;
 pub(crate) mod support;
 mod tasks;

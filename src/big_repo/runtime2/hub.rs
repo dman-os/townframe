@@ -952,6 +952,13 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>>;
+
+    /// Run prekey housekeeping detached from the event loop; failures are
+    /// logged inside and must never surface to the hub.
+    fn prekey_housekeeping(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -1142,6 +1149,16 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                     access,
                 )?;
             }
+            Ok(())
+        })
+    }
+
+    fn prekey_housekeeping(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            runtime_io.prekey_housekeeping(op).await;
             Ok(())
         })
     }
@@ -1806,6 +1823,19 @@ where
                 // admission-driven AFW path handles cold documents; this path
                 // must never create a worker merely because Keyhive changed.
                 self.retry_existing_doc_materialization(doc_id)?;
+                // Prekey janitor: rotate prekeys consumed by Add ops naming
+                // our own published prekeys (offline invitations), and keep
+                // the pool at or above the floor. Deduped internally, and
+                // never fails the event loop.
+                if matches!(
+                    data.payload(),
+                    beekem::operation::CgkaOperation::Add { .. }
+                ) {
+                    self.spawn_tracked(
+                        crate::runtime2::TrackedWorkKind::PrekeyHousekeeping,
+                        F::prekey_housekeeping(Arc::clone(&self.runtime_io), std::sync::Arc::clone(&data)),
+                    )?;
+                }
             }
             Runtime2Evt::DelegationReceived { target, data } => {
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());

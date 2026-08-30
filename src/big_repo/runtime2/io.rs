@@ -318,4 +318,13 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         peer_id: big_sync_core::PeerId,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
+
+    /// Run prekey housekeeping for a CGKA Add operation. Fired for both
+    /// local and remotely replayed CGKA ops; internally deduped so a
+    /// consumed prekey is rotated at most once, and the pool is refilled
+    /// when it dips below the floor.
+    fn prekey_housekeeping(
+        &self,
+        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    ) -> F::Future<'_, ()>;
 }

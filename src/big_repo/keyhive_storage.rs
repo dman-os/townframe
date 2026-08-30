@@ -12,6 +12,7 @@ use crate::store::sqlite::SqliteBigRepoStore;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -122,7 +123,12 @@ impl FsKeyhiveStorage {
         file.sync_all().await?;
         drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Err(err) = Self::sync_dir(&self.root) {
+                    tracing::warn!(error = %err, "failed to fsync keyhive storage root after prekey secrets rename");
+                }
+                Ok(())
+            }
             Err(err) => {
                 drop(tokio::fs::remove_file(&tmp).await);
                 Err(err)
@@ -234,7 +240,12 @@ impl FsKeyhiveStorage {
         file.sync_all().await?;
         drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Err(err) = Self::sync_dir(&parent_dir) {
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after rename");
+                }
+                Ok(())
+            }
             Err(err) => {
                 drop(tokio::fs::remove_file(&tmp).await);
                 if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
@@ -259,7 +270,11 @@ impl FsKeyhiveStorage {
             hash.to_hex(),
             std::process::id()
         ));
-        tokio::fs::write(&tmp, data).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
         #[cfg(unix)]
         {
             if parent_dir.ends_with(LOCAL_SECRETS_SUBDIR) || parent_dir == self.local_secret_dir() {
@@ -271,12 +286,29 @@ impl FsKeyhiveStorage {
             }
         }
         let result = match tokio::fs::hard_link(&tmp, &dest).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let Err(err) = Self::sync_dir(&parent_dir) {
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after hard link");
+                }
+                Ok(true)
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
             Err(error) => Err(error),
         };
         drop(tokio::fs::remove_file(&tmp).await);
         result
+    }
+
+    /// Flush a directory's entries to disk. On platforms where directory
+    /// fsync is unsupported this is a no-op; failures are reported to the
+    /// caller, which decides whether they are fatal for the write.
+    fn sync_dir(path: &Path) -> io::Result<()> {
+        let file = std::fs::File::open(path)?;
+        match file.sync_all() {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     async fn load_dir(dir: PathBuf) -> io::Result<Vec<(StorageHash, Vec<u8>)>> {
@@ -924,5 +956,51 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
 
     fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         self.inner.delete_local_secret(hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn save_file_if_absent_writes_exact_bytes_and_is_idempotent() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "bigrepo-keyhive-storage-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let storage = FsKeyhiveStorage::new(root.clone())?;
+        let parent_dir = root.join(LOCAL_SECRETS_SUBDIR);
+        let hash = StorageHash::new([42u8; 32]);
+        let data = b"secret material".to_vec();
+
+        assert!(storage
+            .save_file_if_absent(parent_dir.clone(), hash, data.clone())
+            .await?);
+
+        let written = tokio::fs::read(root.join(LOCAL_SECRETS_SUBDIR).join(format!("{}.bin", hash.to_hex()))).await?;
+        assert_eq!(written, data);
+
+        // Same hash with different data must be refused and must not clobber.
+        assert!(!storage
+            .save_file_if_absent(parent_dir.clone(), hash, b"clobber".to_vec())
+            .await?);
+        let unchanged =
+            tokio::fs::read(root.join(LOCAL_SECRETS_SUBDIR).join(format!("{}.bin", hash.to_hex())))
+                .await?;
+        assert_eq!(unchanged, data);
+
+        // A different hash still writes.
+        let other = StorageHash::new([43u8; 32]);
+        assert!(storage
+            .save_file_if_absent(parent_dir.clone(), other, b"other".to_vec())
+            .await?);
+
+        tokio::fs::remove_dir_all(&root).await?;
+        Ok(())
     }
 }

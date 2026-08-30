@@ -248,6 +248,71 @@ impl BigKeyhiveHandle {
         Arc::clone(&self.keyhive)
     }
 
+    /// The local individual's currently published prekeys.
+    ///
+    /// Rebuilt from the individual's prekey ops (Add publishes, Rotate
+    /// retires and replaces), mirroring `PrekeyState::build` upstream —
+    /// the fields themselves are `pub(crate)`.
+    ///
+    /// NOTE: the tombstones must be collected and applied in a *second*
+    /// pass, exactly like upstream `PrekeyState::build`: applying Rotate
+    /// removals inline while iterating the ops map is order-dependent and
+    /// resurrects rotated-out keys when the original Add happens to iterate
+    /// after its Rotate.
+    pub(crate) async fn prekeys(
+        &self,
+    ) -> std::collections::HashSet<keyhive_crypto::share_key::ShareKey> {
+        use keyhive_core::principal::individual::op::KeyOp;
+        let individual = self.keyhive.individual().await;
+        let locked = individual.lock().await;
+        let mut set = std::collections::HashSet::new();
+        let mut tombstones = Vec::new();
+        for op in locked.prekey_ops().values() {
+            let op: &KeyOp = op.as_ref();
+            match op {
+                KeyOp::Add(add) => {
+                    set.insert(add.payload().share_key);
+                }
+                KeyOp::Rotate(rot) => {
+                    tombstones.push(rot.payload().old);
+                    set.insert(rot.payload().new);
+                }
+            }
+        }
+        for tombstone in tombstones {
+            set.remove(&tombstone);
+        }
+        set
+    }
+
+    /// The local individual id of the active keyhive agent.
+    pub(crate) async fn local_individual_id(
+        &self,
+    ) -> keyhive_core::principal::individual::id::IndividualId {
+        self.keyhive.individual().await.lock().await.id()
+    }
+
+    /// Replace a published prekey with a fresh one.
+    pub(crate) async fn rotate_prekey(
+        &self,
+        prekey: keyhive_crypto::share_key::ShareKey,
+    ) -> Res<Arc<keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::rotate_key::RotateKeyOp>>> {
+        self.keyhive
+            .rotate_prekey(prekey)
+            .await
+            .map_err(|err| ferr!("prekey rotation failed: {err}"))
+    }
+
+    /// Publish an additional prekey, growing the available pool.
+    pub(crate) async fn expand_prekeys(
+        &self,
+    ) -> Res<Arc<keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>>> {
+        self.keyhive
+            .expand_prekeys()
+            .await
+            .map_err(|err| ferr!("prekey expansion failed: {err}"))
+    }
+
     pub async fn get_group(
         &self,
         id: keyhive_core::principal::group::id::GroupId,
