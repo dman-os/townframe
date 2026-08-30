@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures::lock::Mutex;
 
 use futures::{FutureExt, future::BoxFuture};
+use secrets_rs::SecretRepo;
 use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
+use utils_rs::prelude::eyre;
 
 /// Subdirectory of the repo data dir holding keyhive state.
 pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
@@ -54,13 +56,29 @@ pub(crate) struct DocReservation {
     pub initial_content: Option<Vec<u8>>,
 }
 
+/// Reserved blob id under which the prekey-secrets sidecar is stored when
+/// the keyring backend is active.
+const PREKEY_SECRETS_BLOB_ID: &str = "prekey-secrets.v1";
 /// Monotonic per-process counter for temp filenames.
 static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Filesystem-backed [`KeyhiveStorage`] for BigRepo.
-#[derive(Debug, Clone)]
-pub(crate) struct FsKeyhiveStorage {
-    root: PathBuf,
+/// Where local key material lives for a filesystem-backed storage.
+#[derive(Clone)]
+enum SecretMaterial {
+    /// Raw files under the storage root (fsync'd; headless fallback).
+    Files,
+    /// OS keyring via the shared `secrets_rs` repo; archives/ops stay on
+    /// disk. Key material never touches the filesystem.
+    Keyring { repo: Arc<SecretRepo>, namespace: String },
+}
+
+impl std::fmt::Debug for SecretMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Files => write!(formatter, "Files"),
+            Self::Keyring { namespace, .. } => write!(formatter, "Keyring({namespace})"),
+        }
+    }
 }
 
 /// Error type returned by [`FsKeyhiveStorage`] operations.
@@ -69,11 +87,53 @@ pub(crate) enum FsKeyhiveStorageError {
     /// Underlying filesystem I/O failed.
     #[error("keyhive fs storage io error: {0}")]
     Io(#[from] io::Error),
+    #[error("keyhive secret store error: {0}")]
+    Secrets(#[from] secrets_rs::SecretsError),
+}
+
+/// Filesystem-backed [`KeyhiveStorage`] for BigRepo.
+#[derive(Clone)]
+pub(crate) struct FsKeyhiveStorage {
+    root: PathBuf,
+    secret_material: SecretMaterial,
+}
+
+impl std::fmt::Debug for FsKeyhiveStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FsKeyhiveStorage")
+            .field("root", &self.root)
+            .field("secret_material", &self.secret_material)
+            .finish()
+    }
 }
 
 impl FsKeyhiveStorage {
     /// Create the storage root, its `archives/` and `ops/` subdirs.
     pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
+        Self::new_with_secret_material(root, SecretMaterial::Files)
+    }
+
+    /// Same layout as [`FsKeyhiveStorage::new`], but local key material and
+    /// the prekey-secrets sidecar persist through the OS keyring instead of
+    /// raw files. Archives and ops stay on disk either way; the fsync'd file
+    /// paths remain the fallback of record for headless systems.
+    pub(crate) fn with_secret_repo(root: PathBuf, repo: Arc<SecretRepo>) -> io::Result<Self> {
+        let namespace = blake3::hash(root.to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string();
+        Self::new_with_secret_material(root, SecretMaterial::Keyring { repo, namespace })
+    }
+
+    /// Whether this storage persists key material through the OS keyring.
+    pub(crate) fn uses_keyring_secrets(&self) -> bool {
+        matches!(self.secret_material, SecretMaterial::Keyring { .. })
+    }
+
+    fn new_with_secret_material(
+        root: PathBuf,
+        secret_material: SecretMaterial,
+    ) -> io::Result<Self> {
         std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
         std::fs::create_dir_all(root.join(OPS_SUBDIR))?;
         let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
@@ -91,7 +151,10 @@ impl FsKeyhiveStorage {
             std::fs::set_permissions(&reservations_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            secret_material,
+        })
     }
 
     fn archive_dir(&self) -> PathBuf {
@@ -111,6 +174,21 @@ impl FsKeyhiveStorage {
     }
 
     async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
+        match &self.secret_material {
+            SecretMaterial::Files => self.prekey_secrets_file_save(bytes).await,
+            SecretMaterial::Keyring { repo, namespace } => repo
+                .put_blob(namespace, PREKEY_SECRETS_BLOB_ID, &bytes)
+                .await
+                .map_err(|err| {
+                    io::Error::other(format!("keyring prekey secret persist failed: {err}"))
+                }),
+        }
+    }
+
+    /// File-backed persistence for the prekey-secrets sidecar; the fallback
+    /// of record. Atomic tmp write + `sync_all` + rename, root dir fsynced
+    /// after the rename lands.
+    async fn prekey_secrets_file_save(&self, bytes: Vec<u8>) -> io::Result<()> {
         let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
         let tmp = self.tmp_dir().join(format!(
             "{PREKEY_SECRETS_FILE}.{}.{tmp_id}.tmp",
@@ -137,11 +215,24 @@ impl FsKeyhiveStorage {
     }
 
     async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
-        let path = self.root.join(PREKEY_SECRETS_FILE);
-        match tokio::fs::read(path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
+        match &self.secret_material {
+            SecretMaterial::Files => {
+                let path = self.root.join(PREKEY_SECRETS_FILE);
+                match tokio::fs::read(path).await {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
+            SecretMaterial::Keyring { repo, namespace } => {
+                let loaded = repo
+                    .get_blob(namespace, PREKEY_SECRETS_BLOB_ID)
+                    .await
+                    .map_err(|err| {
+                        io::Error::other(format!("keyring prekey secret load failed: {err}"))
+                    })?;
+                Ok(loaded)
+            }
         }
     }
 
@@ -421,9 +512,21 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
     ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         let parent_dir = self.local_secret_dir();
         async move {
-            self.save_file_if_absent(parent_dir, hash, data)
-                .await
-                .map_err(Into::into)
+            match &self.secret_material {
+                SecretMaterial::Files => {
+                    self.save_file_if_absent(parent_dir, hash, data)
+                        .await
+                        .map_err(Into::into)
+                }
+                // Content-addressed puts are idempotent; registered in the
+                // material index so `load_local_secrets` can enumerate them.
+                SecretMaterial::Keyring { repo, namespace } => {
+                    let id = hash.to_hex();
+                    repo.put_blob(namespace, &id, &data).await?;
+                    repo.add_to_index(namespace, &id).await?;
+                    Ok(true)
+                }
+            }
         }
         .boxed()
     }
@@ -432,14 +535,47 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         &self,
     ) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
         let dir = self.local_secret_dir();
-        async move { Self::load_dir(dir).await.map_err(Into::into) }.boxed()
+        async move {
+            match &self.secret_material {
+                SecretMaterial::Files => Self::load_dir(dir).await.map_err(Into::into),
+                SecretMaterial::Keyring { repo, namespace } => {
+                    let mut out = Vec::new();
+                    for id in repo.list_blob_ids(namespace).await? {
+                        // The material index itself is not a key-material blob.
+                        if id == secrets_rs::MATERIAL_INDEX_ID {
+                            continue;
+                        }
+                        let Some(hash) = StorageHash::from_hex(&id) else {
+                            continue;
+                        };
+                        if let Some(bytes) = repo.get_blob(namespace, &id).await? {
+                            out.push((hash, bytes));
+                        }
+                    }
+                    Ok(out)
+                }
+            }
+        }
+        .boxed()
     }
 
     fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         let dir = self.local_secret_dir();
-        async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
+        async move {
+            match &self.secret_material {
+                SecretMaterial::Files => Self::delete_file(dir, hash).await.map_err(Into::into),
+                SecretMaterial::Keyring { repo, namespace } => {
+                    let id = hash.to_hex();
+                    repo.delete_blob(namespace, &id).await?;
+                    repo.remove_from_index(namespace, &id).await?;
+                    Ok(())
+                }
+            }
+        }
+        .boxed()
     }
 }
+
 
 /// Keyhive storage backend selected by the BigRepo storage mode.
 #[derive(Debug, Clone)]
@@ -508,9 +644,40 @@ impl BigRepoKeyhiveStorage {
             .map(|archives| Self::new(BigRepoKeyhiveStorageInner::Fs { events, archives }))
     }
 
+    /// [`fs`] variant persisting key material through the OS keyring; same
+    /// on-disk layout for archives/ops. Falls back to `fs` if the keyring
+    /// cannot be initialised (headless systems).
+    pub(crate) async fn fs_with_secret_repo(
+        events: SqliteBigRepoStore,
+        root: PathBuf,
+    ) -> eyre::Result<Self> {
+        match SecretRepo::boot().await {
+            Ok(repo) => {
+                let archives = FsKeyhiveStorage::with_secret_repo(root, Arc::new(repo))?;
+                tracing::debug!(
+                    flavor = "keyring",
+                    uses_keyring_secrets = archives.uses_keyring_secrets(),
+                    "keyhive secret material stored in OS keyring"
+                );
+                Ok(Self::new(BigRepoKeyhiveStorageInner::Fs { events, archives }))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "keyring-backed secret storage unavailable; \
+                     falling back to file-based keyhive secret persistence"
+                );
+                Self::fs(events, root).map_err(|err| eyre::eyre!("file-based keyhive storage fallback failed: {err}"))
+            }
+        }
+    }
+
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
         match &self.inner {
             BigRepoKeyhiveStorageInner::Memory(_) | BigRepoKeyhiveStorageInner::Sqlite { .. } => {
+                // StorageConfig::Memory is ephemeral by design — all keyhive
+                // state including key material is process-local; sidecar
+                // persistence is intentionally skipped.
                 Ok(())
             }
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
@@ -522,6 +689,7 @@ impl BigRepoKeyhiveStorage {
     pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
         match &self.inner {
             BigRepoKeyhiveStorageInner::Memory(_) | BigRepoKeyhiveStorageInner::Sqlite { .. } => {
+                // See save_prekey_secrets: Memory mode is ephemeral by design.
                 Ok(None)
             }
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.load_prekey_secrets().await,
@@ -999,6 +1167,90 @@ mod tests {
         assert!(storage
             .save_file_if_absent(parent_dir.clone(), other, b"other".to_vec())
             .await?);
+
+        tokio::fs::remove_dir_all(&root).await?;
+        Ok(())
+    }
+
+    fn unique_test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "bigrepo-keyhive-storage-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    async fn keyring_test_storage(label: &str) -> io::Result<(FsKeyhiveStorage, std::path::PathBuf)> {
+        let root = unique_test_root(label);
+        let repo = SecretRepo::boot().await.expect("mock keyring boot");
+        let storage = FsKeyhiveStorage::with_secret_repo(root.clone(), Arc::new(repo))?;
+        Ok((storage, root))
+    }
+
+    #[tokio::test]
+    async fn keyring_mode_round_trips_local_secrets() -> Result<(), Box<dyn std::error::Error>> {
+        let (storage, root) = keyring_test_storage("roundtrip").await?;
+        assert!(storage.uses_keyring_secrets());
+
+        let hash = StorageHash::new([7u8; 32]);
+        let data = b"keyring secret".to_vec();
+
+        assert!(storage.save_local_secret(hash, data.clone()).await?);
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded, vec![(hash, data.clone())]);
+
+        // A second secret survives alongside the first.
+        let other = StorageHash::new([8u8; 32]);
+        storage.save_local_secret(other, b"more".to_vec()).await?;
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded.len(), 2);
+
+        // Deleting removes both the blob and the index entry.
+        storage.delete_local_secret(hash).await?;
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded, vec![(other, b"more".to_vec())]);
+
+        tokio::fs::remove_dir_all(&root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keyring_mode_round_trips_prekey_secrets(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (storage, root) = keyring_test_storage("prekey").await?;
+
+        assert!(storage.load_prekey_secrets().await?.is_none());
+        storage.save_prekey_secrets(b"prekey blob".to_vec()).await?;
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"prekey blob".to_vec())
+        );
+        // Second write overwrites; last write wins.
+        storage.save_prekey_secrets(b"updated".to_vec()).await?;
+        assert_eq!(storage.load_prekey_secrets().await?, Some(b"updated".to_vec()));
+
+        tokio::fs::remove_dir_all(&root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_mode_still_persists_prekey_secrets_to_disk() -> Result<(), Box<dyn std::error::Error>> {
+        let root = unique_test_root("prekey-file");
+        let storage = FsKeyhiveStorage::new(root.clone())?;
+        assert!(!storage.uses_keyring_secrets());
+
+        storage.save_prekey_secrets(b"file blob".to_vec()).await?;
+        assert_eq!(
+            tokio::fs::read(root.join(PREKEY_SECRETS_FILE)).await?,
+            b"file blob".to_vec()
+        );
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"file blob".to_vec())
+        );
 
         tokio::fs::remove_dir_all(&root).await?;
         Ok(())

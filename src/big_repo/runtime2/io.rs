@@ -40,6 +40,10 @@ pub struct CausalDecryptResult {
     pub complete: Vec<(Vec<u8>, Vec<u8>)>,
     /// Concrete reasons why the causal closure could not be decrypted.
     pub blockers: Vec<MaterializationBlocker>,
+    /// Application secret for each decrypted content ref (entrypoint plus
+    /// causal ancestors). Lets the caller maintain a per-document
+    /// recovered-key cache without repeating CGKA derivations.
+    pub keys: Vec<(Vec<u8>, keyhive_crypto::symmetric_key::SymmetricKey)>,
 }
 
 /// Result of a transport-level document sync attempt before materialization.
@@ -222,12 +226,29 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// reachable. Mirrors
     /// [`Document::try_causal_decrypt_content`](keyhive_core::principal::document::Document::try_causal_decrypt_content).
     /// The returned [`CausalDecryptResult::complete`] includes the entrypoint
-    /// plus any ancestors decrypted along the causal chain.
+    /// plus any ancestors decrypted along the causal chain, and
+    /// [`CausalDecryptResult::keys`] carries the application secret for each
+    /// decrypted content ref so the caller can maintain a per-document
+    /// recovered-key cache (ARK-style) without another CGKA round-trip.
     fn try_causal_decrypt(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         locator: crate::runtime2::support::BigRepoCiphertextLocator,
     ) -> F::Future<'_, eyre::Result<CausalDecryptResult>>;
+
+    /// Decrypt the blob at `locator` with an application secret previously
+    /// recovered from an earlier materialization walk (per-document
+    /// recovered-key cache). Returns `None` when the blob is missing or the
+    /// cached key does not open it — callers must treat that as a cache miss,
+    /// discard the entry, and fall back to the authoritative CGKA
+    /// derivation via [`RuntimeIo::try_causal_decrypt`]. Never trust a stale
+    /// key silently: an AEAD failure must invalidate the entry.
+    fn decrypt_with_cached_key(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _locator: crate::runtime2::support::BigRepoCiphertextLocator,
+        _key: keyhive_crypto::symmetric_key::SymmetricKey,
+    ) -> F::Future<'_, eyre::Result<Option<Vec<u8>>>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +300,11 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
+    /// Persist a durable prekey-state snapshot (published membership ops +
+    /// secret halves) to incremental storage. Called after every prekey state
+    /// change so restarts restore membership without requiring compaction.
+    /// Best-effort: errors are logged by callers, not fatal.
+    fn persist_prekey_state(&self) -> F::Future<'_, eyre::Result<()>>;
     /// Check whether the sedimentree for `sed_id` is resident in storage.
     fn contains_sedimentree(
         &self,
@@ -318,13 +344,4 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         peer_id: big_sync_core::PeerId,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
-
-    /// Run prekey housekeeping for a CGKA Add operation. Fired for both
-    /// local and remotely replayed CGKA ops; internally deduped so a
-    /// consumed prekey is rotated at most once, and the pool is refilled
-    /// when it dips below the floor.
-    fn prekey_housekeeping(
-        &self,
-        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-    ) -> F::Future<'_, ()>;
 }

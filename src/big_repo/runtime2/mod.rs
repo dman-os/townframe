@@ -14,6 +14,9 @@ pub use automerge_frontier_worker::{
 pub(crate) use causal_checkpoint_worker::{
     CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,
 };
+pub(crate) use prekey_janitor_worker::{
+    PrekeyJanitorWorkerStopToken, spawn_prekey_janitor_worker,
+};
 pub(crate) use group_part_worker::{
     GroupPartWorkerStopToken, group_part_id, spawn_group_part_worker,
 };
@@ -22,6 +25,7 @@ pub(crate) mod keyhive_dispatcher;
 mod lease;
 mod messages;
 pub(crate) mod prekey_janitor;
+pub(crate) mod prekey_janitor_worker;
 pub(crate) mod native;
 pub(crate) mod support;
 mod tasks;

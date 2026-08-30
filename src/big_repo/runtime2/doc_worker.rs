@@ -47,6 +47,7 @@ where
         partially_decrypted: false,
         latest_keyhive_seq: 0,
         causal_epoch: None,
+        recovered_keys: std::sync::Mutex::new(HashMap::new()),
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
         io,
@@ -151,6 +152,16 @@ struct DocWorker2<F: FutureForm> {
     latest_keyhive_seq: u64,
     /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
     causal_epoch: Option<[u8; 32]>,
+    /// Per-document recovered-key cache (ARK-style `#blobKeys`): content ref
+    /// (commit id) → application secret recovered during earlier
+    /// materialization walks. Consulted before every CGKA round-trip; an
+    /// entry whose key fails AEAD is invalidated on sight (never trusted) and
+    /// the blob falls back to the authoritative Keyhive derivation. The cache
+    /// lives and dies with this worker instance, so a regenerated worker
+    /// starts cold.
+    recovered_keys: std::sync::Mutex<
+        HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>,
+    >,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -574,6 +585,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .map_err(|error| ferr!("failed ordering document blobs: {error}"))?;
         let fragments: Vec<_> = tree.fragments().collect();
         let commits: Vec<_> = tree.loose_commits().collect();
+        let doc_id_snapshot = self.doc_id;
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -587,7 +599,50 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             };
             let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, head);
+
+            // ARK-style recovered-key fast path: a cached application secret
+            // for this content ref opens the blob with zero CGKA work. A
+            // cached key that fails AEAD is treated as a miss — the entry is
+            // discarded on sight and the walk falls back to the authoritative
+            // Keyhive derivation; stale keys are never trusted.
+            let cached_key = self
+                .recovered_keys
+                .lock()
+                .expect("recovered-key cache lock poisoned")
+                .get(&head)
+                .copied();
+            if let Some(key) = cached_key {
+                match self.io.decrypt_with_cached_key(self.sed_id, locator, key).await? {
+                    Some(plaintext) => {
+                        plaintexts.insert(head.as_bytes().to_vec(), plaintext);
+                        continue;
+                    }
+                    None => {
+                        tracing::debug!(
+                            %doc_id_snapshot,
+                            ?head,
+                            "cached decryption key failed AEAD; invalidating entry"
+                        );
+                        self.recovered_keys
+                            .lock()
+                            .expect("recovered-key cache lock poisoned")
+                            .remove(&head);
+                    }
+                }
+            }
+
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            {
+                let mut cache = self
+                    .recovered_keys
+                    .lock()
+                    .expect("recovered-key cache lock poisoned");
+                for (content_ref, key) in &result.keys {
+                    if let Ok(array) = <[u8; 32]>::try_from(content_ref.as_slice()) {
+                        cache.insert(CommitId::new(array), *key);
+                    }
+                }
+            }
             plaintexts.extend(result.complete);
             blockers.extend(result.blockers);
         }

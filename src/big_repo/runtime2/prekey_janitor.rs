@@ -9,10 +9,18 @@
 //!
 //! Upstream exposes `rotate_prekey`/`expand_prekeys` but ships no policy, so
 //! the genesis pool would otherwise sit frozen at 7 keys. This janitor
-//! implements the policy: watch CGKA Add operations (fired for both local
-//! and remotely replayed ops) that consume one of our published prekeys,
-//! rotate the consumed key exactly once, and refill the pool whenever it
-//! drops below [`PREKEY_POOL_FLOOR`].
+//! implements the policy: when a `CgkaOperation::Add` consuming one of our
+//! published prekeys is observed in the durable admission log (see
+//! [`super::prekey_janitor_worker`]), rotate the consumed key exactly once
+//! and refill the pool whenever it drops below [`PREKEY_POOL_FLOOR`].
+//!
+//! Idempotence is structural, not tracked: the rotation guard is membership
+//! in the *current published set*, and a rotated key is tombstoned out of
+//! that set (see `BigKeyhiveHandle::prekeys`, which folds `{Add, Rotate}`
+//! ops in two passes exactly like upstream `PrekeyState::build`). An
+//! arbitrary replay of already-handled admissions therefore hits the
+//! precheck's false branch and is a no-op; no in-memory dedupe state is
+//! needed, so janitor behavior survives process restarts unchanged.
 
 use crate::interlude::*;
 use beekem::id::MemberId;
@@ -22,116 +30,62 @@ use keyhive_crypto::share_key::ShareKey;
 /// inviters keep finding distinct slots for document invitations.
 pub(crate) const PREKEY_POOL_FLOOR: usize = 8;
 
-/// Interior-mutable janitor state. Cloneable (state shared through `Arc`) so
-/// it can live on structs that derive [`Clone`]; the hub can call the janitor
-/// from concurrently spawned futures without holding a lock across awaits.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PrekeyJanitor {
-    /// Prekeys already marked for rotation. Sync replays and merges deliver
-    /// the same `CgkaOperation::Add` repeatedly; this makes rotation
-    /// idempotent for the lifetime of the process. Keys rotated out of the
-    /// published set disappear from `prekeys()`, so a fresh process cannot
-    /// double-rotate historical ops either.
-    rotated: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<ShareKey>>>,
-    /// Whether a low-water refill has already been issued for the current
-    /// exhaustion of the pool.
-    refill_issued:
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl PrekeyJanitor {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Claim a rotation for `pk` (dedupes op replays). Returns `true` if this
-    /// is the first sighting.
-    fn claim_rotation(&self, pk: &ShareKey) -> bool {
-        self.rotated
-            .lock()
-            .expect("prekey janitor state lock poisoned")
-            .insert(*pk)
-    }
-
-    /// Un-claim after a failed rotation so a later sighting can retry.
-    fn release_rotation(&self, pk: &ShareKey) {
-        self.rotated
-            .lock()
-            .expect("prekey janitor state lock poisoned")
-            .remove(pk);
-    }
-
-    /// Claim the right to refill the pool. Returns `true` if no refill is
-    /// already in flight for the current low-water event.
-    fn claim_refill(&self) -> bool {
-        !self
-            .refill_issued
-            .swap(true, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn release_refill(&self) {
-        self.refill_issued
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Handle a CGKA Add operation naming our own prekey (an offline invitation
-/// into some document's encryption tree). Rotates the consumed prekey (once
-/// per key per process), then refills the pool when it dips below
-/// [`PREKEY_POOL_FLOOR`].
+/// into some document's encryption tree). Rotates the consumed prekey and
+/// refills the pool while it sits below [`PREKEY_POOL_FLOOR`].
 ///
-/// Never fails the caller: rotation/refill failures are logged and can be
-/// retried on a later sighting of the same operation.
+/// The rotation only fires for the *current* published set, so replays of
+/// already-handled rows (the admission cursor is at-least-once) are
+/// structural no-ops. Failures propagate to the caller: the worker must not
+/// advance its durable cursor past a row whose housekeeping failed, so the
+/// row is retried on the next poll.
 pub(crate) async fn housekeep_after_add(
-    janitor: &PrekeyJanitor,
     keyhive: &crate::keyhive::BigKeyhiveHandle,
     added_id: &MemberId,
     pk: &ShareKey,
-) {
+) -> Res<()> {
     let local_id = keyhive.local_individual_id().await;
     if added_id.0.as_bytes() != local_id.0.as_bytes() {
-        return;
-    }
-    let prekeys = keyhive.prekeys().await;
-    if !prekeys.contains(pk) {
-        return;
-    }
-    if !janitor.claim_rotation(pk) {
-        // Replayed op: already rotated this prekey.
-        return;
-    }
-    if let Err(err) = keyhive.rotate_prekey(*pk).await {
-        janitor.release_rotation(pk);
-        tracing::warn!(
-            ?pk,
-            error = %err,
-            "prekey janitor: failed rotating consumed prekey"
+        tracing::debug!(
+            ?added_id,
+            local = ?local_id,
+            "prekey janitor: Add names another agent"
         );
-        return;
+        return Ok(());
     }
-    tracing::debug!(?pk, "prekey janitor: rotated consumed prekey");
 
     let prekeys = keyhive.prekeys().await;
-    if prekeys.len() >= PREKEY_POOL_FLOOR {
-        janitor.release_refill();
-        return;
-    }
-    if !janitor.claim_refill() {
-        return;
-    }
-    if let Err(err) = keyhive.expand_prekeys().await {
-        janitor.release_refill();
-        tracing::warn!(
+    if !prekeys.contains(pk) {
+        tracing::debug!(
+            ?pk,
             pool = prekeys.len(),
-            floor = PREKEY_POOL_FLOOR,
-            error = %err,
-            "prekey janitor: failed expanding prekey pool"
+            "prekey janitor: pk not in published set (replayed admission)"
         );
-        return;
+        return Ok(());
     }
-    tracing::debug!(
-        pool = prekeys.len(),
-        floor = PREKEY_POOL_FLOOR,
-        "prekey janitor: refilled prekey pool below floor"
-    );
+    keyhive
+        .rotate_prekey(*pk)
+        .await
+        .map_err(|err| ferr!("prekey janitor: rotating consumed prekey failed: {err}"))?;
+    tracing::debug!(?pk, "prekey janitor: rotated consumed prekey");
+
+    refill_to_floor(keyhive).await
+}
+
+/// Keep publishing prekeys until the pool reaches [`PREKEY_POOL_FLOOR`].
+///
+/// Idempotent: a pool already at the floor does nothing.
+pub(crate) async fn refill_to_floor(keyhive: &crate::keyhive::BigKeyhiveHandle) -> Res<()> {
+    let mut pool = keyhive.prekeys().await.len();
+    while pool < PREKEY_POOL_FLOOR {
+        keyhive
+            .expand_prekeys()
+            .await
+            .map_err(|err| ferr!("prekey janitor: growing pool below floor failed: {err}"))?;
+        pool = keyhive.prekeys().await.len();
+    }
+    if pool != PREKEY_POOL_FLOOR {
+        tracing::debug!(pool, floor = PREKEY_POOL_FLOOR, "prekey janitor: pool refilled");
+    }
+    Ok(())
 }

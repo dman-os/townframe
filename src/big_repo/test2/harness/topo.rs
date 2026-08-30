@@ -663,7 +663,28 @@ impl Pair {
         Ok(())
     }
 
-    /// Restart the left node while preserving its persistent store and identity.
+    /// Shut down and remove the right node, handing back its store handle so
+    /// the caller can inspect/manipulate the persistent SQLite state directly
+    /// while the runtime is down. A fresh node over the same disk path
+    /// ([`Node::boot_with_config`]) models the subsequent process restart.
+    pub(crate) async fn shutdown_take_right(
+        &mut self,
+    ) -> std::sync::Arc<SqliteBigRepoStore> {
+        self.left_conn.take();
+        self.right_conn.take();
+        let node = self.guard.nodes.remove(self.right_idx);
+        let store = std::sync::Arc::clone(&node.store);
+        node.shutdown().await;
+        store
+    }
+
+    /// Re-attach a freshly booted node at the right slot. Callers boot the
+    /// node themselves with [`Node::boot_with_config`], mirroring a process
+    /// restart over the same persistent store.
+    pub(crate) fn put_right(&mut self, node: Node) {
+        self.guard.nodes.insert(self.right_idx, node);
+    }
+
     pub(crate) async fn restart_left(&mut self, storage: StorageConfig) -> crate::Res<()> {
         self.left_conn.take();
         self.right_conn.take();

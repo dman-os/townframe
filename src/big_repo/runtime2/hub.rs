@@ -953,12 +953,6 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    /// Run prekey housekeeping detached from the event loop; failures are
-    /// logged inside and must never surface to the hub.
-    fn prekey_housekeeping(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-    ) -> F::Future<'static, eyre::Result<()>>;
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -972,6 +966,12 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         doc_id: DocumentId,
         reply: futures::channel::oneshot::Receiver<()>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+    /// Persist a durable prekey-state snapshot (published membership ops +
+    /// secret halves) via the shared runtime IO facade. Best-effort; failures
+    /// are logged by the implementation.
+    fn persist_prekey_state_snapshot(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
     ) -> F::Future<'static, eyre::Result<()>>;
     /// Wrap a finite background future so a `TrackedWorkDone` event is emitted
     /// after its own emissions (keeps channel order for the in-flight counter).
@@ -1153,16 +1153,6 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         })
     }
 
-    fn prekey_housekeeping(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            runtime_io.prekey_housekeeping(op).await;
-            Ok(())
-        })
-    }
-
     fn forward_materialization_retry(
         result: futures::channel::oneshot::Receiver<
             Result<crate::runtime2::MaterializationStatus, String>,
@@ -1218,6 +1208,19 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
+        })
+    }
+    fn persist_prekey_state_snapshot(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            runtime_io
+                .persist_prekey_state()
+                .await
+                .inspect_err(|err| {
+                    warn_loc!("persisting prekey state snapshot failed: {err:#}");
+                })
+                .map(|_| ())
         })
     }
     fn track_work(
@@ -1799,8 +1802,16 @@ where
             // --- Keyhive event listener handlers ---
             // Translate raw Keyhive events into domain-level notifications.
             Runtime2Evt::PrekeyExpanded { .. } | Runtime2Evt::PrekeyRotated { .. } => {
-                // Individual prekey operations are internal key management
-                // and do not correspond to a BigRepo domain event.
+                // Individual prekey operations are internal key management and do
+                // not correspond to a BigRepo domain event, but every state change
+                // must reach the durable prekey-state sidecar so restarts restore
+                // published membership without requiring compaction. Best-effort:
+                // a missed snapshot narrows to the ops since the last persisted
+                // one, never breaks decryptability.
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::PrekeyStatePersist,
+                    F::persist_prekey_state_snapshot(std::sync::Arc::clone(&self.runtime_io)),
+                )?;
             }
             // FIXME: this doesn't seem correct, I believe a key rotation can correspond
             // to multiple CGKA ops
@@ -1823,19 +1834,6 @@ where
                 // admission-driven AFW path handles cold documents; this path
                 // must never create a worker merely because Keyhive changed.
                 self.retry_existing_doc_materialization(doc_id)?;
-                // Prekey janitor: rotate prekeys consumed by Add ops naming
-                // our own published prekeys (offline invitations), and keep
-                // the pool at or above the floor. Deduped internally, and
-                // never fails the event loop.
-                if matches!(
-                    data.payload(),
-                    beekem::operation::CgkaOperation::Add { .. }
-                ) {
-                    self.spawn_tracked(
-                        crate::runtime2::TrackedWorkKind::PrekeyHousekeeping,
-                        F::prekey_housekeeping(Arc::clone(&self.runtime_io), std::sync::Arc::clone(&data)),
-                    )?;
-                }
             }
             Runtime2Evt::DelegationReceived { target, data } => {
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
@@ -2601,6 +2599,7 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub group_part_stop: Option<crate::runtime2::GroupPartWorkerStopToken>,
     pub causal_checkpoint_stop: Option<crate::runtime2::CausalCheckpointWorkerStopToken>,
     pub automerge_frontier_stop: Option<crate::runtime2::AutomergeFrontierWorkerStopToken>,
+    pub prekey_janitor_stop: Option<crate::runtime2::PrekeyJanitorWorkerStopToken>,
     pub(crate) keyhive_dispatcher_stop:
         Option<crate::runtime2::keyhive_dispatcher::KeyhiveDispatcherStopToken>,
 }
@@ -2626,6 +2625,9 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
             stop.cancel();
         }
         if let Some(stop) = self.causal_checkpoint_stop.take() {
+            stop.cancel();
+        }
+        if let Some(stop) = self.prekey_janitor_stop.take() {
             stop.cancel();
         }
         if let Some(stop) = self.group_part_stop.take() {
@@ -2903,6 +2905,7 @@ where
             group_part_stop: None,
             causal_checkpoint_stop: None,
             automerge_frontier_stop: None,
+            prekey_janitor_stop: None,
             keyhive_dispatcher_stop: None,
         },
     ))

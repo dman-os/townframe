@@ -1073,7 +1073,6 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
-source = "git+https://github.com/dman-os/keyhive?rev=f53929d91bd177fec50bf2e7436d8ae5ba7021f8#f53929d91bd177fec50bf2e7436d8ae5ba7021f8"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1118,6 +1117,7 @@ dependencies = [
  "pretty_assertions",
  "rand 0.8.7",
  "rand 0.9.5",
+ "secrets_rs",
  "sedimentree_core",
  "serde",
  "serde_json",
@@ -2987,10 +2987,8 @@ name = "daybook_core"
 version = "0.1.0"
 dependencies = [
  "am_utils_rs",
- "android-native-keyring-store",
  "anyhow",
  "api_utils_rs",
- "apple-native-keyring-store",
  "async-channel",
  "async-trait",
  "atproto-dasl",
@@ -3017,14 +3015,13 @@ dependencies = [
  "irpc",
  "irpc-iroh",
  "jsonschema",
- "keyring-core",
- "linux-keyutils-keyring-store",
  "loom",
  "mltools",
  "oci-client 0.15.0",
  "oci-spec 0.8.4",
  "rand 0.9.5",
  "schemars 1.2.2",
+ "secrets_rs",
  "semver",
  "serde",
  "serde_json",
@@ -3047,8 +3044,6 @@ dependencies = [
  "wash_plugin_wflow",
  "wasmtime",
  "wflow",
- "windows-native-keyring-store",
- "zbus-secret-service-keyring-store",
  "zstd",
 ]
 
@@ -6246,7 +6241,6 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
-source = "git+https://github.com/dman-os/keyhive?rev=f53929d91bd177fec50bf2e7436d8ae5ba7021f8#f53929d91bd177fec50bf2e7436d8ae5ba7021f8"
 dependencies = [
  "beekem",
  "bincode",
@@ -6272,7 +6266,6 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
-source = "git+https://github.com/dman-os/keyhive?rev=f53929d91bd177fec50bf2e7436d8ae5ba7021f8#f53929d91bd177fec50bf2e7436d8ae5ba7021f8"
 dependencies = [
  "bincode",
  "blake3",
@@ -10601,6 +10594,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrets_rs"
+version = "0.1.0"
+dependencies = [
+ "android-native-keyring-store",
+ "apple-native-keyring-store",
+ "bincode",
+ "iroh",
+ "keyring-core",
+ "linux-keyutils-keyring-store",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "utils_rs",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10626,7 +10638,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-lock",
  "bijoux",
@@ -11609,7 +11621,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.17.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11630,7 +11642,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -11644,7 +11656,7 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11662,7 +11674,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11681,7 +11693,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11711,7 +11723,7 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "future_form",
  "futures",
@@ -11727,7 +11739,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/subduction?rev=023992fbfbf569aae22a4afa9796553c4da61858#023992fbfbf569aae22a4afa9796553c4da61858"
+source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
 dependencies = [
  "async-channel",
  "async-lock",

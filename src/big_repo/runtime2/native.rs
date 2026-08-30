@@ -96,9 +96,6 @@ where
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
     local_peer_id: PeerId,
-    /// Prekey janitor state: rotates consumed prekeys, keeps the pool at or
-    /// above the floor.
-    prekey_janitor: crate::runtime2::prekey_janitor::PrekeyJanitor,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -859,28 +856,9 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
         Sendable::from_future(async move {
             // Load the raw blob from storage.
-            let raw = match locator.kind {
-                crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
-                    <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
-                        &self.storage,
-                        locator.sedimentree_id,
-                        locator.commit_id,
-                    )
-                    .await
-                    .map_err(|err| ferr!("failed loading loose commit: {err}"))?
-                    .map(|frag| frag.blob().clone().into_contents())
-                }
-                crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
-                    <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
-                        &self.storage,
-                        locator.sedimentree_id,
-                        locator.commit_id,
-                    )
-                    .await
-                    .map_err(|err| ferr!("failed loading fragment: {err}"))?
-                    .map(|frag| frag.blob().clone().into_contents())
-                }
-            };
+            let raw = self
+                .load_ciphertext_bytes(sed_id, locator.kind, locator.commit_id)
+                .await?;
             let Some(raw) = raw else {
                 return Ok(None);
             };
@@ -915,6 +893,43 @@ where
     }
 
     #[tracing::instrument(skip(self))]
+    fn decrypt_with_cached_key(
+        &self,
+        sed_id: SedimentreeId,
+        locator: BigRepoCiphertextLocator,
+        key: keyhive_crypto::symmetric_key::SymmetricKey,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+        Sendable::from_future(async move {
+            // ARK-style recovered-key fast path: the blob is opened with the
+            // cached application secret directly (no CGKA, no keyhive lock).
+            // Any failure is a cache miss — the caller invalidates the entry
+            // and re-derives authoritatively; nothing stale is ever trusted.
+            let Some(raw) = self
+                .load_ciphertext_bytes(sed_id, locator.kind, locator.commit_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Ok(encrypted) = decode_encrypted_blob(&raw) else {
+                return Ok(None);
+            };
+            if encrypted.content_ref.as_slice() != locator.commit_id.as_bytes() {
+                return Ok(None);
+            }
+            let mut data = encrypted.ciphertext.clone();
+            if key.try_decrypt(encrypted.nonce, &mut data).is_err() {
+                return Ok(None);
+            }
+            let Ok(envelope) =
+                bincode::deserialize::<Envelope<Vec<u8>, Vec<u8>>>(&data)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(envelope.plaintext))
+        })
+    }
+
+    #[tracing::instrument(skip(self))]
     fn try_causal_decrypt(
         &self,
         sed_id: SedimentreeId,
@@ -930,37 +945,20 @@ where
                 return Ok(CausalDecryptResult {
                     complete: Vec::new(),
                     blockers: vec![MaterializationBlocker::DocumentNotInHive],
+                    ..Default::default()
                 });
             };
             // Load the raw blob from storage.
-            let raw = match locator.kind {
-                crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
-                    <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
-                        &self.storage,
-                        locator.sedimentree_id,
-                        locator.commit_id,
-                    )
-                    .await
-                    .map_err(|err| ferr!("failed loading loose commit: {err}"))?
-                    .map(|frag| frag.blob().clone().into_contents())
-                }
-                crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
-                    <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
-                        &self.storage,
-                        locator.sedimentree_id,
-                        locator.commit_id,
-                    )
-                    .await
-                    .map_err(|err| ferr!("failed loading fragment: {err}"))?
-                    .map(|frag| frag.blob().clone().into_contents())
-                }
-            };
+            let raw = self
+                .load_ciphertext_bytes(sed_id, locator.kind, locator.commit_id)
+                .await?;
             let Some(raw) = raw else {
                 return Ok(CausalDecryptResult {
                     complete: Vec::new(),
                     blockers: vec![MaterializationBlocker::MissingCiphertexts {
                         content_refs: vec![locator.commit_id.as_bytes().to_vec()],
                     }],
+                    ..Default::default()
                 });
             };
 
@@ -1004,6 +1002,7 @@ where
                             blockers: vec![MaterializationBlocker::MissingDocumentKeys {
                                 content_refs: vec![encrypted.content_ref.clone()],
                             }],
+                            ..Default::default()
                         });
                     }
                     Err(error) => {
@@ -1121,7 +1120,15 @@ where
                     content_refs: missing_keys,
                 });
             }
-            Ok(CausalDecryptResult { complete, blockers })
+            // Surface the recovered application secrets so the doc worker's
+            // per-document recovered-key cache can serve later walks without
+            // repeating CGKA derivations.
+            let mut keys =
+                vec![(encrypted.content_ref.clone(), entrypoint_key)];
+            for (content_ref, key) in &state.keys {
+                keys.push((content_ref.clone(), *key));
+            }
+            Ok(CausalDecryptResult { complete, blockers, keys })
         };
         Sendable::from_future(fut)
     }
@@ -1231,6 +1238,14 @@ where
         })
     }
 
+    fn persist_prekey_state(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            self.keyhive
+                .save_prekey_state(&self.keyhive_storage)
+                .await
+                .map_err(|err| ferr!("persisting prekey state snapshot failed: {err}"))
+        })
+    }
     fn contains_sedimentree(
         &self,
         sed_id: SedimentreeId,
@@ -1381,24 +1396,42 @@ where
             }
         })
     }
+}
 
-    fn prekey_housekeeping(
+// ── Native ciphertext access helpers ─────────────────────────────────────
+
+impl<S> NativeBigRepoIo<S>
+where
+    S: BigRepoSubductionStorage,
+{
+    /// Load the raw ciphertext bytes for a sedimentree blob from storage.
+    async fn load_ciphertext_bytes(
         &self,
-        op: std::sync::Arc<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, ()> {
-        Sendable::from_future(async move {
-            let beekem::operation::CgkaOperation::Add { added_id, pk, .. } = op.payload() else {
-                // Only Add operations consume prekeys.
-                return;
-            };
-            let (added_id, pk) = (*added_id, *pk);
-            crate::runtime2::prekey_janitor::housekeep_after_add(
-                &self.prekey_janitor,
-                &self.keyhive,
-                &added_id,
-                &pk,
-            )
-            .await;
+        sed_id: SedimentreeId,
+        kind: crate::runtime2::support::BigRepoCiphertextKind,
+        commit_id: sedimentree_core::loose_commit::id::CommitId,
+    ) -> eyre::Result<Option<Vec<u8>>> {
+        Ok(match kind {
+            crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
+                    &self.storage,
+                    sed_id,
+                    commit_id,
+                )
+                .await
+                .map_err(|err| ferr!("failed loading loose commit: {err}"))?
+                .map(|frag| frag.blob().clone().into_contents())
+            }
+            crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
+                    &self.storage,
+                    sed_id,
+                    commit_id,
+                )
+                .await
+                .map_err(|err| ferr!("failed loading fragment: {err}"))?
+                .map(|frag| frag.blob().clone().into_contents())
+            }
         })
     }
 }
@@ -2143,7 +2176,6 @@ where
         keyhive_storage: keyhive_storage.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
-        prekey_janitor: crate::runtime2::prekey_janitor::PrekeyJanitor::new(),
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
     });
 
@@ -2213,6 +2245,19 @@ where
     stop_token
         .child_tasks
         .spawn(spawned_causal_checkpoint.run)?;
+
+    // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
+    // the durable admission log (own cursor) so Add ops incorporated while
+    // the runtime was down are picked up on the next boot.
+    let spawned_prekey_janitor = crate::runtime2::spawn_prekey_janitor_worker(
+        group_part_store.clone(),
+        keyhive.clone(),
+        Arc::clone(&timer),
+    );
+    stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
+    stop_token
+        .child_tasks
+        .spawn(spawned_prekey_janitor.run)?;
 
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),

@@ -274,6 +274,14 @@ impl BigRepo {
         self.sqlite_store.clone()
     }
 
+    /// The keyhive sidecar storage (archives, WAL events, local secret
+    /// material). Test-only: lets tier tests trigger compaction and inspect
+    /// durable keyhive state exactly as a production shutdown would leave it.
+    #[cfg(test)]
+    pub(crate) fn keyhive_storage(&self) -> BigRepoKeyhiveStorage {
+        self.keyhive_storage.clone()
+    }
+
     async fn boot_inner(
         config: Config,
         store: SqliteBigRepoStore,
@@ -315,7 +323,11 @@ impl BigRepo {
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
             StorageConfig::Disk { path } => {
-                BigRepoKeyhiveStorage::fs(keyhive_events.clone(), path.join(KEYHIVE_SUBDIR))
+                let keyhive_root = path.join(KEYHIVE_SUBDIR);
+                // Key material goes through the OS keyring where available;
+                // fsync'd files remain the fallback of record.
+                BigRepoKeyhiveStorage::fs_with_secret_repo(keyhive_events.clone(), keyhive_root)
+                    .await
                     .wrap_err("failed booting keyhive storage")?
             }
         };
@@ -339,8 +351,8 @@ impl BigRepo {
         } else {
             BigKeyhiveHandle::new(node_identity_seed, listener).await?
         };
-        keyhive.import_prekey_secrets(&keyhive_storage).await?;
-        keyhive.save_prekey_secrets(&keyhive_storage).await?;
+        keyhive.import_prekey_state(&keyhive_storage).await?;
+        keyhive.save_prekey_state(&keyhive_storage).await?;
         let policy_keyhive = keyhive.clone_keyhive();
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,

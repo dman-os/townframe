@@ -14,6 +14,7 @@ members = [
   "./src/daybook_types",
   "./src/mltools/",
   "./src/plug_dayledger/",
+  "./src/secrets_rs",
   "./src/plug_plabels/",
   "./src/plug_test/",
   "./src/sqlx_utils_rs/",
@@ -45,6 +46,7 @@ api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
+secrets_rs = { path = "./src/secrets_rs" }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
 daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
@@ -149,14 +151,14 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "023992fbfbf569aae22a4afa9796553c4da61858" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "152848df15a4fbff9e0a3c1ca722a2ad3bc55c65" }
 
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "f53929d91bd177fec50bf2e7436d8ae5ba7021f8" }
 keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "f53929d91bd177fec50bf2e7436d8ae5ba7021f8" }
@@ -232,6 +234,7 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 # [patch."https://github.com/dman-os/subduction"]
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 # subduction_core = { path = "../subduction/subduction_core" }
 # subduction_iroh = { path = "../subduction/subduction_iroh" }
 # subduction_websocket = { path = "../subduction/subduction_websocket" }
@@ -242,10 +245,12 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 # #
 
-# [patch."https://github.com/dman-os/keyhive"]
-# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-# keyhive_core = { path = "../keyhive/keyhive_core" }
-# beekem = { path = "../keyhive/beekem" }
+# LOCAL DEV (uncommitted ../keyhive changes: prekey-state delta + janitor APIs).
+# Remove once the upstream repo is pushed and the rev pins are updated.
+[patch."https://github.com/dman-os/keyhive"]
+keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+keyhive_core = { path = "../keyhive/keyhive_core" }
+beekem = { path = "../keyhive/beekem" }
 
 # Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
 # # NOTE: the comment above is now stale
