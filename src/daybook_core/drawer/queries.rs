@@ -205,6 +205,7 @@ impl DrawerRepo {
 
     /// Adapt dmeta-only exact-head hydration to the legacy metadata result
     /// consumed by the in-flight projection code. No user facet value is read.
+    #[allow(dead_code)]
     pub(crate) async fn hydrate_facet_at_heads(
         &self,
         physical_branch_id: &BranchId,

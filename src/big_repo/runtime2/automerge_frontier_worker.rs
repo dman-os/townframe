@@ -76,6 +76,7 @@ pub struct SpawnedAutomergeFrontierWorker<F: FutureForm> {
     pub run: F::Future<'static, eyre::Result<()>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_automerge_frontier_worker(
     store: SqliteBigRepoStore,
     big_sync_store: Arc<dyn HostPartStore>,
@@ -476,6 +477,7 @@ impl crate::runtime2::driver::StreamMachine for AutomergeFrontierCore {
 /// Publish heads after the live bundle reaches the supplied materialization
 /// barriers, then read them under the keyring lock. No-op when the doc isn't
 /// materialized yet (its admission/part event will re-trigger later).
+#[allow(clippy::too_many_arguments)]
 async fn publish_heads(
     doc_id: crate::DocumentId,
     runtime: &crate::runtime2::Runtime2Handle<Sendable>,

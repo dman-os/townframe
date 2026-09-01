@@ -151,6 +151,7 @@ pub async fn plugs_repo() -> Res<Arc<PlugsRepo>> {
                 Arc::clone(&blobs),
                 ctx.doc_config.document_id(),
                 daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
+                Arc::clone(&sqlite_local_state_repo().await?),
             )
             .await?;
             register_shutdown(move || async move { plugs_stop.stop().await });
@@ -191,7 +192,6 @@ pub async fn drawer_repo() -> Res<Arc<DrawerRepo>> {
             // has no switch/notif loop, so materialize the cache from the
             // config the same way the switch does at boot.
             plugs.ensure_core_plug().await?;
-            plugs.events_for_init().await?;
             register_shutdown(move || async move { drawer_stop.stop().await });
             Ok(drawer)
         })
@@ -272,14 +272,10 @@ pub async fn doc_blobs_index_repo() -> Res<Arc<DocBlobsIndexRepo>> {
     match DOC_BLOBS_INDEX
         .get_or_try_init(|| async {
             let drawer = drawer_repo().await?;
-            let blobs = blobs_repo().await?;
             let sqlite_local_state = sqlite_local_state_repo().await?;
-            let (repo, stop) = DocBlobsIndexRepo::boot(
-                Arc::clone(&drawer),
-                Arc::clone(&blobs),
-                Arc::clone(&sqlite_local_state),
-            )
-            .await?;
+            let (repo, stop) =
+                DocBlobsIndexRepo::boot(Arc::clone(&drawer), Arc::clone(&sqlite_local_state))
+                    .await?;
             register_shutdown(move || async move { stop.stop().await });
             Ok(repo)
         })

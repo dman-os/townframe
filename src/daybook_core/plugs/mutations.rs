@@ -151,7 +151,7 @@ impl PlugsRepo {
             .config_store()?
             .query_sync(|config| {
                 (
-                    config.plug_config_doc_ids.contains_key(&plug_id),
+                    !config.plug_config_doc_ids.contains_key(&plug_id),
                     config.enabled.get(&plug_id).cloned(),
                 )
             })

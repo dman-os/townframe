@@ -7,9 +7,7 @@ use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 
 use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
-use daybook_types::doc::{
-    ArcFacetRaw, BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef,
-};
+use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};

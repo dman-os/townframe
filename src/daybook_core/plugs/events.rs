@@ -7,16 +7,10 @@ use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
-use daybook_types::doc::{FacetKey, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::doc::{FacetKey, WellKnownFacetTag};
 use sqlx_utils_rs::SqlCtx;
 
 pub(crate) const PLUGS_CONFIG_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-config-facet-set";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigFacetApplyOutcome {
-    Applied,
-    Deferred,
-}
 
 pub(crate) struct PlugsConfigFacetSetConsumerStopToken {
     cancel_token: CancellationToken,
@@ -51,10 +45,6 @@ pub(crate) async fn spawn_facet_set_plugs_config_consumer(
     let worker_cancel_token = cancel_token.clone();
     let route = plugs_repo.config_facet_route();
     let worker_handle = tokio::spawn(async move {
-        let mut wake = drawer
-            .subscribe_materialization_wake(None)
-            .await
-            .expect(ERROR_IMPOSSIBLE);
         let mut walker = SerialDeltaWalker::open(
             facet_set_store.as_ref(),
             &state,
@@ -63,43 +53,24 @@ pub(crate) async fn spawn_facet_set_plugs_config_consumer(
         )
         .await
         .expect(ERROR_IMPOSSIBLE);
-        let mut deferred = None;
         loop {
-            let read = if let Some((revision, entries)) = deferred.take() {
-                RevisionRead::Entries { revision, entries }
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = worker_cancel_token.cancelled() => break,
-                    read = walker.next() => read.expect(ERROR_IMPOSSIBLE),
-                }
+            let read = tokio::select! {
+                biased;
+                _ = worker_cancel_token.cancelled() => break,
+                read = walker.next() => read.expect(ERROR_IMPOSSIBLE),
             };
             match read {
                 RevisionRead::ReplayComplete { .. } => {}
                 RevisionRead::Entries { revision, entries } => {
-                    let mut retry = false;
-                    for delta in entries.iter().cloned() {
+                    for delta in entries {
                         assert_eq!(
                             delta.key, route,
                             "unexpected route in PlugsConfig FacetSet consumer"
                         );
-                        match plugs_repo
+                        plugs_repo
                             .process_config_facet_delta(&drawer, delta)
                             .await
-                            .expect(ERROR_IMPOSSIBLE)
-                        {
-                            ConfigFacetApplyOutcome::Applied => {}
-                            ConfigFacetApplyOutcome::Deferred => retry = true,
-                        }
-                    }
-                    if retry {
-                        deferred = Some((revision, entries));
-                        tokio::select! {
-                            biased;
-                            _ = worker_cancel_token.cancelled() => break,
-                            result = wake.wait() => result.expect(ERROR_IMPOSSIBLE),
-                        }
-                        continue;
+                            .expect(ERROR_IMPOSSIBLE);
                     }
                     walker.settle(revision).await.expect(ERROR_IMPOSSIBLE);
                 }
@@ -238,7 +209,7 @@ async fn apply_manifest_entries(
         let Some(doc) = drawer
             .get_doc_with_facets_at_branch_heads(
                 &delta.key.document_id,
-                &daybook_types::doc::BranchPath::new("main"),
+                daybook_types::doc::BranchPath::new("main"),
                 &snapshot.branch_heads,
                 Some(vec![manifest_key.clone()]),
             )
@@ -315,56 +286,23 @@ impl PlugsRepo {
     /// resolve a pending plug whose pinned heads became readable.
     pub(crate) async fn process_config_facet_delta(
         &self,
-        drawer: &DrawerRepo,
-        delta: crate::index::FacetDelta,
-    ) -> Res<ConfigFacetApplyOutcome> {
+        _drawer: &DrawerRepo,
+        _delta: crate::index::FacetDelta,
+    ) -> Res<()> {
+        // FacetSet events are dirty hints, not snapshots to install. Serialize
+        // reconciliation with local plug commands, then load the config at one
+        // exact current drawer frontier. This makes stale, coalesced, local,
+        // and out-of-order events converge through Automerge resolution.
+        let _guard = self.mutation_mutex.lock().await;
         let store = self.config_store()?;
-        let previous = store.query_sync(|config| config.clone()).await;
-        let (current, current_heads, actor_id) = match delta.current {
-            Some(snapshot) => {
-                let raw = match drawer
-                    .hydrate_facet_value_at_heads(
-                        &delta.key.branch_id,
-                        &snapshot.branch_heads,
-                        &delta.key.facet_key,
-                    )
-                    .await?
-                {
-                    crate::drawer::ExactFacetValueHydration::Deferred => {
-                        return Ok(ConfigFacetApplyOutcome::Deferred);
-                    }
-                    crate::drawer::ExactFacetValueHydration::Absent => {
-                        eyre::bail!(
-                            "PlugsConfig FacetSet membership has no value at exact branch heads"
-                        );
-                    }
-                    crate::drawer::ExactFacetValueHydration::Present(raw) => raw,
-                };
-                let config = match WellKnownFacet::from_json(raw, WellKnownFacetTag::PlugsConfig)? {
-                    WellKnownFacet::PlugsConfig(config) => config,
-                    _ => unreachable!("PlugsConfig facet decoded as another well-known facet"),
-                };
-                (config, snapshot.branch_heads, Some(snapshot.actor_id))
-            }
-            None => (
-                <PlugsConfig as crate::stores::FacetStore>::seed(),
-                delta.current_branch_heads.unwrap_or_default(),
-                None,
-            ),
-        };
+        let previous = store.query_sync(Clone::clone).await;
+        let (current, current_heads) = store.latest_snapshot().await?;
+        self.apply_config_diff(Some(&previous), &current).await?;
         store
-            .apply_external_snapshot(current.clone(), current_heads.clone())
+            .apply_external_snapshot(current, current_heads.unwrap_or_default())
             .await?;
-        let local_actor = store.local_writer_actor().await;
-        let is_local = actor_id
-            .as_ref()
-            .zip(local_actor.as_ref())
-            .is_some_and(|(actor, local)| actor == local);
-        if !is_local {
-            self.apply_config_diff(Some(&previous), &current).await?;
-        }
         self.reconcile_revision_frontier().await?;
-        Ok(ConfigFacetApplyOutcome::Applied)
+        Ok(())
     }
 
     async fn process_manifest_doc_change(

@@ -165,30 +165,19 @@ async fn recover_pending_documents(
     big_repo: &SharedBigRepo,
     pending_documents: &BigKeyhiveGroup,
 ) -> Res<()> {
-    for document_id in big_repo.documents_in_group(pending_documents).await {
-        if !big_repo.contains_sedimentree_id(document_id).await? {
-            // Allocation without persisted content remains a GC candidate.
-            continue;
-        }
-        let handle = match big_repo.get_doc(&document_id).await? {
-            big_repo::DocLookup::Ready(handle) => handle,
-            big_repo::DocLookup::PendingMaterialization => {
-                eyre::bail!(
-                    "pending document {document_id} has materialized storage but is not ready"
-                )
-            }
-            big_repo::DocLookup::Missing => {
-                eyre::bail!(
-                    "pending document {document_id} has materialized storage but is missing"
-                )
-            }
-        };
-        let content = handle.with_document_read(|document| document.clone()).await;
-        big_repo
-            .finalize_allocated_doc(document_id, content, pending_documents.clone())
+    // Reservations are the durable enumeration of allocated-but-unfinalized
+    // document IDs; the pending group cannot enumerate a merely reserved
+    // public key before a signed Keyhive authority exists.
+    for document_id in big_repo.reserved_doc_ids().await? {
+        if !big_repo
+            .recover_allocated_doc(document_id, pending_documents.clone())
             .await
             .map_err(eyre::Report::from)
-            .wrap_err_with(|| format!("finalizing pending document {document_id}"))?;
+            .wrap_err_with(|| format!("finalizing pending document {document_id}"))?
+        {
+            // Allocation without staged content remains a GC candidate.
+            continue;
+        }
     }
     Ok(())
 }

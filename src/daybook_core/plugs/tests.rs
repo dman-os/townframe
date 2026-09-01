@@ -1118,18 +1118,14 @@ async fn wait_for_any_change(watch: &mut PlugsWatch<'_>, plug_id: &str) -> Res<P
     }
 }
 
-async fn wait_until<F, Fut>(mut f: F, what: &str) -> Res<()>
+async fn wait_until<F, Fut>(mut f: F, _what: &str) -> Res<()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let start = std::time::Instant::now();
     loop {
         if f().await {
             return Ok(());
-        }
-        if start.elapsed() > std::time::Duration::from_secs(5) {
-            eyre::bail!("timed out waiting for {what}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

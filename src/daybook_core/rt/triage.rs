@@ -3,13 +3,9 @@ use crate::interlude::*;
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
-use crate::repos::Repo;
 use crate::rt::dispatch::DispatchOnSuccessHook;
 use crate::rt::{DispatchArgs, Rt};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
 
@@ -501,12 +497,10 @@ async fn plan_processor_group(
                     }
                 }
             }
-        } else if previous.contains_key(&processor_facet_state_key(&delta.key)) {
-            if !is_dmeta {
-                removed.insert(delta.key.facet_key.clone());
-                if delta.removed_local {
-                    local_candidates.insert(delta.key.facet_key.clone());
-                }
+        } else if previous.contains_key(&processor_facet_state_key(&delta.key)) && !is_dmeta {
+            removed.insert(delta.key.facet_key.clone());
+            if delta.removed_local {
+                local_candidates.insert(delta.key.facet_key.clone());
             }
         }
     }
@@ -624,10 +618,10 @@ async fn apply_processor_revision(
                 .map(|delta| processor_facet_state_key(&delta.key)),
         );
     }
-    let prior_rows = state
-        .get_many(&lookup_keys)
-        .await
-        .map_err(|error| ferr!("reading DocProcessor sparse state: {error}"))?;
+    let prior_rows =
+        big_sync_core::delta_walker_state::DeltaWalkerStateRepo::get_many(state, &lookup_keys)
+            .await
+            .map_err(|error| ferr!("reading DocProcessor sparse state: {error}"))?;
     let mut prior_snapshots = HashMap::new();
     let mut prior_docs = HashMap::new();
     for (key, value) in prior_rows {

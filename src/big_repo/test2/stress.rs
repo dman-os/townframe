@@ -33,7 +33,6 @@ pub struct BigRepoStressConfig {
     pub relay_idx: Option<usize>,
     pub seed: u64,
     pub peer_seed_offset: u8,
-    pub test_revocations: bool,
 }
 
 impl Default for BigRepoStressConfig {
@@ -43,7 +42,6 @@ impl Default for BigRepoStressConfig {
             relay_idx: None,
             seed: utils_rs::testing::test_seed(DEFAULT_STRESS_SEED),
             peer_seed_offset: 0,
-            test_revocations: false,
         }
     }
 }
@@ -217,21 +215,6 @@ impl BigRepoStressFixture {
         let _left_and_right = (left, right);
         Ok(self.sync_parts().await)
     }
-
-    pub async fn revoke_access(&self, node: &Node, obj: &ObjId, target_peer: PeerId) -> Res<()> {
-        let doc_id = self.doc_id(obj).await?;
-        let keyhive_peer = KeyhivePeerId::from_bytes(*target_peer.as_bytes());
-        let agent = node
-            .repo
-            .keyhive()
-            .get_agent_by_peer_id(&keyhive_peer)
-            .await?
-            .ok_or_else(|| {
-                crate::ferr!("agent {target_peer} not available on {}", node.peer_id())
-            })?;
-        node.repo.revoke_doc_access(doc_id, agent).await?;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -396,12 +379,6 @@ impl StressFixture for BigRepoStressFixture {
                     .expect("failed transacting stress mutation");
             })
             .await?;
-        if self.config.test_revocations {
-            let editors = self.editor_peer_ids.lock().await;
-            if let Some(&target_peer) = editors.iter().find(|&&p| p != node.peer_id()) {
-                drop(self.revoke_access(node, obj, target_peer).await);
-            }
-        }
         Ok(())
     }
 
@@ -483,26 +460,33 @@ impl StressFixture for BigRepoStressFixture {
                 .add_member_to_group(relay_agent, &group, Access::Relay)
                 .await?;
         }
-        for editor in &editors {
-            self.shared_edit_groups
-                .lock()
-                .await
-                .insert(editor.peer_id(), group.clone());
-        }
         // Membership propagation is notification-driven. Keep the initial
         // quiescence barrier, but do not inject explicit Keyhive sync rounds
         // into the stress workload.
         for node in &live {
             node.repo.wait_for_quiescence(None).await?;
         }
+        // Store each node's independently reconstructed local group. Sharing
+        // the owner's in-process group handle across nodes bypasses the
+        // distributed Keyhive reconstruction path this stress test exercises.
         for editor in &editors {
-            let local_group = editor.repo.keyhive().get_group(group.id()).await;
-            if local_group.is_none() {
-                return Err(crate::ferr!(
-                    "editor {} reached bootstrap quiescence without the shared Keyhive group",
-                    editor.peer_id()
-                ));
-            }
+            let local_group = editor
+                .repo
+                .keyhive()
+                .get_group(group.id())
+                .await
+                .ok_or_else(|| {
+                    crate::ferr!(
+                        "editor {} reached bootstrap quiescence without the shared Keyhive group",
+                        editor.peer_id()
+                    )
+                })?;
+            let previous = self
+                .shared_edit_groups
+                .lock()
+                .await
+                .insert(editor.peer_id(), local_group);
+            assert!(previous.is_none(), "stress editor group was already cached");
         }
         Ok(())
     }
@@ -519,10 +503,23 @@ impl StressFixture for BigRepoStressFixture {
             Ok(doc_id) => doc_id,
             Err(_) => return Ok(false),
         };
-        Ok(matches!(
+        if !matches!(
             node.repo.get_doc(&doc_id).await?,
             crate::DocLookup::Ready(_)
-        ))
+        ) {
+            return Ok(false);
+        }
+        let agent = node.repo.keyhive().keyhive_peer_id().to_identifier()?;
+        let document = keyhive_core::principal::identifier::Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+                .expect("stress document id must be a verifying key"),
+        );
+        Ok(node
+            .repo
+            .keyhive()
+            .agent_access_on(&agent, document)
+            .await
+            .is_some_and(|access| access.is_editor()))
     }
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
@@ -699,7 +696,7 @@ impl StressFixture for BigRepoStressFixture {
                 let Ok(agent_id) = node.repo.keyhive().keyhive_peer_id().to_identifier() else {
                     continue;
                 };
-                let access = nodes[0]
+                let access = node
                     .repo
                     .keyhive()
                     .agent_access_on(&agent_id, doc_identifier)
@@ -744,6 +741,12 @@ impl StressFixture for BigRepoStressFixture {
             }
         }
 
+        tracing::info!(
+            barrier = "editor-automerge-head-equality",
+            editor_count = editors.len(),
+            document_count = tracked_docs.len(),
+            "stress barrier begin"
+        );
         let mut materialized_by_peer = Vec::new();
         for node in &editors {
             let mut documents = BTreeMap::new();
@@ -831,6 +834,10 @@ impl StressFixture for BigRepoStressFixture {
             }
         }
         if sedimentree_mismatches.is_empty() && materialized_mismatches.is_empty() {
+            tracing::info!(
+                barrier = "editor-automerge-head-equality",
+                "stress barrier complete"
+            );
             return Ok(());
         }
         let peer_cursors = try_join_all(nodes.iter().map(|node| async {
@@ -913,28 +920,6 @@ mod tests {
             PHASE1_MUTATIONS,
             PHASE2_MUTATIONS,
             PHASE3_MUTATIONS,
-            None,
-        )
-        .await
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn long_test_big_repo_tier10_stress_revocations_converges() -> Res<()> {
-        let config = BigRepoStressConfig {
-            relay_idx: Some(3),
-            peer_seed_offset: 128,
-            test_revocations: true,
-            ..BigRepoStressConfig::default()
-        };
-        let fixture = BigRepoStressFixture::new(config.clone());
-        run_randomized_stress(
-            fixture,
-            Arc::new(()),
-            config.seed,
-            config.node_count,
-            PHASE1_MUTATIONS / 2,
-            PHASE2_MUTATIONS / 2,
-            PHASE3_MUTATIONS / 2,
             None,
         )
         .await

@@ -527,6 +527,12 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         Ok(())
     }
 
+    /// Load the facet value and branch heads from one exact current frontier
+    /// without changing the in-memory store.
+    pub(crate) async fn latest_snapshot(&self) -> Res<(S, Option<ChangeHashSet>)> {
+        let guard = self.inner.read().await;
+        Self::hydrate(&guard.drawer, &self.doc_id, &guard.branch).await
+    }
     async fn hydrate(
         drawer: &DrawerRepo,
         doc_id: &daybook_types::doc::DocId,
@@ -536,17 +542,20 @@ impl<S: FacetStore> FacetStoreHandle<S> {
             .get_doc_branches(doc_id)
             .await?
             .and_then(|entry| entry.branches.get(branch.as_str()).cloned());
+        let Some(heads) = heads else {
+            return Ok((S::seed(), None));
+        };
         let Some(doc) = drawer
-            .get_doc_with_facets_at_branch(doc_id, branch, Some(vec![S::facet_key()]))
+            .get_doc_with_facets_at_branch_heads(doc_id, branch, &heads, Some(vec![S::facet_key()]))
             .await?
         else {
-            return Ok((S::seed(), heads));
+            return Ok((S::seed(), Some(heads)));
         };
         let store = match doc.facets.get(&S::facet_key()) {
             Some(raw) => serde_json::from_value(raw.clone())?,
             None => S::seed(),
         };
-        Ok((store, heads))
+        Ok((store, Some(heads)))
     }
 
     fn build_patch(&self, store: &S) -> Res<daybook_types::doc::DocPatch> {

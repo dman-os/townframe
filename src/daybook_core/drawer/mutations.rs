@@ -750,10 +750,11 @@ impl DrawerRepo {
         })()?;
         let handle = self
             .big_repo
-            .finalize_allocated_doc(
+            .finalize_allocated_doc_from_parent(
                 branch_doc_id,
                 branch_doc,
                 self.pending_documents_group.clone(),
+                &from_handle,
             )
             .await
             .map_err(|err| eyre::eyre!("{err}"))

@@ -2,7 +2,7 @@ use crate::blobs::BLOB_SCHEME;
 #[cfg(test)]
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
-use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
+use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
 use big_sync::SqliteDeltaWalkerStateRepo;
@@ -146,23 +146,20 @@ async fn run_facet_set_doc_blobs_consumer(
             RevisionRead::ReplayComplete { .. } => {}
             RevisionRead::Entries { revision, entries } => {
                 let prepared = doc_blobs_repo.prepare_facet_set_revision(&entries).await?;
-                if prepared.is_none() {
-                    deferred = Some((revision, entries));
-                } else {
+                if let Some(prepared) = prepared {
                     let mut settlement =
                         walker.begin_settlement(revision).await.map_err(|error| {
                             ferr!("beginning doc-blobs FacetSet settlement: {error}")
                         })?;
                     doc_blobs_repo
-                        .apply_facet_set_revision_in_tx(
-                            settlement.context_mut(),
-                            prepared.expect("prepared facet-set revision"),
-                        )
+                        .apply_facet_set_revision_in_tx(settlement.context_mut(), prepared)
                         .await?;
                     settlement
                         .settle()
                         .await
                         .map_err(|error| ferr!("settling doc-blobs FacetSet walker: {error}"))?;
+                } else {
+                    deferred = Some((revision, entries));
                 }
             }
         }
@@ -176,6 +173,7 @@ async fn run_facet_set_doc_blobs_consumer(
     }
 }
 
+#[allow(dead_code)]
 impl DocBlobsIndexRepo {
     pub async fn boot(
         drawer_repo: Arc<DrawerRepo>,
@@ -454,7 +452,7 @@ impl DocBlobsIndexRepo {
         doc_id: &DocId,
         branch_id: &BranchId,
     ) -> Res<Option<BranchPathBuf>> {
-        if branch_id.0 == doc_id.to_string() {
+        if branch_id.0 == *doc_id {
             return Ok(Some(BranchPathBuf::from("main")));
         }
         if let Some(entry) = self.drawer_repo.get_entry(doc_id).await?
@@ -883,7 +881,7 @@ pub enum ReindexDocOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repos::SubscribeOpts;
+    use crate::index::FacetRouteKey;
     use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, BlobPin, FacetRaw};
 

@@ -135,10 +135,8 @@ fn doc_and_heads(
         .collect::<Res<Vec<_>>>()?;
     Ok((
         automerge_obj_to_doc_id(obj_id),
-        Arc::from(
-            am_utils_rs::parse_commit_heads(&names)
-                .wrap_err_with(|| format!("invalid frontier payload at revision {revision}"))?,
-        ),
+        am_utils_rs::parse_commit_heads(&names)
+            .wrap_err_with(|| format!("invalid frontier payload at revision {revision}"))?,
     ))
 }
 

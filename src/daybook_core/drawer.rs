@@ -22,8 +22,8 @@ pub use meta::doc_version_updates;
 pub use meta::version_updates;
 
 use big_repo::{
-    BigKeyhiveGroup, BigRepoLocalFilter, BigRepoLocalListenerRegistration,
-    BigRepoLocalNotification, SharedBigRepo, SharedPartStore,
+    BigKeyhiveGroup, BigRepoLocalListenerRegistration, BigRepoLocalNotification, SharedBigRepo,
+    SharedPartStore,
 };
 use cache::FacetCacheKey;
 use cache::*;
@@ -55,6 +55,7 @@ pub(crate) fn facet_snapshot_metadata(
 
 /// Exact-head facet hydration owned by the drawer, which is the sole owner
 /// of BigRepo document handles at this layer.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExactFacetHydration {
     Deferred,

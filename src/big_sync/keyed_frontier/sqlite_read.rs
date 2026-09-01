@@ -78,6 +78,7 @@ pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
         0
     }
 
+    #[expect(clippy::type_complexity)]
     fn fetch_rows<'a>(
         &'a self,
         selector: &'a Self::Selector,

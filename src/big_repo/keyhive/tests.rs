@@ -79,7 +79,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     .await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
         owner.clone_keyhive(),
-        storage,
+        storage.clone(),
         owner.keyhive_peer_id(),
         owner.contact_card().clone(),
     ));
@@ -89,13 +89,34 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     let (intended_group, _) = owner
         .create_group_with_parents(Vec::new(), &protocol)
         .await?;
-    let (_doc_authority, doc_id, _) = owner
-        .create_pending_doc(
+    let doc_id = owner
+        .reserve_doc_id(
             vec![pending_group.clone().into(), intended_group.clone().into()],
-            &protocol,
+            &storage,
         )
         .await?;
+    // A reservation is not yet a Keyhive authority: no document exists and
+    // no group contains it.
     assert!(!owner.document_has_content(doc_id).await?);
+    assert!(
+        !owner
+            .group_document_ids(&pending_group)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        !owner
+            .group_document_ids(&intended_group)
+            .await
+            .contains(&doc_id)
+    );
+
+    // Finalization creates the document under the reserved identity with the
+    // real content heads and the reserved parents.
+    owner
+        .finalize_reserved_doc(doc_id, nonempty::nonempty!([7u8; 32]), &protocol, &storage)
+        .await?;
+    assert!(owner.document_has_content(doc_id).await?);
     assert!(
         owner
             .group_document_ids(&pending_group)
@@ -112,7 +133,6 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     owner
         .revoke_group_from_doc(&pending_group, doc_id, vec![vec![7; 32]], &protocol)
         .await?;
-    assert!(owner.document_has_content(doc_id).await?);
     assert!(
         !owner
             .group_document_ids(&pending_group)

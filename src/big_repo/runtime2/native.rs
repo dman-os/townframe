@@ -41,7 +41,7 @@ use crate::{
     },
     runtime2::types::BigRepoSyncPolicy,
 };
-use keyhive_core::principal::document::{DecryptError, EncryptError};
+use keyhive_core::principal::document::{DecryptError, DocCausalDecryptionError, EncryptError};
 use keyhive_core::{
     crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
     principal::identifier::Identifier, store::ciphertext::CiphertextStore,
@@ -359,10 +359,11 @@ where
         &self,
         sed_id: SedimentreeId,
         staged: crate::runtime2::support::StagedAutomergeIngest,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let (sedimentree, blobs, cgka_ops, local_secrets) =
-                encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
+                encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id, initial_keys)
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
             if !cgka_ops.is_empty() {
@@ -1005,16 +1006,31 @@ where
 
             // Attempt causal decrypt for the entrypoint's ancestors.
             tracing::debug!(%sed_id, "causal: before causal kh_doc lock (async IO across lock)");
+            // A partial causal decrypt is a transient materialization state,
+            // not a programming error: during clone bootstrap or catch-up a
+            // peer may not yet hold every ancestor ciphertext/key. The
+            // per-ancestor classification below turns the missing refs into
+            // blockers so the doc worker parks and retries; only structural
+            // failures remain fatal.
             let state = {
                 let mut doc = kh_doc.lock().await;
                 tracing::debug!(%sed_id, "causal: acquired causal kh_doc lock");
-                doc.try_causal_decrypt_content(&encrypted, &ct_store)
-                    .await
-                    .map_err(|err| {
-                        ferr!(
+                match doc.try_causal_decrypt_content(&encrypted, &ct_store).await {
+                    Ok(state) => state,
+                    Err(DocCausalDecryptionError::CausalDecryptionError(err)) => {
+                        tracing::warn!(
+                            content_ref = ?encrypted.content_ref,
+                            cannot = ?err.cannot.keys().collect::<Vec<_>>(),
+                            "causal decrypt partially failed; deferring failed refs as blockers"
+                        );
+                        err.progress
+                    }
+                    Err(err) => {
+                        return Err(ferr!(
                             "causal decrypt failed; BigRepo envelope is not causally closed: {err}"
-                        )
-                    })?
+                        ));
+                    }
+                }
             };
             tracing::debug!(%sed_id, "causal: released causal kh_doc lock");
             let mut missing_ciphertexts = Vec::new();
@@ -1130,28 +1146,74 @@ where
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
         Sendable::from_future(async move {
-            let (_authority, doc_id, _hashes) = self
+            let doc_id = self
                 .keyhive
-                .create_pending_doc(parents, &self.keyhive_protocol)
+                .reserve_doc_id(parents, &self.keyhive_storage)
                 .await?;
             Ok(doc_id)
+        })
+    }
+
+    fn stage_allocated_document(
+        &self,
+        doc_id: DocumentId,
+        initial_content: Vec<u8>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        already_persisted: bool,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            if already_persisted {
+                return Ok(());
+            }
+            self.keyhive
+                .stage_reserved_doc(doc_id, initial_content, initial_keys, &self.keyhive_storage)
+                .await
         })
     }
 
     fn finalize_document_authority(
         &self,
         doc_id: DocumentId,
+        content_heads: NonEmpty<[u8; 32]>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            self.keyhive
+                .finalize_reserved_doc(
+                    doc_id,
+                    content_heads,
+                    &self.keyhive_protocol,
+                    &self.keyhive_storage,
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn complete_document_authority(
+        &self,
+        doc_id: DocumentId,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         content_heads: NonEmpty<[u8; 32]>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
+            if !self
+                .storage
+                .contains_sedimentree_id(SedimentreeId::new(doc_id.into_bytes()))
+                .await
+                .map_err(|err| ferr!("failed checking finalized sedimentree: {err}"))?
+            {
+                return Err(ferr!(
+                    "cannot complete document {doc_id} before sedimentree persistence"
+                ));
+            }
             let after_content = content_heads.iter().map(|head| head.to_vec()).collect();
             self.keyhive
-                .revoke_group_from_doc(
+                .complete_reserved_doc(
                     &pending_group,
                     doc_id,
                     after_content,
                     &self.keyhive_protocol,
+                    &self.keyhive_storage,
                 )
                 .await?;
             Ok(())
@@ -1407,7 +1469,9 @@ async fn spawn_keyhive_change_subscription(
                 return;
             }
         };
-        // The first event confirms subscription readiness.
+        // The first event confirms subscription readiness. Connection
+        // establishment independently initiates the catch-up Keyhive sync; the
+        // notification stream is responsible only for subsequent dirty hints.
         match tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv()).await {
             Ok(Ok(Some(event))) if event.initial => {}
             Ok(Ok(Some(_))) => {

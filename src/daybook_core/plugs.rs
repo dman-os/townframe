@@ -12,7 +12,6 @@ use big_sync_core::revisioned_store::{
     KeyedFrontierRevisionReader, RevisionRead, RevisionReadLimits, RevisionedStore,
     RevisionedStoreReader,
 };
-use sqlx_utils_rs::SqlCtx;
 use std::collections::BTreeSet;
 
 pub(crate) use self::events::{
@@ -230,7 +229,6 @@ pub struct PlugsRepo {
     config_store: tokio::sync::OnceCell<crate::stores::FacetStoreHandle<PlugsConfig>>,
 
     mutation_mutex: tokio::sync::Mutex<()>,
-    local_actor_id: ActorId,
     cancel_token: CancellationToken,
     cache: surelock::mutex::Mutex<PlugsCache>,
     pub(crate) revision_frontier: SqliteKeyedFrontier<PlugRevisionCodec>,
@@ -367,6 +365,11 @@ pub struct ImportedPlug {
     pub source_digest: Option<String>,
 }
 
+#[allow(
+    clippy::clone_on_ref_ptr,
+    clippy::disallowed_names,
+    clippy::while_let_loop
+)]
 impl PlugsRepo {
     pub async fn watch<'a>(
         &'a self,
@@ -459,12 +462,9 @@ impl PlugsRepo {
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
         doc_config_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPathBuf,
+        _local_user_path: daybook_types::doc::UserPathBuf,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        let local_user_path =
-            daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let cancel_token = CancellationToken::new();
         let frontier_sql = sqlite_local_state_repo
             .ensure_sqlite_ctx("@daybook/core/plugs-revisions")
@@ -486,7 +486,6 @@ impl PlugsRepo {
             drawer: tokio::sync::OnceCell::new(),
             config_store: tokio::sync::OnceCell::new(),
             mutation_mutex: tokio::sync::Mutex::new(()),
-            local_actor_id,
             cancel_token: cancel_token.clone(),
             cache: surelock::mutex::Mutex::new(PlugsCache::default()),
             revision_frontier,
@@ -552,9 +551,11 @@ impl PlugsRepo {
     /// monotonic under the cache lock).
     async fn warm_cache(&self) -> Res<()> {
         let (known_plugs, enabled) = match self.config_store() {
-            Ok(store) => store
-                .query_sync(|config| (config.known_plugs.clone(), config.enabled.clone()))
-                .await,
+            Ok(store) => {
+                store
+                    .query_sync(|config| (config.known_plugs.clone(), config.enabled.clone()))
+                    .await
+            }
             Err(_) => return Ok(()),
         };
         for (plug_id, track) in &known_plugs {

@@ -4,10 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use daybook_types::doc::{
-    BlobPin, BranchPathBuf, ChangeHashSet, DocId, DocPatch, FacetKey, FacetRaw, WellKnownFacet,
-    WellKnownFacetTag,
+    BlobPin, ChangeHashSet, DocId, DocPatch, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
-use eyre::Context;
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::BlobsRepo;
@@ -16,7 +14,7 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
 use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
-use crate::repos::{Repo, RepoStopToken};
+use crate::repos::RepoStopToken;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
@@ -890,7 +888,7 @@ mod tests {
         // main must not unpin it until the branch is removed as well.
         let main_heads = test_context
             .drawer_repo
-            .get_branch_heads_for_path(&doc_id, &BranchPath::new("main"))
+            .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch heads")?;
         let branch_path = BranchPathBuf::from("/test/blob-pin-branch");
@@ -899,7 +897,7 @@ mod tests {
             .create_branch_at_heads_from_branch(
                 &doc_id,
                 &branch_path,
-                &BranchPath::new("main"),
+                BranchPath::new("main"),
                 &main_heads,
                 None,
             )

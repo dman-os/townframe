@@ -345,6 +345,27 @@ impl SyncStatMachine {
             .collect()
     }
 
+    /// TEMP-DIAGNOSTIC: per (peer, part) full-sync blocking flags.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_peer_part_sync_flags(&self) -> Vec<(PeerId, PartId, bool, bool, bool, bool)> {
+        let mut out = Vec::new();
+        for (peer_id, peer_state) in &self.peers {
+            for part_id in peer_state.parts.keys().copied() {
+                let default = Default::default();
+                let part_state = peer_state.parts.get(&part_id).unwrap_or(&default);
+                out.push((
+                    *peer_id,
+                    part_id,
+                    part_state.pending,
+                    part_state.multi_strat,
+                    peer_state.replay_phase_done,
+                    part_state.cursor_active,
+                ));
+            }
+        }
+        out
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn debug_last_object_syncs(&self) -> Vec<(PeerId, PartId, ObjId, std::time::Instant)> {
         self.last_object_syncs
@@ -633,6 +654,12 @@ impl BigSyncMachine {
     #[cfg(any(test, feature = "test-support"))]
     pub fn debug_full_sync_waiters(&self) -> Map<u64, Vec<(PeerId, PartId)>> {
         self.stat_machine.debug_full_sync_waiters()
+    }
+
+    /// TEMP-DIAGNOSTIC: per (peer, part) full-sync blocking flags.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_peer_part_sync_flags(&self) -> Vec<(PeerId, PartId, bool, bool, bool, bool)> {
+        self.stat_machine.debug_peer_part_sync_flags()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2245,7 +2272,10 @@ impl BigSyncMachine {
                 }
             }
             for part_id in stale_part_hints {
-                tracing::debug!(?part_id, "discarding sync completion for stale peer part");
+                // TEMP-DIAGNOSTIC: this path drops the sync completion; if the
+                // cursor job for the obj still has other pending parts, their
+                // waiters may never resolve (cursor_active stuck).
+                tracing::warn!(?part_id, obj_id = %completion.obj_id, "discarding sync completion for stale peer part");
                 peer_state.cursor_machine.remove_part(part_id);
                 part_hints.remove(&part_id);
             }
@@ -2294,7 +2324,9 @@ impl BigSyncMachine {
                 worker.part_hints.clone(),
             )
         };
-        tracing::debug!(
+        // TEMP-DIAGNOSTIC: promote to warn — a permanently-failing sync task
+        // leaves its cursor slot pending forever (cursor_active stuck).
+        tracing::warn!(
             peer_id = %evt.peer_id,
             task_id = evt.task_id,
             obj_id = %evt.obj_id,

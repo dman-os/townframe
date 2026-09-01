@@ -1,14 +1,16 @@
+#![allow(dead_code)]
 use crate::drawer::DrawerRepo;
-use crate::index::doc_delta::{BranchIdentityResolution, DocDelta, DocDeltaWalker, DocDeltaWalkerRead};
+use crate::index::doc_delta::{
+    BranchIdentityResolution, DocDelta, DocDeltaWalker, DocDeltaWalkerRead,
+};
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
 use crate::interlude::*;
 use big_repo::{
     AutomergeFrontierRevisionStore, AutomergeFrontierSelector, AutomergeFrontierTarget,
 };
 use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteKeyedFrontier};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
 use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierRead, FrontierReadLimits, KeyedFrontier, KeyedFrontierReader,
+    FrontierEntry, FrontierRead, KeyedFrontier, KeyedFrontierReader,
 };
 use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
@@ -275,7 +277,7 @@ impl FacetSetRevisionStore {
                 for facet_key in drawer
                     .facet_keys_touched_by_local_actor(
                         &delta.document_id,
-                        &daybook_types::doc::BranchPath::new("main"),
+                        daybook_types::doc::BranchPath::new("main"),
                         &state.branch_heads,
                         &state.all_facet_keys,
                     )
@@ -398,25 +400,32 @@ impl FacetSetRevisionStore {
             .begin()
             .await
             .map_err(|error| ferr!("begin facet-set input state: {error}"))?;
-        let expected = state_tx
-            .progress()
-            .await
-            .map_err(|error| ferr!("read facet-set input state: {error}"))?
-            .upstream_revision;
+        let expected =
+            big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::progress(&mut state_tx)
+                .await
+                .map_err(|error| ferr!("read facet-set input state: {error}"))?
+                .upstream_revision;
         if source_revision <= expected {
             return Err(ferr!(
                 "facet-set source revision {source_revision} does not advance input {expected}"
             ));
         }
         let outcome = self
-            .apply_projection_in_context(&prepared, state_tx.context_mut())
+            .apply_projection_in_context(
+                &prepared,
+                big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::context_mut(
+                    &mut state_tx,
+                ),
+            )
             .await?;
-        state_tx
-            .advance_from(expected, source_revision)
-            .await
-            .map_err(|error| ferr!("advance facet-set input state: {error}"))?;
-        state_tx
-            .commit()
+        big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::advance_from(
+            &mut state_tx,
+            expected,
+            source_revision,
+        )
+        .await
+        .map_err(|error| ferr!("advance facet-set input state: {error}"))?;
+        big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::commit(state_tx)
             .await
             .map_err(|error| ferr!("commit facet-set input state: {error}"))?;
         self.frontier.notify_changed();
@@ -619,7 +628,7 @@ pub struct DocFacetSetIndexStopToken {
 }
 
 impl DocFacetSetIndexStopToken {
-    pub async fn stop(mut self) -> Res<()> {
+    pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         Ok(())
     }
@@ -1051,9 +1060,11 @@ mod tests {
                 let physical_id = doc_id.parse::<big_repo::DocumentId>()?;
                 let handle = drawer.big_repo.get_doc(&physical_id).await?;
                 let handle = handle.into_ready(physical_id)?;
-                Ok::<ChangeHashSet, eyre::Report>(handle
-                    .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
-                    .await)
+                Ok::<ChangeHashSet, eyre::Report>(
+                    handle
+                        .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+                        .await,
+                )
             }
         };
 

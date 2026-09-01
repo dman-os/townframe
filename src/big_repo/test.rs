@@ -589,8 +589,9 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
 
     assert!(!owner.repo.contains_sedimentree_id(doc_id).await?);
     assert!(!owner.repo.keyhive().document_has_content(doc_id).await?);
+    // A reservation is not yet a Keyhive authority: no group contains it.
     assert!(
-        owner
+        !owner
             .repo
             .keyhive()
             .group_document_ids(&pending)
@@ -598,7 +599,7 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
             .contains(&doc_id)
     );
     assert!(
-        owner
+        !owner
             .repo
             .keyhive()
             .group_document_ids(&intended)
@@ -654,6 +655,143 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
             .to_string()
             .contains("initial content mismatch")
     );
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_document_reservation_recovers_after_repository_reopen() -> Res<()> {
+    let temp_root = tempdir()?;
+    let repo_path = temp_root.path().join("reserved-document-restart");
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
+    let pending = repo.create_group_with_parents(vec![]).await?;
+    let intended = repo.create_group_with_parents(vec![]).await?;
+    let pending_id = pending.id().to_bytes();
+    let intended_id = intended.id().to_bytes();
+    let doc_id = repo
+        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
+        .await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
+        .expect("failed creating staged initial document");
+    repo.keyhive
+        .stage_reserved_doc(doc_id, initial.save(), Vec::new(), &repo.keyhive_storage)
+        .await?;
+    stop().await?;
+    drop(repo);
+
+    let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
+    let reopened_pending = reopened
+        .get_group_by_id(pending_id)
+        .await
+        .expect("pending group must survive restart");
+    let reopened_intended = reopened
+        .get_group_by_id(intended_id)
+        .await
+        .expect("intended group must survive restart");
+    assert!(
+        reopened
+            .recover_allocated_doc(doc_id, reopened_pending.clone())
+            .await?
+    );
+    assert!(reopened.contains_sedimentree_id(doc_id).await?);
+    assert!(reopened.keyhive().document_has_content(doc_id).await?);
+    assert!(!reopened.reserved_doc_ids().await?.contains(&doc_id));
+    assert!(
+        !reopened
+            .keyhive()
+            .group_document_ids(&reopened_pending)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        reopened
+            .keyhive()
+            .group_document_ids(&reopened_intended)
+            .await
+            .contains(&doc_id)
+    );
+    reopened_stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reserved_document_crash_windows_are_recoverable() -> Res<()> {
+    let temp_root = tempdir()?;
+    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
+    let pending = owner.repo.create_group_with_parents(vec![]).await?;
+    let intended = owner.repo.create_group_with_parents(vec![]).await?;
+
+    // Crash window 1: reservation durable, no sedimentree, no Keyhive doc.
+    let doc_id = owner
+        .repo
+        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
+        .await?;
+    assert!(
+        owner.repo.reserved_doc_ids().await?.contains(&doc_id),
+        "reservation must be durable immediately after allocation"
+    );
+    assert!(!owner.repo.contains_sedimentree_id(doc_id).await?);
+    assert!(!owner.repo.keyhive().document_has_content(doc_id).await?);
+
+    // Finalizing an id that was never allocated must fail: no reservation and
+    // no matching document.
+    let never_allocated = DocumentId::new([0xEE; 32]);
+    let mut phantom = automerge::Automerge::new();
+    phantom
+        .transact(|tx| tx.put(automerge::ROOT, "id", never_allocated.to_string()))
+        .expect("failed creating phantom document");
+    let phantom_error = owner
+        .repo
+        .finalize_allocated_doc(never_allocated, phantom, pending.clone())
+        .await
+        .expect_err("finalizing an unallocated id must fail");
+    assert!(
+        phantom_error.to_string().contains("no reservation"),
+        "unexpected error: {phantom_error}"
+    );
+
+    // Crash window 2: finalize (Keyhive doc + sedimentree), then re-finalize
+    // (idempotent recovery after reservation cleanup).
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
+        .expect("failed creating initial document commit");
+    let retry_initial = initial.clone();
+    owner
+        .repo
+        .finalize_allocated_doc(doc_id, initial, pending.clone())
+        .await?;
+    owner
+        .repo
+        .finalize_allocated_doc(doc_id, retry_initial, pending.clone())
+        .await?;
+
+    // Crash window 3: everything durable, reservation cleaned up.
+    assert!(owner.repo.contains_sedimentree_id(doc_id).await?);
+    assert!(owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(
+        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
+        "reservation must be deleted after finalization"
+    );
+    assert!(
+        !owner
+            .repo
+            .keyhive()
+            .group_document_ids(&pending)
+            .await
+            .contains(&doc_id)
+    );
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .group_document_ids(&intended)
+            .await
+            .contains(&doc_id)
+    );
+
     owner.shutdown().await?;
     Ok(())
 }

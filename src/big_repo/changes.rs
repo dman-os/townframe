@@ -53,7 +53,6 @@ pub enum BigRepoChangeNotification {
     },
 }
 
-#[expect(clippy::enum_variant_names)]
 /// Local document lifecycle and materialization notifications.
 #[derive(Debug, Clone)]
 pub enum BigRepoLocalNotification {

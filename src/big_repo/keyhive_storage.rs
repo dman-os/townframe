@@ -9,9 +9,13 @@
 use crate::interlude::*;
 
 use crate::store::sqlite::SqliteBigRepoStore;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use futures::lock::Mutex;
 
 use futures::{FutureExt, future::BoxFuture};
 use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
@@ -23,7 +27,31 @@ const ARCHIVES_SUBDIR: &str = "archives";
 const OPS_SUBDIR: &str = "ops";
 const LOCAL_SECRETS_SUBDIR: &str = "local-secrets";
 const PREKEY_SECRETS_FILE: &str = "prekey-secrets.bin";
+const RESERVATIONS_SUBDIR: &str = "reservations";
 const TMP_SUBDIR: &str = "tmp";
+
+/// Magic bytes prefixing a [`DocReservation`] blob in local-secret storage.
+pub(crate) const DOC_RESERVATION_MAGIC: [u8; 4] = *b"DRSV";
+
+/// A durably reserved document identity: the ephemeral signing key whose
+/// verifying key is the eventual document ID, plus the parent authorities the
+/// document will be created under at finalization.
+///
+/// Stored in Keyhive's local-secret storage (never synchronized); it is the
+/// crash-recovery record between ID allocation and Keyhive document creation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DocReservation {
+    pub magic: [u8; 4],
+    pub doc_id: [u8; 32],
+    pub signing_key: [u8; 32],
+    pub parents: Vec<[u8; 32]>,
+    /// Keys for causal parents inherited from another document, if any.
+    pub initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+    /// Serialized initial Automerge content, staged before Keyhive creation.
+    /// None means an identity has been reserved but content creation has not
+    /// started yet.
+    pub initial_content: Option<Vec<u8>>,
+}
 
 /// Monotonic per-process counter for temp filenames.
 static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +81,13 @@ impl FsKeyhiveStorage {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let reservations_dir = root.join(RESERVATIONS_SUBDIR);
+        std::fs::create_dir_all(&reservations_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&reservations_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
         Ok(Self { root })
@@ -100,6 +135,79 @@ impl FsKeyhiveStorage {
         match tokio::fs::read(path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn reservation_path(&self, doc_id: [u8; 32]) -> PathBuf {
+        let mut hex = String::with_capacity(64);
+        for byte in doc_id {
+            use std::fmt::Write;
+            write!(hex, "{byte:02x}").expect("writing hex to String cannot fail");
+        }
+        self.root
+            .join(RESERVATIONS_SUBDIR)
+            .join(format!("{hex}.bin"))
+    }
+
+    async fn save_doc_reservation(&self, doc_id: [u8; 32], bytes: Vec<u8>) -> io::Result<()> {
+        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .tmp_dir()
+            .join(format!("reservation.{}.{tmp_id}.tmp", std::process::id()));
+        let dest = self.reservation_path(doc_id);
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        match tokio::fs::rename(&tmp, &dest).await {
+            Ok(()) => {
+                let parent = dest.parent().expect("reservation parent").to_owned();
+                tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
+                    .await
+                    .map_err(io::Error::other)??;
+                Ok(())
+            }
+            Err(err) => {
+                drop(tokio::fs::remove_file(&tmp).await);
+                Err(err)
+            }
+        }
+    }
+
+    async fn load_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        match tokio::fs::read(self.reservation_path(doc_id)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn list_doc_reservations(&self) -> io::Result<Vec<Vec<u8>>> {
+        let dir = self.root.join(RESERVATIONS_SUBDIR);
+        let mut out = Vec::new();
+        let mut rd = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = rd.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
+                continue;
+            }
+            out.push(tokio::fs::read(&path).await?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<()> {
+        match tokio::fs::remove_file(self.reservation_path(doc_id)).await {
+            Ok(()) => {
+                let parent = self.root.join(RESERVATIONS_SUBDIR);
+                tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
+                    .await
+                    .map_err(io::Error::other)??;
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         }
     }
@@ -319,6 +427,9 @@ enum BigRepoKeyhiveStorageInner {
 #[derive(Clone)]
 pub(crate) struct BigRepoKeyhiveStorage {
     inner: BigRepoKeyhiveStorageInner,
+    /// In-memory document-id reservations for non-filesystem backends. The
+    /// filesystem backend keeps reservations in its own `reservations/` dir.
+    reservations: Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for BigRepoKeyhiveStorage {
@@ -340,7 +451,10 @@ pub(crate) enum BigRepoKeyhiveStorageError {
 
 impl BigRepoKeyhiveStorage {
     fn new(inner: BigRepoKeyhiveStorageInner) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            reservations: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     #[cfg_attr(not(test), expect(dead_code))]
@@ -379,6 +493,113 @@ impl BigRepoKeyhiveStorage {
                 Ok(None)
             }
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.load_prekey_secrets().await,
+        }
+    }
+
+    pub(crate) async fn save_doc_reservation(
+        &self,
+        reservation: &DocReservation,
+    ) -> io::Result<()> {
+        let bytes = bincode::serialize(reservation).map_err(io::Error::other)?;
+        match &self.inner {
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
+                archives
+                    .save_doc_reservation(reservation.doc_id, bytes)
+                    .await
+            }
+            _ => {
+                self.reservations
+                    .lock()
+                    .await
+                    .insert(reservation.doc_id, bytes);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn load_doc_reservation(
+        &self,
+        doc_id: [u8; 32],
+    ) -> io::Result<Option<DocReservation>> {
+        let bytes = match &self.inner {
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
+                archives.load_doc_reservation(doc_id).await?
+            }
+            _ => self.reservations.lock().await.get(&doc_id).cloned(),
+        };
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let reservation = bincode::deserialize(&bytes).map_err(io::Error::other)?;
+        Ok(Some(reservation))
+    }
+
+    pub(crate) async fn list_doc_reservations(&self) -> io::Result<Vec<DocReservation>> {
+        let entries = match &self.inner {
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
+                archives.list_doc_reservations().await?
+            }
+            _ => self
+                .reservations
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        };
+        entries
+            .into_iter()
+            .map(|bytes| bincode::deserialize(&bytes).map_err(io::Error::other))
+            .collect()
+    }
+
+    pub(crate) async fn stage_doc_reservation(
+        &self,
+        doc_id: [u8; 32],
+        initial_content: Vec<u8>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+    ) -> io::Result<()> {
+        let mut reservation = self
+            .load_doc_reservation(doc_id)
+            .await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "document reservation"))?;
+        if let Some(existing) = &reservation.initial_content {
+            if existing != &initial_content || reservation.initial_keys != initial_keys {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "document reservation has different initial content or keys",
+                ));
+            }
+            return Ok(());
+        }
+        reservation.initial_content = Some(initial_content);
+        reservation.initial_keys = initial_keys;
+        self.save_doc_reservation(&reservation).await
+    }
+
+    pub(crate) async fn staged_doc_content(
+        &self,
+        doc_id: [u8; 32],
+    ) -> io::Result<Option<(Vec<u8>, Vec<(Vec<u8>, [u8; 32])>)>> {
+        Ok(self
+            .load_doc_reservation(doc_id)
+            .await?
+            .and_then(|reservation| {
+                reservation
+                    .initial_content
+                    .map(|content| (content, reservation.initial_keys))
+            }))
+    }
+
+    pub(crate) async fn delete_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<()> {
+        match &self.inner {
+            BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
+                archives.delete_doc_reservation(doc_id).await
+            }
+            _ => {
+                self.reservations.lock().await.remove(&doc_id);
+                Ok(())
+            }
         }
     }
 }

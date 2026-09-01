@@ -159,6 +159,7 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: crate::DocumentId,
         initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
@@ -214,6 +215,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: crate::DocumentId,
         initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
@@ -230,6 +232,22 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 )
                 .ok_or_else(|| ferr!("automerge document has no content heads"))?;
                 let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                // Stage the plaintext before creating the Keyhive authority.
+                // This is the recovery record for a crash in any later step.
+                let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
+                runtime_io
+                    .stage_allocated_document(
+                        doc_id,
+                        initial_content.save(),
+                        initial_keys.clone(),
+                        already_persisted,
+                    )
+                    .await?;
+                // The initial content is encrypted against the Keyhive document,
+                // so authority creation precedes Sedimentree persistence.
+                runtime_io
+                    .finalize_document_authority(doc_id, content_heads.clone())
+                    .await?;
                 let bundle = if runtime_io.contains_sedimentree(sed_id).await? {
                     let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
                     cmd_tx
@@ -253,18 +271,23 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                             ));
                         }
                     };
-                    let persisted_heads = surelock::key::lock_scope(|key| {
+                    let (persisted_heads, persisted_content) = surelock::key::lock_scope(|key| {
                         let (doc, _key) = key.lock(&bundle.doc);
-                        doc.get_heads()
-                            .into_iter()
-                            .map(|head| head.0)
-                            .collect::<std::collections::BTreeSet<_>>()
+                        (
+                            doc.get_heads()
+                                .into_iter()
+                                .map(|head| head.0)
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            doc.save(),
+                        )
                     });
                     let requested_heads = content_heads
                         .iter()
                         .copied()
                         .collect::<std::collections::BTreeSet<_>>();
-                    if persisted_heads != requested_heads {
+                    if persisted_heads != requested_heads
+                        || persisted_content != initial_content.save()
+                    {
                         return Err(ferr!(
                             "persisted document initial content mismatch: {doc_id}"
                         ));
@@ -276,6 +299,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
+                            initial_keys: initial_keys.clone(),
                             resp: put_resp,
                         })
                         .await
@@ -283,7 +307,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                     put_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??
                 };
                 runtime_io
-                    .finalize_document_authority(doc_id, pending_group, content_heads)
+                    .complete_document_authority(doc_id, pending_group, content_heads)
                     .await?;
                 eyre::Ok(bundle)
             }
@@ -310,6 +334,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
+                            initial_keys: Vec::new(),
                             resp,
                         })
                         .await
@@ -550,12 +575,14 @@ where
             Runtime2Cmd::PutDoc {
                 doc_id,
                 initial_content,
+                initial_keys,
                 resp,
             } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
                     .send(DocWorkerMsg::PutDoc {
                         initial_content,
+                        initial_keys,
                         resp,
                         _lease,
                     })
@@ -564,6 +591,7 @@ where
             Runtime2Cmd::FinalizeAllocatedDoc {
                 doc_id,
                 initial_content,
+                initial_keys,
                 pending_group,
                 resp,
             } => {
@@ -574,6 +602,7 @@ where
                         self.cmd_tx.clone(),
                         doc_id,
                         initial_content,
+                        initial_keys,
                         pending_group,
                         resp,
                     ),

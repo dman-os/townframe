@@ -2,7 +2,7 @@
 //!
 //! The durable revision source lives with the facet-set projection. This
 //! module contains only the value contract shared by that source and walkers.
-
+#![allow(dead_code)]
 use crate::index::doc_delta::DocDelta;
 use crate::interlude::*;
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey};

@@ -1230,7 +1230,7 @@ async fn wait_for_doc_head_parity(
     tokio::time::timeout(timeout, async {
         let mut last_heartbeat = std::time::Instant::now();
         loop {
-            let (_left_facets, left_facet_keys, left_facet_values, left_heads) = left
+            let (left_doc, left_facet_keys, left_facet_values, left_heads) = left
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
@@ -1241,7 +1241,7 @@ async fn wait_for_doc_head_parity(
                     (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
-            let (_right_facets, right_facet_keys, right_facet_values, right_heads) = right
+            let (right_doc, right_facet_keys, right_facet_values, right_heads) = right
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
@@ -1262,7 +1262,10 @@ async fn wait_for_doc_head_parity(
             right_heads.sort_unstable();
             last_left = Some(left_heads);
             last_right = Some(right_heads);
-            if last_left == last_right && left_facet_keys == right_facet_keys && left_facet_values == right_facet_values {
+            if last_left == last_right
+                && left_facet_keys == right_facet_keys
+                && left_doc.facets == right_doc.facets
+            {
                 break eyre::Ok(());
             }
             let now = std::time::Instant::now();

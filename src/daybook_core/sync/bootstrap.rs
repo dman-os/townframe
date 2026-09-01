@@ -446,11 +446,22 @@ async fn pull_required_partitions_via_big_sync_worker(
             .wait_for_full_sync(vec![peer_id], required_partitions)
             .await?;
 
-        for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id]
-            .into_iter()
-            .chain(bootstrap.config_doc_id)
-        {
-            big_repo.sync_doc_with_peer(doc_id, peer_id).await?;
+        let mut bootstrap_docs = vec![
+            ("app", bootstrap.app_doc_id),
+            ("drawer", bootstrap.drawer_doc_id),
+        ];
+        if let Some(config_doc_id) = bootstrap.config_doc_id {
+            bootstrap_docs.push(("config", config_doc_id));
+        }
+        for (role, doc_id) in bootstrap_docs {
+            tracing::info!(%doc_id, role, "clone bootstrap document sync begin");
+            big_repo
+                .sync_doc_with_peer(doc_id, peer_id)
+                .await
+                .wrap_err_with(|| {
+                    format!("clone bootstrap failed syncing {role} document {doc_id}")
+                })?;
+            tracing::info!(%doc_id, role, "clone bootstrap document sync complete");
         }
         Ok(())
     })

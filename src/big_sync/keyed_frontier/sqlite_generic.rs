@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_names)]
 use super::sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
 use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierReadLimits, FrontierRevision, KeyedFrontier, KeyedFrontierError,

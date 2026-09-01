@@ -689,7 +689,7 @@ mod tests {
         // branch-scoped state rather than removing shared physical membership.
         let main_heads = test_context
             .drawer_repo
-            .get_branch_heads_for_path(&doc_id, &BranchPath::new("main"))
+            .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch heads")?;
         let branch_path = BranchPathBuf::from("/test/blob-pins-part-branch");
@@ -698,7 +698,7 @@ mod tests {
             .create_branch_at_heads_from_branch(
                 &doc_id,
                 &branch_path,
-                &BranchPath::new("main"),
+                BranchPath::new("main"),
                 &main_heads,
                 None,
             )

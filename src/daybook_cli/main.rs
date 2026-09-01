@@ -393,11 +393,14 @@ mod tests {
         .await?;
         let blobs_repo =
             BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
             ctx.doc_app.document_id(),
             daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
+            Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
@@ -424,11 +427,8 @@ mod tests {
             ctx.sql.clone(),
         )
         .await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
         let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
             Arc::clone(&drawer_repo),
-            Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;

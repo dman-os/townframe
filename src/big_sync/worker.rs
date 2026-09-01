@@ -103,6 +103,7 @@ pub struct WorkerSnapshot {
     pub active_machine_tasks: usize,
     pub active_sync_tasks: usize,
     pub zombie_tasks: usize,
+    pub peer_part_sync_flags: Vec<(PeerId, PartId, bool, bool, bool, bool)>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -690,6 +691,7 @@ impl BigSyncWorker {
                     active_machine_tasks: self.tasks.len(),
                     active_sync_tasks: self.sync_tasks.len(),
                     zombie_tasks: self.zombie_tasks.len(),
+                    peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
                 };
                 resp.send(snapshot)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))

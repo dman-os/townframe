@@ -317,9 +317,10 @@ impl<F: FutureForm> DocWorker2<F> {
         match msg {
             DocWorkerMsg::PutDoc {
                 initial_content,
+                initial_keys,
                 resp,
                 _lease: _,
-            } => self.put_doc(initial_content, resp).await,
+            } => self.put_doc(initial_content, initial_keys, resp).await,
             DocWorkerMsg::AcquireHandle { resp, _lease: _ } => self.acquire_handle(resp).await,
             DocWorkerMsg::CommitDelta {
                 bundle_id,
@@ -412,6 +413,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn put_doc(
         &mut self,
         initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp: futures::channel::oneshot::Sender<eyre::Result<Arc<LiveDocBundle>>>,
     ) -> eyre::Result<()> {
         if !matches!(self.state, DocState::Unloaded)
@@ -430,7 +432,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let staged = stage_automerge_ingest(&initial_content);
         self.io
-            .persist_initial_document(self.sed_id, staged)
+            .persist_initial_document(self.sed_id, staged, initial_keys)
             .await?;
 
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());

@@ -490,8 +490,7 @@ impl BigRepo {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
+    pub async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
         self.runtime.inspect_stored_doc_blobs(doc_id).await
     }
 }
@@ -603,6 +602,46 @@ impl BigRepo {
         self.keyhive.group_document_ids(group).await
     }
 
+    /// List document IDs with a durable reservation but no Keyhive document
+    /// yet (or whose reservation cleanup is pending). These are the crash-
+    /// recovery candidates between ID allocation and finalization.
+    pub async fn reserved_doc_ids(&self) -> Res<Vec<DocumentId>> {
+        let reservations = self
+            .keyhive_storage
+            .list_doc_reservations()
+            .await
+            .map_err(|err| ferr!("failed listing document reservations: {err}"))?;
+        Ok(reservations
+            .into_iter()
+            .map(|reservation| DocumentId::new(reservation.doc_id))
+            .collect())
+    }
+
+    pub async fn recover_allocated_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        pending_group: BigKeyhiveGroup,
+    ) -> Result<bool, CreateDocError> {
+        let Some((bytes, initial_keys)) = self
+            .keyhive_storage
+            .staged_doc_content(doc_id.into_bytes())
+            .await
+            .map_err(|err| {
+                CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
+            })?
+        else {
+            return Ok(false);
+        };
+        let content = automerge::Automerge::load(&bytes).map_err(|err| {
+            CreateDocError::from(eyre::eyre!(
+                "failed decoding staged document content: {err}"
+            ))
+        })?;
+        self.finalize_allocated_doc_with_keys(doc_id, content, pending_group, initial_keys)
+            .await?;
+        Ok(true)
+    }
+
     pub async fn allocate_doc(
         self: &Arc<Self>,
         parents: Vec<BigKeyhiveAuthority>,
@@ -616,9 +655,20 @@ impl BigRepo {
         initial_content: automerge::Automerge,
         pending_group: BigKeyhiveGroup,
     ) -> Result<BigDocHandle, CreateDocError> {
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, Vec::new())
+            .await
+    }
+
+    pub async fn finalize_allocated_doc_with_keys(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+    ) -> Result<BigDocHandle, CreateDocError> {
         let bundle = self
             .runtime
-            .finalize_allocated_doc(doc_id, initial_content, pending_group)
+            .finalize_allocated_doc(doc_id, initial_content, pending_group, initial_keys)
             .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
@@ -1031,10 +1081,34 @@ impl std::fmt::Debug for BigDocHandle {
     }
 }
 
+impl BigRepo {
+    /// Finalize a new branch while retaining the source document's encrypted
+    /// causal history. The keys remain inside BigRepo.
+    pub async fn finalize_allocated_doc_from_parent(
+        self: &Arc<BigRepo>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+        source: &BigDocHandle,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let initial_keys = source.content_keys().await?;
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, initial_keys)
+            .await
+    }
+}
+
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
         self.bundle.doc_id
     }
+
+    pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
+        self.repo
+            .keyhive
+            .document_content_keys(self.document_id())
+            .await
+    }
+
     /// Whether this live handle is missing one or more decryption keys.
     pub fn is_partially_decrypted(&self) -> bool {
         self.bundle.is_partially_decrypted()

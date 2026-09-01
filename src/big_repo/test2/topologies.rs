@@ -836,7 +836,6 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // Now sync membership from B→C.  C learns about Read access.
     b_c_conn.sync_keyhive_with_peer().await?;
     c_b_conn.sync_keyhive_with_peer().await?;
-
     // C must be able to materialize now.
     let c_doc = fixtures::sync_doc_expect_ready(&c_b_conn, &node_c.repo, doc_id).await?;
     assert_eq!(

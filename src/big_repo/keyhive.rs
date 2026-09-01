@@ -377,12 +377,27 @@ impl BigKeyhiveHandle {
             .collect()
     }
 
+    pub(crate) async fn document_content_keys(
+        &self,
+        doc_id: DocumentId,
+    ) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
+        let doc = self
+            .keyhive
+            .get_document(keyhive_doc_id(doc_id)?)
+            .await
+            .ok_or_else(|| ferr!("keyhive document not found: {doc_id}"))?;
+        Ok(doc
+            .lock()
+            .await
+            .known_decryption_keys()
+            .iter()
+            .map(|(reference, key)| (reference.clone(), (*key).into()))
+            .collect())
+    }
+
     pub(crate) async fn document_has_content(&self, doc_id: DocumentId) -> Res<bool> {
         let kh_doc_id = keyhive_doc_id(doc_id)?;
-        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
-            return Ok(false);
-        };
-        Ok(doc.lock().await.has_content())
+        Ok(self.keyhive.get_document(kh_doc_id).await.is_some())
     }
 
     pub(crate) async fn document_ids_containing_group(
@@ -477,29 +492,161 @@ impl BigKeyhiveHandle {
         Ok((DocumentId::new(doc_id), hashes))
     }
 
-    pub(crate) async fn create_pending_doc(
+    pub(crate) async fn reserve_doc_id(
         &self,
-        coparents: Vec<BigKeyhiveAuthority>,
+        parents: Vec<BigKeyhiveAuthority>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<DocumentId> {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_08::rngs::OsRng);
+        let doc_id = DocumentId::new(signing_key.verifying_key().to_bytes());
+        let reservation = crate::keyhive_storage::DocReservation {
+            magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
+            doc_id: doc_id.into_bytes(),
+            signing_key: signing_key.to_bytes(),
+            parents: parents
+                .into_iter()
+                .map(|parent| parent.into_identifier().to_bytes())
+                .collect(),
+            initial_keys: Vec::new(),
+            initial_content: None,
+        };
+        storage
+            .save_doc_reservation(&reservation)
+            .await
+            .map_err(|err| ferr!("failed persisting document id reservation: {err}"))?;
+        Ok(doc_id)
+    }
+
+    pub(crate) async fn stage_reserved_doc(
+        &self,
+        doc_id: DocumentId,
+        initial_content: Vec<u8>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        if storage
+            .load_doc_reservation(doc_id.into_bytes())
+            .await
+            .map_err(|err| ferr!("failed loading document reservation: {err}"))?
+            .is_none()
+        {
+            if self
+                .keyhive
+                .get_document(keyhive_doc_id(doc_id)?)
+                .await
+                .is_some()
+            {
+                return Ok(());
+            }
+            return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
+        }
+        storage
+            .stage_doc_reservation(doc_id.into_bytes(), initial_content, initial_keys)
+            .await
+            .map_err(|err| ferr!("failed staging initial document content: {err}"))
+    }
+
+    /// Ensure the Keyhive document exists with the reserved signing key and
+    /// real, non-empty content heads. Reservation cleanup is performed only by
+    /// the outer lifecycle after Sedimentree persistence and pending-group
+    /// cleanup have completed.
+    ///
+    /// Idempotent: if the reservation is already gone the document was already
+    /// finalized; if the Keyhive document already exists the events were
+    /// persisted and only the reservation cleanup is retried.
+    pub(crate) async fn finalize_reserved_doc(
+        &self,
+        doc_id: DocumentId,
+        content_heads: NonEmpty<[u8; 32]>,
         protocol: &BigRepoKeyhiveProtocol,
-    ) -> Res<(BigKeyhiveAuthority, DocumentId, Vec<EventHash>)> {
-        let coparents = coparents
-            .into_iter()
-            .map(BigKeyhiveAuthority::into_peer)
-            .collect::<Res<Vec<_>>>()?;
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<Vec<EventHash>> {
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let Some(reservation) = storage
+            .load_doc_reservation(doc_id.into_bytes())
+            .await
+            .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
+        else {
+            // No reservation: the document was either never allocated or
+            // already finalized. Only the latter is a successful completion.
+            if self.keyhive.get_document(kh_doc_id).await.is_some() {
+                return Ok(Vec::new());
+            }
+            return Err(ferr!(
+                "no reservation and no keyhive document for {doc_id}; cannot finalize"
+            ));
+        };
+        if self.keyhive.get_document(kh_doc_id).await.is_some() {
+            // Events were already persisted. Leave the reservation in place;
+            // the outer lifecycle still has to persist the Sedimentree and
+            // remove the pending-group authority.
+            return Ok(Vec::new());
+        }
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
+        if signing_key.verifying_key().to_bytes() != doc_id.into_bytes() {
+            return Err(ferr!(
+                "reserved signing key does not match document id {doc_id}"
+            ));
+        }
+        let mut coparents = Vec::with_capacity(reservation.parents.len());
+        for parent_id in reservation.parents {
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&parent_id)
+                .map_err(|_| ferr!("reserved parent is not a valid Ed25519 point"))?;
+            let identifier = Identifier::from(vk);
+            let agent =
+                self.keyhive.get_agent(identifier).await.ok_or_else(|| {
+                    ferr!("cannot resolve reserved parent authority {identifier:?}")
+                })?;
+            coparents.push(BigKeyhiveAuthority::Agent(agent).into_peer()?);
+        }
+        let initial_content_heads = NonEmpty {
+            head: content_heads.head.to_vec(),
+            tail: content_heads.tail.into_iter().map(Vec::from).collect(),
+        };
         let doc = self
             .keyhive
-            .generate_pending_doc(coparents)
+            .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
             .await
-            .map_err(|err| ferr!("failed creating pending keyhive document: {err}"))?;
-        let (kh_doc_id, authority) = {
-            let locked = doc.lock().await;
-            let kh_doc_id = locked.doc_id();
-            let authority =
-                BigKeyhiveAuthority::Agent(BigKeyhiveAgent::Document(kh_doc_id, doc.clone()));
-            (kh_doc_id, authority)
-        };
+            .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
         let hashes = self.persist_document_events(&doc, protocol).await?;
-        Ok((authority, DocumentId::new(kh_doc_id.to_bytes()), hashes))
+        Ok(hashes)
+    }
+
+    pub(crate) async fn complete_reserved_doc(
+        &self,
+        pending_group: &BigKeyhiveGroup,
+        doc_id: DocumentId,
+        after_content: Vec<Vec<u8>>,
+        protocol: &BigRepoKeyhiveProtocol,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<Vec<EventHash>> {
+        let Some(_reservation) = storage
+            .load_doc_reservation(doc_id.into_bytes())
+            .await
+            .map_err(|err| ferr!("failed loading document reservation: {err}"))?
+        else {
+            if self
+                .keyhive
+                .get_document(keyhive_doc_id(doc_id)?)
+                .await
+                .is_none()
+            {
+                return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
+            }
+            return Ok(Vec::new());
+        };
+        let document_ids = self.group_document_ids(pending_group).await;
+        let hashes = if document_ids.contains(&doc_id) {
+            self.revoke_group_from_doc(pending_group, doc_id, after_content, protocol)
+                .await?
+        } else {
+            Vec::new()
+        };
+        storage
+            .delete_doc_reservation(doc_id.into_bytes())
+            .await
+            .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
+        Ok(hashes)
     }
 
     pub(crate) async fn revoke_group_from_doc(
@@ -513,6 +660,7 @@ impl BigKeyhiveHandle {
             .await
     }
 
+    #[expect(clippy::type_complexity)]
     async fn persist_document_events(
         &self,
         doc: &Arc<

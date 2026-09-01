@@ -54,13 +54,13 @@ impl PartRevisionReader {
         revision: FrontierRevision,
     ) -> Option<SubEvent> {
         match (key, value) {
-            (crate::keyed_frontier::PartFrontierKey::Object(_), None) => return None,
+            (crate::keyed_frontier::PartFrontierKey::Object(_), None) => None,
             (
                 crate::keyed_frontier::PartFrontierKey::Object(_),
                 Some(PartEvent::Changed(mut event)),
             ) => {
                 event.cursor = revision;
-                return Some(SubEvent::Changed(event));
+                Some(SubEvent::Changed(event))
             }
             (crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id }, value)
                 if self.objects.contains(&obj_id) && !self.parts.contains(&part_id) =>
@@ -70,12 +70,12 @@ impl PartRevisionReader {
                     Some(PartEvent::Changed(event)) => event.payload,
                     Some(PartEvent::Removed(_)) | None => serde_json::Value::Null,
                 };
-                return Some(SubEvent::Changed(ObjChanged {
+                Some(SubEvent::Changed(ObjChanged {
                     cursor: revision,
                     part_ids: Vec::new(),
                     obj_id,
                     payload,
-                }));
+                }))
             }
             (
                 crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
@@ -84,7 +84,7 @@ impl PartRevisionReader {
                 event.cursor = revision;
                 event.obj_id = obj_id;
                 event.part_id = part_id;
-                return Some(SubEvent::Added(event));
+                Some(SubEvent::Added(event))
             }
             (
                 crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
@@ -93,18 +93,16 @@ impl PartRevisionReader {
                 event.cursor = revision;
                 event.obj_id = obj_id;
                 event.part_ids = vec![part_id];
-                return Some(SubEvent::Changed(event));
+                Some(SubEvent::Changed(event))
             }
             (
                 crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
                 Some(PartEvent::Removed(_)) | None,
-            ) if self.parts.contains(&part_id) => {
-                return Some(SubEvent::Removed(ObjRemovedFromPart {
-                    cursor: revision,
-                    part_id,
-                    obj_id,
-                }));
-            }
+            ) if self.parts.contains(&part_id) => Some(SubEvent::Removed(ObjRemovedFromPart {
+                cursor: revision,
+                part_id,
+                obj_id,
+            })),
             _ => None,
         }
     }

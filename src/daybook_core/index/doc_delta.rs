@@ -66,6 +66,7 @@ pub(crate) enum BranchIdentityResolution {
     ImportedHistory,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrackOutcome {
     Tracked,
@@ -97,6 +98,7 @@ impl PreparedDocDeltaRevision {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum DocDeltaWalkerRead {
     Entries(PreparedDocDeltaRevision),
@@ -122,6 +124,7 @@ impl<S, R, I> DocDeltaWalker<S, R, I> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn state(&self) -> &R {
         &self.state
     }
@@ -153,6 +156,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 impl<S, R, I> DocDeltaWalker<S, R, I>
 where
     S: RevisionedStore<Revision = u64, Entry = AutomergeFrontierEvent>,
@@ -529,9 +533,7 @@ mod tests {
         DeltaWalkerProgress, DeltaWalkerStateRepo, DeltaWalkerStateResult,
         DeltaWalkerStateTransaction,
     };
-    use big_sync_core::revisioned_store::{
-        RevisionedStore, RevisionedStoreReader,
-    };
+    use big_sync_core::revisioned_store::{RevisionedStore, RevisionedStoreReader};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -606,9 +608,11 @@ mod tests {
         async fn advance_from(&mut self, expected: u64, next: u64) -> DeltaWalkerStateResult<()> {
             let state = self.inner.lock().unwrap();
             if state.progress != expected {
-                return Err(big_sync_core::delta_walker_state::DeltaWalkerStateError::StaleProgress {
-                    expected,
-                });
+                return Err(
+                    big_sync_core::delta_walker_state::DeltaWalkerStateError::StaleProgress {
+                        expected,
+                    },
+                );
             }
             if next <= state.progress {
                 return Err(big_sync_core::delta_walker_state::DeltaWalkerStateError::NonAdvancingRevision {
@@ -634,8 +638,14 @@ mod tests {
 
     #[async_trait]
     impl DeltaWalkerStateRepo for MemoryStateRepo {
-        type Context<'a> = () where Self: 'a;
-        type Transaction<'a> = MemoryStateTx<'a> where Self: 'a;
+        type Context<'a>
+            = ()
+        where
+            Self: 'a;
+        type Transaction<'a>
+            = MemoryStateTx<'a>
+        where
+            Self: 'a;
 
         async fn progress(&self) -> DeltaWalkerStateResult<DeltaWalkerProgress> {
             let state = self.inner.lock().unwrap();
@@ -709,7 +719,10 @@ mod tests {
         type Entry = AutomergeFrontierEvent;
         type Selector = ();
         type Error = ScriptError;
-        type Reader<'a> = ScriptedReader where Self: 'a;
+        type Reader<'a>
+            = ScriptedReader
+        where
+            Self: 'a;
 
         async fn latest_revision(&self) -> Result<Self::Revision, Self::Error> {
             Ok(0)
@@ -762,21 +775,23 @@ mod tests {
                 state,
                 StubResolver,
             );
-            let mut reader = DocDeltaWalker::<
-                ScriptedStore,
-                MemoryStateRepo,
-                StubResolver,
-            >::open_source(&store, (), 171, default_limits())
+            let mut reader =
+                DocDeltaWalker::<ScriptedStore, MemoryStateRepo, StubResolver>::open_source(
+                    &store,
+                    (),
+                    171,
+                    default_limits(),
+                )
                 .await
                 .unwrap();
             match walker.next(&mut reader).await.unwrap() {
                 DocDeltaWalkerRead::ReplayComplete { through } => assert_eq!(through, 171),
                 other_val => panic!("expected ReplayComplete, got {other_val:?}"),
             }
-            assert!(matches!(
-                walker.next(&mut reader).await,
-                Err(_)
-            ), "script must be exhausted after ReplayComplete");
+            assert!(
+                walker.next(&mut reader).await.is_err(),
+                "script must be exhausted after ReplayComplete"
+            );
         });
     }
 
@@ -796,11 +811,13 @@ mod tests {
                 state,
                 StubResolver,
             );
-            let mut reader = DocDeltaWalker::<
-                ScriptedStore,
-                MemoryStateRepo,
-                StubResolver,
-            >::open_source(&store, (), 171, default_limits())
+            let mut reader =
+                DocDeltaWalker::<ScriptedStore, MemoryStateRepo, StubResolver>::open_source(
+                    &store,
+                    (),
+                    171,
+                    default_limits(),
+                )
                 .await
                 .unwrap();
             match walker.next(&mut reader).await.unwrap() {
