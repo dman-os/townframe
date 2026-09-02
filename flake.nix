@@ -74,7 +74,7 @@
           androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
             includeNDK = true;
             platformToolsVersion = "37.0.1";
-            buildToolsVersions = [ androidBuildToolsVersion "36.0.0" ];
+            buildToolsVersions = [ androidBuildToolsVersion "36.0.0" "34.0.0" ];
             platformVersions = [ "35" "36" ];
           };
 

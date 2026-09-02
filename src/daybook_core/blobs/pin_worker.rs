@@ -16,7 +16,7 @@ use crate::interlude::*;
 use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 use crate::repos::RepoStopToken;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::BranchId;
 use sqlx::{Row, Sqlite};
@@ -660,7 +660,6 @@ async fn run_blob_pin_consumer(
         facet_set_store.as_ref(),
         &facet_state,
         FacetSetSelector::Tag(WellKnownFacetTag::Blob),
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening blob-pin FacetSet walker: {error}"))?;
@@ -668,7 +667,6 @@ async fn run_blob_pin_consumer(
         plugs_repo.as_ref(),
         &plugs_state,
         PlugsRevisionSelector::All,
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening blob-pin Plugs walker: {error}"))?;

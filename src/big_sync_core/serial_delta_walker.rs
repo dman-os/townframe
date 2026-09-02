@@ -67,7 +67,6 @@ where
         source: &'a S,
         state: &'a R,
         selector: S::Selector,
-        limits: RevisionReadLimits,
     ) -> Result<Self, SerialDeltaWalkerError<S::Error>> {
         let durable_revision = state
             .progress()
@@ -75,7 +74,7 @@ where
             .map_err(SerialDeltaWalkerError::State)?
             .upstream_revision;
         let reader = source
-            .open(selector, durable_revision, limits)
+            .open(selector, durable_revision)
             .await
             .map_err(SerialDeltaWalkerError::Source)?;
         Ok(Self {
@@ -109,7 +108,7 @@ where
         loop {
             let read = self
                 .reader
-                .next()
+                .next(RevisionReadLimits::default())
                 .await
                 .map_err(SerialDeltaWalkerError::Source)?;
             match &read {
@@ -419,7 +418,10 @@ mod tests {
 
     #[async_trait]
     impl RevisionedStoreReader<u64, u64, ScriptError> for ScriptedReader {
-        async fn next(&mut self) -> Result<RevisionRead<u64, u64>, ScriptError> {
+        async fn next(
+            &mut self,
+            _limits: RevisionReadLimits,
+        ) -> Result<RevisionRead<u64, u64>, ScriptError> {
             self.reads.pop_front().ok_or(ScriptError)
         }
     }
@@ -474,7 +476,6 @@ mod tests {
             &'a self,
             _selector: Self::Selector,
             after: u64,
-            _limits: RevisionReadLimits,
         ) -> Result<Self::Reader<'a>, Self::Error> {
             if self.explicit_reads {
                 return Ok(ScriptedReader {
@@ -503,10 +504,6 @@ mod tests {
         }
     }
 
-    fn default_limits() -> RevisionReadLimits {
-        RevisionReadLimits::default()
-    }
-
     /// A reassession at `durable == source head` is the exact crash shape
     /// seen in daybook_core: the reader surfaces an empty batch stamped at the
     /// head revision (nothing qualified beyond the per-key floor), which the
@@ -525,9 +522,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(4); // durable == head
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 4 }
@@ -555,9 +550,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(2);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -578,9 +571,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -603,9 +594,7 @@ mod tests {
                 entries: vec![50],
             }]));
             let state = MemoryStateRepo::new(5);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert!(matches!(
                 walker.next().await,
                 Err(SerialDeltaWalkerError::NonAdvancingRevision)
@@ -625,9 +614,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -648,9 +635,7 @@ mod tests {
             assert_eq!(state.progress().await.unwrap().upstream_revision, 2);
             drop(walker);
 
-            let mut reopened = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut reopened = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -673,9 +658,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                    .await
-                    .unwrap();
+                let mut first = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -686,9 +669,7 @@ mod tests {
                 // consumer retains (revision 1, entries) and the session is
                 // dropped without settling, exactly like a reopen mid-defer.
             }
-            let mut reopened = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut reopened = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -716,9 +697,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                    .await
-                    .unwrap();
+                let mut first = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -727,9 +706,7 @@ mod tests {
                     }
                 );
             }
-            let mut fresh = SerialDeltaWalker::open(&store, &state, 0, default_limits())
-                .await
-                .unwrap();
+            let mut fresh = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
             assert!(matches!(
                 fresh.begin_settlement(1).await,
                 Err(SerialDeltaWalkerError::NoPendingRevision)

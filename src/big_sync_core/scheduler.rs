@@ -297,6 +297,16 @@ where
         self.seed_by_key.insert(key, seed);
         task
     }
+    /// Cancel the current task for `key`.  The task id becomes stale, so a
+    /// completion racing with cancellation cannot be accepted.  The caller
+    /// is responsible for aborting the physical task handle.
+    pub fn cancel(&mut self, key: K) -> Option<TaskId> {
+        let task = self.active_by_key.remove(&key)?;
+        self.key_by_task.remove(&task);
+        self.seed_by_key.remove(&key);
+        self.scheduler.cancel(task);
+        Some(task)
+    }
 
     /// Retire a completed task. Returns false for a stale completion from a
     /// task that was replaced or cancelled already.

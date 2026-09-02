@@ -4,8 +4,9 @@ use future_form::FutureForm;
 pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
 pub mod doc_revision_store;
-pub(crate) mod driver;
 mod group_part_worker;
+pub(crate) mod keyhive_admission;
+pub(crate) mod tokio_keyed_scheduler;
 
 pub use automerge_frontier_worker::{
     AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_obj_to_doc_id,
@@ -40,7 +41,7 @@ pub use lease::{
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
-pub use types::WorkerGroupScope;
+pub use types::{GroupScopeHandle, WorkerGroupScope};
 
 mod doc_worker;
 mod handle;

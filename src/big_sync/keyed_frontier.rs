@@ -60,7 +60,11 @@ pub mod contract {
     {
         let mut entries = Vec::new();
         loop {
-            match reader.next().await.expect("frontier read") {
+            match reader
+                .next(FrontierReadLimits::default())
+                .await
+                .expect("frontier read")
+            {
                 FrontierRead::Entries {
                     entries: page,
                     through: _,
@@ -198,12 +202,13 @@ pub mod contract {
         );
         assert_eq!(transaction.commit().await.expect("empty commit"), 0);
 
+        let mut invalid_limit = frontier
+            .open(harness.all_selector(0))
+            .await
+            .expect("open reader");
         assert!(matches!(
-            frontier
-                .open(
-                    harness.all_selector(0),
-                    FrontierReadLimits { max_entries: 0 }
-                )
+            invalid_limit
+                .next(FrontierReadLimits { max_entries: 0 })
                 .await,
             Err(KeyedFrontierError::EmptyReadLimit)
         ));
@@ -229,7 +234,7 @@ pub mod contract {
         assert_eq!(revision, 1);
 
         let mut precommit_reader = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open pre-commit reader");
         let mut uncommitted = frontier
@@ -252,16 +257,17 @@ pub mod contract {
             .expect("rollback uncommitted put");
 
         let mut reader = frontier
-            .open(
-                harness.all_selector(0),
-                FrontierReadLimits { max_entries: 2 },
-            )
+            .open(harness.all_selector(0))
             .await
             .expect("open bounded replay");
         let mut pages = Vec::new();
         let mut replay_markers = 0;
         loop {
-            match reader.next().await.expect("bounded replay read") {
+            match reader
+                .next(FrontierReadLimits { max_entries: 2 })
+                .await
+                .expect("bounded replay read")
+            {
                 FrontierRead::Entries { entries, through } => pages.push((entries, through)),
                 FrontierRead::ReplayComplete { through } => {
                     assert_eq!(through, revision);
@@ -288,8 +294,10 @@ pub mod contract {
             }],
         )
         .await;
-        let FrontierRead::Entries { entries, through } =
-            reader.next().await.expect("following entry after replay")
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits::default())
+            .await
+            .expect("following entry after replay")
         else {
             panic!("expected following entry")
         };
@@ -312,13 +320,10 @@ pub mod contract {
         )
         .await;
         let mut selected = frontier
-            .open(
-                harness.keys_selector(BTreeMap::from([
-                    (key4.clone(), 0),
-                    (key5.clone(), selector_revision),
-                ])),
-                FrontierReadLimits::default(),
-            )
+            .open(harness.keys_selector(BTreeMap::from([
+                (key4.clone(), 0),
+                (key5.clone(), selector_revision),
+            ])))
             .await
             .expect("open selected replay");
         let selected_entries = replay(&mut *selected).await;
@@ -340,7 +345,7 @@ pub mod contract {
         )
         .await;
         let mut collapsed = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open collapsed replay");
         let collapsed_entries = replay(&mut *collapsed).await;
@@ -374,7 +379,7 @@ pub mod contract {
         )
         .await;
         let mut repeated = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open repeated-write replay");
         let repeated_entries = replay(&mut *repeated)
@@ -395,7 +400,7 @@ pub mod contract {
         let tombstone_revision =
             commit(frontier, [FrontierMutation::Delete { key: key2.clone() }]).await;
         let mut tombstones = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open tombstone replay");
         assert_eq!(
@@ -419,7 +424,7 @@ pub mod contract {
         )
         .await;
         let mut boundary = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open boundary replay");
         let overwritten_revision = commit(
@@ -436,8 +441,10 @@ pub mod contract {
                 .iter()
                 .all(|entry| entry.revision <= boundary_value_revision)
         );
-        let FrontierRead::Entries { entries, through } =
-            boundary.next().await.expect("following overwritten value")
+        let FrontierRead::Entries { entries, through } = boundary
+            .next(FrontierReadLimits::default())
+            .await
+            .expect("following overwritten value")
         else {
             panic!("expected following overwritten value")
         };
@@ -452,12 +459,12 @@ pub mod contract {
         );
 
         let mut idle = frontier
-            .open(harness.all_selector(0), FrontierReadLimits::default())
+            .open(harness.all_selector(0))
             .await
             .expect("open idle reader");
         replay(&mut *idle).await;
         let (read, committed) = tokio::join!(
-            idle.next(),
+            idle.next(FrontierReadLimits::default()),
             commit(
                 frontier,
                 [FrontierMutation::Put {
@@ -484,7 +491,7 @@ pub mod contract {
         )
         .await;
         let FrontierRead::Entries { entries, through } = idle
-            .next()
+            .next(FrontierReadLimits::default())
             .await
             .expect("entry after replay-to-live handoff")
         else {
@@ -502,10 +509,7 @@ pub mod contract {
         );
 
         let mut selected_live = frontier
-            .open(
-                harness.keys_selector(BTreeMap::from([(key1.clone(), 0)])),
-                FrontierReadLimits::default(),
-            )
+            .open(harness.keys_selector(BTreeMap::from([(key1.clone(), 0)])))
             .await
             .expect("open selected live reader");
         replay(&mut *selected_live).await;
@@ -526,7 +530,7 @@ pub mod contract {
         )
         .await;
         let FrontierRead::Entries { entries, through } = selected_live
-            .next()
+            .next(FrontierReadLimits::default())
             .await
             .expect("selected reader crossed nonmatching revision")
         else {
@@ -675,7 +679,6 @@ mod tests {
         async fn open(
             &self,
             _selector: Self::Selector,
-            _limits: FrontierReadLimits,
         ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<u64, u64> + '_>> {
             Err(KeyedFrontierError::Backend(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -724,26 +727,29 @@ mod tests {
         assert_eq!(tx.commit().await.unwrap(), 1);
 
         let mut reader = frontier
-            .open(
-                MemoryKeySelector::All { after: 0 },
-                FrontierReadLimits { max_entries: 2 },
-            )
+            .open(MemoryKeySelector::All { after: 0 })
             .await
             .unwrap();
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits { max_entries: 2 })
+            .await
+            .unwrap()
+        else {
             panic!("expected entries");
         };
         assert_eq!(entries.len(), 3);
         assert_eq!(through, 1);
         assert_eq!(
-            reader.next().await.unwrap(),
+            reader.next(FrontierReadLimits::default()).await.unwrap(),
             FrontierRead::ReplayComplete { through: 1 }
         );
 
         let mut tx = frontier.begin().await.unwrap();
         tx.delete(2).await.unwrap();
         assert_eq!(tx.commit().await.unwrap(), 2);
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } =
+            reader.next(FrontierReadLimits::default()).await.unwrap()
+        else {
             panic!("expected following entries");
         };
         assert_eq!(through, 2);
@@ -760,24 +766,29 @@ mod tests {
             let _revision = tx.commit().await.unwrap();
         }
         let mut reader = frontier
-            .open(
-                MemoryKeySelector::All { after: 0 },
-                FrontierReadLimits { max_entries: 2 },
-            )
+            .open(MemoryKeySelector::All { after: 0 })
             .await
             .unwrap();
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits { max_entries: 2 })
+            .await
+            .unwrap()
+        else {
             panic!("expected first page");
         };
         assert_eq!(entries.len(), 2);
         assert_eq!(through, 2);
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits { max_entries: 2 })
+            .await
+            .unwrap()
+        else {
             panic!("expected second page");
         };
         assert_eq!(entries.len(), 1);
         assert_eq!(through, 3);
         assert_eq!(
-            reader.next().await.unwrap(),
+            reader.next(FrontierReadLimits::default()).await.unwrap(),
             FrontierRead::ReplayComplete { through: 3 }
         );
     }
@@ -791,14 +802,15 @@ mod tests {
             let _revision = tx.commit().await.unwrap();
         }
         let mut reader = frontier
-            .open(
-                MemoryKeySelector::All { after: 0 },
-                FrontierReadLimits { max_entries: 1 },
-            )
+            .open(MemoryKeySelector::All { after: 0 })
             .await
             .unwrap();
 
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits { max_entries: 1 })
+            .await
+            .unwrap()
+        else {
             panic!("expected first replay page");
         };
         assert_eq!(
@@ -811,7 +823,11 @@ mod tests {
         tx.put(3, 3).await.unwrap();
         assert_eq!(tx.commit().await.unwrap(), 3);
 
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } = reader
+            .next(FrontierReadLimits { max_entries: 1 })
+            .await
+            .unwrap()
+        else {
             panic!("expected second replay page");
         };
         assert_eq!(
@@ -820,11 +836,13 @@ mod tests {
         );
         assert_eq!(through, 2);
         assert_eq!(
-            reader.next().await.unwrap(),
+            reader.next(FrontierReadLimits::default()).await.unwrap(),
             FrontierRead::ReplayComplete { through: 2 }
         );
 
-        let FrontierRead::Entries { entries, through } = reader.next().await.unwrap() else {
+        let FrontierRead::Entries { entries, through } =
+            reader.next(FrontierReadLimits::default()).await.unwrap()
+        else {
             panic!("expected following page");
         };
         assert_eq!(

@@ -6,7 +6,7 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
 use big_sync::SqliteDeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{
     BranchId, BranchPathBuf, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
@@ -127,7 +127,6 @@ async fn run_facet_set_doc_blobs_consumer(
         facet_set_store.as_ref(),
         &state,
         FacetSetSelector::Tags(vec![WellKnownFacetTag::Blob, WellKnownFacetTag::BlobPin]),
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening doc-blobs FacetSet walker: {error}"))?;

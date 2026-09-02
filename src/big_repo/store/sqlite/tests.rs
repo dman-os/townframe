@@ -1713,10 +1713,6 @@ async fn automerge_cursors_share_durable_cursor_table() -> Res<()> {
     .fetch_optional(&store.sql.read_pool)
     .await?;
     assert!(cursor_table.is_some(), "unified cursor table must exist");
-    let part = PartId(Byte32Id::new([44; 32]));
-    assert_eq!(store.automerge_part_cursor(part).await?, 0);
-    store.commit_automerge_part_cursor(part, 11).await?;
-    assert_eq!(store.automerge_part_cursor(part).await?, 11);
     assert_eq!(store.automerge_keyhive_cursor().await?, 0);
     store.commit_automerge_keyhive_cursor(17).await?;
     store.commit_automerge_keyhive_cursor(13).await?;

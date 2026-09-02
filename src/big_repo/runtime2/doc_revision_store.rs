@@ -86,7 +86,6 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
         &'a self,
         selector: Self::Selector,
         after: u64,
-        limits: RevisionReadLimits,
     ) -> Result<Self::Reader<'a>, Self::Error> {
         let reqs = SubPartsRequest {
             lower_bound: after,
@@ -106,7 +105,7 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
         };
         let inner = self
             .store
-            .open_local_revision_reader(reqs, limits)
+            .open_local_revision_reader(reqs)
             .await
             .wrap_err("opening physical document revisions")??;
         Ok(Reader {
@@ -141,10 +140,13 @@ fn doc_and_heads(
 
 #[async_trait::async_trait]
 impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader<'_> {
-    async fn next(&mut self) -> Result<RevisionRead<u64, AutomergeFrontierEvent>, eyre::Report> {
+    async fn next(
+        &mut self,
+        limits: RevisionReadLimits,
+    ) -> Result<RevisionRead<u64, AutomergeFrontierEvent>, eyre::Report> {
         let read = self
             .inner
-            .next()
+            .next(limits)
             .await
             .wrap_err("reading physical document revisions")?;
         match read {
@@ -218,6 +220,7 @@ mod tests {
     impl LocalPartRevisionReader for Scripted {
         async fn next(
             &mut self,
+            _limits: big_sync_core::revisioned_store::RevisionReadLimits,
         ) -> Res<big_sync_core::revisioned_store::RevisionRead<u64, SubEvent>> {
             Ok(self.0.pop_front().expect("script exhausted"))
         }
@@ -273,19 +276,19 @@ mod tests {
             inner: Box::new(Scripted(reads)),
             _store: &store,
         };
-        let first = reader.next().await?;
+        let first = reader.next(RevisionReadLimits::default()).await?;
         assert!(
             matches!(first, RevisionRead::Entries { revision: 3, entries } if entries.len() == 3)
         );
         assert!(
-            matches!(reader.next().await?, RevisionRead::Entries { revision: 4, entries } if entries.is_empty())
+            matches!(reader.next(RevisionReadLimits::default()).await?, RevisionRead::Entries { revision: 4, entries } if entries.is_empty())
         );
         assert_eq!(
-            reader.next().await?,
+            reader.next(RevisionReadLimits::default()).await?,
             RevisionRead::ReplayComplete { through: 4 }
         );
         assert!(
-            matches!(reader.next().await?, RevisionRead::Entries { revision: 5, entries } if entries.is_empty())
+            matches!(reader.next(RevisionReadLimits::default()).await?, RevisionRead::Entries { revision: 5, entries } if entries.is_empty())
         );
         Ok(())
     }

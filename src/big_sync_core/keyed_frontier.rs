@@ -115,7 +115,8 @@ where
 {
     /// Returns bounded entries, a one-time replay boundary, or waits for a
     /// commit which may make matching entries available.
-    async fn next(&mut self) -> KeyedFrontierResult<FrontierRead<K, V>>;
+    async fn next(&mut self, limits: FrontierReadLimits)
+    -> KeyedFrontierResult<FrontierRead<K, V>>;
 }
 
 #[async_trait::async_trait]
@@ -146,6 +147,5 @@ where
     async fn open(
         &self,
         selector: Self::Selector,
-        limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<K, V> + '_>>;
 }

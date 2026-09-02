@@ -42,7 +42,7 @@ where
 {
     /// Returns atomic revisions, exactly one replay boundary, then live
     /// revisions. A live reader may wait inside this call for new work.
-    async fn next(&mut self) -> Result<RevisionRead<R, E>, Error>;
+    async fn next(&mut self, limits: RevisionReadLimits) -> Result<RevisionRead<R, E>, Error>;
 }
 
 /// Inert source contract for a replayable revision stream.
@@ -64,7 +64,6 @@ pub trait RevisionedStore: Send + Sync {
         &'a self,
         selector: Self::Selector,
         after: Self::Revision,
-        limits: RevisionReadLimits,
     ) -> Result<Self::Reader<'a>, Self::Error>;
 }
 
@@ -96,6 +95,7 @@ where
 {
     async fn next(
         &mut self,
+        limits: RevisionReadLimits,
     ) -> Result<RevisionRead<FrontierRevision, FrontierEntry<K, V>>, KeyedFrontierError> {
         if let Some(read) = self.pending.pop_front() {
             return Ok(read);
@@ -106,7 +106,13 @@ where
                 entries: Vec::new(),
             });
         }
-        match self.inner.next().await? {
+        match self
+            .inner
+            .next(crate::keyed_frontier::FrontierReadLimits {
+                max_entries: limits.max_entries,
+            })
+            .await?
+        {
             FrontierRead::Entries { entries, through } if entries.is_empty() => {
                 Ok(RevisionRead::Entries {
                     revision: through,
@@ -167,7 +173,10 @@ mod tests {
 
     #[async_trait]
     impl RevisionedStoreReader<u64, u64, ScriptError> for ScriptedReader {
-        async fn next(&mut self) -> Result<RevisionRead<u64, u64>, ScriptError> {
+        async fn next(
+            &mut self,
+            _limits: RevisionReadLimits,
+        ) -> Result<RevisionRead<u64, u64>, ScriptError> {
             self.reads.pop_front().ok_or(ScriptError)
         }
     }
@@ -191,7 +200,6 @@ mod tests {
             &'a self,
             (): Self::Selector,
             _after: u64,
-            _limits: RevisionReadLimits,
         ) -> Result<Self::Reader<'a>, Self::Error> {
             Ok(ScriptedReader {
                 reads: self.reads.clone(),
@@ -219,30 +227,27 @@ mod tests {
                     },
                 ]),
             };
-            let mut reader = store
-                .open((), 0, RevisionReadLimits::default())
-                .await
-                .unwrap();
+            let mut reader = store.open((), 0).await.unwrap();
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 3,
                     entries: vec![1, 2]
                 }
             );
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 4,
                     entries: Vec::new()
                 }
             );
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::ReplayComplete { through: 4 }
             );
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 5,
                     entries: vec![3]
@@ -267,18 +272,16 @@ mod tests {
                     },
                 ]),
             };
-            let mut watch = LiveRevisionWatch::open(&store, (), RevisionReadLimits::default())
-                .await
-                .unwrap();
+            let mut watch = LiveRevisionWatch::open(&store, ()).await.unwrap();
             assert_eq!(
-                watch.next().await.unwrap(),
+                watch.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 2,
                     entries: vec![7]
                 }
             );
             assert_eq!(
-                watch.next().await.unwrap(),
+                watch.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 3,
                     entries: vec![8]
@@ -295,6 +298,7 @@ mod tests {
     impl crate::keyed_frontier::KeyedFrontierReader<u64, u64> for FrontierScriptReader {
         async fn next(
             &mut self,
+            _limits: crate::keyed_frontier::FrontierReadLimits,
         ) -> Result<crate::keyed_frontier::FrontierRead<u64, u64>, KeyedFrontierError> {
             self.reads.pop_front().ok_or_else(|| {
                 KeyedFrontierError::Backend(Box::new(std::io::Error::new(
@@ -349,13 +353,15 @@ mod tests {
                 pending_progress: None,
                 replay_complete_seen: false,
             };
-            let RevisionRead::Entries { revision, entries } = reader.next().await.unwrap() else {
+            let RevisionRead::Entries { revision, entries } =
+                reader.next(RevisionReadLimits::default()).await.unwrap()
+            else {
                 panic!("expected grouped entries");
             };
             assert_eq!(revision, 3);
             assert_eq!(entries.len(), 2);
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 4,
                     entries: vec![FrontierEntry {
@@ -366,18 +372,18 @@ mod tests {
                 }
             );
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {
                     revision: 5,
                     entries: Vec::new(),
                 }
             );
             assert_eq!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::ReplayComplete { through: 5 }
             );
             assert!(matches!(
-                reader.next().await.unwrap(),
+                reader.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries { revision: 6, .. }
             ));
         });

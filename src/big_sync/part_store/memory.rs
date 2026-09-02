@@ -94,6 +94,10 @@ impl MemoryKeyedFrontierSource<PartFrontierKey, PartEvent> for MemoryPartEventSo
 
 #[derive(Clone)]
 struct MemoryPartEventSelector {
+    /// `Some(after)` selects every key in the scope (the `All` local scope),
+    /// emitting revisions newer than `after` and ignoring the per-part and
+    /// per-object bounds below.
+    all: Option<CursorIndex>,
     part_cursors: HashMap<PartId, CursorIndex>,
     objects: HashSet<ObjId>,
     object_bounds: HashMap<ObjId, CursorIndex>,
@@ -101,6 +105,9 @@ struct MemoryPartEventSelector {
 
 impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
     fn lower_bound(&self, key: &PartFrontierKey) -> Option<FrontierRevision> {
+        if let Some(after) = self.all {
+            return Some(after);
+        }
         match key {
             PartFrontierKey::Object(obj_id) => self.object_bounds.get(obj_id).copied(),
             PartFrontierKey::Part { obj_id, part_id } => {
@@ -951,6 +958,7 @@ impl HostPartStore for MemoryPartStore {
         }
 
         let selector = MemoryPartEventSelector {
+            all: None,
             part_cursors,
             objects,
             object_bounds: reqs
@@ -967,17 +975,12 @@ impl HostPartStore for MemoryPartStore {
                 state: Arc::clone(&self.inner),
             });
         let mut reader: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>> =
-            open_memory_keyed_frontier(
-                source,
-                selector.clone(),
-                FrontierReadLimits { max_entries: 256 },
-            )
-            .await?;
+            open_memory_keyed_frontier(source, selector.clone()).await?;
         let state = Arc::clone(&self.inner);
         let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
         tokio::spawn(async move {
             loop {
-                match reader.next().await.unwrap() {
+                match reader.next(FrontierReadLimits::default()).await.unwrap() {
                     FrontierRead::Entries { entries, .. } => {
                         let events = surelock::key::lock_scope(|key| {
                             let (guard, _key) = key.lock(&state);
@@ -1039,7 +1042,6 @@ impl HostPartStore for MemoryPartStore {
     async fn open_local_revision_reader(
         &self,
         reqs: SubPartsRequest,
-        limits: big_sync_core::revisioned_store::RevisionReadLimits,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
 
@@ -1076,6 +1078,7 @@ impl HostPartStore for MemoryPartStore {
             }));
         }
         let selector = MemoryPartEventSelector {
+            all: None,
             part_cursors,
             objects: objects.clone(),
             object_bounds: reqs
@@ -1091,17 +1094,28 @@ impl HostPartStore for MemoryPartStore {
             Arc::new(MemoryPartEventSource {
                 state: Arc::clone(&self.inner),
             });
-        let reader = crate::keyed_frontier::open_memory_keyed_frontier(
-            source,
-            selector,
-            big_sync_core::keyed_frontier::FrontierReadLimits {
-                max_entries: limits.max_entries,
-            },
-        )
-        .await?;
+        let reader = crate::keyed_frontier::open_memory_keyed_frontier(source, selector).await?;
         Ok(Ok(Box::new(super::PartRevisionReader::new(
             reader, objects, parts,
         ))))
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: CursorIndex,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        let selector = MemoryPartEventSelector {
+            all: Some(after),
+            part_cursors: HashMap::new(),
+            objects: HashSet::new(),
+            object_bounds: HashMap::new(),
+        };
+        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
+            Arc::new(MemoryPartEventSource {
+                state: Arc::clone(&self.inner),
+            });
+        let reader = crate::keyed_frontier::open_memory_keyed_frontier(source, selector).await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {

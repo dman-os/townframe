@@ -5,7 +5,7 @@ use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use big_sync::SqliteDeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{FacetKey, WellKnownFacetTag};
 use sqlx_utils_rs::SqlCtx;
@@ -49,7 +49,6 @@ pub(crate) async fn spawn_facet_set_plugs_config_consumer(
             facet_set_store.as_ref(),
             &state,
             FacetSetSelector::Routes([route.clone()].into_iter().collect()),
-            RevisionReadLimits::default(),
         )
         .await
         .expect(ERROR_IMPOSSIBLE);
@@ -151,7 +150,6 @@ async fn run_facet_set_plugs_manifest_consumer(
         facet_set_store.as_ref(),
         &state,
         FacetSetSelector::Tag(WellKnownFacetTag::PlugManifest),
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening Plugs manifest FacetSet walker: {error}"))?;

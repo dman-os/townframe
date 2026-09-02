@@ -1922,9 +1922,10 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    automerge_frontier_group_scope: crate::runtime2::WorkerGroupScope,
+    automerge_frontier_group_scope: crate::runtime2::GroupScopeHandle,
     causal_checkpoint_group_scope: crate::runtime2::WorkerGroupScope,
     group_part_group_scope: crate::runtime2::WorkerGroupScope,
+    keyhive_change_notifs: bool,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -2021,6 +2022,7 @@ where
         crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
             Arc::clone(&keyhive_protocol),
             group_part_store.clone(),
+            Arc::new(crate::runtime2::TokioTimer),
             Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
@@ -2113,7 +2115,7 @@ where
             std::collections::HashMap::new(),
         )),
         subscription_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
-        keyhive_notif: Some(KeyhiveNotifWiring {
+        keyhive_notif: keyhive_change_notifs.then(|| KeyhiveNotifWiring {
             evt_tx: evt_tx.clone(),
             cancels: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }),

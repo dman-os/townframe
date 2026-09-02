@@ -5,7 +5,7 @@ use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
 use crate::rt::dispatch::DispatchOnSuccessHook;
 use crate::rt::{DispatchArgs, Rt};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
 
@@ -753,7 +753,6 @@ async fn run_doc_processor_driver(
         plugs_repo.as_ref(),
         &plugs_state,
         crate::plugs::PlugsRevisionSelector::All,
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
@@ -761,7 +760,6 @@ async fn run_doc_processor_driver(
         facet_set_store.as_ref(),
         &facet_state,
         FacetSetSelector::All,
-        RevisionReadLimits::default(),
     )
     .await
     .map_err(|error| ferr!("opening DocProcessor FacetSet walker: {error}"))?;

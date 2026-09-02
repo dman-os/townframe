@@ -1,8 +1,8 @@
 #![allow(clippy::disallowed_names)]
 use super::sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
 use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierReadLimits, FrontierRevision, KeyedFrontier, KeyedFrontierError,
-    KeyedFrontierReader, KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
+    FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
+    KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
 };
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use std::{collections::BTreeMap, sync::Arc};
@@ -333,9 +333,8 @@ impl<C: SqliteFrontierCodec> KeyedFrontier<C::Key, C::Value> for SqliteKeyedFron
     async fn open(
         &self,
         selector: Self::Selector,
-        limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<C::Key, C::Value> + '_>> {
-        open_sqlite_reader(self.clone(), selector, limits).await
+        open_sqlite_reader(self.clone(), selector).await
     }
 }
 
@@ -472,6 +471,7 @@ impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync_core::keyed_frontier::FrontierReadLimits;
     #[derive(Clone)]
     struct Bytes;
     impl SqliteFrontierCodec for Bytes {
@@ -554,19 +554,16 @@ mod tests {
             SqliteKeyedFrontier::new(pool.clone(), pool, "replay", Bytes, Arc::new(Notify::new()))
                 .await?;
         let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::All { after: 0 },
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::All { after: 0 })
             .await?;
         assert!(matches!(
-            reader.next().await?,
+            reader.next(FrontierReadLimits::default()).await?,
             big_sync_core::keyed_frontier::FrontierRead::ReplayComplete { .. }
         ));
         let mut tx = frontier.begin().await?;
         tx.put("live".into(), "value".into()).await?;
         tx.commit().await?;
-        let read = reader.next().await?;
+        let read = reader.next(FrontierReadLimits::default()).await?;
         assert!(
             matches!(read, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } if entries.len() == 1)
         );
@@ -592,24 +589,16 @@ mod tests {
         tx.commit().await?;
         let mut keys = BTreeMap::new();
         keys.insert("a".to_string(), 0);
-        let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::Keys(keys),
-                FrontierReadLimits::default(),
-            )
-            .await?;
+        let mut reader = frontier.open(SqliteFrontierSelector::Keys(keys)).await?;
         assert!(
-            matches!(reader.next().await?, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } if entries.iter().all(|entry| entry.key == "a"))
+            matches!(reader.next(FrontierReadLimits::default()).await?, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } if entries.iter().all(|entry| entry.key == "a"))
         );
         let mut empty = frontier
-            .open(
-                SqliteFrontierSelector::Keys(BTreeMap::new()),
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::Keys(BTreeMap::new()))
             .await?;
         let mut replay_complete = false;
         for _ in 0..2 {
-            match empty.next().await? {
+            match empty.next(FrontierReadLimits::default()).await? {
                 big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } => {
                     assert!(entries.is_empty());
                 }
@@ -646,23 +635,17 @@ mod tests {
         let mut namespaces = BTreeMap::new();
         namespaces.insert(vec![b'a'], 1);
         let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::Namespaces(namespaces),
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::Namespaces(namespaces))
             .await?;
         assert!(
-            matches!(reader.next().await?, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } if entries.iter().all(|entry| entry.key == "a2"))
+            matches!(reader.next(FrontierReadLimits::default()).await?, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } if entries.iter().all(|entry| entry.key == "a2"))
         );
         let mut empty = frontier
-            .open(
-                SqliteFrontierSelector::Namespaces(BTreeMap::new()),
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::Namespaces(BTreeMap::new()))
             .await?;
         let mut replay_complete = false;
         for _ in 0..2 {
-            match empty.next().await? {
+            match empty.next(FrontierReadLimits::default()).await? {
                 big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } => {
                     assert!(entries.is_empty());
                 }
@@ -711,25 +694,22 @@ mod tests {
             "ok"
         );
         let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::All { after: 0 },
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::All { after: 0 })
             .await?;
         assert!(matches!(
-            reader.next().await?,
+            reader.next(FrontierReadLimits::default()).await?,
             big_sync_core::keyed_frontier::FrontierRead::Entries { entries, through }
                 if through == 1 && entries.len() == 1 && entries[0].key == "ok"
         ));
         assert!(matches!(
-            reader.next().await?,
+            reader.next(FrontierReadLimits::default()).await?,
             big_sync_core::keyed_frontier::FrontierRead::ReplayComplete { through: 1 }
         ));
         let mut empty = frontier.begin().await?;
         let reserved_revision = empty.revision().await?;
         assert_eq!(reserved_revision, 2);
         assert_eq!(empty.commit().await?, reserved_revision);
-        match reader.next().await? {
+        match reader.next(FrontierReadLimits::default()).await? {
             big_sync_core::keyed_frontier::FrontierRead::Entries { entries, through } => {
                 assert!(entries.is_empty());
                 assert_eq!(through, reserved_revision);
@@ -753,13 +733,10 @@ mod tests {
         tx.put("a".into(), "one".into()).await?;
         assert_eq!(tx.commit().await?, 1);
         let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::All { after: 1 },
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::All { after: 1 })
             .await?;
         assert!(matches!(
-            reader.next().await?,
+            reader.next(FrontierReadLimits::default()).await?,
             big_sync_core::keyed_frontier::FrontierRead::ReplayComplete { through: 1 }
         ));
         let mut tx = frontier.begin().await?;
@@ -790,12 +767,9 @@ mod tests {
         tx.delete("a".into()).await?;
         tx.commit().await?;
         let mut reader = frontier
-            .open(
-                SqliteFrontierSelector::All { after: 0 },
-                FrontierReadLimits::default(),
-            )
+            .open(SqliteFrontierSelector::All { after: 0 })
             .await?;
-        let read = reader.next().await?;
+        let read = reader.next(FrontierReadLimits::default()).await?;
         assert!(
             matches!(read, big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. }
             if entries.iter().any(|entry| entry.key == "a" && entry.value.is_none())

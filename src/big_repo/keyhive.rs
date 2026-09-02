@@ -416,7 +416,12 @@ impl BigKeyhiveHandle {
         &self,
         doc_id: DocumentId,
     ) -> Res<BTreeSet<[u8; 32]>> {
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        // Non-document object ids (plain part-store payloads synced alongside
+        // documents) belong to no keyhive group. Eligibility callers treat
+        // them as out of scope instead of failing the worker.
+        let Ok(kh_doc_id) = keyhive_doc_id(doc_id) else {
+            return Ok(BTreeSet::new());
+        };
         let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
             return Ok(BTreeSet::new());
         };

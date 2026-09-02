@@ -71,13 +71,13 @@ impl PlugsRepoFfi {
             .do_on_rt(async move {
                 Some(tokio::spawn(async move {
                     let mut watch = watch_repo
-                        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+                        .watch(PlugsRevisionSelector::All)
                         .await
                         .expect(ERROR_IMPOSSIBLE);
                     loop {
                         let read = tokio::select! {
                             _ = watch_cancel.cancelled() => return,
-                            read = watch.next() => read.expect(ERROR_IMPOSSIBLE),
+                            read = watch.next(RevisionReadLimits::default()) => read.expect(ERROR_IMPOSSIBLE),
                         };
                         let big_sync_core::revisioned_store::RevisionRead::Entries {
                             entries, ..

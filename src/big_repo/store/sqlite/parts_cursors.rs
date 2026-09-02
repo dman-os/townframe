@@ -721,14 +721,25 @@ impl HostPartStore for SqliteBigRepoStore {
     async fn open_local_revision_reader(
         &self,
         reqs: SubPartsRequest,
-        limits: big_sync_core::revisioned_store::RevisionReadLimits,
     ) -> Res<Result<Box<dyn big_sync::LocalPartRevisionReader>, ListPartsError>> {
         open_sqlite_local_revision_reader(
             self.sql.read_pool.clone(),
             self.scope().id(),
             Arc::clone(&self.local_revision_wakeups),
             reqs,
-            limits,
+        )
+        .await
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: u64,
+    ) -> Res<Result<Box<dyn big_sync::LocalPartRevisionReader>, ListPartsError>> {
+        big_sync::open_sqlite_local_revision_reader_all(
+            self.sql.read_pool.clone(),
+            self.scope().id(),
+            Arc::clone(&self.local_revision_wakeups),
+            after,
         )
         .await
     }

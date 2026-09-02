@@ -5,7 +5,7 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
@@ -567,7 +567,6 @@ impl DocFacetRefIndexRepo {
             self.plugs_repo.as_ref(),
             &plugs_state,
             PlugsRevisionSelector::All,
-            RevisionReadLimits::default(),
         )
         .await
         .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
@@ -577,7 +576,6 @@ impl DocFacetRefIndexRepo {
                 facet_set_store.as_ref(),
                 &facet_state,
                 FacetSetSelector::FacetTags(tags),
-                RevisionReadLimits::default(),
             )
             .await
             .map_err(|error| ferr!("opening facet-ref FacetSet walker: {error}"))?;

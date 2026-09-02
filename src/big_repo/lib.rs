@@ -35,8 +35,9 @@ pub use runtime2::doc_revision_store::{
     AutomergeFrontierTarget,
 };
 pub use runtime2::types::{
-    CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
-    SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt, WorkerGroupScope,
+    CreateDocError, DocLookup, GetDocError, GroupScopeController, GroupScopeHandle,
+    KeyhiveSyncCancelled, PutDocError, SyncDocError, SyncDocOutcome, SyncDocPolicyError,
+    SyncDocReceipt, WorkerGroupScope,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 mod store;
@@ -116,6 +117,13 @@ pub struct Config {
     pub causal_checkpoint_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents and group parts the group-part worker manages.
     pub group_part_group_scope: WorkerGroupScope,
+    /// Test-only: unwire the per-connection `SubscribeKeyhiveChanges`
+    /// subscription so peers only learn keyhive changes through explicit
+    /// `sync_keyhive_with_peer` rounds. Lets tests pin late-keyhive-sync
+    /// semantics with a membership view that is stale by construction.
+    /// Production nodes always wire the subscription.
+    #[cfg(test)]
+    pub keyhive_change_notifs: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +164,8 @@ pub struct BigRepo {
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
     #[educe(Debug(ignore))]
     connection_tasks: Arc<utils_rs::AbortableJoinSet>,
+    #[educe(Debug(ignore))]
+    automerge_frontier_group_scope: GroupScopeController,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -169,6 +179,8 @@ impl BigRepo {
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        #[cfg(test)]
+        let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
             node_identity_seed,
             storage,
@@ -177,6 +189,7 @@ impl BigRepo {
             automerge_frontier_group_scope,
             causal_checkpoint_group_scope,
             group_part_group_scope,
+            ..
         } = config;
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
@@ -207,6 +220,8 @@ impl BigRepo {
                 automerge_frontier_group_scope,
                 causal_checkpoint_group_scope,
                 group_part_group_scope,
+                #[cfg(test)]
+                keyhive_change_notifs,
             },
             store,
         )
@@ -265,6 +280,10 @@ impl BigRepo {
         config: Config,
         store: SqliteBigRepoStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        #[cfg(test)]
+        let keyhive_change_notifs = config.keyhive_change_notifs;
+        #[cfg(not(test))]
+        let keyhive_change_notifs = true;
         let Config {
             node_identity_seed,
             storage,
@@ -273,6 +292,7 @@ impl BigRepo {
             automerge_frontier_group_scope,
             causal_checkpoint_group_scope,
             group_part_group_scope,
+            ..
         } = config;
         let big_sync_store: SharedPartStore = Arc::new(store.clone());
         // Frontier payloads live in their own storage scope so the raw doc_id
@@ -332,6 +352,12 @@ impl BigRepo {
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
+        // The embedder-facing scope controller: workers read the live scope
+        // through a handle, so a relay can grow/shrink its document set at
+        // runtime without restarting the worker.
+        let automerge_frontier_group_scope_controller =
+            GroupScopeController::new(automerge_frontier_group_scope);
+
         let (runtime, ephemeral, keyhive_protocol, keyhive_dispatcher, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
                 signer,
@@ -345,9 +371,10 @@ impl BigRepo {
                 Arc::clone(&change_manager),
                 evt_tx,
                 evt_rx,
-                automerge_frontier_group_scope,
+                automerge_frontier_group_scope_controller.handle(),
                 causal_checkpoint_group_scope,
                 group_part_group_scope,
+                keyhive_change_notifs,
             )
             .await?;
 
@@ -367,6 +394,7 @@ impl BigRepo {
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             connection_tasks: Arc::clone(&connection_tasks),
+            automerge_frontier_group_scope: automerge_frontier_group_scope_controller,
         });
 
         let change_manager_stop = out
@@ -388,6 +416,22 @@ impl BigRepo {
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Update the Automerge frontier worker's group scope at runtime.
+    ///
+    /// Daybook sync nodes keep [`WorkerGroupScope::All`]; relays constrain
+    /// this to the (dynamic) set of group-part ids backing the documents they
+    /// use to communicate with their clients. Workers rescan on change: newly
+    /// eligible docs gain frontier state, docs that left the scope lose their
+    /// frontier mirror.
+    pub fn set_automerge_frontier_group_scope(&self, scope: WorkerGroupScope) {
+        self.automerge_frontier_group_scope.set(scope);
+    }
+
+    /// The current live Automerge frontier worker scope.
+    pub fn automerge_frontier_group_scope(&self) -> WorkerGroupScope {
+        self.automerge_frontier_group_scope.get()
     }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive

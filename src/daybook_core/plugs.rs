@@ -295,7 +295,6 @@ impl RevisionedStore for PlugsRepo {
         &'a self,
         selector: Self::Selector,
         after: Self::Revision,
-        limits: RevisionReadLimits,
     ) -> Result<Self::Reader<'a>, Self::Error> {
         let selector = match selector {
             PlugsRevisionSelector::All => SqliteFrontierSelector::All { after },
@@ -303,15 +302,7 @@ impl RevisionedStore for PlugsRepo {
                 SqliteFrontierSelector::Keys(keys.into_iter().map(|key| (key, after)).collect())
             }
         };
-        let inner = self
-            .revision_frontier
-            .open(
-                selector,
-                big_sync_core::keyed_frontier::FrontierReadLimits {
-                    max_entries: limits.max_entries,
-                },
-            )
-            .await?;
+        let inner = self.revision_frontier.open(selector).await?;
         Ok(KeyedFrontierRevisionReader::new(inner))
     }
 }
@@ -324,20 +315,20 @@ impl<'a> PlugsWatch<'a> {
     pub async fn open(
         source: &'a PlugsRepo,
         selector: PlugsRevisionSelector,
-        limits: RevisionReadLimits,
     ) -> Result<Self, big_sync_core::keyed_frontier::KeyedFrontierError> {
         Ok(Self {
-            inner: LiveRevisionWatch::open(source, selector, limits).await?,
+            inner: LiveRevisionWatch::open(source, selector).await?,
         })
     }
 
     pub async fn next(
         &mut self,
+        limits: RevisionReadLimits,
     ) -> Result<
         big_sync_core::revisioned_store::RevisionRead<FrontierRevision, PlugsWatchChange>,
         big_sync_core::keyed_frontier::KeyedFrontierError,
     > {
-        match self.inner.next().await? {
+        match self.inner.next(limits).await? {
             RevisionRead::Entries { revision, entries } => Ok(RevisionRead::Entries {
                 revision,
                 entries: entries
@@ -374,20 +365,19 @@ impl PlugsRepo {
     pub async fn watch<'a>(
         &'a self,
         selector: PlugsRevisionSelector,
-        limits: RevisionReadLimits,
     ) -> Result<PlugsWatch<'a>, big_sync_core::keyed_frontier::KeyedFrontierError> {
-        PlugsWatch::open(self, selector, limits).await
+        PlugsWatch::open(self, selector).await
     }
 
     pub(crate) async fn reconcile_revision_frontier(&self) -> Res<()> {
         let mut reader = self
-            .open(PlugsRevisionSelector::All, 0, RevisionReadLimits::default())
+            .open(PlugsRevisionSelector::All, 0)
             .await
             .map_err(|e| eyre::eyre!(e.to_string()))?;
         let mut current = HashMap::<String, PlugRevisionState>::new();
         loop {
             match reader
-                .next()
+                .next(RevisionReadLimits::default())
                 .await
                 .map_err(|e| eyre::eyre!(e.to_string()))?
             {

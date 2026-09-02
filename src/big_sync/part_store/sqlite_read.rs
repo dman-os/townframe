@@ -13,6 +13,14 @@ use std::collections::BTreeMap;
 /// loading a broad source range and filtering it in memory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SqlitePartSelector {
+    /// Select every member row in the scope, ignoring `objects`/`parts`.
+    ///
+    /// The value is the replay lower bound: the reader starts emitting rows
+    /// newer than it. Used by local workers whose scope is "everything"
+    /// (`All`): the part set is enumerated by the query itself at read time
+    /// instead of being frozen at reader construction, so parts created
+    /// later still match.
+    pub(crate) all: Option<FrontierRevision>,
     pub(crate) objects: BTreeMap<ObjId, FrontierRevision>,
     pub(crate) parts: BTreeMap<PartId, FrontierRevision>,
 }
@@ -20,12 +28,11 @@ pub(crate) struct SqlitePartSelector {
 impl SqlitePartSelector {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
-        self.objects.is_empty() && self.parts.is_empty()
+        self.all.is_none() && self.objects.is_empty() && self.parts.is_empty()
     }
 }
 
 /// The current, collapsed SQLite row passed to the sibling decoder.
-///
 /// `payload_json == None` is meaningful: it is a retained deletion/tombstone
 /// row and must not be discarded by a decoder merely because it has no value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +66,11 @@ fn push_selector_predicate(
     scope_id: i64,
 ) {
     query.push(" AND (");
+    if selector.all.is_some() {
+        query.push("1");
+        query.push(")");
+        return;
+    }
     let mut first = true;
     for (obj_id, lower_bound) in &selector.objects {
         if !first {
@@ -167,10 +179,21 @@ mod tests {
         let object = ObjId::new([1; 32]);
         let part = PartId::new([2; 32]);
         let selector = SqlitePartSelector {
+            all: None,
             objects: BTreeMap::from([(object, 7)]),
             parts: BTreeMap::from([(part, 19)]),
         };
         assert_eq!(selector.objects[&object], 7);
         assert_eq!(selector.parts[&part], 19);
+    }
+
+    #[test]
+    fn match_all_selector_is_never_empty() {
+        let selector = SqlitePartSelector {
+            all: Some(9),
+            ..Default::default()
+        };
+        assert!(!selector.is_empty());
+        assert!(SqlitePartSelector::default().is_empty());
     }
 }

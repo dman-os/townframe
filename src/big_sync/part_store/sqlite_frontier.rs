@@ -5,8 +5,8 @@ use super::sqlite_read::{SqliteFrontierRow, SqlitePartSelector, part_query_rows}
 use super::sqlite_write::SqliteFrontierWrite;
 use crate::keyed_frontier::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
 use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierReadLimits, FrontierRevision, KeyedFrontier, KeyedFrontierError,
-    KeyedFrontierReader, KeyedFrontierResult,
+    FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
+    KeyedFrontierResult,
 };
 use big_sync_core::rpc::{ObjAddedToPart, ObjChanged, PartEvent};
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -72,6 +72,10 @@ impl SqliteReadSource for SqlitePartFrontier {
 
     fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    fn initial_after(&self, selector: &SqlitePartSelector) -> FrontierRevision {
+        selector.all.unwrap_or(0)
     }
 
     fn committed_revision(
@@ -204,9 +208,8 @@ impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
     async fn open(
         &self,
         selector: Self::Selector,
-        limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent> + '_>> {
-        open_sqlite_reader(self.clone(), selector, limits).await
+        open_sqlite_reader(self.clone(), selector).await
     }
 }
 

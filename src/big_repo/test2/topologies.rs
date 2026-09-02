@@ -768,7 +768,17 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     //   │  A  │────│  B  │────│  C  │
     //   │(30) │    │(31) │    │(32) │
     //   └─────┘    └─────┘    └─────┘
-    let guard = ShutdownGuard::boot(&[(30, "Alice"), (31, "Bob"), (32, "Carol")]).await?;
+    // Carol's keyhive change-notification subscription is unwired: the test
+    // pins that C holds the doc payload *before* membership and that the
+    // payload-first delivery is rejected for lack of local membership. With
+    // notifications wired, B's dispatcher could propagate the grant to C in
+    // the background and race the deliberate staleness below.
+    let guard = ShutdownGuard::boot_mixed(&[
+        (30, "Alice", true),
+        (31, "Bob", true),
+        (32, "Carol", false),
+    ])
+    .await?;
     let node_a = guard.node(0);
     let node_b = guard.node(1);
     let node_c = guard.node(2);

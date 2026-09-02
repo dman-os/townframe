@@ -1088,7 +1088,7 @@ async fn wait_for_change(
 ) -> Res<PlugsWatchChange> {
     loop {
         let read = watch
-            .next()
+            .next(RevisionReadLimits::default())
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))?;
         let RevisionRead::Entries { entries, .. } = read else {
@@ -1106,7 +1106,7 @@ async fn wait_for_change(
 async fn wait_for_any_change(watch: &mut PlugsWatch<'_>, plug_id: &str) -> Res<PlugsWatchChange> {
     loop {
         let read = watch
-            .next()
+            .next(RevisionReadLimits::default())
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))?;
         let RevisionRead::Entries { entries, .. } = read else {
@@ -1138,7 +1138,7 @@ async fn test_enable_plug_emits_plug_enabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_enable_plug_emits_plug_enabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let mut watch = repo
-        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+        .watch(PlugsRevisionSelector::All)
         .await
         .map_err(|error| eyre::eyre!(error.to_string()))?;
     let doc_id = repo.add(mock_plug("plug1")).await?;
@@ -1191,7 +1191,7 @@ async fn test_disable_plug_emits_plug_disabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_disable_plug_emits_plug_disabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let mut watch = repo
-        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+        .watch(PlugsRevisionSelector::All)
         .await
         .map_err(|error| eyre::eyre!(error.to_string()))?;
 
@@ -1218,7 +1218,7 @@ async fn test_update_plug_emits_enabled_plug_updated() -> Res<()> {
         crate::test_support::test_cx("plugs_test_update_plug_emits_enabled_plug_updated").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let mut watch = repo
-        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+        .watch(PlugsRevisionSelector::All)
         .await
         .map_err(|error| eyre::eyre!(error.to_string()))?;
 
@@ -1562,7 +1562,7 @@ async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
     .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let mut watch = repo
-        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+        .watch(PlugsRevisionSelector::All)
         .await
         .map_err(|error| eyre::eyre!(error.to_string()))?;
 
@@ -1629,7 +1629,7 @@ async fn test_local_config_write_not_double_processed() -> Res<()> {
         crate::test_support::test_cx("plugs_test_local_config_write_not_double_processed").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
     let mut watch = repo
-        .watch(PlugsRevisionSelector::All, RevisionReadLimits::default())
+        .watch(PlugsRevisionSelector::All)
         .await
         .map_err(|error| eyre::eyre!(error.to_string()))?;
 

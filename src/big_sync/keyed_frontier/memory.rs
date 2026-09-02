@@ -263,7 +263,6 @@ where
 struct MemoryKeyedFrontierReader<K, V, S> {
     source: Arc<dyn MemoryKeyedFrontierSource<K, V>>,
     selector: S,
-    limits: FrontierReadLimits,
     initial_root: Option<Arc<MemoryKeyedFrontierRoot<K, V>>>,
     initial_through: FrontierRevision,
     after: FrontierRevision,
@@ -283,6 +282,7 @@ where
         after: FrontierRevision,
         through: FrontierRevision,
         initial: bool,
+        max_entries: usize,
     ) -> (Vec<FrontierEntry<K, V>>, FrontierRevision) {
         let mut entries = Vec::new();
         let mut scanned_through = after;
@@ -303,13 +303,13 @@ where
                 .collect::<Vec<_>>();
             if !entries.is_empty()
                 && !revision_entries.is_empty()
-                && entries.len() + revision_entries.len() > self.limits.max_entries
+                && entries.len() + revision_entries.len() > max_entries
             {
                 break;
             }
             entries.extend(revision_entries);
             scanned_through = revision;
-            if entries.len() >= self.limits.max_entries {
+            if entries.len() >= max_entries {
                 break;
             }
         }
@@ -336,11 +336,22 @@ where
     V: Clone + Send + Sync,
     S: MemoryKeyedFrontierSelector<K>,
 {
-    async fn next(&mut self) -> KeyedFrontierResult<FrontierRead<K, V>> {
+    async fn next(
+        &mut self,
+        limits: FrontierReadLimits,
+    ) -> KeyedFrontierResult<FrontierRead<K, V>> {
+        if limits.max_entries == 0 {
+            return Err(KeyedFrontierError::EmptyReadLimit);
+        }
         loop {
             if let Some(root) = self.initial_root.as_ref() {
-                let (entries, through) =
-                    self.read_root(root, self.after, self.initial_through, true);
+                let (entries, through) = self.read_root(
+                    root,
+                    self.after,
+                    self.initial_through,
+                    true,
+                    limits.max_entries,
+                );
                 self.after = through;
                 if !entries.is_empty() {
                     return Ok(FrontierRead::Entries { entries, through });
@@ -359,7 +370,13 @@ where
             self.wakeups.borrow_and_update();
             let view = self.source.view().await?;
             let previous_after = self.after;
-            let (entries, through) = self.read_root(&view.root, self.after, view.through, false);
+            let (entries, through) = self.read_root(
+                &view.root,
+                self.after,
+                view.through,
+                false,
+                limits.max_entries,
+            );
             self.after = through;
             if !entries.is_empty() {
                 return Ok(FrontierRead::Entries { entries, through });
@@ -383,7 +400,6 @@ where
     async fn open_with_selector<S>(
         &self,
         selector: S,
-        limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<K, V>>>
     where
         S: MemoryKeyedFrontierSelector<K>,
@@ -392,28 +408,23 @@ where
             Arc::new(OwnedMemoryKeyedFrontierSource {
                 inner: Arc::clone(&self.inner),
             });
-        open_memory_keyed_frontier(source, selector, limits).await
+        open_memory_keyed_frontier(source, selector).await
     }
 }
 
 pub async fn open_memory_keyed_frontier<K, V, S>(
     source: Arc<dyn MemoryKeyedFrontierSource<K, V>>,
     selector: S,
-    limits: FrontierReadLimits,
 ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<K, V>>>
 where
     K: Ord + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
     S: MemoryKeyedFrontierSelector<K>,
 {
-    if limits.max_entries == 0 {
-        return Err(KeyedFrontierError::EmptyReadLimit);
-    }
     let view = source.view().await?;
     Ok(Box::new(MemoryKeyedFrontierReader {
         source,
         selector,
-        limits,
         initial_root: Some(view.root),
         initial_through: view.through,
         after: 0,
@@ -462,8 +473,7 @@ where
     async fn open(
         &self,
         selector: Self::Selector,
-        limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<K, V> + '_>> {
-        self.open_with_selector(selector, limits).await
+        self.open_with_selector(selector).await
     }
 }

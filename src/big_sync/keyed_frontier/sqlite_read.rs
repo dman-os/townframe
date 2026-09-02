@@ -66,7 +66,6 @@ struct SqliteRows<R> {
 struct SqliteReader<S: SqliteReadSource> {
     source: S,
     selector: S::Selector,
-    limits: FrontierReadLimits,
     initial_through: Option<FrontierRevision>,
     after: FrontierRevision,
 }
@@ -118,20 +117,15 @@ where
 pub(crate) async fn open_sqlite_reader<S>(
     source: S,
     selector: S::Selector,
-    limits: FrontierReadLimits,
 ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<S::Key, S::Value>>>
 where
     S: SqliteReadSource,
 {
-    if limits.max_entries == 0 {
-        return Err(KeyedFrontierError::EmptyReadLimit);
-    }
     let initial_through = source.committed_revision().await.map_err(backend_error)?;
     let after = source.initial_after(&selector);
     Ok(Box::new(SqliteReader {
         source,
         selector,
-        limits,
         initial_through: Some(initial_through),
         after,
     }))
@@ -142,7 +136,13 @@ impl<S> KeyedFrontierReader<S::Key, S::Value> for SqliteReader<S>
 where
     S: SqliteReadSource,
 {
-    async fn next(&mut self) -> KeyedFrontierResult<FrontierRead<S::Key, S::Value>> {
+    async fn next(
+        &mut self,
+        limits: FrontierReadLimits,
+    ) -> KeyedFrontierResult<FrontierRead<S::Key, S::Value>> {
+        if limits.max_entries == 0 {
+            return Err(KeyedFrontierError::EmptyReadLimit);
+        }
         loop {
             let Some(phase_through) = self.initial_through else {
                 // Registration precedes the confirming cursor query.  The
@@ -162,7 +162,7 @@ where
                     &self.selector,
                     self.after,
                     current,
-                    self.limits.max_entries,
+                    limits.max_entries,
                 )
                 .await
                 .map_err(backend_error)?;
@@ -180,7 +180,7 @@ where
                 &self.selector,
                 self.after,
                 phase_through,
-                self.limits.max_entries,
+                limits.max_entries,
             )
             .await
             .map_err(backend_error)?;

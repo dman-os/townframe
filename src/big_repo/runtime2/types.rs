@@ -168,8 +168,6 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
-    pub latest_commit_row_id: std::sync::atomic::AtomicI64,
-    #[educe(Debug(ignore))]
     pub latest_keyhive_seq: std::sync::atomic::AtomicU64,
     #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
@@ -191,7 +189,6 @@ impl LiveDocBundle {
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
-            latest_commit_row_id: std::sync::atomic::AtomicI64::new(0),
             latest_keyhive_seq: std::sync::atomic::AtomicU64::new(latest_keyhive_seq),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
             _runtime2_lease: Some(lease),
@@ -229,35 +226,10 @@ impl LiveDocBundle {
             .store(partial, std::sync::atomic::Ordering::Release);
     }
 
-    #[expect(dead_code)]
-    pub fn update_commit_watermark(&self, row_id: i64) {
-        self.latest_commit_row_id
-            .fetch_max(row_id, std::sync::atomic::Ordering::Release);
-        self.barrier_notify.notify_waiters();
-    }
-
     pub fn update_keyhive_watermark(&self, seq: u64) {
         self.latest_keyhive_seq
             .fetch_max(seq, std::sync::atomic::Ordering::Release);
         self.barrier_notify.notify_waiters();
-    }
-
-    pub async fn await_commit_watermark(&self, target_row_id: i64) -> Res<()> {
-        loop {
-            let notified = self.barrier_notify.notified();
-            tokio::pin!(notified);
-            if self
-                .latest_commit_row_id
-                .load(std::sync::atomic::Ordering::Acquire)
-                >= target_row_id
-            {
-                return Ok(());
-            }
-            if self.is_broken() {
-                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
-            }
-            notified.await;
-        }
     }
 
     pub async fn await_keyhive_watermark(&self, target_seq: u64) -> Res<()> {
@@ -339,6 +311,71 @@ impl WorkerGroupScope {
             Self::All => None,
             Self::Groups(groups) => Some(groups),
         }
+    }
+}
+
+/// Live handle onto a worker's [`WorkerGroupScope`] that the embedder can
+/// update at runtime — a relay, for example, grows and shrinks its scope as
+/// the set of documents it uses to communicate with its clients changes.
+/// Workers read the current value at event-processing time and observe
+/// [`GroupScopeHandle::changed`] to rescan newly eligible or newly ineligible
+/// documents.
+///
+/// The controller side lives with the embedder ([`BigRepo`]); each spawned
+/// worker holds a clone of the receiver handle.
+#[derive(Debug, Clone)]
+pub struct GroupScopeHandle {
+    rx: tokio::sync::watch::Receiver<WorkerGroupScope>,
+}
+
+/// The write side of a [`GroupScopeHandle`].
+#[derive(Debug)]
+pub struct GroupScopeController {
+    tx: tokio::sync::watch::Sender<WorkerGroupScope>,
+}
+
+impl GroupScopeController {
+    pub fn new(initial: WorkerGroupScope) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(initial);
+        Self { tx }
+    }
+
+    /// Publish a new scope. A redundant set (unchanged value) does not wake
+    /// workers.
+    pub fn set(&self, scope: WorkerGroupScope) {
+        self.tx.send_if_modified(|current| {
+            let changed = *current != scope;
+            if changed {
+                *current = scope;
+            }
+            changed
+        });
+    }
+
+    pub fn handle(&self) -> GroupScopeHandle {
+        GroupScopeHandle { rx: self.tx.subscribe() }
+    }
+
+    /// The scope as of this call.
+    pub fn get(&self) -> WorkerGroupScope {
+        self.tx.borrow().clone()
+    }
+}
+
+impl GroupScopeHandle {
+    /// The scope as of this call.
+    pub fn get(&self) -> WorkerGroupScope {
+        self.rx.borrow().clone()
+    }
+
+    /// Resolves when the scope changes. If the controller has been dropped
+    /// the scope is frozen forever and this resolves immediately; callers
+    /// that observe changes in a select loop must treat closure as
+    /// "never changes again" (park on `std::future::pending`), not spin.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        // `watch::RecvError` is Closed-only (unit struct — watch receivers
+        // cannot lag), so closure is the only failure and callers park on it.
+        self.rx.changed().await
     }
 }
 

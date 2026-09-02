@@ -55,7 +55,6 @@ pub async fn open_sqlite_local_revision_reader(
     scope_id: i64,
     changed: Arc<Notify>,
     reqs: SubPartsRequest,
-    limits: big_sync_core::revisioned_store::RevisionReadLimits,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
     use big_sync_core::rpc::SubscriptionTarget;
 
@@ -95,17 +94,33 @@ pub async fn open_sqlite_local_revision_reader(
         }
     }
     let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
-    let reader = open_sqlite_reader(
-        frontier,
-        selector,
-        big_sync_core::keyed_frontier::FrontierReadLimits {
-            max_entries: limits.max_entries,
-        },
-    )
-    .await?;
+    let reader = open_sqlite_reader(frontier, selector).await?;
     Ok(Ok(Box::new(super::PartRevisionReader::new(
         reader, objects, parts,
     ))))
+}
+
+/// Open an unfiltered local revision reader over every part and object in
+/// the scope, including parts created after this call. Callers that own a
+/// different store facade can supply its read pool, scope, and commit
+/// wakeup without going through the legacy subscription channel. `after` is
+/// the replay lower bound (a part-store frontier revision).
+pub async fn open_sqlite_local_revision_reader_all(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    after: CursorIndex,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let reader = open_sqlite_reader(
+        frontier,
+        SqlitePartSelector {
+            all: Some(after),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
 }
 
 use super::sqlite_core::MemberState;
@@ -1069,14 +1084,13 @@ impl HostPartStore for SqlitePartStore {
         let (tx, rx) = mpsc::unbounded("SqlitePartStore".into(), "caller".into());
         let store = self.clone();
         tokio::spawn(async move {
-            let mut reader = store
-                .frontier
-                .open(selector, FrontierReadLimits { max_entries: 256 })
-                .await
-                .expect(ERROR_IMPOSSIBLE);
+            let mut reader = store.frontier.open(selector).await.expect(ERROR_IMPOSSIBLE);
             let mut replay_complete_sent = false;
             loop {
-                let read = reader.next().await.expect(ERROR_IMPOSSIBLE);
+                let read = reader
+                    .next(FrontierReadLimits::default())
+                    .await
+                    .expect(ERROR_IMPOSSIBLE);
                 let FrontierRead::Entries { entries, .. } = read else {
                     assert!(
                         !replay_complete_sent,
@@ -1223,7 +1237,6 @@ impl HostPartStore for SqlitePartStore {
     async fn open_local_revision_reader(
         &self,
         reqs: SubPartsRequest,
-        limits: big_sync_core::revisioned_store::RevisionReadLimits,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
 
@@ -1262,17 +1275,25 @@ impl HostPartStore for SqlitePartStore {
                 }
             }
         }
-        let reader = open_sqlite_reader(
-            self.frontier.clone(),
-            selector,
-            big_sync_core::keyed_frontier::FrontierReadLimits {
-                max_entries: limits.max_entries,
-            },
-        )
-        .await?;
+        let reader = open_sqlite_reader(self.frontier.clone(), selector).await?;
         Ok(Ok(Box::new(super::PartRevisionReader::new(
             reader, objects, parts,
         ))))
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: CursorIndex,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        let reader = open_sqlite_reader(
+            self.frontier.clone(),
+            SqlitePartSelector {
+                all: Some(after),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {

@@ -294,7 +294,14 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let pair = Pair::boot(238, 239, "Owner", "StaleReader").await?;
+    // The keyhive change-notification subscription is unwired on both
+    // nodes: the revocation never propagates to the reader in the
+    // background, so the reader's membership view is stale by construction
+    // and the owner's serving policy is deterministically the rejecting
+    // side. (With notifications wired, the background propagation races the
+    // explicit doc sync below, and the reader's own stale-then-refreshed
+    // gate rejects first with Policy(DocumentNotFound).)
+    let pair = Pair::boot_without_keyhive_notifs(238, 239, "Owner", "StaleReader").await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
 
     let mut initial = automerge::Automerge::new();
@@ -315,10 +322,9 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
     drop(reader_doc);
     drop(owner_doc);
 
-    // Revoke without letting the reader's keyhive learn about it. The
-    // notification path debounces for at least `quiet_window` (100ms), so the
-    // doc-sync attempt below lands while the reader's local gate still passes
-    // and the owner's serving policy is the side that rejects.
+    // Revoke without letting the reader's keyhive learn about it (the
+    // notification subscription is unwired on both nodes), so the owner's
+    // serving policy is deterministically the side that rejects.
     pair.left()
         .repo
         .revoke_doc_access(doc_id, reader_agent)

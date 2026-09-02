@@ -3,7 +3,7 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
 use big_repo::SharedPartStore;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, DocId, WellKnownFacetTag};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
@@ -504,7 +504,6 @@ impl BlobPinsPartWorker {
             facet_set_store.as_ref(),
             &state,
             FacetSetSelector::Tag(WellKnownFacetTag::BlobPin),
-            RevisionReadLimits::default(),
         )
         .await
         .map_err(|error| ferr!("opening blob-pins-part FacetSet walker: {error}"))?;

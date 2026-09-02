@@ -20,21 +20,20 @@ impl<'a, S> LiveRevisionWatch<'a, S>
 where
     S: RevisionedStore + 'a,
 {
-    pub async fn open(
-        source: &'a S,
-        selector: S::Selector,
-        limits: RevisionReadLimits,
-    ) -> Result<Self, S::Error> {
+    pub async fn open(source: &'a S, selector: S::Selector) -> Result<Self, S::Error> {
         let latest = source.latest_revision().await?;
-        let reader = source.open(selector, latest, limits).await?;
+        let reader = source.open(selector, latest).await?;
         Ok(Self { reader })
     }
 
     /// Yield only revisions committed after the initial observation. The
     /// source's initial replay boundary is an implementation detail here.
-    pub async fn next(&mut self) -> Result<RevisionRead<S::Revision, S::Entry>, S::Error> {
+    pub async fn next(
+        &mut self,
+        limits: RevisionReadLimits,
+    ) -> Result<RevisionRead<S::Revision, S::Entry>, S::Error> {
         loop {
-            match self.reader.next().await? {
+            match self.reader.next(limits).await? {
                 RevisionRead::ReplayComplete { .. } => continue,
                 entries @ RevisionRead::Entries { .. } => return Ok(entries),
             }

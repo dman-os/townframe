@@ -9,9 +9,7 @@ use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use big_repo::AutomergeFrontierEvent;
 use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -141,9 +139,8 @@ where
         source: &'a S,
         selector: S::Selector,
         after: u64,
-        limits: RevisionReadLimits,
     ) -> Result<S::Reader<'a>, S::Error> {
-        source.open(selector, after, limits).await
+        source.open(selector, after).await
     }
 
     pub(crate) async fn progress(&self) -> Res<u64> {
@@ -443,7 +440,7 @@ where
     {
         loop {
             let read = reader
-                .next()
+                .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
                 .await
                 .map_err(|error| ferr!("reading DocDelta source: {error:?}"))?;
             match &read {
@@ -704,7 +701,10 @@ mod tests {
 
     #[async_trait]
     impl RevisionedStoreReader<u64, AutomergeFrontierEvent, ScriptError> for ScriptedReader {
-        async fn next(&mut self) -> Result<RevisionRead<u64, AutomergeFrontierEvent>, ScriptError> {
+        async fn next(
+            &mut self,
+            _limits: big_sync_core::revisioned_store::RevisionReadLimits,
+        ) -> Result<RevisionRead<u64, AutomergeFrontierEvent>, ScriptError> {
             self.reads.pop_front().ok_or(ScriptError)
         }
     }
@@ -732,7 +732,6 @@ mod tests {
             &'a self,
             _selector: Self::Selector,
             _after: u64,
-            _limits: RevisionReadLimits,
         ) -> Result<Self::Reader<'a>, Self::Error> {
             Ok(ScriptedReader {
                 reads: self.reads.clone(),
@@ -747,10 +746,6 @@ mod tests {
             route: PartId::new([9; 32]),
             revision: 1,
         }
-    }
-
-    fn default_limits() -> RevisionReadLimits {
-        RevisionReadLimits::default()
     }
 
     /// The regression behind the facet-set sync failures: reopening the
@@ -780,7 +775,6 @@ mod tests {
                     &store,
                     (),
                     171,
-                    default_limits(),
                 )
                 .await
                 .unwrap();
@@ -816,7 +810,6 @@ mod tests {
                     &store,
                     (),
                     171,
-                    default_limits(),
                 )
                 .await
                 .unwrap();

@@ -12,9 +12,7 @@ use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteKeyedFrontier};
 use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRead, KeyedFrontier, KeyedFrontierReader,
 };
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacetTag};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -105,11 +103,21 @@ pub struct FacetSetReader<'a> {
 
 #[async_trait]
 impl RevisionedStoreReader<u64, FacetDelta, eyre::Report> for FacetSetReader<'_> {
-    async fn next(&mut self) -> Result<RevisionRead<u64, FacetDelta>, eyre::Report> {
+    async fn next(
+        &mut self,
+        limits: big_sync_core::revisioned_store::RevisionReadLimits,
+    ) -> Result<RevisionRead<u64, FacetDelta>, eyre::Report> {
         if let Some(read) = self.pending.pop_front() {
             return Ok(read);
         }
-        match self.inner.next().await.map_err(|error| ferr!("{error}"))? {
+        match self
+            .inner
+            .next(big_sync_core::keyed_frontier::FrontierReadLimits {
+                max_entries: limits.max_entries,
+            })
+            .await
+            .map_err(|error| ferr!("{error}"))?
+        {
             FrontierRead::ReplayComplete { through } => {
                 Ok(RevisionRead::ReplayComplete { through })
             }
@@ -558,7 +566,6 @@ impl RevisionedStore for FacetSetRevisionStore {
         &'a self,
         selector: Self::Selector,
         after: u64,
-        limits: RevisionReadLimits,
     ) -> Result<Self::Reader<'a>, Self::Error> {
         let (selector, documents) = match selector {
             FacetSetSelector::All => (
@@ -602,12 +609,7 @@ impl RevisionedStore for FacetSetRevisionStore {
         };
         let inner = self
             .frontier
-            .open(
-                selector,
-                big_sync_core::keyed_frontier::FrontierReadLimits {
-                    max_entries: limits.max_entries,
-                },
-            )
+            .open(selector)
             .await
             .map_err(|error| ferr!("{error}"))?;
         Ok(FacetSetReader {
@@ -680,7 +682,6 @@ impl DocFacetSetIndexRepo {
                         }],
                     },
                     after,
-                    RevisionReadLimits::default(),
                 )
                 .await
                 .unwrap();
@@ -874,6 +875,7 @@ impl DocFacetSetIndexRepo {
 mod tests {
     use super::*;
     use crate::test_support::test_cx;
+    use big_sync_core::revisioned_store::RevisionReadLimits;
     use daybook_types::doc::{AddDocArgs, BranchPathBuf, FacetKey, FacetRaw, WellKnownFacet};
     use std::collections::VecDeque;
 
@@ -889,6 +891,7 @@ mod tests {
     {
         async fn next(
             &mut self,
+            _limits: big_sync_core::keyed_frontier::FrontierReadLimits,
         ) -> big_sync_core::keyed_frontier::KeyedFrontierResult<
             big_sync_core::keyed_frontier::FrontierRead<FacetRouteKey, DocFacetMembership>,
         > {
@@ -1001,7 +1004,9 @@ mod tests {
             documents: None,
         };
 
-        let RevisionRead::Entries { revision, entries } = reader.next().await? else {
+        let RevisionRead::Entries { revision, entries } =
+            reader.next(RevisionReadLimits::default()).await?
+        else {
             eyre::bail!("expected typed removal entry");
         };
         assert_eq!(revision, 7);
@@ -1022,7 +1027,7 @@ mod tests {
             Some(WellKnownFacetTag::BlobPin.as_str().as_bytes().to_vec())
         );
         assert_eq!(
-            reader.next().await?,
+            reader.next(RevisionReadLimits::default()).await?,
             RevisionRead::ReplayComplete { through: 7 }
         );
         Ok(())
