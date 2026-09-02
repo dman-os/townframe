@@ -13,10 +13,11 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
 
+use super::PartFrontierKey;
 use super::{HostPartStore, obj_id_bounds_for_bucket};
 use crate::keyed_frontier::{
     MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
-    MemoryKeyedFrontierView, PartFrontierKey, open_memory_keyed_frontier,
+    MemoryKeyedFrontierView, open_memory_keyed_frontier,
 };
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};

@@ -1,11 +1,9 @@
 //! SQLite facade joining the keyed-frontier read and write halves.
 
 use super::PartFrontierKey;
-use super::sqlite_read::{
-    SqliteFrontierRow, SqlitePartSelector, SqliteReadError, SqliteReadSource, open_sqlite_reader,
-    part_query_rows,
-};
+use super::sqlite_read::{SqliteFrontierRow, SqlitePartSelector, part_query_rows};
 use super::sqlite_write::SqliteFrontierWrite;
+use crate::keyed_frontier::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
 use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierReadLimits, FrontierRevision, KeyedFrontier, KeyedFrontierError,
     KeyedFrontierReader, KeyedFrontierResult,
@@ -72,12 +70,20 @@ impl SqliteReadSource for SqlitePartFrontier {
         &self.read_pool
     }
 
-    fn scope_id(&self) -> i64 {
-        self.scope_id
-    }
-
     fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    fn committed_revision(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<FrontierRevision, SqliteReadError>> + Send + '_>> {
+        Box::pin(async move {
+            let revision: i64 =
+                sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                    .fetch_one(&self.read_pool)
+                    .await?;
+            Ok(u64::try_from(revision).expect("SQLite frontier revision is non-negative"))
+        })
     }
 
     fn row_revision(&self, row: &SqliteFrontierRow) -> FrontierRevision {
@@ -95,6 +101,7 @@ impl SqliteReadSource for SqlitePartFrontier {
     {
         Box::pin(part_query_rows(
             self,
+            self.scope_id,
             selector,
             after,
             through,
@@ -200,5 +207,136 @@ impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
         limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent> + '_>> {
         open_sqlite_reader(self.clone(), selector, limits).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keyed_frontier::contract;
+    use big_sync_core::keyed_frontier::FrontierRevision;
+    use big_sync_core::rpc::{ObjChanged, PartEvent};
+    use big_sync_core::{BuckId, ObjId, PartId};
+    use sqlx_utils_rs::SqlCtx;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    struct SqliteContractHarness {
+        _sql: SqlCtx,
+        frontier: SqlitePartFrontier,
+    }
+
+    impl SqliteContractHarness {
+        async fn new() -> Self {
+            let sql = SqlCtx::memory()
+                .await
+                .expect("create sqlite contract database");
+            crate::sqlite_core::SqliteCore::init_schema(&sql.write_pool, BuckId::MAX_LEVEL)
+                .await
+                .expect("initialize sqlite contract schema");
+            let core = crate::sqlite_core::SqliteCore::new(
+                sql.clone(),
+                "keyed-frontier-contract",
+                BuckId::MAX_LEVEL,
+            )
+            .await
+            .expect("create sqlite contract core");
+            let frontier = SqlitePartFrontier::new(
+                sql.read_pool.clone(),
+                sql.write_pool.clone(),
+                core.scope_id,
+                Arc::new(Notify::new()),
+            );
+            Self {
+                _sql: sql,
+                frontier,
+            }
+        }
+    }
+
+    impl contract::KeyedFrontierContractHarness for SqliteContractHarness {
+        type Key = PartFrontierKey;
+        type Value = PartEvent;
+        type Frontier = SqlitePartFrontier;
+
+        fn frontier(&self) -> &Self::Frontier {
+            &self.frontier
+        }
+
+        fn key(&self, index: u64) -> PartFrontierKey {
+            let obj_id = ObjId::new([index as u8; 32]);
+            if index == 2 {
+                PartFrontierKey::Part {
+                    obj_id,
+                    part_id: PartId::new([index as u8; 32]),
+                }
+            } else {
+                PartFrontierKey::Object(obj_id)
+            }
+        }
+
+        fn value(&self, index: u64) -> PartEvent {
+            let object_index = (index / 10) as u8;
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: if object_index == 2 {
+                    vec![PartId::new([object_index; 32])]
+                } else {
+                    Vec::new()
+                },
+                obj_id: ObjId::new([object_index; 32]),
+                payload: serde_json::json!({ "value": index }),
+            })
+        }
+
+        fn values_match(&self, expected: &PartEvent, actual: &PartEvent) -> bool {
+            match (expected, actual) {
+                (PartEvent::Changed(expected), PartEvent::Changed(actual)) => {
+                    expected.part_ids == actual.part_ids
+                        && expected.obj_id == actual.obj_id
+                        && expected.payload == actual.payload
+                }
+                _ => expected == actual,
+            }
+        }
+
+        fn all_selector(&self, after: FrontierRevision) -> SqlitePartSelector {
+            let mut selector = SqlitePartSelector::default();
+            for index in 1..=9 {
+                match self.key(index) {
+                    PartFrontierKey::Object(obj_id) => {
+                        selector.objects.insert(obj_id, after);
+                    }
+                    PartFrontierKey::Part { part_id, .. } => {
+                        selector.parts.insert(part_id, after);
+                    }
+                }
+            }
+            selector
+        }
+
+        fn keys_selector(
+            &self,
+            bounds: BTreeMap<PartFrontierKey, FrontierRevision>,
+        ) -> SqlitePartSelector {
+            let mut selector = SqlitePartSelector::default();
+            for (key, bound) in bounds {
+                match key {
+                    PartFrontierKey::Object(obj_id) => {
+                        selector.objects.insert(obj_id, bound);
+                    }
+                    PartFrontierKey::Part { part_id, .. } => {
+                        selector.parts.insert(part_id, bound);
+                    }
+                }
+            }
+            selector
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_part_frontier_contract() {
+        contract::assert_keyed_frontier_contract(&SqliteContractHarness::new().await).await;
     }
 }

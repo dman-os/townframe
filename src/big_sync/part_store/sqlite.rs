@@ -1,10 +1,9 @@
-use super::super::keyed_frontier::{
-    PartFrontierKey, SqlitePartFrontier, SqlitePartSelector, open_sqlite_reader,
-};
 use super::HostPartStore;
 use super::LocalPartRevisionReader;
 use super::sqlite_core::{EVENT_ADDED, EVENT_REMOVED};
+use super::{PartFrontierKey, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
+use crate::keyed_frontier::open_sqlite_reader;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 

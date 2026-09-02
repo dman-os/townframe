@@ -291,12 +291,12 @@ crate::define_enum_and_tag!(
         },
         // NOTE: the value is the full manifest JSON (ADR 007 §1); `PlugManifestFacet`
         // is the typed manifest, or raw JSON on the uniffi surface.
-        "plugManifest" PlugManifest type (PlugManifestFacet),
+        PlugManifest type (PlugManifestFacet),
         #[derive(Debug, Clone, Serialize, Deserialize)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        "plugsConfig" PlugsConfig struct {
+        PlugsConfig struct {
             /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
             ///            ?branch=<branch>&at=<head1>|<head2>
             pub enabled: HashMap<String, Url>,
@@ -311,7 +311,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        "branch" Branch struct {
+        Branch struct {
             pub document_id: DocId,
             pub branch_id: BranchId,
             pub created_from: Option<BranchVersion>,
@@ -320,7 +320,7 @@ crate::define_enum_and_tag!(
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        "branches" Branches struct {
+        Branches struct {
             pub declarations: HashMap<BranchId, BranchDeclaration>,
         },
     }

@@ -165,9 +165,6 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
     fn read_pool(&self) -> &SqlitePool {
         &self.read_pool
     }
-    fn scope_id(&self) -> i64 {
-        0
-    }
     fn changed(&self) -> &Notify {
         &self.changed
     }

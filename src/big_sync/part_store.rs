@@ -10,6 +10,20 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{BuckId, Byte32Id, ObjId, PartId, PeerId, mpsc};
 
+/// The logical object and part routes represented by the part-store frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PartFrontierKey {
+    Object(ObjId),
+    Part { obj_id: ObjId, part_id: PartId },
+}
+
+pub(crate) use sqlite_frontier::SqlitePartFrontier;
+pub(crate) use sqlite_read::SqlitePartSelector;
+
+mod sqlite_frontier;
+mod sqlite_read;
+mod sqlite_write;
+
 pub mod memory;
 pub mod sqlite;
 pub mod sqlite_core;
@@ -21,7 +35,7 @@ pub trait LocalPartRevisionReader: Send {
 }
 
 pub(crate) struct PartRevisionReader {
-    inner: Box<dyn KeyedFrontierReader<crate::keyed_frontier::PartFrontierKey, PartEvent>>,
+    inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
     objects: HashSet<ObjId>,
     parts: HashSet<PartId>,
     pending: std::collections::VecDeque<RevisionRead<FrontierRevision, SubEvent>>,
@@ -32,7 +46,7 @@ pub(crate) struct PartRevisionReader {
 
 impl PartRevisionReader {
     pub(crate) fn new(
-        inner: Box<dyn KeyedFrontierReader<crate::keyed_frontier::PartFrontierKey, PartEvent>>,
+        inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
         objects: HashSet<ObjId>,
         parts: HashSet<PartId>,
     ) -> Self {
@@ -49,20 +63,17 @@ impl PartRevisionReader {
 
     fn project(
         &self,
-        key: crate::keyed_frontier::PartFrontierKey,
+        key: PartFrontierKey,
         value: Option<PartEvent>,
         revision: FrontierRevision,
     ) -> Option<SubEvent> {
         match (key, value) {
-            (crate::keyed_frontier::PartFrontierKey::Object(_), None) => None,
-            (
-                crate::keyed_frontier::PartFrontierKey::Object(_),
-                Some(PartEvent::Changed(mut event)),
-            ) => {
+            (PartFrontierKey::Object(_), None) => None,
+            (PartFrontierKey::Object(_), Some(PartEvent::Changed(mut event))) => {
                 event.cursor = revision;
                 Some(SubEvent::Changed(event))
             }
-            (crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id }, value)
+            (PartFrontierKey::Part { obj_id, part_id }, value)
                 if self.objects.contains(&obj_id) && !self.parts.contains(&part_id) =>
             {
                 let payload = match value {
@@ -77,32 +88,31 @@ impl PartRevisionReader {
                     payload,
                 }))
             }
-            (
-                crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
-                Some(PartEvent::Added(mut event)),
-            ) if self.parts.contains(&part_id) => {
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Added(mut event)))
+                if self.parts.contains(&part_id) =>
+            {
                 event.cursor = revision;
                 event.obj_id = obj_id;
                 event.part_id = part_id;
                 Some(SubEvent::Added(event))
             }
-            (
-                crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
-                Some(PartEvent::Changed(mut event)),
-            ) if self.parts.contains(&part_id) => {
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Changed(mut event)))
+                if self.parts.contains(&part_id) =>
+            {
                 event.cursor = revision;
                 event.obj_id = obj_id;
                 event.part_ids = vec![part_id];
                 Some(SubEvent::Changed(event))
             }
-            (
-                crate::keyed_frontier::PartFrontierKey::Part { obj_id, part_id },
-                Some(PartEvent::Removed(_)) | None,
-            ) if self.parts.contains(&part_id) => Some(SubEvent::Removed(ObjRemovedFromPart {
-                cursor: revision,
-                part_id,
-                obj_id,
-            })),
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Removed(_)) | None)
+                if self.parts.contains(&part_id) =>
+            {
+                Some(SubEvent::Removed(ObjRemovedFromPart {
+                    cursor: revision,
+                    part_id,
+                    obj_id,
+                }))
+            }
             _ => None,
         }
     }

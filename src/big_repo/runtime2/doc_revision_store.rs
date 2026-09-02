@@ -13,7 +13,6 @@ use big_sync_core::rpc::{
     ObjAddedToPart, ObjChanged, ObjRemovedFromPart, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
 use serde_json::Value;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomergeFrontierEvent {
