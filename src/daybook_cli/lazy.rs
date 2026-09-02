@@ -149,11 +149,10 @@ pub async fn plugs_repo() -> Res<Arc<PlugsRepo>> {
             let (plugs, plugs_stop) = PlugsRepo::load(
                 Arc::clone(&ctx.big_repo),
                 Arc::clone(&blobs),
-                ctx.doc_app.document_id(),
+                ctx.doc_config.document_id(),
                 daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
             )
             .await?;
-            plugs.ensure_system_plugs().await?;
             register_shutdown(move || async move { plugs_stop.stop().await });
             Ok(plugs)
         })
@@ -186,6 +185,13 @@ pub async fn drawer_repo() -> Res<Arc<DrawerRepo>> {
                 Arc::clone(&plugs),
             )
             .await?;
+            // ADR 007 §2: the drawer is attached to the plugs repo inside
+            // DrawerRepo::load; only now can the core plug be ensured (it
+            // writes the config facet through the drawer). The one-shot CLI
+            // has no switch/notif loop, so materialize the cache from the
+            // config the same way the switch does at boot.
+            plugs.ensure_core_plug().await?;
+            plugs.events_for_init().await?;
             register_shutdown(move || async move { drawer_stop.stop().await });
             Ok(drawer)
         })

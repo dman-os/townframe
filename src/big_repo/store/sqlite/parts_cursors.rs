@@ -587,10 +587,9 @@ impl HostPartStore for SqliteBigRepoStore {
         limit: u32,
         enforce_policy: bool,
     ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
-        if enforce_policy
-            && let Err(err) = self.summarize_parts(parts.clone()).await? {
-                return Ok(Err(err));
-            }
+        if enforce_policy && let Err(err) = self.summarize_parts(parts.clone()).await? {
+            return Ok(Err(err));
+        }
         let mut out = HashMap::new();
         for part_id in parts {
             // Select the txid at the requested row limit first, then return the

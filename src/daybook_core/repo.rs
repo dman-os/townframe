@@ -107,6 +107,8 @@ pub struct RepoCtx {
 
     pub doc_app: BigDocHandle,
     pub doc_drawer: BigDocHandle,
+    /// ADR 007 §2: the repo config doc (third core doc).
+    pub doc_config: BigDocHandle,
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
 
@@ -163,6 +165,7 @@ impl RepoCtx {
         parts: RepoCtxParts,
         doc_app: BigDocHandle,
         doc_drawer: BigDocHandle,
+        doc_config: BigDocHandle,
         core_inventory_doc_id: DocumentId,
         docs_inventory_doc_id: DocumentId,
     ) -> Arc<Self> {
@@ -181,6 +184,7 @@ impl RepoCtx {
             big_repo_stop: parts.big_repo_stop,
             doc_app,
             doc_drawer,
+            doc_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
             local_actor_id: parts.local_actor_id,
@@ -370,44 +374,49 @@ impl RepoCtx {
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
-        let (doc_app, doc_drawer, core_inventory_doc_id, docs_inventory_doc_id) = if initialize_repo
-        {
-            let (doc_app, doc_drawer) = init_core_docs(&big_repo, &authority).await?;
-            info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
-            let (core_id, docs_id) = Self::run_repo_init_dance(
-                &big_repo,
-                &part_store,
-                &blob_part_store,
-                &doc_app,
-                &doc_drawer,
-                &authority,
-                &local_user_path,
-                &sql,
-                layout.blobs_root.clone(),
-            )
-            .await?;
-            mark_repo_initialized(&layout.repo_root).await?;
-            info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
-            (doc_app, doc_drawer, core_id, docs_id)
-        } else {
-            let (doc_app, doc_drawer, core_id, docs_id) = load_core_docs(&big_repo, &sql).await?;
-            crate::authority::grant_docs_admin(
-                &big_repo,
-                &authority.core_docs,
-                [
-                    doc_app.document_id(),
-                    doc_drawer.document_id(),
-                    core_id,
-                    docs_id,
-                ],
-            )
-            .await?;
-            (doc_app, doc_drawer, core_id, docs_id)
-        };
+        let (doc_app, doc_drawer, doc_config, core_inventory_doc_id, docs_inventory_doc_id) =
+            if initialize_repo {
+                let (doc_app, doc_drawer, doc_config) =
+                    init_core_docs(&big_repo, &authority).await?;
+                info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
+                let (core_id, docs_id) = Self::run_repo_init_dance(
+                    &big_repo,
+                    &part_store,
+                    &blob_part_store,
+                    &doc_app,
+                    &doc_drawer,
+                    &doc_config,
+                    &authority,
+                    &local_user_path,
+                    &sql,
+                    layout.blobs_root.clone(),
+                )
+                .await?;
+                mark_repo_initialized(&layout.repo_root).await?;
+                info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
+                (doc_app, doc_drawer, doc_config, core_id, docs_id)
+            } else {
+                let (doc_app, doc_drawer, doc_config, core_id, docs_id) =
+                    load_core_docs(&big_repo, &sql).await?;
+                crate::authority::grant_docs_admin(
+                    &big_repo,
+                    &authority.core_docs,
+                    [
+                        doc_app.document_id(),
+                        doc_drawer.document_id(),
+                        doc_config.document_id(),
+                        core_id,
+                        docs_id,
+                    ],
+                )
+                .await?;
+                (doc_app, doc_drawer, doc_config, core_id, docs_id)
+            };
         info!(
             repo_root = %layout.repo_root.display(),
             doc_app_id = %doc_app.document_id(),
             doc_drawer_id = %doc_drawer.document_id(),
+            doc_config_id = %doc_config.document_id(),
             core_inventory_doc_id = %core_inventory_doc_id,
             docs_inventory_doc_id = %docs_inventory_doc_id,
             "repo open_inner: core docs ready"
@@ -454,6 +463,7 @@ impl RepoCtx {
             parts,
             doc_app,
             doc_drawer,
+            doc_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
         ))
@@ -466,6 +476,7 @@ impl RepoCtx {
         _blob_part_store: &SharedPartStore,
         doc_app: &BigDocHandle,
         doc_drawer: &BigDocHandle,
+        doc_config: &BigDocHandle,
         authority: &crate::authority::RepoAuthority,
         local_user_path: &UserPath,
         sql: &SqlCtx,
@@ -498,7 +509,7 @@ impl RepoCtx {
             let (repo, stop) = PlugsRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
-                doc_app.document_id(),
+                doc_config.document_id(),
                 local_user_path.to_owned(),
             )
             .await
@@ -646,6 +657,7 @@ impl RepoCtx {
                 [
                     doc_app.document_id(),
                     doc_drawer.document_id(),
+                    doc_config.document_id(),
                     core_inventory_doc_id,
                     docs_inventory_doc_id,
                 ],
@@ -664,19 +676,20 @@ impl RepoCtx {
                 &globals::InitState::Created {
                     doc_id_app: doc_app.document_id(),
                     doc_id_drawer: doc_drawer.document_id(),
+                    doc_id_config: Some(doc_config.document_id()),
                     core_inventory_doc_id: Some(core_inventory_doc_id),
                     docs_inventory_doc_id: Some(docs_inventory_doc_id),
                 },
             )
             .await?;
 
-            info!("repo init dance: ensuring system plugs");
+            info!("repo init dance: ensuring core plug");
             plugs_repo
                 .as_ref()
                 .expect("plugs repo must be loaded")
-                .ensure_system_plugs()
+                .ensure_core_plug()
                 .await?;
-            info!("repo init dance: system plugs ensured");
+            info!("repo init dance: core plug ensured");
 
             Ok((core_inventory_doc_id, docs_inventory_doc_id))
         }
@@ -813,15 +826,17 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
 pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
     let init_state = globals::get_init_state(sql).await?;
-    let (doc_id_app, doc_id_drawer, mut core_inv, mut docs_inv) = match init_state {
+    let (doc_id_app, doc_id_drawer, doc_id_config, mut core_inv, mut docs_inv) = match init_state {
         globals::InitState::Created {
             doc_id_app,
             doc_id_drawer,
+            doc_id_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
         } => (
             doc_id_app,
             doc_id_drawer,
+            doc_id_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
         ),
@@ -829,6 +844,8 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             eyre::bail!("clone init: InitState not set");
         }
     };
+    let doc_id_config =
+        doc_id_config.ok_or_else(|| eyre::eyre!("clone init: InitState missing doc_id_config"))?;
     let doc_app = parts
         .big_repo
         .get_doc(&doc_id_app)
@@ -839,6 +856,11 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         .get_doc(&doc_id_drawer)
         .await?
         .into_ready(doc_id_drawer)?;
+    let doc_config = parts
+        .big_repo
+        .get_doc(&doc_id_config)
+        .await?
+        .into_ready(doc_id_config)?;
 
     if core_inv.is_none() || docs_inv.is_none() {
         let (config_store, _) = doc_app
@@ -864,6 +886,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         &globals::InitState::Created {
             doc_id_app,
             doc_id_drawer,
+            doc_id_config: Some(doc_id_config),
             core_inventory_doc_id: Some(core_inventory_doc_id),
             docs_inventory_doc_id: Some(docs_inventory_doc_id),
         },
@@ -888,6 +911,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         parts,
         doc_app,
         doc_drawer,
+        doc_config,
         core_inventory_doc_id,
         docs_inventory_doc_id,
     ))
@@ -998,20 +1022,32 @@ async fn get_ready_doc(
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
-) -> Res<(BigDocHandle, BigDocHandle, DocumentId, DocumentId)> {
+) -> Res<(
+    BigDocHandle,
+    BigDocHandle,
+    BigDocHandle,
+    DocumentId,
+    DocumentId,
+)> {
     let init_state = globals::get_init_state(repo_sql).await?;
     let globals::InitState::Created {
         doc_id_app,
         doc_id_drawer,
+        doc_id_config,
         core_inventory_doc_id,
         docs_inventory_doc_id,
     } = init_state
     else {
         eyre::bail!("repo init_state missing for existing repository");
     };
-    let (handle_app, handle_drawer) = tokio::try_join!(
+    let (handle_app, handle_drawer, handle_config) = tokio::try_join!(
         get_ready_doc(big_repo, doc_id_app),
-        get_ready_doc(big_repo, doc_id_drawer)
+        get_ready_doc(big_repo, doc_id_drawer),
+        async {
+            let doc_id_config = doc_id_config
+                .ok_or_eyre("repo init_state missing doc_id_config for existing repository")?;
+            get_ready_doc(big_repo, doc_id_config).await
+        },
     )?;
 
     let (core_id, docs_id) = match (core_inventory_doc_id, docs_inventory_doc_id) {
@@ -1035,13 +1071,13 @@ async fn load_core_docs(
         }
     };
 
-    Ok((handle_app, handle_drawer, core_id, docs_id))
+    Ok((handle_app, handle_drawer, handle_config, core_id, docs_id))
 }
 
 async fn init_core_docs(
     big_repo: &SharedBigRepo,
     authority: &crate::authority::RepoAuthority,
-) -> Res<(BigDocHandle, BigDocHandle)> {
+) -> Res<(BigDocHandle, BigDocHandle, BigDocHandle)> {
     let app_doc = {
         let bytes = version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
@@ -1060,7 +1096,18 @@ async fn init_core_docs(
             .await
             .map_err(|err| ferr!("{err}"))?
     };
-    Ok((app_doc, drawer_doc))
+    // ADR 007 §2: the repo config doc, created alongside app/drawer with the
+    // same parents. It hosts synced config facets (the plugg config facet).
+    let config_doc = {
+        let bytes = crate::drawer::doc_version_updates::version_latest()?;
+        let doc = automerge::Automerge::load(&bytes)
+            .wrap_err("error loading version_latest for config doc")?;
+        big_repo
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
+            .await
+            .map_err(|err| ferr!("{err}"))?
+    };
+    Ok((app_doc, drawer_doc, config_doc))
 }
 
 pub mod globals {
@@ -1072,6 +1119,9 @@ pub mod globals {
         Created {
             doc_id_app: DocumentId,
             doc_id_drawer: DocumentId,
+            /// ADR 007 §2: the repo config doc (third core doc).
+            #[serde(default)]
+            doc_id_config: Option<DocumentId>,
             #[serde(default)]
             core_inventory_doc_id: Option<DocumentId>,
             #[serde(default)]

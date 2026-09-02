@@ -190,6 +190,15 @@ pub async fn test_cx_with_options(
         handle.document_id()
     };
 
+    // ADR 007 §2: the repo config doc (third core doc) hosting the plugg
+    // config facet.
+    let config_doc_id = {
+        let doc =
+            automerge::Automerge::load(&crate::drawer::doc_version_updates::version_latest()?)?;
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
     // Load config first to get local identity
     let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
@@ -203,7 +212,7 @@ pub async fn test_cx_with_options(
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&blobs),
-        app_doc_id,
+        config_doc_id,
         local_user_path.clone(),
     )
     .await?;
@@ -281,7 +290,7 @@ pub async fn test_cx_with_options(
             .wrap_err("error storing e2e mltools config")?;
     }
 
-    plugs_repo.ensure_system_plugs().await?;
+    plugs_repo.ensure_core_plug().await?;
 
     let repo_root = temp_dir.path().join("repo");
     tokio::fs::create_dir_all(&repo_root).await?;
@@ -399,6 +408,10 @@ pub async fn test_cx_with_options(
             .get_doc(&drawer_doc_id)
             .await?
             .into_ready(drawer_doc_id)?,
+        big_repo
+            .get_doc(&config_doc_id)
+            .await?
+            .into_ready(config_doc_id)?,
         core_inventory_doc_id,
         docs_inventory_doc_id,
     );
@@ -459,7 +472,7 @@ pub async fn test_cx_with_options(
 }
 
 #[cfg(test)]
-pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
+pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<crate::plugs::ImportedPlug> {
     let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/oci")
         .join("@daybook/test");
@@ -472,10 +485,24 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
         .rt
         .plugs_repo
         .import_from_oci_layout(&artifact_path, crate::plugs::OciImportOptions::default())
-        .await?;
-    Ok(())
+        .await
 }
 
+/// ADR 007: authoring imports make a plug known; runtime behavior (processors,
+/// pins) requires it to be enabled. Tests that need dispatch/pin behavior must
+/// import AND enable.
+#[cfg(test)]
+pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()> {
+    let imported = import_test_plug_oci(test_cx).await?;
+    let doc_id = imported
+        .doc_id
+        .ok_or_eyre("imported test plug missing manifest doc id")?;
+    let ref_url: url::Url =
+        format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+            .parse()?;
+    test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
+    Ok(())
+}
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
     let sql = sqlx_utils_rs::SqlCtx::url(sqlite_url).await?;
 

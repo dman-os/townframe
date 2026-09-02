@@ -20,48 +20,8 @@ fn recover_facet_heads_inner(
     facet_key: &FacetKey,
     read_heads: Option<&[ChangeHash]>,
 ) -> Res<Vec<ChangeHash>> {
-    // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
-    let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
-        Some((Value::Object(ObjType::Map), id)) => id,
-        None => return Ok(Vec::new()),
-        Some((other, _)) => {
-            eyre::bail!("unexpected value for 'facets' property: expected Map, got {other:?}");
-        }
-    };
-
-    let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
-    let dmeta_obj = match get(doc, &facets_obj, &dmeta_key, read_heads)? {
-        Some((Value::Object(ObjType::Map), id)) => id,
-        None => return Ok(Vec::new()),
-        Some((other, _)) => {
-            eyre::bail!("unexpected value for dmeta facet property: expected Map, got {other:?}");
-        }
-    };
-
-    let dmeta_facets_obj = match get(doc, &dmeta_obj, "facets", read_heads)? {
-        Some((Value::Object(ObjType::Map), id)) => id,
-        None => return Ok(Vec::new()),
-        Some((other, _)) => {
-            eyre::bail!("unexpected value for dmeta.facets property: expected Map, got {other:?}");
-        }
-    };
-
-    let facet_meta_obj = match get(doc, &dmeta_facets_obj, facet_key.to_string(), read_heads)? {
-        Some((Value::Object(ObjType::Map), id)) => id,
-        None => return Ok(Vec::new()),
-        Some((other, _)) => {
-            eyre::bail!(
-                "unexpected value for facet metadata property: expected Map, got {other:?}"
-            );
-        }
-    };
-
-    let updated_at_list = match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        None => return Ok(Vec::new()),
-        Some((other, _)) => {
-            eyre::bail!("unexpected value for updatedAt property: expected List, got {other:?}");
-        }
+    let Some(updated_at_list) = facet_updated_at_list(doc, facet_key, read_heads)? else {
+        return Ok(Vec::new());
     };
 
     let mut recovered = Vec::new();
@@ -83,6 +43,102 @@ fn recover_facet_heads_inner(
     }
 
     Ok(recovered)
+}
+
+/// The facet's dmeta `updatedAt` list object at the given heads (None when
+/// the dmeta walk yields no list). The list object id is stable across
+/// writes — it is created once at facet-meta creation and reused.
+pub fn facet_updated_at_list(
+    doc: &Automerge,
+    facet_key: &FacetKey,
+    read_heads: Option<&[ChangeHash]>,
+) -> Res<Option<automerge::ObjId>> {
+    // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
+    let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        None => return Ok(None),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for 'facets' property: expected Map, got {other:?}");
+        }
+    };
+
+    let dmeta_key = format!("{}/main", WellKnownFacetTag::Dmeta.as_str());
+    let dmeta_obj = match get(doc, &facets_obj, &dmeta_key, read_heads)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        None => return Ok(None),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for dmeta facet property: expected Map, got {other:?}");
+        }
+    };
+
+    let dmeta_facets_obj = match get(doc, &dmeta_obj, "facets", read_heads)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        None => return Ok(None),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for dmeta.facets property: expected Map, got {other:?}");
+        }
+    };
+
+    let facet_meta_obj = match get(doc, &dmeta_facets_obj, facet_key.to_string(), read_heads)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        None => return Ok(None),
+        Some((other, _)) => {
+            eyre::bail!(
+                "unexpected value for facet metadata property: expected Map, got {other:?}"
+            );
+        }
+    };
+
+    match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
+        Some((Value::Object(ObjType::List), id)) => Ok(Some(id)),
+        None => Ok(None),
+        Some((other, _)) => {
+            eyre::bail!("unexpected value for updatedAt property: expected List, got {other:?}");
+        }
+    }
+}
+
+/// The write points (heads + author) of a facet between two head sets,
+/// oldest first, derived from the facet's dmeta `updatedAt` markers. Each
+/// marker is written in the same change as the facet content it snapshots,
+/// so hydrating the facet at a write point's heads yields a consistent,
+/// non-partially-updated version.
+pub fn facet_write_points(
+    doc: &Automerge,
+    facet_key: &FacetKey,
+    from: &[ChangeHash],
+    to: &[ChangeHash],
+) -> Res<Vec<(ChangeHashSet, ActorId)>> {
+    let Some(updated_at_list) = facet_updated_at_list(doc, facet_key, Some(to))? else {
+        return Ok(Vec::new());
+    };
+    // A facet write rewrites its updatedAt marker list; the diff window
+    // therefore shows an Insert patch on the (stable) list per write.
+    let patches = doc.diff_obj(&automerge::ROOT, from, to, true)?;
+    let mut write_hashes: HashSet<ChangeHash> = HashSet::new();
+    for patch in &patches {
+        let automerge::PatchAction::Insert { values, .. } = &patch.action else {
+            continue;
+        };
+        if patch.obj != updated_at_list {
+            continue;
+        }
+        for (_, exid, _) in values.iter() {
+            if let Some(hash) = doc.hash_for_opid(exid) {
+                write_hashes.insert(hash);
+            }
+        }
+    }
+    // Causal order + heads + author from the change graph.
+    let mut points = Vec::new();
+    for change in doc.get_changes(from) {
+        if write_hashes.contains(&change.hash()) {
+            let mut heads: Vec<ChangeHash> = change.deps().to_vec();
+            heads.push(change.hash());
+            points.push((ChangeHashSet(heads.into()), change.actor_id().clone()));
+        }
+    }
+    Ok(points)
 }
 
 fn get<'a, P: Into<automerge::Prop>>(

@@ -31,6 +31,36 @@ pub struct FacetMeta {
     pub deleted_at: Vec<Timestamp>,
 }
 
+/// ADR 007 §5: the per-plug track in the plugg config facet. We keep info
+/// about the activated and latest manifests of plugs — not an index of all
+/// version manifests. `latest` is the highest version seen (valid or
+/// rejected, with the rejection reason); `last_valid` is the ref the
+/// runtime cache materializes (equals `latest` when the latest is valid);
+/// `last_enabled_version` is the upgrade-compat baseline. Versions are
+/// stored as semver strings (semver is a `manifest`-feature-only dep here).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct KnownPlug {
+    /// full ref (pinned heads) at the latest version's manifest.
+    pub latest: Url,
+    /// semver string of the latest version.
+    #[serde(default)]
+    pub latest_version: String,
+    /// rejection reason of the latest version; None when it is valid.
+    #[serde(default)]
+    pub latest_rejection: Option<String>,
+    /// full ref at the last valid version's manifest (the cache baseline).
+    pub last_valid: Url,
+    /// semver string of the last valid version.
+    #[serde(default)]
+    pub last_valid_version: String,
+    /// version last enabled, if ever — the upgrade-compat baseline.
+    #[serde(default)]
+    pub last_enabled_version: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +82,16 @@ pub struct OcrTextRegion {
     pub confidence_score: Option<f32>,
 }
 
+#[cfg(feature = "manifest")]
+/// ADR 007 §1: the plugManifest facet value is the full `PlugManifest` JSON.
+/// The facet type is gated on the `manifest` feature only (the garde gate);
+/// without it the facet is carried as raw JSON.
+pub type PlugManifestFacet = crate::manifest::PlugManifest;
+
+#[cfg(not(feature = "manifest"))]
+/// See the typed twin; see [`PlugManifestFacet`] under the `manifest` feature.
+pub type PlugManifestFacet = serde_json::Value;
+
 crate::define_enum_and_tag!(
     "org.example.daybook.",
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,9 +99,9 @@ crate::define_enum_and_tag!(
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
     WellKnownFacetTag,
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
     #[serde(rename_all = "camelCase", untagged)]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+    #[allow(clippy::large_enum_variant)] // the typed PlugManifest payload is intentionally big
     WellKnownFacet {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -170,7 +210,25 @@ crate::define_enum_and_tag!(
             pub dtype: EmbeddingDtype,
             /// method tag
             pub compression: Option<EmbeddingCompression>,
-        }
+        },
+        // NOTE: the value is the full manifest JSON (ADR 007 §1); `PlugManifestFacet`
+        // is the typed manifest, or raw JSON on the uniffi surface.
+        "plugManifest" PlugManifest type (PlugManifestFacet),
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        "plugsConfig" PlugsConfig struct {
+            /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
+            ///            ?branch=<branch>&at=<head1>|<head2>
+            pub enabled: HashMap<String, Url>,
+            /// Known plugs (plug id -> track): the latest version seen with
+            /// its validity status + the last valid/enabled versions (ADR
+            /// 007 §5; replaces the facet-set index derivation).
+            #[serde(default)]
+            pub known_plugs: HashMap<String, KnownPlug>,
+            pub plug_config_doc_ids: HashMap<String, String>,
+        },
     }
 );
 
@@ -1031,6 +1089,14 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::BlobPin => Self::BlobPin(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::PlugManifest => Self::PlugManifest(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::PlugsConfig => Self::PlugsConfig(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

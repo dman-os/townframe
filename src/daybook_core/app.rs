@@ -149,7 +149,6 @@ pub mod version_updates {
     use autosurgeon::reconcile_prop;
 
     use crate::config::ConfigStore;
-    use crate::plugs::PlugsStore;
     use crate::rt::init::InitStore;
     use crate::tables::TablesStore;
 
@@ -173,8 +172,6 @@ pub mod version_updates {
                 ConfigStore::default(),
             )
             .map_err(|_| automerge::AutomergeError::Fail)?;
-            reconcile_prop(tx, ROOT, PlugsStore::prop().as_ref(), PlugsStore::default())
-                .map_err(|_| automerge::AutomergeError::Fail)?;
             reconcile_prop(tx, ROOT, InitStore::prop().as_ref(), InitStore::default())
                 .map_err(|_| automerge::AutomergeError::Fail)?;
             Ok::<_, automerge::AutomergeError>(())

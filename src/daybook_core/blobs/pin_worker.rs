@@ -812,22 +812,23 @@ impl crate::rt::switch::SwitchSink for BlobPinTriageListener {
                 }
             },
             crate::rt::switch::SwitchEvent::Plugs(event) => match &**event {
-                crate::plugs::PlugsEvent::PlugAdded { id, .. }
-                | crate::plugs::PlugsEvent::PlugChanged { id, .. } => {
+                crate::plugs::PlugsEvent::PlugEnabled { id, .. }
+                | crate::plugs::PlugsEvent::EnabledPlugUpdated { id, .. } => {
                     self.worker
                         .handle_work_item(BlobPinWorkItem::PlugUpsert {
                             plug_id: id.to_string(),
                         })
                         .await?;
                 }
-                crate::plugs::PlugsEvent::PlugDeleted { id, .. } => {
+                crate::plugs::PlugsEvent::PlugDisabled { id, .. } => {
                     self.worker
                         .handle_work_item(BlobPinWorkItem::PlugDelete {
                             plug_id: id.to_string(),
                         })
                         .await?;
                 }
-                crate::plugs::PlugsEvent::ConfigDocsChanged { .. } => {}
+                crate::plugs::PlugsEvent::PlugsConfigChanged { .. }
+                | crate::plugs::PlugsEvent::ManifestRejected { .. } => {}
             },
             crate::rt::switch::SwitchEvent::Dispatch(_)
             | crate::rt::switch::SwitchEvent::Config(_) => {}
@@ -993,14 +994,30 @@ mod tests {
             facets: default(),
         };
 
-        // 1. Add plug
-        plugs.add(manifest.clone()).await?;
+        // 1. Add plug (authoring: known but not enabled — no pin yet).
+        let doc_id = plugs.add(manifest.clone()).await?;
+
+        // 2. Enable at the manifest doc (ADR §3 full ref, pinned at current
+        // heads). Enablement is what drives the pin worker's reindex.
+        let ref_url: url::Url =
+            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+                .parse()?;
+        plugs.enable_plug(&ref_url).await?;
         wait_for_pin_presence(&worker, true, &hash_plug, true).await?;
 
-        // 2. Remove bundle from plug
+        // 3. Author v0.2 without the bundle — `add` writes a NEW manifest doc,
+        //    so the old doc's pin stays until the plug is re-pinned to the new
+        //    doc (known-but-disabled manifest changes are invisible, ADR §7).
         manifest.wflow_bundles.clear();
         manifest.version = "0.2.0".parse().unwrap();
-        plugs.add(manifest).await?;
+        let doc_id_v2 = plugs.add(manifest).await?;
+
+        // 4. Re-pin to the new doc (same plug id, ref differs → EnabledPlugUpdated)
+        //    → the pin worker reindexes with the new manifest and unpins.
+        let ref_url_v2: url::Url =
+            format!("db+facet:///{doc_id_v2}/org.example.daybook.plugManifest/main?branch=main")
+                .parse()?;
+        plugs.enable_plug(&ref_url_v2).await?;
         wait_for_pin_presence(&worker, true, &hash_plug, false).await?;
 
         test_context.stop().await?;

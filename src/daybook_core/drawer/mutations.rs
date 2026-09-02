@@ -12,7 +12,7 @@ use crate::drawer::{
 
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey};
+use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey, WellKnownFacetTag};
 
 struct PreparedAddDoc {
     doc_id: DocId,
@@ -116,6 +116,27 @@ impl DrawerRepo {
     }
 
     pub async fn batch_add(&self, args_batch: Vec<AddDocArgs>) -> Result<Vec<DocId>, DrawerError> {
+        self.batch_add_inner(args_batch, true).await
+    }
+
+    /// ADR 007 §4: the first manifest write (the core manifest doc at repo init)
+    /// is the single write in the system that must skip facet validation — no
+    /// manifest is registered yet. Everything after validates normally.
+    pub async fn add_unchecked(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
+        let mut created = self.batch_add_inner(vec![args], false).await?;
+        if created.len() != 1 {
+            Err(ferr!(
+                "batch_add returned invalid result for single add call"
+            ))?;
+        }
+        Ok(created.pop().expect("checked above"))
+    }
+
+    async fn batch_add_inner(
+        &self,
+        args_batch: Vec<AddDocArgs>,
+        validate: bool,
+    ) -> Result<Vec<DocId>, DrawerError> {
         if self.cancel_token.is_cancelled() {
             Err(ferr!("repo is stopped"))?;
         }
@@ -124,9 +145,11 @@ impl DrawerRepo {
             return Ok(Vec::new());
         }
 
-        for args in &args_batch {
-            let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
-            self.validate_facets(&args.facets, &resulting_keys).await?;
+        if validate {
+            for args in &args_batch {
+                let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
+                self.validate_facets(&args.facets, &resulting_keys).await?;
+            }
         }
 
         let mut prepared_docs = Vec::with_capacity(args_batch.len());
@@ -210,6 +233,112 @@ impl DrawerRepo {
             ))?;
         }
         Ok(created.pop().expect("checked above"))
+    }
+
+    /// ADR 007 §2: register a doc that was created outside the drawer (e.g. the
+    /// repo config doc at init) so the drawer serves it like any content doc.
+    /// Grants the drawer groups admin access and adds a `docs.map` entry.
+    pub async fn register_existing_doc(
+        &self,
+        doc_id: &DocId,
+        branch_doc_id: DocumentId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Result<(), DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            Err(ferr!("repo is stopped"))?;
+        }
+        if self.get_branch_ref(doc_id, branch_path).await?.is_some() {
+            return Ok(());
+        }
+        self.big_repo
+            .add_admin_member_to_doc(branch_doc_id, self.content_docs_group.clone())
+            .await?;
+        self.big_repo
+            .add_admin_member_to_doc(branch_doc_id, self.drawer_group.clone())
+            .await?;
+        let entry = DocEntry {
+            branches: [(branch_path.to_string(), StoredBranchRef { branch_doc_id })].into(),
+            branches_deleted: HashMap::new(),
+            vtag: VersionTag::mint(self.local_actor_id.clone()),
+            previous_version_heads: None,
+        };
+        let drawer_heads = self
+            .drawer_doc_handle
+            .with_document(|doc| {
+                doc.set_actor(self.local_actor_id.clone());
+                let mut tx = doc.transaction();
+                let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?,
+                };
+                let map_id = match tx.get(&docs_obj, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
+                };
+                autosurgeon::reconcile_prop(
+                    &mut tx,
+                    &map_id,
+                    autosurgeon::Prop::Key((&doc_id[..]).into()),
+                    &entry,
+                )?;
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })
+            .await??;
+        surelock::key::lock_scope(|key| {
+            let (mut heads, _key) = key.lock(&self.current_heads);
+            *heads = drawer_heads;
+        });
+        surelock::key::lock_scope(|key| {
+            let (mut cache, _key) = key.lock(&self.entry_cache);
+            cache.insert(doc_id.clone(), entry);
+        });
+
+        // Adopted content docs (e.g. the repo config doc) are created outside
+        // the drawer's `add` flow, so they lack the root `id` and the dmeta
+        // facet that every content doc carries. Bootstrap both now so later
+        // drawer writes (update_at_heads etc.) validate normally.
+        let branch_handle = match self.big_repo.get_doc(&branch_doc_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::PendingMaterialization => {
+                return Err(ferr!("adopted doc branch pending materialization: {doc_id}").into());
+            }
+            big_repo::DocLookup::Missing => {
+                return Err(ferr!("adopted doc branch missing: {doc_id}").into());
+            }
+        };
+        let mutation_actor_id = self.content_actor_id(None, branch_doc_id);
+        let now = Timestamp::now();
+        let dmeta_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Dmeta);
+        branch_handle
+            .with_document(|am_doc| {
+                let has_dmeta = dmeta::facet_meta_obj(am_doc, &dmeta_key)?.is_some();
+                am_doc.set_actor(mutation_actor_id.clone());
+                let mut tx = am_doc.transaction();
+                if tx.get(automerge::ROOT, "id")?.is_none() {
+                    tx.put(automerge::ROOT, "id", doc_id)?;
+                }
+                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
+                };
+                if !has_dmeta {
+                    dmeta::ensure_for_add(
+                        &mut tx,
+                        &facets_obj,
+                        &[],
+                        now,
+                        None,
+                        &mutation_actor_id,
+                    )?;
+                }
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })
+            .await??;
+        Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(%patch.id, %branch_path))]
@@ -326,7 +455,6 @@ impl DrawerRepo {
                 eyre::Ok((ChangeHashSet(Arc::from([heads])), invalidated_uuids))
             })
             .await??;
-
         // 2. Update partition store
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &new_heads)
             .await?;
