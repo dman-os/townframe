@@ -3,6 +3,11 @@
 //! The walker owns source reading and durable source progress.  It delegates
 //! keyed cursor coverage to [`crate::watermark::WatermarkMachine`].  It does
 //! not know about logical work, task generations, merging, or a runtime.
+//!
+//! The walker never sees source selection: the caller opens the store's
+//! reader with whatever filter it needs (selection is a store-open concern,
+//! compiled into the store's query) and hands the opened reader to
+//! [`ConcurrentDeltaWalker::open`].
 
 use crate::delta_walker_state::{
     DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
@@ -74,17 +79,19 @@ where
     R: DeltaWalkerStateRepo,
     K: Ord + Copy,
 {
+    /// Take an already-opened reader and the consumer's state repo.
+    ///
+    /// The reader was opened by the caller at the state repo's durable
+    /// progress with the caller's own selection; the walker only reads
+    /// `state.progress()` for its durable watermark bookkeeping and takes
+    /// ownership of settlement. The state repo is exclusively owned by this
+    /// consumer, so the caller's `after` and the progress read here agree.
     pub async fn open(
-        source: &'a S,
+        reader: S::Reader<'a>,
         state: R,
-        selector: S::Selector,
         key_of: impl Fn(&S::Entry) -> K + Send + Sync + 'static,
     ) -> Result<Self, ConcurrentDeltaWalkerError<S::Error>> {
         let durable_revision = state.progress().await?.upstream_revision;
-        let reader = source
-            .open(selector, durable_revision)
-            .await
-            .map_err(ConcurrentDeltaWalkerError::Source)?;
         Ok(Self {
             reader,
             state,
@@ -453,7 +460,12 @@ mod tests {
         source: &'a ScriptedSource,
         state: MemoryStateRepo,
     ) -> ConcurrentDeltaWalker<'a, ScriptedSource, MemoryStateRepo, u64> {
-        ConcurrentDeltaWalker::open(source, state, (), |key| *key)
+        let durable = state.progress().await.unwrap().upstream_revision;
+        let reader = source
+            .open((), durable)
+            .await
+            .expect("scripted source open must succeed");
+        ConcurrentDeltaWalker::open(reader, state, |key| *key)
             .await
             .expect("walker open must succeed")
     }

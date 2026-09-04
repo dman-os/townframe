@@ -10,7 +10,6 @@ use crate::context::*;
 use daybook_core::blobs::BlobsRepo;
 use daybook_core::config::ConfigRepo;
 use daybook_core::drawer::DrawerRepo;
-use daybook_core::index::DocBlobsIndexRepo;
 use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::plugs::PlugsRepo;
 use daybook_core::progress::ProgressRepo;
@@ -266,26 +265,6 @@ pub async fn sqlite_local_state_repo() -> Res<Arc<SqliteLocalStateRepo>> {
     }
 }
 
-pub async fn doc_blobs_index_repo() -> Res<Arc<DocBlobsIndexRepo>> {
-    static DOC_BLOBS_INDEX: tokio::sync::OnceCell<Arc<DocBlobsIndexRepo>> =
-        tokio::sync::OnceCell::const_new();
-    match DOC_BLOBS_INDEX
-        .get_or_try_init(|| async {
-            let drawer = drawer_repo().await?;
-            let sqlite_local_state = sqlite_local_state_repo().await?;
-            let (repo, stop) =
-                DocBlobsIndexRepo::boot(Arc::clone(&drawer), Arc::clone(&sqlite_local_state))
-                    .await?;
-            register_shutdown(move || async move { stop.stop().await });
-            Ok(repo)
-        })
-        .await
-    {
-        Ok(repo) => Ok(Arc::clone(repo)),
-        Err(err) => Err(err),
-    }
-}
-
 pub async fn progress_repo() -> Res<Arc<ProgressRepo>> {
     static PROGRESS: tokio::sync::OnceCell<Arc<ProgressRepo>> = tokio::sync::OnceCell::const_new();
     match PROGRESS
@@ -309,13 +288,11 @@ pub async fn sync_repo() -> Res<Arc<IrohSyncRepo>> {
             let ctx = repo_ctx().await?;
             let config = config_repo().await?;
             let blobs = blobs_repo().await?;
-            let doc_blobs_index = doc_blobs_index_repo().await?;
             let progress = progress_repo().await?;
             let (repo, stop) = IrohSyncRepo::boot(
                 Arc::clone(&ctx),
                 Arc::clone(&config),
                 Arc::clone(&blobs),
-                Arc::clone(&doc_blobs_index),
                 Some(Arc::clone(&progress)),
             )
             .await?;

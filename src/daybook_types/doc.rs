@@ -292,7 +292,7 @@ crate::define_enum_and_tag!(
         // NOTE: the value is the full manifest JSON (ADR 007 §1); `PlugManifestFacet`
         // is the typed manifest, or raw JSON on the uniffi surface.
         PlugManifest type (PlugManifestFacet),
-        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

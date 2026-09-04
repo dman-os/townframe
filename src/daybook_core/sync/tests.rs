@@ -4,7 +4,6 @@ mod stress;
 
 use crate::blobs::{BlobId, BlobsRepo};
 use crate::drawer::DrawerRepo;
-use crate::index::DocBlobsIndexRepo;
 use crate::local_state::SqliteLocalStateRepo;
 use crate::plugs::PlugsRepo;
 use crate::progress::ProgressRepo;
@@ -19,7 +18,6 @@ struct SyncTestNode {
     rt: Arc<crate::rt::Rt>,
     drawer: Arc<DrawerRepo>,
     blobs_repo: Arc<BlobsRepo>,
-    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Arc<ProgressRepo>,
     plugs_repo: Arc<PlugsRepo>,
     sync_repo: Arc<IrohSyncRepo>,
@@ -41,7 +39,6 @@ impl SyncTestNode {
             rt: _rt,
             blobs_repo: _blobs_repo,
             drawer: _drawer,
-            doc_blobs_index_repo: _doc_blobs_index_repo,
             progress_repo: _progress_repo,
             plugs_repo: _plugs_repo,
             sync_repo,
@@ -681,40 +678,34 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     assert!(doc_b.facets.contains_key(&key_pin_1));
     assert!(doc_b.facets.contains_key(&key_pin_2));
 
-    // 2. Verify node_b's DocBlobsIndexRepo has indexed the hashes in SQLite doc_blob_refs
+    // 2. Verify node_b's facet-set index has settled the doc's BlobPin
+    // facet routes (the projection the retired doc-blobs index derived from).
+    let facet_set_sql = node_b.rt.doc_facet_set_index_repo.sql().clone();
+    let blob_pin_tag = daybook_types::doc::WellKnownFacetTag::BlobPin.as_str();
+    let facet_set_hash_rows = |sql: &sqlx::SqlitePool| {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT DISTINCT facet_id
+              FROM facet_set_doc_facets
+             WHERE document_id = ?1
+               AND facet_tag = ?2
+            "#,
+        )
+        .bind(&doc_id)
+        .bind(blob_pin_tag)
+        .fetch_all(sql)
+    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = node_b
-            .doc_blobs_index_repo
-            .list_hashes_for_doc(&doc_id)
-            .await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
         if hashes.contains(&hash_1) && hashes.contains(&hash_2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_b = node_b
-        .doc_blobs_index_repo
-        .list_hashes_for_doc(&doc_id)
-        .await?;
+    let hashes_b = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
     assert!(hashes_b.contains(&hash_1));
     assert!(hashes_b.contains(&hash_2));
-
-    let blob_refs_b = node_b
-        .doc_blobs_index_repo
-        .list_blob_refs_for_doc(&doc_id)
-        .await?;
-    assert_eq!(blob_refs_b.len(), 2);
-    assert!(
-        blob_refs_b
-            .iter()
-            .any(|r| r.blob_hash == hash_1 && r.length_octets == payload_1.len() as u64)
-    );
-    assert!(
-        blob_refs_b
-            .iter()
-            .any(|r| r.blob_hash == hash_2 && r.length_octets == payload_2.len() as u64)
-    );
 
     // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
     let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, None).await?;
@@ -755,19 +746,13 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = node_b
-            .doc_blobs_index_repo
-            .list_hashes_for_doc(&doc_id)
-            .await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
         if hashes.len() == 1 && hashes.contains(&hash_1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_after = node_b
-        .doc_blobs_index_repo
-        .list_hashes_for_doc(&doc_id)
-        .await?;
+    let hashes_after = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
     assert_eq!(hashes_after, vec![hash_1.clone()]);
 
     node_b.stop().await?;
@@ -994,7 +979,6 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         Arc::clone(&rtx),
         Arc::clone(&config_repo),
         Arc::clone(&blobs_repo),
-        Arc::clone(&rt.doc_blobs_index_repo),
         Some(Arc::clone(&progress_repo)),
     )
     .await?;
@@ -1003,7 +987,6 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         ctx: rtx,
         drawer: Arc::clone(&rt.drawer),
         blobs_repo: Arc::clone(&rt.blobs_repo),
-        doc_blobs_index_repo: Arc::clone(&rt.doc_blobs_index_repo),
         progress_repo: Arc::clone(&rt.progress_repo),
         plugs_repo: Arc::clone(&rt.plugs_repo),
         rt,

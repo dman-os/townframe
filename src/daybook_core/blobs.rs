@@ -11,8 +11,6 @@ pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
 
-pub use pin_worker::BlobPinWorker;
-pub use pins_part_worker::BlobPinsPartWorker;
 
 pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartId {
     let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");

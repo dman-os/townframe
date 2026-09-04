@@ -28,6 +28,16 @@ impl PlugsRepo {
         Ok(Some(Arc::new(manifest)))
     }
 
+    /// The plug's current enabled ref from the live config facet, if enabled.
+    /// Used by broadcast-driven consumers that carry no config snapshot (the
+    /// durable rev-store path uses each revision's own config instead).
+    pub(crate) async fn enabled_ref(&self, plug_id: &str) -> Res<Option<url::Url>> {
+        let store = self.config_store.get()?;
+        Ok(store
+            .query_sync(|config| config.enabled.get(plug_id).cloned())
+            .await)
+    }
+
     pub(crate) fn parse_enabled_ref(url: &url::Url) -> Res<daybook_types::url::FacetRef> {
         let parsed = daybook_types::url::parse_facet_ref(url)?;
         if parsed.facet_key.tag

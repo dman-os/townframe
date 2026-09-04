@@ -115,7 +115,6 @@ impl PlugsRepo {
         // The manual cache seed above already made core active; re-apply
         // from the ref for consistency.
         self.activate_from_ref(CORE_PLUG_ID, &ref_url).await?;
-        self.reconcile_revision_frontier().await?;
         Ok(())
     }
 
@@ -215,7 +214,6 @@ impl PlugsRepo {
         if already_enabled.as_ref() != Some(&ref_url) {
             self.activate_from_ref(&plug_id, &ref_url).await?;
         }
-        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -239,7 +237,6 @@ impl PlugsRepo {
             let (mut cache, _key) = key.lock(&self.cache);
             cache.clear_active(plug_id);
         });
-        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -309,7 +306,6 @@ impl PlugsRepo {
             })
             .await?;
         self.activate_from_ref(plug_id, &new_ref).await?;
-        self.reconcile_revision_frontier().await?;
         Ok(new_heads)
     }
 
@@ -481,6 +477,59 @@ impl PlugsRepo {
             }
         }
 
+        // 1.9 Bake the plug's blob references as Blob facets on the manifest
+        // doc (ADR 001 + the plugs rework): the manifest doc is a static
+        // artifact and these facets are its blob declarations, written once
+        // at authoring. Pinning is driven from these facets (enablement via
+        // the plugs config event stream), never by parsing the manifest back.
+        // Blobs we cannot size are skipped: their representation length is
+        // unknown until they land in the local blob store.
+        let mut blob_lengths = std::collections::HashMap::<String, u64>::new();
+        for bundle in manifest.wflow_bundles.values() {
+            for url in &bundle.component_urls {
+                if url.scheme() != crate::blobs::BLOB_SCHEME {
+                    continue;
+                }
+                let hash = url.path().trim_start_matches('/');
+                if blob_lengths.contains_key(hash) {
+                    continue;
+                }
+                if let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>()
+                    && let Ok(path) = self.blobs.get_path(&blob_id).await
+                    && let Ok(meta) = tokio::fs::metadata(&path).await
+                {
+                    blob_lengths.insert(hash.to_string(), meta.len());
+                } else {
+                    tracing::warn!(hash, "authoring: blob not sized; facet skipped");
+                }
+            }
+        }
+        let mut facets = std::collections::HashMap::new();
+        facets.insert(
+            Self::plug_manifest_facet_key(),
+            daybook_types::doc::WellKnownFacet::PlugManifest(manifest).into(),
+        );
+        for (hash, length_octets) in blob_lengths {
+            facets.insert(
+                daybook_types::doc::FacetKey {
+                    tag: daybook_types::doc::WellKnownFacetTag::Blob.into(),
+                    id: hash.clone(),
+                },
+                daybook_types::doc::WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets,
+                    digest: hash.clone(),
+                    inline: None,
+                    urls: Some(vec![format!(
+                        "{}:///{}",
+                        crate::blobs::BLOB_SCHEME,
+                        hash
+                    )]),
+                })
+                .into(),
+            );
+        }
+
         // 2. Write a manifest doc through the drawer (validated).
         let drawer = self
             .drawer
@@ -489,11 +538,7 @@ impl PlugsRepo {
         let doc_id = drawer
             .add(daybook_types::doc::AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                facets: [(
-                    Self::plug_manifest_facet_key(),
-                    daybook_types::doc::WellKnownFacet::PlugManifest(manifest).into(),
-                )]
-                .into(),
+                facets,
                 user_path: None,
             })
             .await?;

@@ -1,12 +1,18 @@
 use crate::interlude::*;
 
 use crate::drawer::DrawerRepo;
-use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
-use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
-
+use crate::plugs::PlugsRepo;
+use big_sync::DeltaWalkerStateTransaction;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
+use big_sync_core::revisioned_store::RevisionedStore as _;
+use big_sync_core::concurrent_delta_walker::{
+    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
+};
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
@@ -30,20 +36,12 @@ pub struct DocFacetRefEdge {
 pub struct DocFacetRefIndexRepo {
     drawer_repo: Arc<DrawerRepo>,
     plugs_repo: Arc<PlugsRepo>,
-    work_tx: tokio::sync::mpsc::UnboundedSender<DocFacetRefIndexWorkItem>,
-    work_rx:
-        tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<DocFacetRefIndexWorkItem>>>,
     sql: SqlCtx,
     reference_specs: tokio::sync::RwLock<HashMap<String, Vec<FacetReferenceManifest>>>,
 }
 
-pub struct DocFacetRefIndexStopToken {
-    cancel_token: CancellationToken,
-}
-
 enum FacetSetPreparation {
     Ready(Vec<FacetSetBranchPreparation>),
-    Deferred,
 }
 
 enum FacetSetBranchPreparation {
@@ -57,53 +55,48 @@ enum FacetSetBranchPreparation {
     },
 }
 
-impl DocFacetRefIndexStopToken {
-    pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        Ok(())
-    }
-}
-
-pub struct DocFacetRefMachineStopToken {
-    cancel_token: CancellationToken,
-    worker_handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl DocFacetRefMachineStopToken {
-    pub(crate) async fn stop(mut self) -> Res<()> {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.worker_handle.take() {
-            handle.await?;
-        }
-        Ok(())
-    }
-}
-
 impl DocFacetRefIndexRepo {
     pub async fn boot(
         drawer_repo: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
-    ) -> Res<(Arc<Self>, DocFacetRefIndexStopToken)> {
+        facet_set_store: Arc<FacetSetRevisionStore>,
+        parent_cancel_token: CancellationToken,
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let sql = sqlite_local_state_repo
             .ensure_sqlite_ctx(FACET_REF_LOCAL_STATE_ID)
             .await?;
         Self::init_schema(&sql).await?;
-        let (work_tx, work_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
             drawer_repo: Arc::clone(&drawer_repo),
             plugs_repo: Arc::clone(&plugs_repo),
-            work_tx,
-            work_rx: tokio::sync::Mutex::new(Some(work_rx)),
             sql,
             reference_specs: tokio::sync::RwLock::new(HashMap::new()),
         });
 
         repo.refresh_reference_specs().await?;
 
-        Ok((repo, DocFacetRefIndexStopToken { cancel_token }))
+        let cancel_token = parent_cancel_token.child_token();
+        let worker_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            let drawer = Arc::clone(&drawer_repo);
+            let facet_set_store = Arc::clone(&facet_set_store);
+            let cancel_token = cancel_token.clone();
+            async move {
+                repo.run_machine(drawer, facet_set_store, cancel_token)
+                    .await
+                    .expect("facet-ref machine error")
+            }
+        });
+
+        Ok((
+            repo,
+            crate::repos::RepoStopToken {
+                cancel_token,
+                worker_handle: Some(worker_handle),
+            },
+        ))
     }
 
     async fn init_schema(sql: &SqlCtx) -> Res<()> {
@@ -138,13 +131,9 @@ impl DocFacetRefIndexRepo {
         Ok(())
     }
 
-    async fn handle_worker_item(&self, item: DocFacetRefIndexWorkItem) -> Res<()> {
-        match item {
-            DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll => {
-                self.refresh_reference_specs().await?;
-                self.reindex_all_docs().await?;
-            }
-        }
+    async fn refresh_reference_specs_and_reindex_all(&self) -> Res<()> {
+        self.refresh_reference_specs().await?;
+        self.reindex_all_docs().await?;
         Ok(())
     }
 
@@ -349,63 +338,6 @@ impl DocFacetRefIndexRepo {
 
         rows.into_iter().map(row_to_edge).collect()
     }
-
-    pub fn enqueue_refresh_specs_and_reindex_all(&self) -> Res<()> {
-        self.work_tx
-            .send(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll)
-            .map_err(|err| ferr!("doc_facet_ref_index work queue closed: {err}"))?;
-        Ok(())
-    }
-}
-
-/// Spawn the unified FacetSet/Plugs/work-queue reference machine.
-pub(crate) async fn spawn_facet_ref_machine(
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    facet_ref_repo: Arc<DocFacetRefIndexRepo>,
-    parent_cancel_token: CancellationToken,
-) -> Res<DocFacetRefMachineStopToken> {
-    let work_rx = facet_ref_repo
-        .work_rx
-        .lock()
-        .await
-        .take()
-        .expect("facet-ref machine spawned once");
-    let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-        facet_ref_repo.sql.read_pool.clone(),
-        facet_ref_repo.sql.write_pool.clone(),
-        FACET_REF_LOCAL_STATE_ID,
-        "facets",
-    )
-    .await
-    .map_err(|error| ferr!("initializing facet-ref FacetSet walker state: {error}"))?;
-    let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-        facet_ref_repo.sql.read_pool.clone(),
-        facet_ref_repo.sql.write_pool.clone(),
-        FACET_REF_LOCAL_STATE_ID,
-        "plugs",
-    )
-    .await
-    .map_err(|error| ferr!("initializing facet-ref Plugs walker state: {error}"))?;
-    let cancel_token = parent_cancel_token.child_token();
-    let worker_cancel_token = cancel_token.clone();
-    let drawer = Arc::clone(&facet_ref_repo.drawer_repo);
-    let worker_handle = tokio::spawn(async move {
-        facet_ref_repo
-            .run_machine(
-                drawer,
-                facet_set_store,
-                facet_state,
-                plugs_state,
-                work_rx,
-                worker_cancel_token,
-            )
-            .await
-            .unwrap();
-    });
-    Ok(DocFacetRefMachineStopToken {
-        cancel_token,
-        worker_handle: Some(worker_handle),
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -495,6 +427,148 @@ fn append_url_references(
     Ok(())
 }
 
+/// Keyed execution budget for the facet-ref machine; mirrors the frontier
+/// worker's concurrent budget.
+const FACET_REF_TASK_BUDGET: usize = 64;
+
+/// Scheduling key for one physical branch. Hash of the facet route's
+/// (document, branch) pair: collisions only over-serialize a key, never
+/// break correctness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct FacetRefKey(u64);
+
+fn facet_ref_key(route: &FacetRouteKey) -> FacetRefKey {
+    facet_ref_key_from_branch(&route.branch_id)
+}
+
+fn facet_ref_key_from_branch(branch_id: &daybook_types::doc::BranchId) -> FacetRefKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    branch_id.0.hash(&mut hasher);
+    FacetRefKey(hasher.finish())
+}
+
+/// Why the facet-ref machine's inner loop stopped. The machine's facet
+/// walker is keyed and held open, but its selector depends on inputs that
+/// change (reference specs, plug revisions); those inputs force
+/// a reopen with fresh tags rather than an in-loop merge.
+enum FacetRefMachineSignal {
+    /// The machine is stopping (cancel token fired).
+    Stop,
+    /// The selector inputs changed: the facet walker must be reopened.
+    Reopen,
+}
+
+/// The merged keyed command for one branch: the newest delta with the source
+/// cursor it must cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FacetRefTask {
+    key: FacetRefKey,
+    cursor: u64,
+    delta: FacetDelta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FacetRefTaskOutput {
+    Applied,
+}
+
+async fn run_facet_ref_task(
+    task: FacetRefTask,
+    repo: Arc<DocFacetRefIndexRepo>,
+    facet_state: big_sync::SqliteDeltaWalkerStateRepo,
+) -> Res<FacetRefTaskOutput> {
+    // All hydration completes before the effect transaction opens; the
+    // edge rewrite and its commit are then one SQLite unit.
+    let FacetSetPreparation::Ready(prepared) = repo
+        .prepare_facet_set_revision(std::slice::from_ref(&task.delta))
+        .await?;
+    let mut tx = facet_state
+        .begin()
+        .await
+        .map_err(|error| ferr!("beginning facet-ref settlement: {error}"))?;
+    repo.apply_facet_set_revision_in_tx(tx.context_mut(), &prepared)
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|error| ferr!("committing facet-ref settlement: {error}"))?;
+    Ok(FacetRefTaskOutput::Applied)
+}
+
+/// The keyed facet-ref machine for one reopen epoch: a `ConcurrentDeltaWalker`
+/// over the facet-set source, keyed by branch, feeding per-branch edge tasks;
+/// plug revisions break out to a fresh epoch. The epoch's mutable machine
+/// state (walker, scheduler, pending, and parked keys) lives as stack locals in
+/// `run_machine`; helpers take `&self` plus `&mut` references to it.
+
+impl DocFacetRefIndexRepo {
+    async fn on_task_completion(
+        self: &Arc<Self>,
+        walker: &mut ConcurrentDeltaWalker<
+            '_,
+            FacetSetRevisionStore,
+            big_sync::SqliteDeltaWalkerStateRepo,
+            FacetRefKey,
+        >,
+        tasks: &mut TokioKeyedScheduler<FacetRefKey, FacetRefTask, FacetRefTaskOutput>,
+        pending: &mut HashMap<FacetRefKey, FacetRefTask>,
+        completion: TokioTaskCompletion<FacetRefTask, FacetRefTaskOutput>,
+    ) -> Res<()> {
+        let task = completion.command;
+        match completion.result {
+            FacetRefTaskOutput::Applied => {
+                // The command's effect is durable; only now may the walker
+                // cursor advance past it.
+                walker.ack(task.key, task.cursor).await?;
+                if pending
+                    .get(&task.key)
+                    .is_some_and(|t| t.cursor == task.cursor)
+                {
+                    pending.remove(&task.key);
+                }
+            }
+            Err(error) => panic!("facet-ref task failed: {error:?}"),
+        }
+        Ok(())
+    }
+
+    fn on_delta(
+        self: &Arc<Self>,
+        facet_state: &big_sync::SqliteDeltaWalkerStateRepo,
+        tasks: &mut TokioKeyedScheduler<FacetRefKey, FacetRefTask, FacetRefTaskOutput>,
+        pending: &mut HashMap<FacetRefKey, FacetRefTask>,
+        delta: ConcurrentDelta<FacetRefKey, FacetDelta>,
+    ) -> Res<()> {
+        let task = FacetRefTask {
+            key: delta.key,
+            cursor: delta.cursor,
+            delta: delta.entry,
+        };
+        match pending.get(&delta.key) {
+            Some(existing) if existing.cursor >= task.cursor => return Ok(()),
+            _ => {}
+        }
+        pending.insert(task.key, task.clone());
+        self.start_task(facet_state, tasks, task)
+    }
+
+    fn start_task(
+        self: &Arc<Self>,
+        facet_state: &big_sync::SqliteDeltaWalkerStateRepo,
+        tasks: &mut TokioKeyedScheduler<FacetRefKey, FacetRefTask, FacetRefTaskOutput>,
+        task: FacetRefTask,
+    ) -> Res<()> {
+        let future = run_facet_ref_task(
+            task.clone(),
+            Arc::clone(self),
+            facet_state.clone(),
+        );
+        tasks.replace(task.key, task.clone(), future)?;
+        Ok(())
+    }
+
+}
+
 impl DocFacetRefIndexRepo {
     async fn prepare_facet_set_revision(&self, entries: &[FacetDelta]) -> Res<FacetSetPreparation> {
         let reference_tags = self.reference_tags().await;
@@ -539,7 +613,10 @@ impl DocFacetRefIndexRepo {
                 .hydrate_physical_doc_at_heads(physical_id, heads.clone())
                 .await?
             else {
-                return Ok(FacetSetPreparation::Deferred);
+                eyre::bail!(
+                    "facet-ref source heads are not materialized for branch {}",
+                    branch_id.0
+                );
             };
             prepared.push(FacetSetBranchPreparation::Live {
                 document_id,
@@ -557,106 +634,139 @@ impl DocFacetRefIndexRepo {
         self: Arc<Self>,
         drawer: Arc<DrawerRepo>,
         facet_set_store: Arc<FacetSetRevisionStore>,
-        facet_state: big_sync::SqliteDeltaWalkerStateRepo,
-        plugs_state: big_sync::SqliteDeltaWalkerStateRepo,
-        mut work_rx: tokio::sync::mpsc::UnboundedReceiver<DocFacetRefIndexWorkItem>,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        let mut wake = drawer.subscribe_materialization_wake(None).await?;
-        let mut plugs_walker = SerialDeltaWalker::open(
-            self.plugs_repo.as_ref(),
-            &plugs_state,
-            PlugsRevisionSelector::All,
+        let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+            self.sql.read_pool.clone(),
+            self.sql.write_pool.clone(),
+            FACET_REF_LOCAL_STATE_ID,
+            "facets",
         )
         .await
-        .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
+        .map_err(|error| ferr!("initializing facet-ref FacetSet walker state: {error}"))?;
+        // Table renamed off "plugs": the old state tracked the retired plugs
+        // frontier's revision numbering, which is unrelated to the facet
+        // revisions the plug event store replays.
+        let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
+            self.sql.read_pool.clone(),
+            self.sql.write_pool.clone(),
+            FACET_REF_LOCAL_STATE_ID,
+            "plug-events",
+        )
+        .await
+        .map_err(|error| ferr!("initializing facet-ref Plugs walker state: {error}"))?;
+        let plugs_durable = plugs_state.progress().await?.upstream_revision;
+        let plugs_events = Arc::new(crate::plugs::PlugsConfigEventStore::new(
+            Arc::clone(&facet_set_store),
+            Arc::clone(&drawer),
+            &self.plugs_repo,
+        ));
+        let plugs_reader = plugs_events
+            .open((), plugs_durable)
+            .await
+            .map_err(|error| ferr!("opening facet-ref Plugs reader: {error}"))?;
+        let mut plugs_walker = SerialDeltaWalker::open(plugs_reader, &plugs_state)
+            .await
+            .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
         'reopen: loop {
+            // The epoch's mutable machine state lives on the stack.
             let tags = self.reference_tags().await;
-            let mut walker = SerialDeltaWalker::open(
-                facet_set_store.as_ref(),
-                &facet_state,
-                FacetSetSelector::FacetTags(tags),
+            let source = facet_set_store.as_ref();
+            let selector = FacetSetSelector::FacetTags(tags);
+            let durable = facet_state.progress().await?.upstream_revision;
+            let reader = source
+                .open(selector, durable)
+                .await
+                .map_err(|error| ferr!("opening facet-ref FacetSet reader: {error}"))?;
+            let mut walker = ConcurrentDeltaWalker::open(
+                reader,
+                facet_state.clone(),
+                |entry: &FacetDelta| facet_ref_key(&entry.key),
             )
             .await
             .map_err(|error| ferr!("opening facet-ref FacetSet walker: {error}"))?;
-            let mut deferred: Option<(u64, Vec<FacetDelta>)> = None;
-            loop {
-                let read = if let Some((revision, entries)) = deferred.take() {
-                    RevisionRead::Entries { revision, entries }
-                } else {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => return Ok(()),
-                        item = work_rx.recv() => {
-                            let item = item.ok_or_else(|| ferr!("facet-ref work queue closed"))?;
-                            self.handle_worker_item(item).await?;
-                            continue 'reopen;
-                        }
-                        plug_read = plugs_walker.next() => {
-                            match plug_read.map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))? {
-                                RevisionRead::ReplayComplete { .. } => continue,
-                                RevisionRead::Entries { revision, entries } => {
-                                    if !entries.is_empty() {
-                                        self.handle_worker_item(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll).await?;
-                                        plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
-                                        continue 'reopen;
-                                    }
-                                    plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
-                                    continue;
-                                }
-                            }
-                        }
-                        read = walker.next() => read.map_err(|error| ferr!("reading facet-ref FacetSet walker: {error}"))?,
+            let mut tasks = TokioKeyedScheduler::new(FACET_REF_TASK_BUDGET);
+            // The newest unacked delta per key.
+            let mut pending: HashMap<FacetRefKey, FacetRefTask> = HashMap::new();
+            // Exit signal from a select arm; arms never return mid-select so
+            // the stack state is never moved while its futures hold borrows.
+            let signal: FacetRefMachineSignal = loop {
+                let available = FACET_REF_TASK_BUDGET.saturating_sub(tasks.active_count());
+                let next_deadline = tasks.next_deadline();
+                tokio::select! {
+                    biased;
+                    // The default `signal` is already `Stop`.
+                    _ = cancel_token.cancelled() => break FacetRefMachineSignal::Stop,
+                    completion = tasks.next_completion() => {
+                        self.on_task_completion(
+                            &mut walker,
+                            &mut tasks,
+                            &mut pending,
+                            completion?,
+                        )
+                        .await?;
                     }
-                };
-                match read {
-                    RevisionRead::ReplayComplete { .. } => {}
-                    RevisionRead::Entries { revision, entries } => {
-                        let prepared = self.prepare_facet_set_revision(&entries).await?;
-                        if matches!(&prepared, FacetSetPreparation::Deferred) {
-                            deferred = Some((revision, entries));
-                            tokio::select! {
-                                biased;
-                                _ = cancel_token.cancelled() => return Ok(()),
-                                item = work_rx.recv() => {
-                                    let item = item.ok_or_else(|| ferr!("facet-ref work queue closed"))?;
-                                    self.handle_worker_item(item).await?;
-                                    continue 'reopen;
+                    plug_read = plugs_walker.next() => {
+                        match plug_read
+                            .map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))?
+                        {
+                            RevisionRead::ReplayComplete { .. } => continue,
+                            RevisionRead::Entries { revision, entries } => {
+                                let touched = entries
+                                    .iter()
+                                    .any(|entry| !entry.events.is_empty());
+                                if touched {
+                                    self.refresh_reference_specs_and_reindex_all().await?;
                                 }
-                                plug_read = plugs_walker.next() => {
-                                    match plug_read.map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))? {
-                                        RevisionRead::ReplayComplete { .. } => {}
-                                        RevisionRead::Entries { revision, entries } => {
-                                            if !entries.is_empty() {
-                                                self.handle_worker_item(DocFacetRefIndexWorkItem::RefreshSpecsAndReindexAll).await?;
-                                                plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
-                                                continue 'reopen;
-                                            }
-                                            plugs_walker.settle(revision).await.map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
-                                        }
-                                    }
+                                plugs_walker
+                                    .settle(revision)
+                                    .await
+                                    .map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
+                                if touched {
+                                    break FacetRefMachineSignal::Reopen;
                                 }
-                                result = wake.wait() => result?,
                             }
-                            continue;
                         }
-                        let FacetSetPreparation::Ready(prepared) = prepared else {
-                            unreachable!("Deferred preparation handled above")
-                        };
-                        let mut settlement = walker
-                            .begin_settlement(revision)
-                            .await
-                            .map_err(|error| ferr!("beginning facet-ref settlement: {error}"))?;
-                        self.apply_facet_set_revision_in_tx(settlement.context_mut(), &prepared)
-                            .await?;
-                        settlement.settle().await.map_err(|error| {
-                            ferr!("settling facet-ref FacetSet revision: {error}")
-                        })?;
+                    }
+                    read = async {
+                        if available == 0 {
+                            std::future::pending().await
+                        } else {
+                            walker.next(available).await
+                        }
+                    } => match read? {
+                        ConcurrentDeltaRead::ReplayComplete { .. } => {}
+                        ConcurrentDeltaRead::Entries { entries, .. } => {
+                            for delta in entries {
+                                self.on_delta(
+                                    &facet_state,
+                                    &mut tasks,
+                                    &mut pending,
+                                    delta,
+                                )?;
+                            }
+                        }
+                    },
+                    _ = async {
+                        if let Some(deadline) = next_deadline {
+                            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        tasks.tick(std::time::Instant::now())?;
                     }
                 }
+            };
+            match signal {
+                FacetRefMachineSignal::Stop => return Ok(()),
+                // The selector inputs changed (plug revision or refreshed
+                // tags): reopen the facet walker with fresh tags.
+                FacetRefMachineSignal::Reopen => continue 'reopen,
             }
         }
     }
+
 
     async fn apply_facet_set_revision_in_tx(
         &self,
@@ -798,10 +908,6 @@ fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<Doc
         reference_kind: reference_kind_from_db_value(&reference_kind)?,
         origin_heads: ChangeHashSet(heads),
     })
-}
-
-enum DocFacetRefIndexWorkItem {
-    RefreshSpecsAndReindexAll,
 }
 
 #[cfg(test)]

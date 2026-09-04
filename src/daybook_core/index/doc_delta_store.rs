@@ -10,20 +10,15 @@
 //! branch doc anyway. The store owns no cursor, no event loop, and does no
 //! content I/O; consumers walk it with `ConcurrentDeltaWalker` and drive
 //! keyed tasks through `TokioKeyedScheduler`.
-//! by a keyed worker (see facet_set).
-//! The consumer contract (the only obligation, enforced nowhere mechanically):
-//! by a keyed worker (see facet_set).
 //! 1. the consumer's effect must be idempotent and latest-state;
 //! 2. the effect and the memory advance commit in ONE transaction
 //!    (`commit_transition` codifies this);
 //! 3. the walker cursor is acked only after that commit.
-//! by a keyed worker (see facet_set).
 //! With that contract, `memory(branch)` may lead the durable cursor (never
 //! lag the durable effect). A crash between the memory commit and the ack
 //! replays the entry, the reader diffs the new memory against the same heads,
 //! gets an unchanged transition and DROPS the entry — the walker settles the
 //! entry-less revision via `finish` and replay catch-up costs zero jobs.
-//! by a keyed worker (see facet_set).
 //! Filtering: everything except branch shape is a part-store subscription on
 //! the source (keyhive group → group-part sub; specific docs/branches →
 //! object subs). Branch-name filtering works without identity resolution

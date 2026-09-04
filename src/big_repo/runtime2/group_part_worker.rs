@@ -14,6 +14,7 @@ use big_sync_core::concurrent_delta_walker::{
     ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
 };
 use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
+use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::outbox::Outbox;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
@@ -119,7 +120,9 @@ pub fn spawn_group_part_worker(
                 store: store.clone(),
                 timer,
             };
-            let admission = ConcurrentDeltaWalker::open(&source, state, (), |row| row.seq).await?;
+            let durable = state.progress().await?.upstream_revision;
+            let reader = source.open((), durable).await?;
+            let admission = ConcurrentDeltaWalker::open(reader, state, |row: &keyhive_admission::AdmittedRow| row.seq).await?;
             let worker = Worker {
                 store,
                 keyhive,
@@ -231,10 +234,20 @@ impl<'a> Worker<'a> {
     async fn machine_loop(mut self) -> Res<()> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
+            let next_deadline = self.tasks.next_deadline();
             tokio::select! {
                 biased;
                 completion = self.tasks.next_completion() => {
                     self.on_task_completion(completion?).await?;
+                }
+                _ = async {
+                    if let Some(deadline) = next_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.tasks.tick(std::time::Instant::now())?;
                 }
                 admission = async {
                     if available == 0 {
@@ -282,7 +295,7 @@ impl<'a> Worker<'a> {
         &mut self,
         completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
     ) -> Res<()> {
-        match (completion.command, completion.result?) {
+        match (completion.command, completion.result) {
             (Task::Decode { source, .. }, TaskOutput::Decoded(affected)) => {
                 self.on_decoded(source, affected).await?;
             }
@@ -299,6 +312,7 @@ impl<'a> Worker<'a> {
             | (Task::EnsurePart { .. }, TaskOutput::Reconciled) => {
                 unreachable!("group-part task produced an incompatible output")
             }
+            (_, Err(error)) => panic!("group-part task failed: {error:?}"),
         }
         self.pump_tasks()?;
         Ok(())

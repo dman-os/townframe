@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::config::ConfigRepo;
-use crate::index::{DocBlobsIndexRepo, DocFacetRefIndexRepo, DocFacetSetIndexRepo};
+use crate::index::{DocFacetRefIndexRepo, DocFacetSetIndexRepo};
 use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
@@ -88,9 +88,6 @@ pub struct Rt {
     pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
     pub sqlite_plugin: Arc<wash_plugin_sqlite::SqlPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
-    pub blob_pin_worker: Arc<crate::blobs::BlobPinWorker>,
-    pub blob_pins_part_worker: Arc<crate::blobs::BlobPinsPartWorker>,
-    pub doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
@@ -104,16 +101,10 @@ pub struct RtStopToken {
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: crate::repos::RepoStopToken,
     blob_pins_part_worker_stop: crate::repos::RepoStopToken,
-    doc_blobs_index_stop: crate::repos::RepoStopToken,
-    facet_set_doc_blobs_consumer_stop: crate::index::FacetSetDocBlobsConsumerStopToken,
-    blob_pins_part_consumer_stop: crate::index::BlobPinsPartConsumerStopToken,
-    doc_facet_ref_machine_stop: crate::index::DocFacetRefMachineStopToken,
-    blob_pin_consumer_stop: crate::index::BlobPinConsumerStopToken,
-    doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
-    facet_set_machine_stop: crate::index::FacetSetMachineStopToken,
-    plugs_config_consumer_stop: crate::plugs::PlugsConfigFacetSetConsumerStopToken,
-    plugs_manifest_consumer_stop: crate::plugs::PlugsManifestConsumerStopToken,
-    doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
+    doc_facet_set_index_stop: crate::repos::RepoStopToken,
+    plugs_config_consumer_stop: crate::repos::RepoStopToken,
+    plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
+    doc_facet_ref_index_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
@@ -124,13 +115,8 @@ impl RtStopToken {
             .await?;
         self.doc_processor_stop.stop().await?;
 
-        self.blob_pin_consumer_stop.stop().await?;
-        self.doc_facet_ref_machine_stop.stop().await?;
-        self.blob_pins_part_consumer_stop.stop().await?;
-        self.facet_set_doc_blobs_consumer_stop.stop().await?;
         self.plugs_manifest_consumer_stop.stop().await?;
         self.plugs_config_consumer_stop.stop().await?;
-        self.facet_set_machine_stop.stop().await?;
 
         if let Err(err) = self.doc_facet_set_index_stop.stop().await {
             warn!(
@@ -145,31 +131,18 @@ impl RtStopToken {
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
             );
         }
-
-        // FIXME: this is wrong, dispatches are allowed
-        // to resume on reboot
-        //
-        // Wait for all active dispatches to complete
-        // let active_dispatches: Vec<String> = self
-        //     .rt
-        //     .dispatch_repo
-        //     .list()
-        //     .await
-        //     .iter()
-        //     .map(|(id, _)| id.clone())
-        //     .collect();
-        // if !active_dispatches.is_empty() {
-        //     info!(
-        //         count = active_dispatches.len(),
-        //         "waiting for active dispatches to complete"
-        //     );
-        //     for dispatch_id in active_dispatches {
-        //         let _ = self
-        //             .rt
-        //             .wait_for_dispatch_end(&dispatch_id, Duration::from_secs(30))
-        //             .await;
-        //     }
-        // }
+        if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_pins_part_worker during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.blob_pin_worker_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_pin_worker during shutdown - continuing"
+            );
+        }
 
         // Stop wflow partition worker
         if let Err(err) = self.wflow_part_handle.stop().await {
@@ -183,24 +156,6 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping wash_host during shutdown - continuing"
-            );
-        }
-        if let Err(err) = self.doc_blobs_index_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping doc_blobs_index_repo during shutdown - continuing"
-            );
-        }
-        if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping blob_pins_part_worker during shutdown - continuing"
-            );
-        }
-        if let Err(err) = self.blob_pin_worker_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping blob_pin_worker during shutdown - continuing"
             );
         }
 
@@ -288,6 +243,9 @@ impl Rt {
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let total_started = std::time::Instant::now();
         let startup_progress_task_id = config.startup_progress_task_id.clone();
+        // One cancel token for the whole Rt, created up front so workers
+        // booted before the Rt struct is constructed still share it.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
         crate::repo::ensure_authority_partitions(
             &rcx.part_store,
@@ -319,7 +277,13 @@ impl Rt {
 
         let stage_started = std::time::Instant::now();
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
-            crate::index::DocFacetSetIndexRepo::boot(Arc::clone(&sqlite_local_state_repo)).await?;
+            crate::index::DocFacetSetIndexRepo::boot(
+                Arc::clone(&sqlite_local_state_repo),
+                Arc::clone(&drawer),
+                Arc::clone(&rcx.part_store),
+                cancel_token.clone(),
+            )
+            .await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -330,31 +294,29 @@ impl Rt {
         )
         .await?;
         let stage_started = std::time::Instant::now();
-        let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
-            Arc::clone(&drawer),
+        let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
+            Arc::clone(&rcx.blob_part_store),
             Arc::clone(&sqlite_local_state_repo),
+            Arc::clone(&drawer),
+            doc_facet_set_index_repo.revision_store(),
+            cancel_token.clone(),
         )
         .await?;
-        let (blob_pins_part_worker, blob_pins_part_worker_stop) =
-            crate::blobs::BlobPinsPartWorker::boot(
-                Arc::clone(&rcx.blob_part_store),
-                Arc::clone(&sqlite_local_state_repo),
-            )
-            .await?;
-        let (blob_pin_worker, blob_pin_worker_stop) = crate::blobs::BlobPinWorker::boot(
+        let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
             Arc::clone(&drawer),
-            Arc::clone(&plugs_repo),
             rcx.sql.clone(),
-            Some(Arc::clone(&blobs_repo)),
             rcx.core_inventory_doc_id,
             rcx.docs_inventory_doc_id,
+            doc_facet_set_index_repo.revision_store(),
+            Arc::clone(&plugs_repo),
+            cancel_token.clone(),
         )
         .await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
             format!(
-                "rt boot: loaded doc-blobs index ({})",
+                "rt boot: blob pin workers started ({})",
                 Self::startup_timing_note(stage_started, total_started)
             ),
         )
@@ -365,6 +327,8 @@ impl Rt {
                 Arc::clone(&drawer),
                 Arc::clone(&plugs_repo),
                 Arc::clone(&sqlite_local_state_repo),
+                doc_facet_set_index_repo.revision_store(),
+                cancel_token.clone(),
             )
             .await?;
         Self::emit_startup_progress_status(
@@ -474,7 +438,7 @@ impl Rt {
         let rt = Arc::new(Self {
             config,
             local_wflow_part_id,
-            cancel_token: default(),
+            cancel_token,
             plugs_repo,
             drawer,
             rcx,
@@ -489,9 +453,6 @@ impl Rt {
             stateless_view_plugin,
             sqlite_plugin,
             blobs_repo,
-            blob_pin_worker: Arc::clone(&blob_pin_worker),
-            blob_pins_part_worker: Arc::clone(&blob_pins_part_worker),
-            doc_blobs_index_repo: Arc::clone(&doc_blobs_index_repo),
             doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
             doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
             sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
@@ -500,17 +461,10 @@ impl Rt {
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
-        let facet_set_machine_stop = Arc::clone(&rt.doc_facet_set_index_repo)
-            .spawn_doc_delta_machine(
-                Arc::clone(&rt.drawer),
-                Arc::clone(&rt.rcx.part_store),
-                rt.cancel_token.clone(),
-            )
-            .await?;
         let plugs_config_sql = sqlite_local_state_repo
             .ensure_sqlite_ctx(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
             .await?;
-        let plugs_config_consumer_stop = crate::plugs::spawn_facet_set_plugs_config_consumer(
+        let plugs_config_consumer_stop = crate::plugs::spawn_plugs_config_consumer(
             rt.doc_facet_set_index_repo.revision_store(),
             Arc::clone(&rt.drawer),
             Arc::clone(&rt.plugs_repo),
@@ -523,35 +477,8 @@ impl Rt {
             .await?;
         let plugs_manifest_consumer_stop = crate::plugs::spawn_facet_set_plugs_manifest_consumer(
             rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.drawer),
             Arc::clone(&rt.plugs_repo),
             plugs_manifest_sql,
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        let facet_set_doc_blobs_consumer_stop = crate::index::spawn_facet_set_doc_blobs_consumer(
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.doc_blobs_index_repo),
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        let blob_pins_part_consumer_stop = crate::index::spawn_facet_set_blob_pins_part_consumer(
-            Arc::clone(&rt.drawer),
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.blob_pins_part_worker),
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        let doc_facet_ref_machine_stop = crate::index::spawn_facet_ref_machine(
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.doc_facet_ref_index_repo),
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        let blob_pin_consumer_stop = crate::index::spawn_blob_pin_consumer(
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.plugs_repo),
-            Arc::clone(&rt.blob_pin_worker),
             rt.cancel_token.clone(),
         )
         .await?;
@@ -605,13 +532,7 @@ impl Rt {
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
-                doc_blobs_index_stop,
-                facet_set_doc_blobs_consumer_stop,
-                blob_pins_part_consumer_stop,
-                doc_facet_ref_machine_stop,
-                blob_pin_consumer_stop,
                 doc_facet_set_index_stop,
-                facet_set_machine_stop,
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,
                 doc_facet_ref_index_stop,

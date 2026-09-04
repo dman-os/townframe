@@ -15,6 +15,13 @@ use daybook_types::doc::{
 
 // queries
 impl DrawerRepo {
+    pub(crate) async fn subscribe_document_materialization(
+        &self,
+        physical_branch_id: &BranchId,
+    ) -> Res<MaterializationWake> {
+        self.subscribe_materialization_wake(Some(physical_branch_id)).await
+    }
+
     pub(crate) async fn subscribe_materialization_wake(
         &self,
         physical_branch_id: Option<&BranchId>,
@@ -31,6 +38,7 @@ impl DrawerRepo {
         Ok(MaterializationWake {
             _registration: registration,
             receiver,
+            pending: std::collections::VecDeque::new(),
         })
     }
 

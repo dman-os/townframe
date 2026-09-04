@@ -13,7 +13,6 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::BlobsRepo;
-use crate::index::DocBlobsIndexRepo;
 use crate::progress::ProgressRepo;
 use crate::repo::RepoCtx;
 
@@ -83,7 +82,6 @@ pub struct IrohSyncRepo {
 
     config_repo: Arc<crate::config::ConfigRepo>,
     blobs_sync_backend: Arc<crate::blobs::sync::BlobSyncBackend>,
-    _doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
 
     conn_end_signal_tx: mpsc::UnboundedSender<big_repo::ConnFinishSignal>,
@@ -192,7 +190,6 @@ impl IrohSyncRepo {
         rcx: Arc<RepoCtx>,
         config_repo: Arc<crate::config::ConfigRepo>,
         blobs_repo: Arc<BlobsRepo>,
-        doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
         progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
         let address_lookup = iroh::address_lookup::MemoryLookup::default();
@@ -310,7 +307,6 @@ impl IrohSyncRepo {
             address_lookup,
             config_repo,
             blobs_sync_backend,
-            _doc_blobs_index_repo: doc_blobs_index_repo,
             progress_repo,
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),

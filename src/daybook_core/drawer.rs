@@ -114,6 +114,7 @@ pub(crate) enum BranchIdentityResolution {
 pub(crate) struct MaterializationWake {
     _registration: BigRepoLocalListenerRegistration,
     receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    pending: std::collections::VecDeque<MaterializationChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,25 +126,40 @@ pub(crate) struct MaterializationChange {
 impl MaterializationWake {
     pub(crate) async fn changed(&mut self) -> Res<MaterializationChange> {
         loop {
+            if let Some(change) = self.pending.pop_front() {
+                return Ok(change);
+            }
             let Some(batch) = self.receiver.recv().await else {
                 return Err(ferr!("Drawer materialization listener closed"));
             };
-            let Some(notification) = batch.into_iter().next() else {
-                continue;
-            };
-            let (doc_id, heads) = match notification {
-                BigRepoLocalNotification::DocCreated { doc_id, heads }
-                | BigRepoLocalNotification::DocImported { doc_id, heads }
-                | BigRepoLocalNotification::DocHeadsUpdated { doc_id, heads }
-                | BigRepoLocalNotification::DocMaterializationReady { doc_id, heads } => {
-                    (doc_id, Some(heads))
+            self.pending.extend(batch.into_iter().map(|notification| {
+                let (doc_id, heads) = match notification {
+                    BigRepoLocalNotification::DocCreated { doc_id, heads }
+                    | BigRepoLocalNotification::DocImported { doc_id, heads }
+                    | BigRepoLocalNotification::DocHeadsUpdated { doc_id, heads }
+                    | BigRepoLocalNotification::DocMaterializationReady { doc_id, heads } => {
+                        (doc_id, Some(heads))
+                    }
+                    BigRepoLocalNotification::DocMaterializationPending { doc_id } => {
+                        (doc_id, None)
+                    }
+                };
+                MaterializationChange {
+                    branch_id: daybook_types::doc::BranchId(doc_id.to_string()),
+                    heads: heads.map(ChangeHashSet),
                 }
-                BigRepoLocalNotification::DocMaterializationPending { doc_id } => (doc_id, None),
-            };
-            return Ok(MaterializationChange {
-                branch_id: daybook_types::doc::BranchId(doc_id.to_string()),
-                heads: heads.map(ChangeHashSet),
-            });
+            }));
+        }
+    }
+
+    /// Wait for a notification that may make the document readable. Pending
+    /// notifications are state changes, not retry triggers for parked work.
+    pub(crate) async fn ready_changed(&mut self) -> Res<MaterializationChange> {
+        loop {
+            let change = self.changed().await?;
+            if change.heads.is_some() {
+                return Ok(change);
+            }
         }
     }
 

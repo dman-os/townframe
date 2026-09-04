@@ -1,8 +1,7 @@
 use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
-use big_sync_core::revisioned_store::RevisionReadLimits;
-use daybook_core::plugs::{OciImportOptions, PlugsRepo, PlugsRevisionSelector, PlugsWatchChange};
+use daybook_core::plugs::{OciImportOptions, PlugsEvent, PlugsRepo, PlugsWatchChange};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -70,22 +69,27 @@ impl PlugsRepoFfi {
         let watch_handle = fcx
             .do_on_rt(async move {
                 Some(tokio::spawn(async move {
-                    let mut watch = watch_repo
-                        .watch(PlugsRevisionSelector::All)
-                        .await
-                        .expect(ERROR_IMPOSSIBLE);
+                    let mut events = watch_repo.subscribe_events();
                     loop {
-                        let read = tokio::select! {
+                        let event = tokio::select! {
                             _ = watch_cancel.cancelled() => return,
-                            read = watch.next(RevisionReadLimits::default()) => read.expect(ERROR_IMPOSSIBLE),
+                            event = events.recv() => event.expect(ERROR_IMPOSSIBLE),
                         };
-                        let big_sync_core::revisioned_store::RevisionRead::Entries {
-                            entries, ..
-                        } = read
-                        else {
-                            unreachable!("PlugsWatch hides replay completion")
+                        // PlugsConfigChanged carries no plug id; cross-language
+                        // listeners subscribe per plug lifecycle.
+                        let change = match event {
+                            PlugsEvent::PlugEnabled { plug_id, .. }
+                            | PlugsEvent::PlugUpdated { plug_id, .. } => PlugsWatchChange {
+                                plug_id,
+                                active: true,
+                            },
+                            PlugsEvent::PlugDisabled { plug_id } => PlugsWatchChange {
+                                plug_id,
+                                active: false,
+                            },
+                            PlugsEvent::PlugsConfigChanged { .. } => continue,
                         };
-                        watch_registry.notify(entries);
+                        watch_registry.notify(vec![change]);
                     }
                 }))
             })

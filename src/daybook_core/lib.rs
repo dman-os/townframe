@@ -101,8 +101,6 @@ pub fn part_id_from_label(label: &str) -> PartId {
     PartId::new(*digest.as_bytes())
 }
 
-pub use blobs::{
-    BlobPinWorker, BlobPinsPartWorker, blob_inventory_part_id, blob_inventory_part_id_from_doc_id,
-};
+pub use blobs::{blob_inventory_part_id, blob_inventory_part_id_from_doc_id};
 
 pub mod app;

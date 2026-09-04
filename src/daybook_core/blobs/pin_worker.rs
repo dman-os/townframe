@@ -5,34 +5,119 @@ use daybook_types::doc::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::blobs::BlobsRepo;
-use crate::drawer::DrawerRepo;
+use crate::drawer::{DrawerRepo, MaterializationWake};
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
-use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 use crate::repos::RepoStopToken;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::RevisionRead;
-use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use big_sync::DeltaWalkerStateRepo as _;
+use big_sync_core::revisioned_store::RevisionedStore as _;
+use big_sync_core::concurrent_delta_walker::{
+    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
+};
+use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::BranchId;
 use sqlx::{Row, Sqlite};
 
 pub(crate) const BLOB_PIN_STATE_LOCAL_STATE_ID: &str = "@daybook/core/blob-pin-worker";
-const BLOB_PIN_PLUG_WALKER_ID: &str = "plugs";
 
-pub struct BlobPinWorker {
+/// Walker state for the enablement machine (plugs config event rev store).
+pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-plug-events";
+
+/// Spawn the blob-pin worker and its two machines:
+///
+/// - the facet machine: blob facet deltas -> docs inventory (full-branch
+///   state per delta);
+/// - the plug-events machine: typed `PlugsEvent`s from the plugs config
+///   rev store -> core inventory pin maintenance, enablement-driven.
+///
+/// Both share one inventory lock so their inventory writes cannot
+/// interleave. The machines' stop handle rides the returned
+/// [`RepoStopToken`]. No public surface: observers read the inventory
+/// docs through the drawer.
+pub async fn spawn_blob_pin_worker(
     drawer_repo: Arc<DrawerRepo>,
-    plugs_repo: Arc<PlugsRepo>,
     sql: SqlCtx,
-    blobs_repo: Option<Arc<BlobsRepo>>,
-    core_inventory_doc_id: DocId,
-    docs_inventory_doc_id: DocId,
+    core_inventory_doc_id: DocumentId,
+    docs_inventory_doc_id: DocumentId,
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    parent_cancel_token: CancellationToken,
+) -> Res<RepoStopToken> {
+    Ctx::ensure_schema(&sql).await?;
+
+    let core_doc_id =
+        Ctx::resolve_doc_id_for_branch(&drawer_repo, core_inventory_doc_id).await?;
+    let docs_doc_id =
+        Ctx::resolve_doc_id_for_branch(&drawer_repo, docs_inventory_doc_id).await?;
+    let ctx = Arc::new(Ctx {
+        drawer_repo,
+        sql,
+        core_inventory_doc_id: core_doc_id,
+        docs_inventory_doc_id: docs_doc_id,
+        inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
+    });
+    let event_store = Arc::new(crate::plugs::PlugsConfigEventStore::new(
+        Arc::clone(&facet_set_store),
+        Arc::clone(&ctx.drawer_repo),
+        &plugs_repo,
+    ));
+    let cancel_token = parent_cancel_token.child_token();
+    // One supervisor joins both machines; a panic in either takes the
+    // task down per the task-panic-handler convention.
+    let worker_handle = tokio::spawn({
+        let facet_set_store = Arc::clone(&facet_set_store);
+        let plugs_repo = Arc::clone(&plugs_repo);
+        let cancel_token = cancel_token.clone();
+        let mut facet_worker = Worker::new(Arc::clone(&ctx));
+        let mut event_worker = Worker::new(ctx);
+        async move {
+            let facet = facet_worker.run_facet_machine(facet_set_store, cancel_token.clone());
+            let events = event_worker.run_plug_events_machine(event_store, plugs_repo, cancel_token);
+            let (facet, events) = tokio::join!(facet, events);
+            facet.expect("blob-pin facet machine error");
+            events.expect("blob-pin plug-events machine error");
+        }
+    });
+    Ok(RepoStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlobPinFacetApplyOutcome {
-    Applied,
-    Deferred,
+/// Shared state of the blob-pin worker: the facet machine (docs inventory)
+/// and the plug-events machine (core inventory) plus their inventory
+/// upsert subtasks all hold this Arc. Private — the worker has no public
+/// surface; observers read the inventory docs through the drawer.
+struct Ctx {
+    drawer_repo: Arc<DrawerRepo>,
+    sql: SqlCtx,
+    core_inventory_doc_id: DocId,
+    docs_inventory_doc_id: DocId,
+    /// One lock shared by both machines: plug-pin upserts and facet-driven
+    /// inventory diffs must not interleave.
+    inventory_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Private machine owner. The context is shared with task futures, while each
+/// machine keeps its walker, scheduler, pending work, and wake state on its
+/// own stack in the machine method.
+struct Worker {
+    ctx: Arc<Ctx>,
+}
+
+impl Worker {
+    fn new(ctx: Arc<Ctx>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl std::ops::Deref for Worker {
+    type Target = Ctx;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
 }
 
 struct PreparedDocBranch {
@@ -40,41 +125,8 @@ struct PreparedDocBranch {
     branch_id: BranchId,
     pins: Option<HashMap<String, u64>>,
 }
+impl Ctx {
 
-impl BlobPinWorker {
-    pub async fn boot(
-        drawer_repo: Arc<DrawerRepo>,
-        plugs_repo: Arc<PlugsRepo>,
-        sql: SqlCtx,
-        blobs_repo: Option<Arc<BlobsRepo>>,
-        core_inventory_doc_id: DocumentId,
-        docs_inventory_doc_id: DocumentId,
-    ) -> Res<(Arc<Self>, RepoStopToken)> {
-        Self::ensure_schema(&sql).await?;
-
-        let cancel_token = CancellationToken::new();
-
-        let core_doc_id =
-            Self::resolve_doc_id_for_branch(&drawer_repo, core_inventory_doc_id).await?;
-        let docs_doc_id =
-            Self::resolve_doc_id_for_branch(&drawer_repo, docs_inventory_doc_id).await?;
-
-        let worker = Arc::new(Self {
-            drawer_repo,
-            plugs_repo: Arc::clone(&plugs_repo),
-            sql,
-            blobs_repo,
-            core_inventory_doc_id: core_doc_id,
-            docs_inventory_doc_id: docs_doc_id,
-        });
-        Ok((
-            worker,
-            RepoStopToken {
-                cancel_token,
-                worker_handle: None,
-            },
-        ))
-    }
 
     async fn resolve_doc_id_for_branch(
         drawer_repo: &DrawerRepo,
@@ -161,6 +213,29 @@ impl BlobPinWorker {
         Ok(())
     }
 
+    /// Blob pin candidates from one Blob facet value: the facet's digest plus
+    /// any `db+blob` component URLs, keyed by representation hash.
+    fn blob_pins_from_facet_value(blob: &daybook_types::doc::Blob) -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        if let Some(urls) = &blob.urls {
+            for url_str in urls {
+                if let Ok(url) = url_str.parse::<url::Url>()
+                    && (url.scheme() == crate::blobs::BLOB_SCHEME
+                        || url.scheme() == "daybook-blob")
+                {
+                    let hash = url.path().trim_start_matches('/');
+                    if hash.parse::<crate::blobs::BlobId>().is_ok() {
+                        out.push((hash.to_string(), blob.length_octets));
+                    }
+                }
+            }
+        }
+        if blob.digest.parse::<crate::blobs::BlobId>().is_ok() {
+            out.push((blob.digest.clone(), blob.length_octets));
+        }
+        out
+    }
+
     async fn hydrate_blob_pins(
         drawer: &DrawerRepo,
         physical_branch_id: &BranchId,
@@ -186,6 +261,13 @@ impl BlobPinWorker {
         };
         if branch.branch_id != *physical_branch_id || branch.document_id != *document_id {
             return Err(ferr!("blob facet branch identity mismatch"));
+        }
+        // Plug manifests are static artifacts whose blob pins follow
+        // ENABLEMENT (the core inventory, driven by the plugs config event
+        // stream), not doc presence. Exclude them from the docs-inventory
+        // path so a replicated manifest does not pin its blobs on every peer.
+        if facets.contains_key(&FacetKey::from(WellKnownFacetTag::PlugManifest)) {
+            return Ok(Some(HashMap::new()));
         }
         let dmeta = match WellKnownFacet::from_json(
             facets
@@ -213,24 +295,61 @@ impl BlobPinWorker {
             else {
                 unreachable!("Blob facet decoded to another well-known variant");
             };
-            if let Some(urls) = &blob.urls {
-                for url_str in urls {
-                    if let Ok(url) = url_str.parse::<url::Url>()
-                        && (url.scheme() == crate::blobs::BLOB_SCHEME
-                            || url.scheme() == "daybook-blob")
-                    {
-                        let hash = url.path().trim_start_matches('/');
-                        if hash.parse::<crate::blobs::BlobId>().is_ok() {
-                            current_pins.insert(hash.to_string(), blob.length_octets);
-                        }
-                    }
-                }
-            }
-            if blob.digest.parse::<crate::blobs::BlobId>().is_ok() {
-                current_pins.insert(blob.digest, blob.length_octets);
+            for (hash, length) in blob_pins_from_facet_value(&blob) {
+                current_pins.insert(hash, length);
             }
         }
         Ok(Some(current_pins))
+    }
+
+    /// Hydrate the manifest doc's Blob facets at an enabled ref's heads.
+    ///
+    /// Returns `None` when the manifest is not locally readable at the ref
+    /// (ADR 007 §6: pending). Unpinned refs resolve the branch's current
+    /// heads. Pure read — the pin set is computed, never written back.
+    async fn manifest_blob_pins(
+        &self,
+        ref_url: &url::Url,
+    ) -> Res<Option<HashMap<String, u64>>> {
+        let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(ref_url)?;
+        let branch_path =
+            daybook_types::doc::BranchPath::new(parsed.branch.as_deref().unwrap_or("main"));
+        let heads = if let Some(at) = &parsed.at {
+            ChangeHashSet(am_utils_rs::parse_commit_heads(at)?)
+        } else {
+            let Some(heads) = self
+                .drawer_repo
+                .get_branch_heads_for_path(&parsed.doc_id, branch_path)
+                .await?
+            else {
+                return Ok(None);
+            };
+            heads
+        };
+        // All facets: the manifest doc is small, and the Blob facet keys carry
+        // per-blob ids, so a tag filter would need the full key list anyway.
+        let Some(doc) = self
+            .drawer_repo
+            .get_doc_with_facets_at_branch_heads(&parsed.doc_id, branch_path, &heads, None)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut pins = HashMap::new();
+        for (facet_key, raw) in &doc.facets {
+            if facet_key.tag != WellKnownFacetTag::Blob.into() {
+                continue;
+            }
+            let WellKnownFacet::Blob(blob) =
+                WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::Blob)?
+            else {
+                unreachable!("Blob facet decoded to another well-known variant");
+            };
+            for (hash, length) in blob_pins_from_facet_value(&blob) {
+                pins.insert(hash, length);
+            }
+        }
+        Ok(Some(pins))
     }
 
     async fn desired_pins(&self) -> Res<HashMap<String, BlobPin>> {
@@ -334,89 +453,13 @@ impl BlobPinWorker {
         Ok(())
     }
 
-    async fn apply_facet_set_revision(
-        &self,
-        entries: Vec<FacetDelta>,
-    ) -> Res<BlobPinFacetApplyOutcome> {
-        let mut affected = BTreeMap::<(DocId, BranchId), Option<ChangeHashSet>>::new();
-        for entry in entries {
-            if entry.key.facet_key.tag != WellKnownFacetTag::Blob.into() {
-                continue;
-            }
-            let key = (entry.key.document_id, entry.key.branch_id);
-            let current_heads = entry.current_branch_heads;
-            if let Some(previous) = affected.get(&key) {
-                if previous != &current_heads {
-                    return Err(ferr!("conflicting Blob branch heads in one facet revision"));
-                }
-            } else {
-                affected.insert(key, current_heads);
-            }
-        }
-
-        let mut branches = Vec::with_capacity(affected.len());
-        for ((doc_id, branch_id), branch_heads) in affected {
-            let pins = match branch_heads {
-                Some(heads) => {
-                    match Self::hydrate_blob_pins(&self.drawer_repo, &branch_id, &doc_id, heads)
-                        .await?
-                    {
-                        Some(pins) => Some(pins),
-                        None => return Ok(BlobPinFacetApplyOutcome::Deferred),
-                    }
-                }
-                None => None,
-            };
-            branches.push(PreparedDocBranch {
-                doc_id,
-                branch_id,
-                pins,
-            });
-        }
-
-        self.replace_doc_branch_state(&branches).await?;
-        let docs = self.desired_pins().await?;
-        self.apply_inventory_diff(&self.docs_inventory_doc_id, &docs)
-            .await?;
-        Ok(BlobPinFacetApplyOutcome::Applied)
-    }
-
-    pub async fn reindex_plug(&self, plug_id: &str) -> Res<()> {
-        let Some(manifest) = self.plugs_repo.get(plug_id).await else {
-            return self.delete_plug(plug_id).await;
-        };
-
-        let mut current_pins = HashMap::<String, u64>::new();
-        for bundle in manifest.wflow_bundles.values() {
-            for url in &bundle.component_urls {
-                if url.scheme() == crate::blobs::BLOB_SCHEME || url.scheme() == "daybook-blob" {
-                    let hash = url.path().trim_start_matches('/');
-                    if let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>() {
-                        let length_octets = if let Some(blobs) = &self.blobs_repo {
-                            if let Ok(path) = blobs.get_path(blob_id).await {
-                                tokio::fs::metadata(&path).await.map(|meta| meta.len()).ok()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(length) = length_octets {
-                            current_pins.insert(hash.to_string(), length);
-                        }
-                    }
-                }
-            }
-        }
-
-        self.reconcile_plug_pins(plug_id, current_pins).await
-    }
-
-    async fn reconcile_plug_pins(
-        &self,
-        plug_id: &str,
-        current_pins: HashMap<String, u64>,
-    ) -> Res<()> {
+    /// Upsert one enabled plug's blob pins into the core inventory.
+    ///
+    /// Kept core-inventory machinery (blobPin upsert + orphan eviction keyed
+    /// by plug): only the pin-source changes with the plugs event rework —
+    /// the caller computes pins from the manifest doc's Blob facets at the
+    /// enabled heads instead of parsing manifest internals.
+    async fn apply_plug_pins(&self, plug_id: &str, current_pins: HashMap<String, u64>) -> Res<()> {
         let prev_hashes: HashSet<String> =
             sqlx::query_scalar("SELECT blob_hash FROM blob_pin_plug_state WHERE plug_id = ?1")
                 .bind(plug_id)
@@ -497,7 +540,9 @@ impl BlobPinWorker {
         Ok(())
     }
 
-    pub async fn delete_plug(&self, plug_id: &str) -> Res<()> {
+    /// Drop one plug's blob pins from the core inventory, evicting pins no
+    /// other plug still references. Driven by `PlugsEvent::PlugDisabled`.
+    async fn drop_plug_pins(&self, plug_id: &str) -> Res<()> {
         let prev_hashes: Vec<String> =
             sqlx::query_scalar("SELECT blob_hash FROM blob_pin_plug_state WHERE plug_id = ?1")
                 .bind(plug_id)
@@ -546,15 +591,6 @@ impl BlobPinWorker {
         Ok(())
     }
 
-    pub async fn list_doc_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        self.list_pins_from_doc_id(&self.docs_inventory_doc_id)
-            .await
-    }
-
-    pub async fn list_core_inventory_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        self.list_pins_from_doc_id(&self.core_inventory_doc_id)
-            .await
-    }
 
     async fn list_pins_from_doc_id(&self, doc_id: &DocId) -> Res<HashMap<String, BlobPin>> {
         let Some(doc) = self
@@ -581,149 +617,503 @@ impl BlobPinWorker {
     }
 }
 
-pub(crate) struct BlobPinConsumerStopToken {
-    cancel_token: CancellationToken,
-    worker_handle: Option<tokio::task::JoinHandle<()>>,
+/// Keyed execution budget for the blob-pin machine; mirrors the frontier
+/// worker's concurrent budget.
+const BLOB_PIN_TASK_BUDGET: usize = 64;
+
+/// Scheduling key: one physical branch (hash collisions only over-serialize
+/// a key, never break correctness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BlobPinKey(u64);
+
+fn blob_pin_facet_key(branch_id: &BranchId) -> BlobPinKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    branch_id.0.hash(&mut hasher);
+    BlobPinKey(hasher.finish())
 }
 
-impl BlobPinConsumerStopToken {
-    pub(crate) async fn stop(mut self) -> Res<()> {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.worker_handle.take() {
-            handle.await?;
+/// The keyed command for one branch: the newest delta with the source cursor
+/// it must cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlobPinTask {
+    key: BlobPinKey,
+    cursor: u64,
+    /// One branch's blob facet delta from the facet-set source. Hydration is
+    /// full-branch state at the delta's heads, so a newer cursor supersedes
+    /// any older or sibling delta for the branch.
+    delta: FacetDelta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobPinTaskOutput {
+    Applied,
+}
+
+async fn run_blob_pin_task(
+    task: BlobPinTask,
+    ctx: Arc<Ctx>,
+    inventory_lock: Arc<tokio::sync::Mutex<()>>,
+) -> Res<BlobPinTaskOutput> {
+    let delta = task.delta;
+    if delta.key.facet_key.tag != WellKnownFacetTag::Blob.into() {
+        return Ok(BlobPinTaskOutput::Applied);
+    }
+    // All hydration completes before the inventory section opens; the
+    // state write and the inventory diff are then serialized so their
+    // global recomputes cannot interleave.
+    let pins = match &delta.current_branch_heads {
+        Some(heads) => {
+            match Ctx::hydrate_blob_pins(
+                &ctx.drawer_repo,
+                &delta.key.branch_id,
+                &delta.key.document_id,
+                heads.clone(),
+            )
+            .await?
+            {
+                Some(pins) => pins,
+                None => eyre::bail!(
+                    "blob-pin source heads are not materialized for branch {}",
+                    delta.key.branch_id.0
+                ),
+            }
+        }
+        None => {
+            // Tombstone: the branch was removed; its pin rows go with it.
+            let branch = PreparedDocBranch {
+                doc_id: delta.key.document_id,
+                branch_id: delta.key.branch_id,
+                pins: None,
+            };
+            let _guard = inventory_lock.lock().await;
+            ctx.replace_doc_branch_state(std::slice::from_ref(&branch))
+                .await?;
+            let docs = ctx.desired_pins().await?;
+            ctx.apply_inventory_diff(&ctx.docs_inventory_doc_id, &docs)
+                .await?;
+            return Ok(BlobPinTaskOutput::Applied);
+        }
+    };
+    let branch = PreparedDocBranch {
+        doc_id: delta.key.document_id,
+        branch_id: delta.key.branch_id,
+        pins: Some(pins),
+    };
+    let _guard = inventory_lock.lock().await;
+    ctx.replace_doc_branch_state(std::slice::from_ref(&branch))
+        .await?;
+    let docs = ctx.desired_pins().await?;
+    ctx.apply_inventory_diff(&ctx.docs_inventory_doc_id, &docs)
+        .await?;
+    Ok(BlobPinTaskOutput::Applied)
+}
+
+impl Worker {
+    /// The blob-pin facet machine: a `ConcurrentDeltaWalker` over the facet-set
+    /// source (Blob tag), keyed by branch, with per-branch inventory tasks.
+    /// Mutable machine state lives as stack locals here.
+    async fn run_facet_machine(
+        &mut self,
+        facet_set_store: Arc<FacetSetRevisionStore>,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
+        let facet_state = SqliteDeltaWalkerStateRepo::new(
+            self.sql.read_pool.clone(),
+            self.sql.write_pool.clone(),
+            BLOB_PIN_STATE_LOCAL_STATE_ID,
+            "facets",
+        )
+        .await
+        .map_err(|error| ferr!("initializing blob-pin FacetSet walker state: {error}"))?;
+        let durable = facet_state.progress().await?.upstream_revision;
+        let reader = facet_set_store
+            .open(FacetSetSelector::Tag(WellKnownFacetTag::Blob), durable)
+            .await
+            .map_err(|error| ferr!("opening blob-pin FacetSet reader: {error}"))?;
+        let mut facet_walker = ConcurrentDeltaWalker::open(
+            reader,
+            facet_state,
+            |entry: &FacetDelta| blob_pin_facet_key(&entry.key.branch_id),
+        )
+        .await
+        .map_err(|error| ferr!("opening blob-pin FacetSet walker: {error}"))?;
+        let mut tasks = TokioKeyedScheduler::new(BLOB_PIN_TASK_BUDGET);
+        // The newest unacked delta per key.
+        let mut pending: HashMap<BlobPinKey, BlobPinTask> = HashMap::new();
+        loop {
+            let available = BLOB_PIN_TASK_BUDGET.saturating_sub(tasks.active_count());
+            let next_deadline = tasks.next_deadline();
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                completion = tasks.next_completion() => {
+                    self.on_task_completion(
+                        &mut facet_walker,
+                        &mut tasks,
+                        &mut pending,
+                        completion?,
+                    )
+                    .await?;
+                }
+                facet = async {
+                    if available == 0 {
+                        std::future::pending().await
+                    } else {
+                        facet_walker.next(available).await
+                    }
+                } => match facet? {
+                    ConcurrentDeltaRead::ReplayComplete { .. } => {}
+                    ConcurrentDeltaRead::Entries { entries, .. } => {
+                        for delta in entries {
+                            self.on_delta(&mut tasks, &mut pending, delta)?;
+                        }
+                    }
+                },
+                _ = async {
+                    if let Some(deadline) = next_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    tasks.tick(std::time::Instant::now())?
+                }
+            }
+        }
+    }
+
+    async fn on_task_completion(
+        &mut self,
+        facet_walker: &mut ConcurrentDeltaWalker<
+            '_,
+            FacetSetRevisionStore,
+            SqliteDeltaWalkerStateRepo,
+            BlobPinKey,
+        >,
+        tasks: &mut TokioKeyedScheduler<BlobPinKey, BlobPinTask, BlobPinTaskOutput>,
+        pending: &mut HashMap<BlobPinKey, BlobPinTask>,
+        completion: TokioTaskCompletion<BlobPinTask, BlobPinTaskOutput>,
+    ) -> Res<()> {
+        let task = completion.command;
+        match completion.result {
+            BlobPinTaskOutput::Applied => {
+                // The command's effect is durable; only now may the walker
+                // cursor advance past it.
+                facet_walker.ack(task.key, task.cursor).await?;
+                if pending
+                    .get(&task.key)
+                    .is_some_and(|t| t.cursor == task.cursor)
+                {
+                    pending.remove(&task.key);
+                }
+            }
+            Err(error) => panic!("blob-pin task failed: {error:?}"),
         }
         Ok(())
     }
+
+    fn on_delta(
+        &mut self,
+        tasks: &mut TokioKeyedScheduler<BlobPinKey, BlobPinTask, BlobPinTaskOutput>,
+        pending: &mut HashMap<BlobPinKey, BlobPinTask>,
+        delta: ConcurrentDelta<BlobPinKey, FacetDelta>,
+    ) -> Res<()> {
+        let task = BlobPinTask {
+            key: delta.key,
+            cursor: delta.cursor,
+            delta: delta.entry,
+        };
+        match pending.get(&task.key) {
+            // Newest-wins is correct here: `hydrate_blob_pins` recomputes the
+            // branch's full blob-pin state at the delta's heads, so a newer
+            // cursor (or an equal-cursor sibling of the same branch) is fully
+            // covered by the newest delta.
+            Some(existing) if existing.cursor >= task.cursor => return Ok(()),
+            _ => {}
+        }
+        pending.insert(task.key, task.clone());
+        self.start_task(tasks, task)
+    }
+
+    fn start_task(
+        &mut self,
+        tasks: &mut TokioKeyedScheduler<BlobPinKey, BlobPinTask, BlobPinTaskOutput>,
+        task: BlobPinTask,
+    ) -> Res<()> {
+        let future = run_blob_pin_task(
+            task.clone(),
+            Arc::clone(&self.ctx),
+            Arc::clone(&self.ctx.inventory_lock),
+        );
+        tasks.replace(task.key, task.clone(), future)?;
+        Ok(())
+    }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PlugPinKey(u64);
+
+fn plug_pin_key(plug_id: &str) -> PlugPinKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    plug_id.hash(&mut hasher);
+    PlugPinKey(hasher.finish())
 }
 
-pub(crate) async fn spawn_blob_pin_consumer(
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    plugs_repo: Arc<PlugsRepo>,
-    worker: Arc<BlobPinWorker>,
-    parent_cancel_token: CancellationToken,
-) -> Res<BlobPinConsumerStopToken> {
-    let facet_state = SqliteDeltaWalkerStateRepo::new(
-        worker.sql.read_pool.clone(),
-        worker.sql.write_pool.clone(),
-        BLOB_PIN_STATE_LOCAL_STATE_ID,
-        "facets",
-    )
-    .await
-    .map_err(|error| ferr!("initializing blob-pin FacetSet walker state: {error}"))?;
-    let plugs_state = SqliteDeltaWalkerStateRepo::new(
-        worker.sql.read_pool.clone(),
-        worker.sql.write_pool.clone(),
-        BLOB_PIN_STATE_LOCAL_STATE_ID,
-        BLOB_PIN_PLUG_WALKER_ID,
-    )
-    .await
-    .map_err(|error| ferr!("initializing blob-pin Plugs walker state: {error}"))?;
-    let wake = worker
-        .drawer_repo
-        .subscribe_materialization_wake(None)
-        .await?;
-    let cancel_token = parent_cancel_token.child_token();
-    let worker_cancel_token = cancel_token.clone();
-    let worker_handle = tokio::spawn(async move {
-        run_blob_pin_consumer(
-            facet_set_store,
-            plugs_repo,
-            worker,
-            worker_cancel_token,
-            facet_state,
-            plugs_state,
-            wake,
+#[derive(Debug, Clone)]
+struct PlugPinTask {
+    key: PlugPinKey,
+    event: crate::plugs::PlugsEvent,
+    ref_url: Option<url::Url>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlugPinTaskOutput {
+    Applied,
+    Deferred,
+}
+
+async fn run_plug_pin_task(
+    task: PlugPinTask,
+    ctx: Arc<Ctx>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
+) -> Res<PlugPinTaskOutput> {
+    match &task.event {
+        crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
+        | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. } => {
+            let live_ref;
+            let ref_url = match task.ref_url.as_ref() {
+                Some(ref_url) => ref_url,
+                None => {
+                    let Some(ref_url) = plugs_repo.enabled_ref(plug_id).await? else {
+                        return Ok(PlugPinTaskOutput::Applied);
+                    };
+                    live_ref = ref_url;
+                    &live_ref
+                }
+            };
+            let Some(pins) = ctx.manifest_blob_pins(ref_url).await? else {
+                return Ok(PlugPinTaskOutput::Deferred);
+            };
+            let _guard = ctx.inventory_lock.lock().await;
+            ctx.apply_plug_pins(plug_id, pins).await?;
+        }
+        crate::plugs::PlugsEvent::PlugDisabled { plug_id } => {
+            let _guard = ctx.inventory_lock.lock().await;
+            ctx.drop_plug_pins(plug_id).await?;
+        }
+        crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => {}
+    }
+    Ok(PlugPinTaskOutput::Applied)
+}
+
+/// The enablement machine: a serial walker over the plugs config event rev
+/// store maintaining the core inventory's plug pins.
+    ///
+    /// Serial, not keyed: config revisions are rare, each event's effect is one
+    /// inventory transaction, and config events must apply in order (an enable
+    /// and its disable cannot reorder). Replay folds from the facet-set cursor —
+    /// the rev store's diff is a pure function of the config history, so the
+    /// final state converges even though intermediate replays use the revision's
+    /// own config snapshot.
+    ///
+    /// The durable stream alone cannot resolve pending→active transitions (ADR
+    /// 007 §6: a manifest arriving produces no config revision), so the machine
+    /// also consumes the plugs event broadcast, which carries those transitions.
+    async fn process_plug_pin_task(
+        &self,
+        drawer: &DrawerRepo,
+        plugs_repo: Arc<crate::plugs::PlugsRepo>,
+        tasks: &mut TokioKeyedScheduler<PlugPinKey, PlugPinTask, PlugPinTaskOutput>,
+        subscriptions: &mut HashMap<PlugPinKey, MaterializationWake>,
+        task: PlugPinTask,
+    ) -> Res<()> {
+        let key = task.key;
+        tasks.replace(
+            key,
+            task.clone(),
+            run_plug_pin_task(task.clone(), Arc::clone(&self.ctx), Arc::clone(&plugs_repo)),
+        )?;
+        let mut attempted_after_subscription = false;
+        loop {
+            let completion = tasks.next_completion().await?;
+            match completion.result {
+                Ok(PlugPinTaskOutput::Applied) => {
+                    subscriptions.remove(&key);
+                    return Ok(());
+                }
+                Ok(PlugPinTaskOutput::Deferred) => {
+                    let ref_url = match task.ref_url.as_ref() {
+                        Some(ref_url) => ref_url.clone(),
+                        None => plugs_repo
+                            .enabled_ref(match &task.event {
+                                crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugDisabled { plug_id } => plug_id,
+                                crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => {
+                                    unreachable!("config-only event cannot defer")
+                                }
+                            })
+                            .await?
+                            .ok_or_else(|| ferr!("enabled plug disappeared while materializing"))?,
+                    };
+                    if !subscriptions.contains_key(&key) {
+                        let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(&ref_url)?;
+                        let branch_id = BranchId(parsed.doc_id.to_string());
+                        subscriptions.insert(
+                            key,
+                            drawer
+                                .subscribe_document_materialization(&branch_id)
+                                .await?,
+                        );
+                    }
+                    if !attempted_after_subscription {
+                        attempted_after_subscription = true;
+                        tasks.replace(
+                            key,
+                            task.clone(),
+                            run_plug_pin_task(
+                                task.clone(),
+                                Arc::clone(&self.ctx),
+                                Arc::clone(&plugs_repo),
+                            ),
+                        )?;
+                        continue;
+                    }
+                    tasks.park(key, task.clone());
+                    loop {
+                        subscriptions
+                            .get_mut(&key)
+                            .expect("parked plug task has a materialization subscription")
+                            .ready_changed()
+                            .await?;
+                        tasks.wake(
+                            key,
+                            run_plug_pin_task(
+                                task.clone(),
+                                Arc::clone(&self.ctx),
+                                Arc::clone(&plugs_repo),
+                            ),
+                        )?;
+                        let completion = tasks.next_completion().await?;
+                        match completion.result {
+                            Ok(PlugPinTaskOutput::Applied) => {
+                                subscriptions.remove(&key);
+                                return Ok(());
+                            }
+                            Ok(PlugPinTaskOutput::Deferred) => {
+                                tasks.park(key, task.clone());
+                            }
+                            Err(error) => panic!("blob-pin plug task failed: {error:?}"),
+                        }
+                    }
+                }
+                Err(error) => panic!("blob-pin plug task failed: {error:?}"),
+            }
+        }
+    }
+
+    async fn run_plug_events_machine(
+        &mut self,
+        event_store: Arc<crate::plugs::PlugsConfigEventStore>,
+        plugs_repo: Arc<crate::plugs::PlugsRepo>,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
+        let state = SqliteDeltaWalkerStateRepo::new(
+            self.sql.read_pool.clone(),
+            self.sql.write_pool.clone(),
+            BLOB_PIN_PLUG_EVENTS_STATE_ID,
+            "plug-events",
         )
         .await
-        .unwrap();
-    });
-    Ok(BlobPinConsumerStopToken {
-        cancel_token,
-        worker_handle: Some(worker_handle),
-    })
-}
-
-async fn run_blob_pin_consumer(
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    plugs_repo: Arc<PlugsRepo>,
-    worker: Arc<BlobPinWorker>,
-    cancel_token: CancellationToken,
-    facet_state: SqliteDeltaWalkerStateRepo,
-    plugs_state: SqliteDeltaWalkerStateRepo,
-    mut wake: crate::drawer::MaterializationWake,
-) -> Res<()> {
-    let mut facet_walker = SerialDeltaWalker::open(
-        facet_set_store.as_ref(),
-        &facet_state,
-        FacetSetSelector::Tag(WellKnownFacetTag::Blob),
-    )
-    .await
-    .map_err(|error| ferr!("opening blob-pin FacetSet walker: {error}"))?;
-    let mut plugs_walker = SerialDeltaWalker::open(
-        plugs_repo.as_ref(),
-        &plugs_state,
-        PlugsRevisionSelector::All,
-    )
-    .await
-    .map_err(|error| ferr!("opening blob-pin Plugs walker: {error}"))?;
-    let mut deferred_facet: Option<(u64, Vec<FacetDelta>)> = None;
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return Ok(()),
-            result = wake.wait(), if deferred_facet.is_some() => {
-                result?;
-                let (revision, entries) = deferred_facet.take().expect("deferred facet revision");
-                match worker.apply_facet_set_revision(entries.clone()).await? {
-                    BlobPinFacetApplyOutcome::Applied => {
-                        facet_walker
-                            .settle(revision)
-                            .await
-                            .map_err(|error| ferr!("settling blob-pin FacetSet walker: {error}"))?;
-                    }
-                    BlobPinFacetApplyOutcome::Deferred => {
-                        deferred_facet = Some((revision, entries));
-                    }
-                }
-            }
-            read = plugs_walker.next() => {
-                match read.map_err(|error| ferr!("reading blob-pin Plugs walker: {error:?}"))? {
-                    RevisionRead::ReplayComplete { .. } => {}
-                    RevisionRead::Entries { revision, entries } => {
-                        for entry in entries {
-                            if entry.value.is_some() {
-                                worker.reindex_plug(&entry.key).await?;
-                            } else {
-                                worker.delete_plug(&entry.key).await?;
-                            }
+        .map_err(|error| ferr!("initializing blob-pin plug-events walker state: {error}"))?;
+        let durable = state.progress().await?.upstream_revision;
+        let reader = event_store
+            .open((), durable)
+            .await
+            .map_err(|error| ferr!("opening plugs event reader: {error}"))?;
+        let mut walker = SerialDeltaWalker::open(reader, &state)
+            .await
+            .map_err(|error| ferr!("opening plugs event walker: {error}"))?;
+        let mut events_rx = plugs_repo.subscribe_events();
+        let mut tasks = TokioKeyedScheduler::new(1);
+        let mut subscriptions = HashMap::new();
+        loop {
+            let read = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                event = events_rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            let key = match &event {
+                                crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugDisabled { plug_id } => plug_pin_key(plug_id),
+                                crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => continue,
+                            };
+                            let task = PlugPinTask { key, event, ref_url: None };
+                            self.process_plug_pin_task(
+                                &self.drawer_repo,
+                                Arc::clone(&plugs_repo),
+                                &mut tasks,
+                                &mut subscriptions,
+                                task,
+                            )
+                            .await?;
+                            continue;
                         }
-                        plugs_walker
-                            .settle(revision)
-                            .await
-                            .map_err(|error| ferr!("settling blob-pin Plugs walker: {error}"))?;
-                    }
-                }
-            }
-            read = facet_walker.next(), if deferred_facet.is_none() => {
-                match read.map_err(|error| ferr!("reading blob-pin FacetSet walker: {error:?}"))? {
-                    RevisionRead::ReplayComplete { .. } => {}
-                    RevisionRead::Entries { revision, entries } => {
-                        match worker.apply_facet_set_revision(entries.clone()).await? {
-                            BlobPinFacetApplyOutcome::Applied => {
-                                facet_walker
-                                    .settle(revision)
-                                    .await
-                                    .map_err(|error| ferr!("settling blob-pin FacetSet walker: {error}"))?;
-                            }
-                            BlobPinFacetApplyOutcome::Deferred => {
-                                deferred_facet = Some((revision, entries));
-                            }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            tracing::warn!(missed, "plugs event broadcast lagged");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(ferr!("plugs event broadcast closed"));
                         }
                     }
+                }
+                read = walker.next() => read?,
+            };
+            match read {
+                RevisionRead::ReplayComplete { .. } => {}
+                RevisionRead::Entries { revision, entries } => {
+                    for entry in entries {
+                        for event in &entry.events {
+                            let key = match event {
+                                crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugDisabled { plug_id } => plug_pin_key(plug_id),
+                                crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => continue,
+                            };
+                            let ref_url = match event {
+                                crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
+                                | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. } => {
+                                    entry.config.enabled.get(plug_id).cloned()
+                                }
+                                _ => None,
+                            };
+                            self.process_plug_pin_task(
+                                &self.drawer_repo,
+                                Arc::clone(&plugs_repo),
+                                &mut tasks,
+                                &mut subscriptions,
+                                PlugPinTask {
+                                    key,
+                                    event: event.clone(),
+                                    ref_url,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                    walker
+                        .settle(revision)
+                        .await
+                        .map_err(|error| ferr!("settling plugs event walker: {error}"))?;
                 }
             }
         }
     }
+
 }
 
 #[cfg(test)]
@@ -734,18 +1124,42 @@ mod tests {
     use daybook_types::doc::{AddDocArgs, Blob, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
     use daybook_types::manifest::{PlugManifest, WflowBundleManifest};
 
+    /// Pins recorded as BlobPin facets on an inventory doc (the actual
+    /// observable: the machines apply their state into these drawer docs).
+    async fn inventory_blob_pins(
+        drawer: &DrawerRepo,
+        inventory_doc_id: &DocId,
+    ) -> Res<HashMap<String, BlobPin>> {
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch(
+                inventory_doc_id,
+                &daybook_types::doc::BranchPathBuf::from("main"),
+                None,
+            )
+            .await?
+        else {
+            return Ok(HashMap::new());
+        };
+        let mut pins = HashMap::new();
+        for (key, raw) in &doc.facets {
+            if key.tag == WellKnownFacetTag::BlobPin.into()
+                && let Ok(WellKnownFacet::BlobPin(pin)) =
+                    WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::BlobPin)
+            {
+                pins.insert(key.id.clone(), pin);
+            }
+        }
+        Ok(pins)
+    }
+
     async fn wait_for_pin_presence(
-        worker: &BlobPinWorker,
-        is_core: bool,
+        drawer: &DrawerRepo,
+        inventory_doc_id: &DocId,
         hash: &str,
         should_exist: bool,
     ) -> Res<()> {
         loop {
-            let pins = if is_core {
-                worker.list_core_inventory_pins().await?
-            } else {
-                worker.list_doc_inventory_pins().await?
-            };
+            let pins = inventory_blob_pins(drawer, inventory_doc_id).await?;
             if pins.contains_key(hash) == should_exist {
                 return Ok(());
             }
@@ -753,10 +1167,10 @@ mod tests {
         }
     }
 
-    async fn facet_walker_progress(worker: &BlobPinWorker) -> Res<u64> {
+    async fn facet_walker_progress(sql: &SqlCtx) -> Res<u64> {
         let state = SqliteDeltaWalkerStateRepo::new(
-            worker.sql.read_pool.clone(),
-            worker.sql.write_pool.clone(),
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
             BLOB_PIN_STATE_LOCAL_STATE_ID,
             "facets",
         )
@@ -767,7 +1181,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_blob_pin_worker_doc_lifecycle() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
-        let worker = Arc::clone(&test_context.rt.blob_pin_worker);
+        let drawer = &test_context.rt.drawer_repo;
+        let docs_inventory_doc_id = DocId::from(test_context.rt.rcx.docs_inventory_doc_id.clone());
+        let sql = test_context.rt.rcx.sql.clone();
 
         let blob_id_1 = test_context
             .rt
@@ -811,12 +1227,12 @@ mod tests {
             })
             .await?;
 
-        wait_for_pin_presence(&worker, false, &hash_1, true).await?;
-        wait_for_pin_presence(&worker, false, &hash_2, true).await?;
-        let initial_progress = facet_walker_progress(&worker).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, true).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_2, true).await?;
+        let initial_progress = facet_walker_progress(&sql).await?;
         assert!(initial_progress > 0);
 
-        let pins = worker.list_doc_inventory_pins().await?;
+        let pins = inventory_blob_pins(drawer, &docs_inventory_doc_id).await?;
         assert_eq!(pins.get(&hash_1).unwrap().length_octets, 1234);
         assert_eq!(pins.get(&hash_2).unwrap().length_octets, 1234);
 
@@ -845,9 +1261,9 @@ mod tests {
             )
             .await?;
 
-        wait_for_pin_presence(&worker, false, &hash_2, false).await?;
-        wait_for_pin_presence(&worker, false, &hash_1, true).await?;
-        let update_progress = facet_walker_progress(&worker).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_2, false).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, true).await?;
+        let update_progress = facet_walker_progress(&sql).await?;
         assert!(update_progress > initial_progress);
 
         // Repeating the same logical value is a new source revision but must
@@ -875,8 +1291,8 @@ mod tests {
                 None,
             )
             .await?;
-        wait_for_pin_presence(&worker, false, &hash_2, false).await?;
-        wait_for_pin_presence(&worker, false, &hash_1, true).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_2, false).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, true).await?;
 
         // A second branch owns the same pin independently. Removing it from
         // main must not unpin it until the branch is removed as well.
@@ -896,7 +1312,7 @@ mod tests {
                 None,
             )
             .await?;
-        wait_for_pin_presence(&worker, false, &hash_1, true).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, true).await?;
 
         test_context
             .drawer_repo
@@ -911,7 +1327,7 @@ mod tests {
                 None,
             )
             .await?;
-        wait_for_pin_presence(&worker, false, &hash_1, true).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, true).await?;
 
         let branch_heads = test_context
             .drawer_repo
@@ -931,82 +1347,81 @@ mod tests {
                 Some(branch_heads),
             )
             .await?;
-        wait_for_pin_presence(&worker, false, &hash_1, false).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, false).await?;
 
         // 3. Delete doc
         test_context.drawer_repo.del(&doc_id).await?;
-        wait_for_pin_presence(&worker, false, &hash_1, false).await?;
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &hash_1, false).await?;
 
         test_context.stop().await?;
         Ok(())
     }
 
+    /// The enablement-driven plug lifecycle: authoring bakes the manifest's
+    /// blob references as Blob facets on the manifest doc; enabling the plug
+    /// (a config facet revision) drives the core inventory pins; disabling
+    /// drops them. Manifest blob facets never flow into the docs inventory.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_blob_pin_worker_plug_lifecycle() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
-        let worker = Arc::clone(&test_context.rt.blob_pin_worker);
+        let drawer = &test_context.rt.drawer_repo;
+        let core_inventory_doc_id = DocId::from(test_context.rt.rcx.core_inventory_doc_id.clone());
+        let docs_inventory_doc_id = DocId::from(test_context.rt.rcx.docs_inventory_doc_id.clone());
         let plugs = &test_context.rt.plugs_repo;
 
-        let blob_id_plug = test_context
-            .rt
-            .blobs_repo
-            .put(b"test wasm bundle content")
-            .await?;
-        let hash_plug = blob_id_plug.to_string();
+        let blob_id = test_context.rt.blobs_repo.put(b"test wasm bundle content").await?;
+        let hash = blob_id.to_string();
 
-        let mut manifest = PlugManifest {
+        // 1. Author the plug: `add` bakes the manifest's blob references as
+        //    Blob facets on the manifest doc (the static artifact carries its
+        //    own blob declarations).
+        let manifest = PlugManifest {
             namespace: "test".into(),
             name: "sample-plug".into(),
             version: "0.1.0".parse().unwrap(),
             title: "Sample Plug".into(),
             desc: "A test plug".into(),
+            facets: default(),
             local_states: default(),
             dependencies: default(),
-            views: default(),
             routines: default(),
             wflow_bundles: [(
                 "bundle1".into(),
                 Arc::new(WflowBundleManifest {
                     keys: vec!["wflow1".into()],
-                    component_urls: vec![
-                        format!("{}:///{hash_plug}", crate::blobs::BLOB_SCHEME)
-                            .parse()
-                            .unwrap(),
-                    ],
+                    component_urls: vec![format!("{}:///{hash}", crate::blobs::BLOB_SCHEME)
+                        .parse()
+                        .unwrap()],
                 }),
             )]
             .into(),
+            views: default(),
             commands: default(),
             inits: default(),
             processors: default(),
-            facets: default(),
         };
+        let doc_id = plugs.add(manifest).await?;
 
-        // 1. Add plug (authoring: known but not enabled — no pin yet).
-        let doc_id = plugs.add(manifest.clone()).await?;
-
-        // 2. Enable at the manifest doc (ADR §3 full ref, pinned at current
-        // heads). Enablement is what drives the pin worker's reindex.
-        let ref_url: url::Url =
-            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
-                .parse()?;
+        // 2. Enable: the config revision's PlugEnabled drives the core
+        //    inventory pins.
+        let ref_url: url::Url = format!(
+            "db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main"
+        )
+        .parse()?;
         plugs.enable_plug(&ref_url).await?;
-        wait_for_pin_presence(&worker, true, &hash_plug, true).await?;
+        wait_for_pin_presence(drawer, &core_inventory_doc_id, &hash, true).await?;
 
-        // 3. Author v0.2 without the bundle — `add` writes a NEW manifest doc,
-        //    so the old doc's pin stays until the plug is re-pinned to the new
-        //    doc (known-but-disabled manifest changes are invisible, ADR §7).
-        manifest.wflow_bundles.clear();
-        manifest.version = "0.2.0".parse().unwrap();
-        let doc_id_v2 = plugs.add(manifest).await?;
+        // 3. Manifest blobs follow enablement only: the docs inventory must
+        //    not pin them (manifest-doc exclusion in the facet machine).
+        let docs_pins = inventory_blob_pins(drawer, &docs_inventory_doc_id).await?;
+        assert!(
+            !docs_pins.contains_key(&hash),
+            "manifest blob facets must not flow into the docs inventory"
+        );
 
-        // 4. Re-pin to the new doc (same plug id, ref differs → EnabledPlugUpdated)
-        //    → the pin worker reindexes with the new manifest and unpins.
-        let ref_url_v2: url::Url =
-            format!("db+facet:///{doc_id_v2}/org.example.daybook.plugManifest/main?branch=main")
-                .parse()?;
-        plugs.enable_plug(&ref_url_v2).await?;
-        wait_for_pin_presence(&worker, true, &hash_plug, false).await?;
+        // 4. Disable: the PlugDisabled event drops the plug's pins.
+        plugs.disable_plug("@test/sample-plug").await?;
+        wait_for_pin_presence(drawer, &core_inventory_doc_id, &hash, false).await?;
 
         test_context.stop().await?;
         Ok(())

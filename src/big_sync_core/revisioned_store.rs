@@ -272,7 +272,12 @@ mod tests {
                     },
                 ]),
             };
-            let mut watch = LiveRevisionWatch::open(&store, ()).await.unwrap();
+            let store_ref = &store;
+            let mut watch = LiveRevisionWatch::open(&store, |after| async move {
+                store_ref.open((), after).await
+            })
+            .await
+            .unwrap();
             assert_eq!(
                 watch.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {

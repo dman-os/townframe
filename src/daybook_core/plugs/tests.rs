@@ -1082,37 +1082,55 @@ async fn doc_heads(
 }
 
 async fn wait_for_change(
-    watch: &mut PlugsWatch<'_>,
+    events: &mut tokio::sync::broadcast::Receiver<PlugsEvent>,
     plug_id: &str,
     active: bool,
 ) -> Res<PlugsWatchChange> {
     loop {
-        let read = watch
-            .next(RevisionReadLimits::default())
+        let event = events
+            .recv()
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))?;
-        let RevisionRead::Entries { entries, .. } = read else {
-            unreachable!("PlugsWatch hides replay completion")
+        let change = match event {
+            PlugsEvent::PlugEnabled { plug_id: id, .. }
+            | PlugsEvent::PlugUpdated { plug_id: id, .. } => PlugsWatchChange {
+                plug_id: id,
+                active: true,
+            },
+            PlugsEvent::PlugDisabled { plug_id: id } => PlugsWatchChange {
+                plug_id: id,
+                active: false,
+            },
+            PlugsEvent::PlugsConfigChanged { .. } => continue,
         };
-        if let Some(change) = entries
-            .into_iter()
-            .find(|change| change.plug_id == plug_id && change.active == active)
-        {
+        if change.plug_id == plug_id && change.active == active {
             return Ok(change);
         }
     }
 }
 
-async fn wait_for_any_change(watch: &mut PlugsWatch<'_>, plug_id: &str) -> Res<PlugsWatchChange> {
+async fn wait_for_any_change(
+    events: &mut tokio::sync::broadcast::Receiver<PlugsEvent>,
+    plug_id: &str,
+) -> Res<PlugsWatchChange> {
     loop {
-        let read = watch
-            .next(RevisionReadLimits::default())
+        let event = events
+            .recv()
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))?;
-        let RevisionRead::Entries { entries, .. } = read else {
-            unreachable!("PlugsWatch hides replay completion")
+        let change = match event {
+            PlugsEvent::PlugEnabled { plug_id: id, .. }
+            | PlugsEvent::PlugUpdated { plug_id: id, .. } => PlugsWatchChange {
+                plug_id: id,
+                active: true,
+            },
+            PlugsEvent::PlugDisabled { plug_id: id } => PlugsWatchChange {
+                plug_id: id,
+                active: false,
+            },
+            PlugsEvent::PlugsConfigChanged { .. } => continue,
         };
-        if let Some(change) = entries.into_iter().find(|change| change.plug_id == plug_id) {
+        if change.plug_id == plug_id {
             return Ok(change);
         }
     }
@@ -1137,10 +1155,7 @@ where
 async fn test_enable_plug_emits_plug_enabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_enable_plug_emits_plug_enabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let mut watch = repo
-        .watch(PlugsRevisionSelector::All)
-        .await
-        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let mut watch = repo.subscribe_events();
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
@@ -1190,10 +1205,7 @@ async fn test_re_enable_same_ref_no_duplicate_event() -> Res<()> {
 async fn test_disable_plug_emits_plug_disabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_disable_plug_emits_plug_disabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let mut watch = repo
-        .watch(PlugsRevisionSelector::All)
-        .await
-        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
@@ -1217,10 +1229,7 @@ async fn test_update_plug_emits_enabled_plug_updated() -> Res<()> {
     let ctx =
         crate::test_support::test_cx("plugs_test_update_plug_emits_enabled_plug_updated").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let mut watch = repo
-        .watch(PlugsRevisionSelector::All)
-        .await
-        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug_at("plug1", "0.1.0")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
@@ -1561,10 +1570,7 @@ async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
     )
     .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let mut watch = repo
-        .watch(PlugsRevisionSelector::All)
-        .await
-        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo
         .add(mock_plug_with_facet(
@@ -1628,10 +1634,7 @@ async fn test_local_config_write_not_double_processed() -> Res<()> {
     let ctx =
         crate::test_support::test_cx("plugs_test_local_config_write_not_double_processed").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let mut watch = repo
-        .watch(PlugsRevisionSelector::All)
-        .await
-        .map_err(|error| eyre::eyre!(error.to_string()))?;
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;

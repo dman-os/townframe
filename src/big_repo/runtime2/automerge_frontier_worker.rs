@@ -126,8 +126,10 @@ pub fn spawn_automerge_frontier_worker(
                 store: store.clone(),
                 timer: Arc::clone(&timer),
             };
+            let admission_durable = admission_state.progress().await?.upstream_revision;
+            let admission_reader = admission_source.open((), admission_durable).await?;
             let admission =
-                ConcurrentDeltaWalker::open(&admission_source, admission_state, (), |row| {
+                ConcurrentDeltaWalker::open(admission_reader, admission_state, |row: &keyhive_admission::AdmittedRow| {
                     let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
                         .expect("persisted keyhive admission event must decode");
                     match event {
@@ -151,7 +153,9 @@ pub fn spawn_automerge_frontier_worker(
             .await?;
             // The walker's source-wide durable revision is the replay lower
             // bound; the reader resolves the live part set on every read.
-            let parts = ConcurrentDeltaWalker::open(&part_source, part_state, (), |event| {
+            let part_durable = part_state.progress().await?.upstream_revision;
+            let part_reader = part_source.open((), part_durable).await?;
+            let parts = ConcurrentDeltaWalker::open(part_reader, part_state, |event| {
                 let doc_id = match event {
                     SubEvent::Added(event) => event.obj_id,
                     SubEvent::Changed(event) => event.obj_id,
@@ -403,11 +407,21 @@ impl<'a> Worker<'a> {
     async fn machine_loop(mut self) -> Res<()> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
+            let next_deadline = self.tasks.next_deadline();
             tokio::select! {
                 biased;
 
                 completion = self.tasks.next_completion() => {
                     self.on_task_completion(completion?).await?;
+                }
+                _ = async {
+                    if let Some(deadline) = next_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.tasks.tick(std::time::Instant::now())?;
                 }
 
                 admission = async {
@@ -648,7 +662,7 @@ impl<'a> Worker<'a> {
             ConcurrentTaskOutput,
         >,
     ) -> Res<()> {
-        match (completion.command, completion.result?) {
+        match (completion.command, completion.result) {
             (
                 FrontierTask::Publish {
                     doc_id,
@@ -697,7 +711,10 @@ impl<'a> Worker<'a> {
                 }
                 self.pending_parts.remove(&doc_id);
             }
-            (FrontierTask::Publish { .. }, ConcurrentTaskOutput::Deferred) => {}
+            (task @ FrontierTask::Publish { doc_id, .. }, ConcurrentTaskOutput::Deferred) => {
+                self.tasks.park(FrontierKey::Document(doc_id), task);
+            }
+            (_, Err(error)) => panic!("automerge frontier task failed: {error:?}"),
         }
         Ok(())
     }

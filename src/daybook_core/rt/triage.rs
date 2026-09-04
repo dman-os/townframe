@@ -5,7 +5,8 @@ use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
 use crate::rt::dispatch::DispatchOnSuccessHook;
 use crate::rt::{DispatchArgs, Rt};
-use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
+use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
 
@@ -702,11 +703,14 @@ pub(crate) async fn spawn_doc_processor_driver(
     plugs_repo: Arc<PlugsRepo>,
     parent_cancel_token: CancellationToken,
 ) -> Res<DocProcessorStopToken> {
+    // Table renamed off "plugs": the old state tracked the retired plugs
+    // frontier's revision numbering, which is unrelated to the facet
+    // revisions the plug event store replays.
     let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
         rt.rcx.sql.read_pool.clone(),
         rt.rcx.sql.write_pool.clone(),
         "@daybook/core/doc-processor",
-        "plugs",
+        "plug-events",
     )
     .await
     .map_err(|error| ferr!("initializing DocProcessor Plugs walker state: {error}"))?;
@@ -749,20 +753,27 @@ async fn run_doc_processor_driver(
     mut wake: crate::drawer::MaterializationWake,
 ) -> Res<()> {
     let mut triage = new_doc_processor_listener(Arc::clone(&rt));
-    let mut plugs_walker = SerialDeltaWalker::open(
-        plugs_repo.as_ref(),
-        &plugs_state,
-        crate::plugs::PlugsRevisionSelector::All,
-    )
-    .await
-    .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
-    let mut facet_walker = SerialDeltaWalker::open(
-        facet_set_store.as_ref(),
-        &facet_state,
-        FacetSetSelector::All,
-    )
-    .await
-    .map_err(|error| ferr!("opening DocProcessor FacetSet walker: {error}"))?;
+    let plugs_durable = plugs_state.progress().await?.upstream_revision;
+    let plugs_events = crate::plugs::PlugsConfigEventStore::new(
+        Arc::clone(&facet_set_store),
+        Arc::clone(&rt.drawer),
+        &plugs_repo,
+    );
+    let plugs_reader = plugs_events
+        .open((), plugs_durable)
+        .await
+        .map_err(|error| ferr!("opening DocProcessor Plugs reader: {error}"))?;
+    let mut plugs_walker = SerialDeltaWalker::open(plugs_reader, &plugs_state)
+        .await
+        .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
+    let facet_durable = facet_state.progress().await?.upstream_revision;
+    let facet_reader = facet_set_store
+        .open(FacetSetSelector::All, facet_durable)
+        .await
+        .map_err(|error| ferr!("opening DocProcessor FacetSet reader: {error}"))?;
+    let mut facet_walker = SerialDeltaWalker::open(facet_reader, &facet_state)
+        .await
+        .map_err(|error| ferr!("opening DocProcessor FacetSet walker: {error}"))?;
     let mut deferred = None;
     loop {
         let read = if let Some((revision, entries)) = deferred.take() {
@@ -775,7 +786,10 @@ async fn run_doc_processor_driver(
                     match plug_read.map_err(|error| ferr!("reading DocProcessor Plugs walker: {error:?}"))? {
                         RevisionRead::ReplayComplete { .. } => continue,
                         RevisionRead::Entries { revision, entries } => {
-                            if !entries.is_empty() {
+                            let touched = entries
+                                .iter()
+                                .any(|entry| !entry.events.is_empty());
+                            if touched {
                                 triage.refresh_processors(&rt).await?;
                             }
                             plugs_walker

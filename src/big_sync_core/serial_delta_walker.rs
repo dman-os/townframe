@@ -4,6 +4,11 @@
 //! session may fetch one revision, let its embedder perform projection work,
 //! and then settle that revision in the same state transaction. It owns no
 //! task, callback, outbox, or external event loop.
+//!
+//! The walker never sees source selection: the caller opens the store's
+//! reader with whatever filter it needs (selection is a store-open concern,
+//! compiled into the store's query) and hands the opened reader to
+//! [`SerialDeltaWalker::open`].
 
 use crate::delta_walker_state::{
     DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
@@ -62,21 +67,22 @@ where
     S: RevisionedStore<Revision = u64> + 'a,
     R: DeltaWalkerStateRepo + 'a,
 {
-    /// Open the source at the state repository's current progress.
+    /// Take an already-opened reader and the consumer's state repo.
+    ///
+    /// The reader was opened by the caller at the state repo's durable
+    /// progress with the caller's own selection; the walker only reads
+    /// `state.progress()` for its durable revision and takes ownership of
+    /// settlement. The state repo is exclusively owned by this consumer, so
+    /// the caller's `after` and the progress read here agree.
     pub async fn open(
-        source: &'a S,
+        reader: S::Reader<'a>,
         state: &'a R,
-        selector: S::Selector,
     ) -> Result<Self, SerialDeltaWalkerError<S::Error>> {
         let durable_revision = state
             .progress()
             .await
             .map_err(SerialDeltaWalkerError::State)?
             .upstream_revision;
-        let reader = source
-            .open(selector, durable_revision)
-            .await
-            .map_err(SerialDeltaWalkerError::Source)?;
         Ok(Self {
             state,
             reader,
@@ -286,6 +292,21 @@ mod tests {
                 }),
             }
         }
+    }
+
+
+    async fn open_walker<'a>(
+        store: &'a ScriptedStore,
+        state: &'a MemoryStateRepo,
+    ) -> SerialDeltaWalker<'a, ScriptedStore, MemoryStateRepo> {
+        let durable = state.progress().await.unwrap().upstream_revision;
+        let reader = store
+            .open(0, durable)
+            .await
+            .expect("scripted store open must succeed");
+        SerialDeltaWalker::open(reader, state)
+            .await
+            .expect("walker open must succeed")
     }
 
     struct MemoryStateTx<'a> {
@@ -522,7 +543,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(4); // durable == head
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut walker = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 4 }
@@ -550,7 +571,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(2);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut walker = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -571,7 +592,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut walker = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -594,7 +615,7 @@ mod tests {
                 entries: vec![50],
             }]));
             let state = MemoryStateRepo::new(5);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut walker = open_walker(&store, &state).await.unwrap();
             assert!(matches!(
                 walker.next().await,
                 Err(SerialDeltaWalkerError::NonAdvancingRevision)
@@ -614,7 +635,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut walker = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -635,7 +656,7 @@ mod tests {
             assert_eq!(state.progress().await.unwrap().upstream_revision, 2);
             drop(walker);
 
-            let mut reopened = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut reopened = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -658,7 +679,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+                let mut first = open_walker(&store, &state).await.unwrap();
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -669,7 +690,7 @@ mod tests {
                 // consumer retains (revision 1, entries) and the session is
                 // dropped without settling, exactly like a reopen mid-defer.
             }
-            let mut reopened = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut reopened = open_walker(&store, &state).await.unwrap();
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -697,7 +718,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+                let mut first = open_walker(&store, &state).await.unwrap();
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -706,7 +727,7 @@ mod tests {
                     }
                 );
             }
-            let mut fresh = SerialDeltaWalker::open(&store, &state, 0).await.unwrap();
+            let mut fresh = open_walker(&store, &state).await.unwrap();
             assert!(matches!(
                 fresh.begin_settlement(1).await,
                 Err(SerialDeltaWalkerError::NoPendingRevision)
