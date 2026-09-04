@@ -127,7 +127,7 @@ pub fn spawn_group_part_worker(
                 evt_tx,
                 scope,
                 admission,
-                tasks: crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler::new(
+                tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
                 pending_sources: HashMap::new(),
@@ -220,7 +220,7 @@ struct Worker<'a> {
     scope: WorkerGroupScope,
     admission: ConcurrentDeltaWalker<'a, keyhive_admission::Store, SqliteDeltaWalkerStateRepo, u64>,
     tasks:
-        crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler<GroupPartKey, Task, TaskOutput>,
+        big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<GroupPartKey, Task, TaskOutput>,
     pending_sources: HashMap<u64, PendingSource>,
     pending_documents: HashMap<ObjId, PendingDocument>,
     pending_group_parts: HashMap<PartId, PendingGroupPart>,
@@ -280,7 +280,7 @@ impl<'a> Worker<'a> {
 
     async fn on_task_completion(
         &mut self,
-        completion: crate::runtime2::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
+        completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
     ) -> Res<()> {
         match (completion.command, completion.result?) {
             (Task::Decode { source, .. }, TaskOutput::Decoded(affected)) => {
@@ -323,7 +323,11 @@ impl<'a> Worker<'a> {
         self.settle_sources(snapshot).await
     }
 
-    async fn finish_group_part_task(&mut self, part: PartId, snapshot: Vec<SourceCursor>) -> Res<()> {
+    async fn finish_group_part_task(
+        &mut self,
+        part: PartId,
+        snapshot: Vec<SourceCursor>,
+    ) -> Res<()> {
         let pending = self
             .pending_group_parts
             .get_mut(&part)

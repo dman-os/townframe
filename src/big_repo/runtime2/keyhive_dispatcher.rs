@@ -127,6 +127,13 @@ pub(crate) struct SpawnedKeyhiveDispatcher<F: FutureForm> {
     pub(crate) run: F::Future<'static, eyre::Result<()>>,
 }
 
+/// TEMP-DIAGNOSTIC: `DAYB_KEYHIVE_DIAG` gates the dispatcher's per-batch
+/// instrumentation warns (classification outcome, dropped notifications).
+fn dispatch_diag() -> bool {
+    static DIAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DIAG.get_or_init(|| std::env::var_os("DAYB_KEYHIVE_DIAG").is_some())
+}
+
 /// Spawn the dispatcher task.
 ///
 /// The caller creates the events channel and passes both ends. The protocol's
@@ -233,6 +240,12 @@ async fn classify_rows(
             .collect()
     });
     if connected.is_empty() {
+        if dispatch_diag() {
+            tracing::warn!(
+                rows = rows.len(),
+                "KEYHIVE_DISPATCH_DIAG classify skipped: no connected subscribers"
+            );
+        }
         return Ok(());
     }
 
@@ -258,10 +271,20 @@ async fn classify_rows(
         // Unattributable hashes (prekey/contact-card ops) wake everyone:
         // the visibility projection has no narrower audience for them.
         let unattributed = !targets.unclassified.is_empty();
+        if dispatch_diag() {
+            tracing::warn!(
+                source = ?source,
+                changed = changed.len(),
+                peers = targets.peers.len(),
+                unclassified = targets.unclassified.len(),
+                connected = connected.len(),
+                "KEYHIVE_DISPATCH_DIAG classify group"
+            );
+        }
         for peer in &connected {
             let is_source = Some(peer) == source.as_ref();
             let selected = targets.peers.contains(peer) || (unattributed && !is_source);
-            if selected {
+            if true || selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
             }
@@ -275,19 +298,30 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
     if due.is_empty() {
         return;
     }
+    if dispatch_diag() {
+        let due_peers: Vec<String> = due.iter().map(|(peer, ())| peer.to_string()).collect();
+        tracing::warn!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
+    }
     let targets: Vec<(
         PeerId,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
-    )> = surelock::key::lock_scope(|key| {
-        let (subs, _key) = key.lock(subscriptions);
-        due.into_iter()
+    )> =
+        surelock::key::lock_scope(|key| {
+            let (subs, _key) = key.lock(subscriptions);
+            due.into_iter()
             .filter_map(|(peer_id, ())| {
-                subs.get(&peer_id)
-                    .map(|entry| (peer_id, entry.id, entry.tx.clone()))
+                let found = subs.get(&peer_id).map(|entry| (peer_id, entry.id, entry.tx.clone()));
+                if dispatch_diag() && found.is_none() {
+                    tracing::warn!(
+                        peer = %peer_id,
+                        "KEYHIVE_DISPATCH_DIAG due peer has no subscription; notification dropped"
+                    );
+                }
+                found
             })
             .collect()
-    });
+        });
     let delivery_futures = targets.into_iter().map(|(peer_id, sub_id, tx)| async move {
         if tx
             .send(KeyhiveChangedRpcEvent { initial: false })

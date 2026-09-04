@@ -300,7 +300,7 @@ impl Node {
                 frontier_scope,
                 true,
             )
-                .await?
+            .await?
         } else {
             // Disk restarts reopen the SQLite file, modeling a new process
             // rather than reusing the old pool/Arc. Keep the hidden-parts

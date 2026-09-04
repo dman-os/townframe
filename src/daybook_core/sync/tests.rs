@@ -393,51 +393,67 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
-    let mut args_batch = Vec::new();
-    for idx in 0..100usize {
-        let payload = format!("blob-payload-{idx:03}").into_bytes();
-        let hash = node_a.blobs_repo.put(&payload).await?;
-        let hash = crate::blobs::blob_id_to_digest_str(hash);
-        args_batch.push(AddDocArgs {
-            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-            facets: [(
-                FacetKey::from(WellKnownFacetTag::Blob),
-                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
-                    mime: "application/octet-stream".to_string(),
-                    length_octets: payload.len() as u64,
-                    digest: hash.clone(),
-                    inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
-                })),
-            )]
-            .into(),
-            user_path: Some(daybook_types::doc::UserPathBuf::from(
-                node_a.ctx.local_user_path.clone(),
-            )),
-        });
+        let mut args_batch = Vec::new();
+        for idx in 0..100usize {
+            let payload = format!("blob-payload-{idx:03}").into_bytes();
+            let hash = node_a.blobs_repo.put(&payload).await?;
+            let hash = crate::blobs::blob_id_to_digest_str(hash);
+            args_batch.push(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: payload.len() as u64,
+                        digest: hash.clone(),
+                        inline: None,
+                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                    })),
+                )]
+                .into(),
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            });
+        }
+        let created = node_a.drawer.batch_add(args_batch).await?;
+        assert_eq!(created.len(), 100);
+
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+
+        let ids_a = list_doc_ids(&node_a.drawer).await?;
+        let ids_b = list_doc_ids(&node_b.drawer).await?;
+        assert_eq!(
+            ids_a, ids_b,
+            "doc sets are not equal after 100-doc clone sync"
+        );
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        eyre::Ok(())
+    };
+    // TEMP-HUNT: catch panics too — a panic would otherwise unwind past the
+    // leak and the repos would be cleaned up.
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
+    if outcome.is_err() || matches!(&outcome, Ok(Err(_))) {
+        let keep = temp_root.into_path();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
     }
-    let created = node_a.drawer.batch_add(args_batch).await?;
-    assert_eq!(created.len(), 100);
-
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
-
-    let ids_a = list_doc_ids(&node_a.drawer).await?;
-    let ids_b = list_doc_ids(&node_b.drawer).await?;
-    assert_eq!(
-        ids_a, ids_b,
-        "doc sets are not equal after 100-doc clone sync"
-    );
-
-    node_b.stop().await?;
-    node_a.stop().await?;
     Ok(())
 }
 
@@ -519,13 +535,26 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        eyre::Ok((node_a, node_b))
+    };
+    let Ok((node_a, node_b)) = run.await else {
+        let keep = temp_root.into_path();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
+    };
 
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
@@ -572,13 +601,26 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        eyre::Ok((node_a, node_b))
+    };
+    let Ok((node_a, node_b)) = run.await else {
+        let keep = temp_root.into_path();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
+    };
 
     let payload_1 = b"blob-pin-sync-payload-1".to_vec();
     let payload_2 = b"blob-pin-sync-payload-2".to_vec();

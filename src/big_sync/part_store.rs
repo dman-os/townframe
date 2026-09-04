@@ -870,7 +870,9 @@ pub mod host_contract {
         let obj = test_obj(221);
         store.ensure_part(part).await?;
         seed_live_obj(store, obj, payload("revision-all", 1), &[part]).await?;
-        store.set_obj_payload(obj, payload("revision-all", 2)).await?;
+        store
+            .set_obj_payload(obj, payload("revision-all", 2))
+            .await?;
 
         let mut saw_membership_event = false;
         while let RevisionRead::Entries { revision, entries } =

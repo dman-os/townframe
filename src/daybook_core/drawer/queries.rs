@@ -4,10 +4,9 @@ use big_repo::BigRepoLocalFilter;
 use super::{DrawerRepo, MaterializationWake};
 
 use crate::drawer::{
-    ExactFacetHydration, ExactFacetValueHydration, dmeta, facet_recovery,
+    BranchIdentity, BranchIdentityResolution, ExactFacetValueHydration, dmeta, facet_recovery,
     types::{DocBundle, DocEntry, DocNBranches},
 };
-use crate::index::doc_delta::{BranchIdentity, BranchIdentityResolution};
 
 use automerge::ReadDoc;
 use daybook_types::doc::{
@@ -98,7 +97,6 @@ impl DrawerRepo {
     pub(crate) async fn hydrate_dmeta_state_at_heads(
         &self,
         physical_branch_id: &BranchId,
-        document_id: &DocId,
         branch_heads: ChangeHashSet,
     ) -> Res<Option<crate::drawer::ExactDmetaState>> {
         let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
@@ -131,9 +129,6 @@ impl DrawerRepo {
         if branch.branch_id != *physical_branch_id {
             return Err(ferr!("physical branch id does not match Branch facet"));
         }
-        if branch.document_id != *document_id {
-            return Err(ferr!("logical document id does not match Branch facet"));
-        }
 
         let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
         let dmeta_raw = handle
@@ -154,7 +149,7 @@ impl DrawerRepo {
             WellKnownFacet::Dmeta(value) => value,
             _ => unreachable!("Dmeta facet decoded to another well-known variant"),
         };
-        if dmeta.id != *document_id {
+        if dmeta.id != branch.document_id {
             return Err(ferr!("dmeta document id does not match Branch facet"));
         }
         let dmeta_id = dmeta.id.clone();
@@ -201,32 +196,6 @@ impl DrawerRepo {
             facets,
             all_facet_keys,
         }))
-    }
-
-    /// Adapt dmeta-only exact-head hydration to the legacy metadata result
-    /// consumed by the in-flight projection code. No user facet value is read.
-    #[allow(dead_code)]
-    pub(crate) async fn hydrate_facet_at_heads(
-        &self,
-        physical_branch_id: &BranchId,
-        document_id: &DocId,
-        branch_heads: ChangeHashSet,
-        facet_key: &FacetKey,
-    ) -> Res<ExactFacetHydration> {
-        let Some(state) = self
-            .hydrate_dmeta_state_at_heads(physical_branch_id, document_id, branch_heads.clone())
-            .await?
-        else {
-            return Ok(ExactFacetHydration::Deferred);
-        };
-        let Some((facet_heads, actor_id)) = state.facets.get(facet_key).cloned() else {
-            return Ok(ExactFacetHydration::Absent);
-        };
-        Ok(ExactFacetHydration::Present {
-            branch_heads,
-            facet_heads,
-            actor_id,
-        })
     }
 
     /// Hydrate one user-facet value at exact physical branch heads. The

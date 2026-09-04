@@ -6,7 +6,6 @@ mod causal_checkpoint_worker;
 pub mod doc_revision_store;
 mod group_part_worker;
 pub(crate) mod keyhive_admission;
-pub(crate) mod tokio_keyed_scheduler;
 
 pub use automerge_frontier_worker::{
     AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_obj_to_doc_id,

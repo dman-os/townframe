@@ -1,8 +1,6 @@
-use super::doc_delta::{BranchIdentity, PhysicalDocRevision};
-use super::facet_delta::{FacetHydration, FacetSnapshot};
 use crate::drawer::DrawerRepo;
 use crate::interlude::*;
-use daybook_types::doc::{BranchId, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 /// The exact facet transition between two revisions of a logical branch.
 ///
@@ -115,92 +113,4 @@ pub(crate) async fn compute_doc_facet_diff(
     })
 }
 
-/// Adapt the drawer-owned exact-head result to the index facet domain type.
-pub(crate) async fn hydrate_facet_at_heads(
-    drawer: &DrawerRepo,
-    physical_branch_id: &BranchId,
-    document_id: &DocId,
-    branch_heads: ChangeHashSet,
-    facet_key: &FacetKey,
-) -> Res<FacetHydration> {
-    match drawer
-        .hydrate_facet_at_heads(
-            physical_branch_id,
-            document_id,
-            branch_heads.clone(),
-            facet_key,
-        )
-        .await?
-    {
-        crate::drawer::ExactFacetHydration::Deferred => Ok(FacetHydration::Deferred),
-        crate::drawer::ExactFacetHydration::Absent => Ok(FacetHydration::Absent),
-        crate::drawer::ExactFacetHydration::Present {
-            facet_heads,
-            actor_id,
-        } => Ok(FacetHydration::Present(FacetSnapshot {
-            branch_heads,
-            facet_heads,
-            actor_id,
-        })),
-    }
-}
-
-/// Hydrate one physical document at an exact head set; callers decide routing scope.
-pub(crate) async fn hydrate_physical_revision(
-    drawer: &DrawerRepo,
-    physical_id: DocumentId,
-    heads: ChangeHashSet,
-) -> Res<Option<PhysicalDocRevision>> {
-    let Some(facets) = drawer
-        .hydrate_physical_doc_at_heads(physical_id.clone(), heads.clone())
-        .await?
-    else {
-        return Ok(None);
-    };
-    let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
-    let Some(branch_raw) = facets.get(&branch_key).cloned() else {
-        eyre::bail!("missing mandatory Branch facet");
-    };
-    let branch = match WellKnownFacet::from_json(branch_raw, WellKnownFacetTag::Branch)
-        .wrap_err("decode Branch facet")?
-    {
-        WellKnownFacet::Branch(value) => value,
-        _ => eyre::bail!("invalid Branch facet"),
-    };
-    let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-    let Some(dmeta_raw) = facets.get(&dmeta_key).cloned() else {
-        eyre::bail!("missing mandatory Dmeta facet");
-    };
-    let dmeta = match WellKnownFacet::from_json(dmeta_raw, WellKnownFacetTag::Dmeta)
-        .wrap_err("decode Dmeta facet")?
-    {
-        WellKnownFacet::Dmeta(value) => value,
-        _ => eyre::bail!("invalid Dmeta facet"),
-    };
-    if dmeta.id != branch.document_id {
-        eyre::bail!("dmeta document id does not match Branch document id");
-    }
-    let system_tags = [
-        FacetKey::from(WellKnownFacetTag::Branch).tag,
-        FacetKey::from(WellKnownFacetTag::Branches).tag,
-        FacetKey::from(WellKnownFacetTag::Dmeta).tag,
-    ];
-    let keys = dmeta
-        .facets
-        .into_iter()
-        .filter_map(|(key, meta)| {
-            (meta.deleted_at.is_empty() && !system_tags.iter().any(|tag| &key.tag == tag))
-                .then_some(key)
-        })
-        .collect();
-    Ok(Some(PhysicalDocRevision {
-        physical_branch_id: BranchId(physical_id.to_string()),
-        identity: BranchIdentity {
-            document_id: branch.document_id,
-            branch_id: branch.branch_id,
-        },
-        previous_heads: None,
-        current_heads: heads,
-        facet_keys: keys,
-    }))
 }

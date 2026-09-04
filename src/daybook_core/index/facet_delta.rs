@@ -3,7 +3,7 @@
 //! The durable revision source lives with the facet-set projection. This
 //! module contains only the value contract shared by that source and walkers.
 #![allow(dead_code)]
-use crate::index::doc_delta::DocDelta;
+use crate::index::doc_delta_store::DocDelta;
 use crate::interlude::*;
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey};
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,6 @@ pub(crate) fn transition_for_doc_delta(
     previous_branch_heads: Option<ChangeHashSet>,
     current: Option<FacetSnapshot>,
 ) -> Option<FacetDelta> {
-    debug_assert_eq!(key.document_id, delta.document_id);
     debug_assert_eq!(key.branch_id, delta.branch_id);
     let current_branch_heads = delta.current_heads.clone();
     if current_branch_heads.is_none() {
@@ -146,7 +145,6 @@ mod tests {
     #[test]
     fn source_removal_forces_tombstone_and_clears_heads() {
         let source = DocDelta {
-            document_id: DocId::from("doc"),
             branch_id: BranchId::from("branch"),
             previous_heads: None,
             current_heads: None,

@@ -1,7 +1,4 @@
-// FIXME: look at comments from ./pins_part_worker.rs too
-
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use crate::interlude::*;
 
 use daybook_types::doc::{
     BlobPin, ChangeHashSet, DocId, DocPatch, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
@@ -12,7 +9,6 @@ use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
-use crate::interlude::*;
 use crate::plugs::{PlugsRepo, PlugsRevisionSelector};
 use crate::repos::RepoStopToken;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;

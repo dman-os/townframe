@@ -353,7 +353,9 @@ impl GroupScopeController {
     }
 
     pub fn handle(&self) -> GroupScopeHandle {
-        GroupScopeHandle { rx: self.tx.subscribe() }
+        GroupScopeHandle {
+            rx: self.tx.subscribe(),
+        }
     }
 
     /// The scope as of this call.

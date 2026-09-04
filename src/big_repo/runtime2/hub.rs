@@ -1029,7 +1029,16 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                     .sync_keyhive_with_peer(peer_id, request_id.clone())
                     .await
                 {
-                    Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {}
+                    Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {
+                        // TEMP-DIAGNOSTIC: rounds completing with an empty exchange
+                        // (serving side sends 0 for an explicit hash request) are
+                        // invisible at debug level; surface every round here.
+                        tracing::warn!(
+                            %peer_id,
+                            nonce = request_id.nonce,
+                            "KEYHIVE_DIAG keyhive sync round initiated"
+                        );
+                    }
                     Ok(crate::runtime2::KeyhiveSyncOutcome::PeerDisappeared) => {
                         evt_tx
                             .send(Runtime2Evt::KeyhiveSyncFailed {

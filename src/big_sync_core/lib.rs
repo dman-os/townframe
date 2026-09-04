@@ -41,6 +41,7 @@ pub mod live_revision_watch;
 pub mod outbox;
 pub mod revisioned_store;
 pub mod serial_delta_walker;
+pub mod tokio_keyed_scheduler;
 use bucket::BucketMachine;
 pub mod mpsc;
 pub mod part_store;

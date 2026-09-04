@@ -693,6 +693,14 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorageInner {
                 Self::Sqlite { events, .. } | Self::Fs { events, .. } => events
                     .save_keyhive_event(hash, data, source)
                     .await
+                    .inspect_err(|error| {
+                        // TEMP-DIAGNOSTIC: the keyhive protocol wraps this as
+                        // `keyhive protocol error: storage error`, discarding the
+                        // sqlite cause. Log the full source chain here.
+                        warn_loc!(
+                            "KEYHIVE_STORAGE_DIAG save_event failed hash={hash:?}: {error:?}"
+                        );
+                    })
                     .map_err(Into::into),
                 Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,

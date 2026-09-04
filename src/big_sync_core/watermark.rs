@@ -113,7 +113,6 @@ where
         self.drain()
     }
 
-
     /// Advance to the contiguous prefix of ready slots and report the new
     /// watermark, if any. Covered slots are dropped. Mirrors
     /// `CursorSyncMachine::drain_ready_cursor_advances`.

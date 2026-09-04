@@ -31,7 +31,7 @@ use types::{BranchSnapshot, DocDeleteTombstone};
 use utils_rs::lru::SharedKeyedLruPool;
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
+use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,28 @@ pub(crate) struct ExactDmetaState {
     pub branch_heads: ChangeHashSet,
     pub facets: HashMap<FacetKey, (ChangeHashSet, ActorId)>,
     pub all_facet_keys: Vec<FacetKey>,
+}
+
+/// Branch identity validated from the system Branch facet at exact heads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchIdentity {
+    pub document_id: DocId,
+    pub branch_id: BranchId,
+}
+
+/// The outcome of validating a physical branch's system Branch facet at
+/// exact heads. `Ignored` marks docs with no Branch facet (system docs);
+/// `ImportedHistory` marks events whose Branch facet names a different
+/// branch — imported merge history in a destination sedimentree, known
+/// foreign history rather than unresolved materialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchIdentityResolution {
+    Found(BranchIdentity),
+    /// The branch document is not materialized yet; the identity may resolve
+    /// after the next materialization wake.
+    Deferred,
+    Ignored,
+    ImportedHistory,
 }
 
 /// Drawer-owned wakeup for projections waiting on local materialization.

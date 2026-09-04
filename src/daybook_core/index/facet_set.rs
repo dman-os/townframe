@@ -1,7 +1,7 @@
 #![allow(dead_code)]
-use crate::drawer::DrawerRepo;
-use crate::index::doc_delta::{
-    BranchIdentityResolution, DocDelta, DocDeltaWalker, DocDeltaWalkerRead,
+use crate::drawer::{BranchIdentityResolution, DrawerRepo, MaterializationWake};
+use crate::index::doc_delta_store::{
+    DocDelta, DocDeltaBranchFilter, DocDeltaRevisionStore, DocDeltaSelector, begin_settlement,
 };
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
 use crate::interlude::*;
@@ -9,13 +9,17 @@ use big_repo::{
     AutomergeFrontierRevisionStore, AutomergeFrontierSelector, AutomergeFrontierTarget,
 };
 use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteKeyedFrontier};
+use big_sync_core::concurrent_delta_walker::{
+    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
+};
 use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRead, KeyedFrontier, KeyedFrontierReader,
 };
 use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
+use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacetTag};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use tokio_util::sync::CancellationToken;
 
 const FACET_SET_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-set-index";
@@ -241,50 +245,49 @@ impl FacetSetRevisionStore {
         let mut branch_heads = BTreeMap::<(DocId, String), Option<ChangeHashSet>>::new();
         let mut removed_local = BTreeSet::new();
         for delta in entries {
-            let branch_key = (delta.document_id.clone(), delta.branch_id.0.clone());
-            // TEMPORARY projection-level filter: the walker source reads
+            let Some(heads) = delta.current_heads.as_ref() else {
+                eyre::bail!("projection cannot run on un-hydrated deltas");
+            };
+            // TEMPORARY system-doc filter: the walker source reads
             // GLOBAL_PART_ID, which mirrors every known Automerge object -
             // including system docs (app_doc, drawer_doc, config doc, plug
             // manifest docs) that have not been migrated to the facet-based
             // format yet and carry no Branch facet. Only content docs may be
-            // projected here, so re-resolve the identity at the delta's heads
-            // and skip anything the walker's resolver would ignore. This also
-            // means a genuinely corrupted content doc whose Branch facet is
-            // missing at projection time is silently skipped instead of
-            // erroring; accepted tradeoff for the temporary hack. The real fix
-            // is routing FacetSet/DocDelta input through a content-doc group
-            // part instead of GLOBAL_PART_ID.
-            if let Some(heads) = delta.current_heads.as_ref() {
-                match drawer
-                    .resolve_system_branch_identity_at_heads(&delta.branch_id, heads)
-                    .await?
-                {
-                    BranchIdentityResolution::Ignored
-                    | BranchIdentityResolution::ImportedHistory => continue,
-                    BranchIdentityResolution::Deferred => return Ok(None),
-                    BranchIdentityResolution::Found(_) => {}
+            // projected here, so resolve the identity at the delta's heads and
+            // skip everything else. A genuinely corrupted content doc whose
+            // Branch facet is missing at projection time is silently skipped
+            // instead of erroring; accepted tradeoff for the temporary hack.
+            // The real fix is routing the doc delta source through a
+            // content-doc group part instead of GLOBAL_PART_ID, after which
+            // this resolution disappears.
+            let identity = match drawer
+                .resolve_system_branch_identity_at_heads(&delta.branch_id, heads)
+                .await?
+            {
+                BranchIdentityResolution::Ignored | BranchIdentityResolution::ImportedHistory => {
+                    continue;
                 }
-            }
+                BranchIdentityResolution::Deferred => return Ok(None),
+                BranchIdentityResolution::Found(identity) => identity,
+            };
+            let branch_key = (identity.document_id.clone(), delta.branch_id.0.clone());
             if !affected.insert(branch_key.clone()) {
                 return Err(ferr!("duplicate DocDelta branch in one source revision"));
             }
             branch_heads.insert(branch_key, delta.current_heads.clone());
-            let Some(heads) = delta.current_heads else {
-                continue;
-            };
             let Some(state) = drawer
-                .hydrate_dmeta_state_at_heads(&delta.branch_id, &delta.document_id, heads)
+                .hydrate_dmeta_state_at_heads(&delta.branch_id, heads.clone())
                 .await?
             else {
                 return Ok(None);
             };
-            if state.document_id != delta.document_id || state.branch_id != delta.branch_id {
-                return Err(ferr!("dmeta state identity does not match DocDelta"));
+            if state.document_id != identity.document_id {
+                return Err(ferr!("dmeta state identity does not match Branch facet"));
             }
-            if delta.branch_id.0 == delta.document_id {
+            if delta.branch_id.0 == state.document_id {
                 for facet_key in drawer
                     .facet_keys_touched_by_local_actor(
-                        &delta.document_id,
+                        &state.document_id,
                         daybook_types::doc::BranchPath::new("main"),
                         &state.branch_heads,
                         &state.all_facet_keys,
@@ -292,7 +295,7 @@ impl FacetSetRevisionStore {
                     .await?
                 {
                     removed_local.insert((
-                        delta.document_id.clone(),
+                        state.document_id.clone(),
                         delta.branch_id.0.clone(),
                         facet_key,
                     ));
@@ -394,50 +397,11 @@ impl FacetSetRevisionStore {
         Ok(FacetSetApplyOutcome::Applied { revision })
     }
 
-    pub(crate) async fn apply_doc_delta_revision(
-        &self,
-        drawer: &DrawerRepo,
-        source_revision: u64,
-        entries: Vec<DocDelta>,
-    ) -> Res<FacetSetApplyOutcome> {
-        let Some(prepared) = self.prepare_projection(drawer, entries).await? else {
-            return Ok(FacetSetApplyOutcome::Deferred);
-        };
-        let mut state_tx = self
-            .input_state
-            .begin()
-            .await
-            .map_err(|error| ferr!("begin facet-set input state: {error}"))?;
-        let expected =
-            big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::progress(&mut state_tx)
-                .await
-                .map_err(|error| ferr!("read facet-set input state: {error}"))?
-                .upstream_revision;
-        if source_revision <= expected {
-            return Err(ferr!(
-                "facet-set source revision {source_revision} does not advance input {expected}"
-            ));
-        }
-        let outcome = self
-            .apply_projection_in_context(
-                &prepared,
-                big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::context_mut(
-                    &mut state_tx,
-                ),
-            )
-            .await?;
-        big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::advance_from(
-            &mut state_tx,
-            expected,
-            source_revision,
-        )
-        .await
-        .map_err(|error| ferr!("advance facet-set input state: {error}"))?;
-        big_sync_core::delta_walker_state::DeltaWalkerStateTransaction::commit(state_tx)
-            .await
-            .map_err(|error| ferr!("commit facet-set input state: {error}"))?;
+    /// Wake downstream walkers/watches after a committed frontier revision.
+    /// Notification is a wakeup only: durable state and cursors determine
+    /// what must be read.
+    pub(crate) fn notify_changed(&self) {
         self.frontier.notify_changed();
-        Ok(outcome)
     }
 }
 
@@ -638,15 +602,192 @@ impl DocFacetSetIndexStopToken {
 
 pub(crate) struct FacetSetMachineStopToken {
     cancel_token: CancellationToken,
-    worker_handle: Option<tokio::task::JoinHandle<()>>,
+    worker_handle: Option<tokio::task::JoinHandle<Res<()>>>,
 }
 
 impl FacetSetMachineStopToken {
     pub(crate) async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         if let Some(handle) = self.worker_handle.take() {
-            handle.await?;
+            handle.await??;
         }
+        Ok(())
+    }
+}
+
+// Keyed execution budget for the doc delta machine; mirrors the frontier
+// worker's concurrent budget.
+const FACET_SET_TASK_BUDGET: usize = 64;
+
+/// Scheduling key for one physical branch. Hash of the branch id: collisions
+/// only over-serialize a key, never break correctness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct DocDeltaKey(u64);
+
+fn doc_delta_key(branch_id: &BranchId) -> DocDeltaKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    branch_id.0.hash(&mut hasher);
+    DocDeltaKey(hasher.finish())
+}
+
+/// The merged keyed command for one branch: the newest delta with the source
+/// cursor it must cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FacetSetDeltaTask {
+    key: DocDeltaKey,
+    cursor: u64,
+    delta: DocDelta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FacetSetTaskOutput {
+    Applied,
+    /// The branch doc was not materialized yet; the task stays pending and
+    /// is re-driven by the materialization wake.
+    Deferred,
+}
+
+async fn run_facet_set_delta_task(
+    task: FacetSetDeltaTask,
+    drawer: Arc<DrawerRepo>,
+    store: Arc<FacetSetRevisionStore>,
+    memory: big_sync::SqliteDeltaWalkerStateRepo,
+) -> Res<FacetSetTaskOutput> {
+    // All hydration completes before the settlement transaction opens; the
+    // projection write and the memory advance then commit as one SQLite unit.
+    let Some(prepared) = store
+        .prepare_projection(&drawer, vec![task.delta.clone()])
+        .await?
+    else {
+        return Ok(FacetSetTaskOutput::Deferred);
+    };
+    let mut settlement = begin_settlement(&memory, &task.delta).await?;
+    store
+        .apply_projection_in_context(&prepared, settlement.context_mut())
+        .await?;
+    settlement.settle().await?;
+    store.notify_changed();
+    Ok(FacetSetTaskOutput::Applied)
+}
+
+/// The keyed doc delta machine: a `ConcurrentDeltaWalker` over the doc delta
+/// store, keyed by branch, with per-key projection tasks.
+struct FacetSetDeltaWorker<'a> {
+    drawer: Arc<DrawerRepo>,
+    store: Arc<FacetSetRevisionStore>,
+    /// The site memory (per-branch last heads) and the walker's durable
+    /// cursor share one state repo: different key spaces, same SQLite
+    /// connection, so projection writes and the memory advance commit
+    /// together.
+    memory: big_sync::SqliteDeltaWalkerStateRepo,
+    walker: ConcurrentDeltaWalker<
+        'a,
+        DocDeltaRevisionStore<AutomergeFrontierRevisionStore, big_sync::SqliteDeltaWalkerStateRepo>,
+        big_sync::SqliteDeltaWalkerStateRepo,
+        DocDeltaKey,
+    >,
+    tasks: TokioKeyedScheduler<DocDeltaKey, FacetSetDeltaTask, FacetSetTaskOutput>,
+    /// The newest unacked delta per key.
+    pending: HashMap<DocDeltaKey, FacetSetDeltaTask>,
+    /// Keys whose last task deferred; re-driven on materialization wakes.
+    deferred: BTreeSet<DocDeltaKey>,
+    wake: MaterializationWake,
+    cancel_token: CancellationToken,
+}
+
+impl<'a> FacetSetDeltaWorker<'a> {
+    async fn machine_loop(mut self) -> Res<()> {
+        loop {
+            let available = FACET_SET_TASK_BUDGET.saturating_sub(self.tasks.active_count());
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => return Ok(()),
+                completion = self.tasks.next_completion() => {
+                    self.on_task_completion(completion?).await?;
+                }
+                read = async {
+                    if available == 0 {
+                        std::future::pending().await
+                    } else {
+                        self.walker.next(available).await
+                    }
+                } => match read? {
+                    ConcurrentDeltaRead::ReplayComplete { .. } => {}
+                    ConcurrentDeltaRead::Entries { entries, .. } => {
+                        for delta in entries {
+                            self.on_delta(delta)?;
+                        }
+                    }
+                },
+                wake = self.wake.changed() => {
+                    // The wake channel closing means the drawer stopped;
+                    // the machine has no consumer left.
+                    wake?;
+                    // Spurious wakes are allowed: only deferred keys are
+                    // restarted, and a re-run is always idempotent.
+                    for key in std::mem::take(&mut self.deferred) {
+                        if let Some(task) = self.pending.get(&key) {
+                            if self.tasks.has_capacity_for(key) {
+                                self.start_task(task.clone())?;
+                            } else {
+                                self.deferred.insert(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn on_task_completion(
+        &mut self,
+        completion: TokioTaskCompletion<FacetSetDeltaTask, FacetSetTaskOutput>,
+    ) -> Res<()> {
+        let task = completion.command;
+        match completion.result? {
+            FacetSetTaskOutput::Applied => {
+                // The command's effect is durable; only now may the walker
+                // cursor advance past it.
+                self.walker.ack(task.key, task.cursor).await?;
+                self.deferred.remove(&task.key);
+                if self
+                    .pending
+                    .get(&task.key)
+                    .is_some_and(|t| t.cursor == task.cursor)
+                {
+                    self.pending.remove(&task.key);
+                }
+            }
+            FacetSetTaskOutput::Deferred => {
+                self.deferred.insert(task.key);
+            }
+        }
+        Ok(())
+    }
+
+    fn on_delta(&mut self, delta: ConcurrentDelta<DocDeltaKey, DocDelta>) -> Res<()> {
+        let task = FacetSetDeltaTask {
+            key: delta.key,
+            cursor: delta.cursor,
+            delta: delta.entry,
+        };
+        match self.pending.get(&delta.key) {
+            Some(existing) if existing.cursor >= task.cursor => return Ok(()),
+            _ => {}
+        }
+        self.pending.insert(task.key, task.clone());
+        self.start_task(task)
+    }
+
+    fn start_task(&mut self, task: FacetSetDeltaTask) -> Res<()> {
+        let future = run_facet_set_delta_task(
+            task.clone(),
+            Arc::clone(&self.drawer),
+            Arc::clone(&self.store),
+            self.memory.clone(),
+        );
+        self.tasks.replace(task.key, task.clone(), future)?;
         Ok(())
     }
 }
@@ -658,87 +799,43 @@ impl DocFacetSetIndexRepo {
         part_store: big_repo::SharedPartStore,
         parent_cancel_token: CancellationToken,
     ) -> Res<FacetSetMachineStopToken> {
-        let mut wake = drawer.subscribe_materialization_wake(None).await?;
-        let source = AutomergeFrontierRevisionStore::new(part_store);
-        let mut walker = DocDeltaWalker::<AutomergeFrontierRevisionStore, _, _>::new(
-            self.revision_store.input_state(),
-            Arc::clone(&drawer),
-        );
+        let wake = drawer.subscribe_materialization_wake(None).await?;
         let cancel_token = parent_cancel_token.child_token();
         let worker_cancel_token = cancel_token.clone();
         let worker_handle = tokio::spawn(async move {
-            let mut retry_deferred = false;
-            loop {
-                let after = walker.progress().await.unwrap();
-                let mut reader = DocDeltaWalker::<
-                    AutomergeFrontierRevisionStore,
-                    big_sync::SqliteDeltaWalkerStateRepo,
-                    Arc<DrawerRepo>,
-                >::open_source(
-                    &source,
-                    AutomergeFrontierSelector {
+            let source =
+                DocDeltaRevisionStore::new(AutomergeFrontierRevisionStore::new(part_store));
+            // The walker cursor and the site memory share one state repo:
+            // the progress table keys are disjoint from the per-branch
+            // memory keys. Legacy rows without the cursor key are replayed.
+            let state = self.revision_store.input_state();
+            let walker = ConcurrentDeltaWalker::open(
+                &source,
+                state.clone(),
+                DocDeltaSelector {
+                    memory: state.clone(),
+                    source: AutomergeFrontierSelector {
                         targets: vec![AutomergeFrontierTarget::Part {
                             part_id: big_repo::GLOBAL_PART_ID,
                         }],
                     },
-                    after,
-                )
-                .await
-                .unwrap();
-                let deferred = loop {
-                    let read = if retry_deferred {
-                        retry_deferred = false;
-                        tokio::select! {
-                            biased;
-                            _ = worker_cancel_token.cancelled() => return,
-                            read = walker.retry_deferred() => read,
-                        }
-                    } else {
-                        tokio::select! {
-                            biased;
-                            _ = worker_cancel_token.cancelled() => return,
-                            read = walker.next(&mut reader) => read,
-                        }
-                    };
-                    match read.unwrap() {
-                        DocDeltaWalkerRead::ReplayComplete { .. } => {}
-                        DocDeltaWalkerRead::Entries(prepared) => {
-                            let entries = prepared.deltas().to_vec();
-                            let projection = self
-                                .revision_store
-                                .prepare_projection(&drawer, entries)
-                                .await
-                                .unwrap();
-                            let Some(projection) = projection else {
-                                break true;
-                            };
-                            let mut settlement = walker.begin_settlement(prepared).await.unwrap();
-                            let outcome = self
-                                .revision_store
-                                .apply_projection_in_context(&projection, settlement.context_mut())
-                                .await
-                                .unwrap();
-                            if matches!(outcome, FacetSetApplyOutcome::Applied { .. }) {
-                                settlement.settle().await.unwrap();
-                                self.revision_store.frontier.notify_changed();
-                            } else {
-                                settlement.rollback().await.unwrap();
-                                break true;
-                            }
-                        }
-                        DocDeltaWalkerRead::Deferred { .. } => break true,
-                    }
-                };
-                if deferred {
-                    drop(reader);
-                    tokio::select! {
-                        biased;
-                        _ = worker_cancel_token.cancelled() => return,
-                        result = wake.wait() => result.unwrap(),
-                    }
-                    retry_deferred = true;
-                }
-            }
+                    filter: DocDeltaBranchFilter::All,
+                },
+                |delta: &DocDelta| doc_delta_key(&delta.branch_id),
+            )
+            .await?;
+            let worker = FacetSetDeltaWorker {
+                drawer,
+                store: Arc::clone(&self.revision_store),
+                memory: state,
+                walker,
+                tasks: TokioKeyedScheduler::new(FACET_SET_TASK_BUDGET),
+                pending: HashMap::new(),
+                deferred: BTreeSet::new(),
+                wake,
+                cancel_token: worker_cancel_token,
+            };
+            worker.machine_loop().await
         });
         Ok(FacetSetMachineStopToken {
             cancel_token,
@@ -748,17 +845,6 @@ impl DocFacetSetIndexRepo {
 
     pub(crate) fn revision_store(&self) -> Arc<FacetSetRevisionStore> {
         Arc::clone(&self.revision_store)
-    }
-
-    pub(crate) async fn apply_doc_delta_revision(
-        &self,
-        drawer: &DrawerRepo,
-        source_revision: u64,
-        entries: Vec<DocDelta>,
-    ) -> Res<FacetSetApplyOutcome> {
-        self.revision_store
-            .apply_doc_delta_revision(drawer, source_revision, entries)
-            .await
     }
 
     pub async fn boot(
@@ -1077,13 +1163,11 @@ mod tests {
         let system_heads = heads_of(system_doc_id.clone()).await?;
 
         let content_delta = DocDelta {
-            document_id: content_doc_id.clone(),
             branch_id: BranchId(content_doc_id.clone()),
             previous_heads: None,
             current_heads: Some(content_heads),
         };
         let system_delta = DocDelta {
-            document_id: system_doc_id.clone(),
             branch_id: BranchId(system_doc_id.clone()),
             previous_heads: None,
             current_heads: Some(system_heads),

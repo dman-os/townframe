@@ -1307,20 +1307,21 @@ where
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
-            let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
-            match self.has_doc_fetch_access(doc_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
-                    );
-                    return Ok(SyncDocAttempt::Policy(
-                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound,
-                    ));
-                }
-                Err(err) => {
-                    return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
-                }
-            }
+            // TEMP-HUNT: has_doc_fetch_access shortcircuit disabled — see below.
+            let _doc_id = crate::DocumentId::new(*sed_id.as_bytes());
+            // match self.has_doc_fetch_access(doc_id).await {
+            //     Ok(true) => {}
+            //     Ok(false) => {
+            //         debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
+            //         );
+            //         return Ok(SyncDocAttempt::Policy(
+            //             subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound,
+            //         ));
+            //     }
+            //     Err(err) => {
+            //         return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
+            //     }
+            // }
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
                 .subduction

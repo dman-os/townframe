@@ -151,19 +151,18 @@ pub fn spawn_automerge_frontier_worker(
             .await?;
             // The walker's source-wide durable revision is the replay lower
             // bound; the reader resolves the live part set on every read.
-            let parts =
-                ConcurrentDeltaWalker::open(&part_source, part_state, (), |event| {
-                    let doc_id = match event {
-                        SubEvent::Added(event) => event.obj_id,
-                        SubEvent::Changed(event) => event.obj_id,
-                        SubEvent::Removed(event) => event.obj_id,
-                        SubEvent::ReplayComplete => {
-                            unreachable!("replay completion has no part event key")
-                        }
-                    };
-                    FrontierKey::Document(automerge_obj_to_doc_id(doc_id))
-                })
-                .await?;
+            let parts = ConcurrentDeltaWalker::open(&part_source, part_state, (), |event| {
+                let doc_id = match event {
+                    SubEvent::Added(event) => event.obj_id,
+                    SubEvent::Changed(event) => event.obj_id,
+                    SubEvent::Removed(event) => event.obj_id,
+                    SubEvent::ReplayComplete => {
+                        unreachable!("replay completion has no part event key")
+                    }
+                };
+                FrontierKey::Document(automerge_obj_to_doc_id(doc_id))
+            })
+            .await?;
 
             let (local_registration, local_listener) = change_manager
                 .subscribe_local_listener(LocalFilter { doc_id: None })
@@ -179,7 +178,7 @@ pub fn spawn_automerge_frontier_worker(
                 parts,
                 _local_registration: local_registration,
                 local_listener,
-                tasks: crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler::new(
+                tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
                 pending_parts: HashMap::new(),
@@ -358,7 +357,9 @@ enum FrontierTask {
 
 #[derive(Debug)]
 enum ConcurrentTaskOutput {
-    Published { through: Option<u64> },
+    Published {
+        through: Option<u64>,
+    },
     /// The document is outside the worker's current group scope: no
     /// frontier state was written (stale mirror memberships were torn
     /// down), and the sources must settle so the walker cursor advances.
@@ -383,7 +384,7 @@ struct Worker<'a> {
         ConcurrentDeltaWalker<'a, LocalPartRevisionStore, SqliteDeltaWalkerStateRepo, FrontierKey>,
     _local_registration: crate::changes::LocalListenerRegistration,
     local_listener: tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
-    tasks: crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler<
+    tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<
         FrontierKey,
         FrontierTask,
         ConcurrentTaskOutput,
@@ -642,7 +643,7 @@ impl<'a> Worker<'a> {
 
     async fn on_task_completion(
         &mut self,
-        completion: crate::runtime2::tokio_keyed_scheduler::TokioTaskCompletion<
+        completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<
             FrontierTask,
             ConcurrentTaskOutput,
         >,
@@ -710,7 +711,13 @@ impl<'a> Worker<'a> {
             return true;
         };
         match through {
-            Some(through) if parts.values().copied().max().is_none_or(|max| max <= through) => {
+            Some(through)
+                if parts
+                    .values()
+                    .copied()
+                    .max()
+                    .is_none_or(|max| max <= through) =>
+            {
                 self.pending_parts.remove(&doc_id);
                 true
             }
@@ -779,7 +786,9 @@ async fn run_concurrent_frontier_task(
                     // frontier mirror so nothing stale is advertised to peers.
                     let am_obj_id = automerge_doc_obj_id(doc_id);
                     for part_id in frontier_store.obj_parts(am_obj_id).await? {
-                        frontier_store.remove_obj_from_part(am_obj_id, part_id).await?;
+                        frontier_store
+                            .remove_obj_from_part(am_obj_id, part_id)
+                            .await?;
                     }
                     return Ok(ConcurrentTaskOutput::OutOfScope);
                 }

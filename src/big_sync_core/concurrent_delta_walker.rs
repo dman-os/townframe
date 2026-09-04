@@ -221,7 +221,8 @@ where
 mod tests {
     use super::*;
     use crate::delta_walker_state::{
-        DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
+        DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo,
+        DeltaWalkerStateTransaction,
     };
     use std::sync::{Arc, Mutex};
 
@@ -259,21 +260,33 @@ mod tests {
             unreachable!("walker keeps no per-transaction context")
         }
 
-        async fn progress(&mut self) -> crate::delta_walker_state::DeltaWalkerStateResult<DeltaWalkerProgress> {
+        async fn progress(
+            &mut self,
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<DeltaWalkerProgress> {
             Ok(DeltaWalkerProgress {
                 upstream_revision: self.inner.lock().unwrap().progress,
             })
         }
 
-        async fn get(&mut self, _key: &[u8]) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
+        async fn get(
+            &mut self,
+            _key: &[u8],
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
             Ok(None)
         }
 
-        async fn put(&mut self, _key: Vec<u8>, _value: Vec<u8>) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
+        async fn put(
+            &mut self,
+            _key: Vec<u8>,
+            _value: Vec<u8>,
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
             Ok(())
         }
 
-        async fn delete(&mut self, _key: &[u8]) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
+        async fn delete(
+            &mut self,
+            _key: &[u8],
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
             Ok(())
         }
 
@@ -319,13 +332,18 @@ mod tests {
         where
             Self: 'a;
 
-        async fn progress(&self) -> crate::delta_walker_state::DeltaWalkerStateResult<DeltaWalkerProgress> {
+        async fn progress(
+            &self,
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<DeltaWalkerProgress> {
             Ok(DeltaWalkerProgress {
                 upstream_revision: self.inner.lock().unwrap().progress,
             })
         }
 
-        async fn get(&self, _key: &[u8]) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
+        async fn get(
+            &self,
+            _key: &[u8],
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
             Ok(None)
         }
 
@@ -336,7 +354,9 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn begin<'a>(&'a self) -> crate::delta_walker_state::DeltaWalkerStateResult<Self::Transaction<'a>> {
+        async fn begin<'a>(
+            &'a self,
+        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Self::Transaction<'a>> {
             Ok(MemoryStateTx {
                 inner: Arc::clone(&self.inner),
                 staged: None,
@@ -557,7 +577,10 @@ mod tests {
             else {
                 panic!("expected replayed entries");
             };
-            assert_eq!(entries.iter().map(|d| d.key).collect::<Vec<_>>(), vec![7, 8]);
+            assert_eq!(
+                entries.iter().map(|d| d.key).collect::<Vec<_>>(),
+                vec![7, 8]
+            );
         });
     }
 

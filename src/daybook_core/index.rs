@@ -1,5 +1,5 @@
 pub mod doc_blobs;
-pub(crate) mod doc_delta;
+pub(crate) mod doc_delta_store;
 pub(crate) mod facet_delta;
 pub mod facet_ref;
 pub mod facet_set;

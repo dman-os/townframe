@@ -6,7 +6,7 @@
 //! is spawned.
 
 use crate::interlude::*;
-use big_sync_core::scheduler::{KeyedScheduler, SpawnedTask, TaskId};
+use crate::scheduler::{KeyedScheduler, SpawnedTask, TaskId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
@@ -14,9 +14,9 @@ use std::time::Instant;
 
 #[derive(Debug)]
 pub struct TokioTaskCompletion<C, O> {
-    pub(crate) task_id: TaskId,
-    pub(crate) command: C,
-    pub(crate) result: Res<O>,
+    pub task_id: TaskId,
+    pub command: C,
+    pub result: Res<O>,
 }
 
 /// Physical execution of keyed commands with bounded concurrency.
@@ -24,7 +24,7 @@ pub struct TokioTaskCompletion<C, O> {
 /// `C` is treated as an already-merged command.  This scheduler deliberately
 /// does not merge it; that is the concurrent walker's responsibility because
 /// only the walker knows which source revisions the command covers.
-pub(crate) struct TokioKeyedScheduler<K, C, O>
+pub struct TokioKeyedScheduler<K, C, O>
 where
     K: Eq + Hash + Copy + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
@@ -44,7 +44,7 @@ where
     C: Clone + Send + Sync + 'static,
     O: Send + 'static,
 {
-    pub(crate) fn new(max_concurrent: usize) -> Self {
+    pub fn new(max_concurrent: usize) -> Self {
         assert!(max_concurrent > 0, "task budget must be non-zero");
         let (completion_tx, completion_rx) = tokio::sync::mpsc::channel(max_concurrent);
         Self {
@@ -57,11 +57,11 @@ where
         }
     }
 
-    pub(crate) fn active_count(&self) -> usize {
+    pub fn active_count(&self) -> usize {
         self.handles.len()
     }
 
-    pub(crate) fn has_capacity_for(&self, key: K) -> bool {
+    pub fn has_capacity_for(&self, key: K) -> bool {
         self.scheduler.active_task(key).is_some() || self.active_count() < self.max_concurrent
     }
 
@@ -69,7 +69,7 @@ where
     ///
     /// The caller supplies an already-merged command and its future.  The
     /// replacement path drains cancellation before spawning the new task.
-    pub(crate) fn replace<F>(&mut self, key: K, command: C, future: F) -> Res<TaskId>
+    pub fn replace<F>(&mut self, key: K, command: C, future: F) -> Res<TaskId>
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
@@ -93,12 +93,12 @@ where
         }
         Ok(task_id)
     }
-    pub(crate) fn cancel(&mut self, key: K) {
+    pub fn cancel(&mut self, key: K) {
         if self.scheduler.cancel(key).is_some() {
             self.abort_stopped();
         }
     }
-    pub(crate) async fn next_completion(&mut self) -> Res<TokioTaskCompletion<C, O>> {
+    pub async fn next_completion(&mut self) -> Res<TokioTaskCompletion<C, O>> {
         loop {
             let completion = self
                 .completion_rx

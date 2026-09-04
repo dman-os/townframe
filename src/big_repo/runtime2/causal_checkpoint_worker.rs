@@ -113,7 +113,7 @@ pub fn spawn_causal_checkpoint_worker(
                 runtime,
                 scope,
                 admission,
-                tasks: crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler::new(
+                tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
                 pending_admission: HashMap::new(),
@@ -178,8 +178,7 @@ struct Worker<'a> {
         SqliteDeltaWalkerStateRepo,
         FrontierKey,
     >,
-    tasks:
-        crate::runtime2::tokio_keyed_scheduler::TokioKeyedScheduler<FrontierKey, Task, TaskOutput>,
+    tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<FrontierKey, Task, TaskOutput>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
     outbox: Outbox<Cmd, ()>,
 }
@@ -280,7 +279,7 @@ impl<'a> Worker<'a> {
 
     async fn on_task_completion(
         &mut self,
-        completion: crate::runtime2::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
+        completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
     ) -> Res<()> {
         match (completion.command, completion.result?) {
             (Task::EnsureCoverage { doc_id, source }, TaskOutput::Covered)
@@ -295,7 +294,6 @@ impl<'a> Worker<'a> {
                     self.pending_admission.remove(&doc_id);
                 }
             }
-
         }
         Ok(())
     }
@@ -333,8 +331,7 @@ async fn run_task(
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
             if let Some(_) = scope.groups()
-                && !scope
-                    .admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await?)
+                && !scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await?)
             {
                 return Ok(TaskOutput::OutOfScope);
             }
