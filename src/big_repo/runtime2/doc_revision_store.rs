@@ -19,12 +19,14 @@ pub enum AutomergeFrontierEvent {
     Added {
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
+        causal_epoch: Option<[u8; 32]>,
         route: PartId,
         revision: u64,
     },
     Changed {
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
+        causal_epoch: Option<[u8; 32]>,
         routes: Vec<PartId>,
         revision: u64,
     },
@@ -65,9 +67,9 @@ impl AutomergeFrontierRevisionStore {
     }
 }
 
-pub struct Reader<'a> {
+pub struct Reader {
     inner: Box<dyn LocalPartRevisionReader>,
-    _store: &'a AutomergeFrontierRevisionStore,
+    _store: Arc<dyn HostPartStore>,
 }
 
 #[async_trait::async_trait]
@@ -76,7 +78,7 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
     type Entry = AutomergeFrontierEvent;
     type Selector = AutomergeFrontierSelector;
     type Error = eyre::Report;
-    type Reader<'a> = Reader<'a>;
+    type Reader<'a> = Reader;
 
     async fn latest_revision(&self) -> Result<Self::Revision, Self::Error> {
         self.store.latest_revision().await
@@ -110,16 +112,18 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
             .wrap_err("opening physical document revisions")??;
         Ok(Reader {
             inner,
-            _store: self,
+            _store: Arc::clone(&self.store),
         })
     }
 }
 
-fn doc_and_heads(
-    obj_id: ObjId,
-    payload: &ObjPayload,
-    revision: u64,
-) -> Res<(crate::DocumentId, Arc<[automerge::ChangeHash]>)> {
+type FrontierDocState = (
+    crate::DocumentId,
+    Arc<[automerge::ChangeHash]>,
+    Option<[u8; 32]>,
+);
+
+fn doc_and_heads(obj_id: ObjId, payload: &ObjPayload, revision: u64) -> Res<FrontierDocState> {
     let heads = payload
         .get("heads")
         .and_then(Value::as_array)
@@ -131,15 +135,22 @@ fn doc_and_heads(
                 .ok_or_else(|| ferr!("malformed physical frontier head"))
         })
         .collect::<Res<Vec<_>>>()?;
+    let causal_epoch = payload
+        .get("causal_epoch")
+        .map(|epoch| {
+            serde_json::from_value(epoch.clone()).wrap_err("invalid physical frontier epoch")
+        })
+        .transpose()?;
     Ok((
         automerge_obj_to_doc_id(obj_id),
         am_utils_rs::parse_commit_heads(&names)
             .wrap_err_with(|| format!("invalid frontier payload at revision {revision}"))?,
+        causal_epoch,
     ))
 }
 
 #[async_trait::async_trait]
-impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader<'_> {
+impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader {
     async fn next(
         &mut self,
         limits: RevisionReadLimits,
@@ -163,11 +174,13 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                             obj_id,
                             payload,
                         }) => {
-                            let (doc_id, heads) = doc_and_heads(obj_id, &payload, revision)
-                                .wrap_err("invalid physical document revision")?;
+                            let (doc_id, heads, causal_epoch) =
+                                doc_and_heads(obj_id, &payload, revision)
+                                    .wrap_err("invalid physical document revision")?;
                             out.push(AutomergeFrontierEvent::Added {
                                 doc_id,
                                 heads,
+                                causal_epoch,
                                 route: part_id,
                                 revision: cursor,
                             });
@@ -178,11 +191,21 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                             obj_id,
                             payload,
                         }) => {
-                            let (doc_id, heads) = doc_and_heads(obj_id, &payload, revision)
-                                .wrap_err("invalid physical document revision")?;
+                            // Object subscriptions also observe part-membership
+                            // removals. PartRevisionReader represents those as a
+                            // payload-less Changed event; it is route churn, not
+                            // an Automerge frontier payload. Do not feed it to
+                            // the frontier decoder.
+                            if payload.is_null() && part_ids.is_empty() {
+                                continue;
+                            }
+                            let (doc_id, heads, causal_epoch) =
+                                doc_and_heads(obj_id, &payload, revision)
+                                    .wrap_err("invalid physical document revision")?;
                             out.push(AutomergeFrontierEvent::Changed {
                                 doc_id,
                                 heads,
+                                causal_epoch,
                                 routes: part_ids,
                                 revision: cursor,
                             });
@@ -274,7 +297,7 @@ mod tests {
         };
         let mut reader = Reader {
             inner: Box::new(Scripted(reads)),
-            _store: &store,
+            _store: Arc::clone(&store.store),
         };
         let first = reader.next(RevisionReadLimits::default()).await?;
         assert!(
@@ -291,6 +314,46 @@ mod tests {
             matches!(reader.next(RevisionReadLimits::default()).await?, RevisionRead::Entries { revision: 5, entries } if entries.is_empty())
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn reader_ignores_object_subscription_route_removal_churn() -> Res<()> {
+        let obj = ObjId::new([9; 32]);
+        let reads = VecDeque::from([RevisionRead::Entries {
+            revision: 7,
+            entries: vec![SubEvent::Changed(ObjChanged {
+                cursor: 7,
+                part_ids: Vec::new(),
+                obj_id: obj,
+                payload: serde_json::Value::Null,
+            })],
+        }]);
+        let store = AutomergeFrontierRevisionStore {
+            store: Arc::new(big_sync::MemoryPartStore::default()),
+        };
+        let mut reader = Reader {
+            inner: Box::new(Scripted(reads)),
+            _store: Arc::clone(&store.store),
+        };
+        assert!(matches!(
+            reader.next(RevisionReadLimits::default()).await?,
+            RevisionRead::Entries { revision: 7, entries } if entries.is_empty()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn frontier_payload_preserves_causal_epoch() {
+        let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
+        let epoch = [7; 32];
+        let (_, parsed_heads, parsed_epoch) = doc_and_heads(
+            ObjId::new([7; 32]),
+            &serde_json::json!({ "heads": heads, "causal_epoch": epoch }),
+            1,
+        )
+        .expect("frontier payload must decode");
+        assert_eq!(parsed_heads.len(), 1);
+        assert_eq!(parsed_epoch, Some(epoch));
     }
 
     #[test]

@@ -185,12 +185,8 @@ pub async fn drawer_repo() -> Res<Arc<DrawerRepo>> {
                 Arc::clone(&plugs),
             )
             .await?;
-            // ADR 007 §2: the drawer is attached to the plugs repo inside
-            // DrawerRepo::load; only now can the core plug be ensured (it
-            // writes the config facet through the drawer). The one-shot CLI
-            // has no switch/notif loop, so materialize the cache from the
-            // config the same way the switch does at boot.
-            plugs.ensure_core_plug().await?;
+            // DrawerRepo::load attaches the drawer and boots PlugsRepo,
+            // including the core plug invariant, before returning here.
             register_shutdown(move || async move { drawer_stop.stop().await });
             Ok(drawer)
         })

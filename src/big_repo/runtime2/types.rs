@@ -170,6 +170,8 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     pub latest_keyhive_seq: std::sync::atomic::AtomicU64,
     #[educe(Debug(ignore))]
+    causal_epoch: std::sync::RwLock<Option<[u8; 32]>>,
+    #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
     #[educe(Debug(ignore))]
     _runtime2_lease: Option<crate::runtime2::DocLease>,
@@ -182,6 +184,7 @@ impl LiveDocBundle {
         lease: crate::runtime2::DocLease,
         partially_decrypted: bool,
         latest_keyhive_seq: u64,
+        causal_epoch: Option<[u8; 32]>,
     ) -> Self {
         Self {
             id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -190,6 +193,7 @@ impl LiveDocBundle {
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
             latest_keyhive_seq: std::sync::atomic::AtomicU64::new(latest_keyhive_seq),
+            causal_epoch: std::sync::RwLock::new(causal_epoch),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
             _runtime2_lease: Some(lease),
         }
@@ -224,6 +228,21 @@ impl LiveDocBundle {
     pub(crate) fn set_partially_decrypted(&self, partial: bool) {
         self.partially_decrypted
             .store(partial, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The current BeeKEM/PCS epoch observed while materializing this document.
+    pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
+        *self
+            .causal_epoch
+            .read()
+            .expect("bundle epoch lock poisoned")
+    }
+
+    pub(crate) fn update_causal_epoch(&self, epoch: Option<[u8; 32]>) {
+        *self
+            .causal_epoch
+            .write()
+            .expect("bundle epoch lock poisoned") = epoch;
     }
 
     pub fn update_keyhive_watermark(&self, seq: u64) {

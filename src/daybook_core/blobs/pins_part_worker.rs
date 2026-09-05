@@ -245,17 +245,15 @@ impl Ctx {
                 .cloned()
                 .unwrap_or_default();
             let mut next = prior.clone();
-            let mut seen_branch_heads = None;
+            // A keyed task can merge deltas from multiple source revisions. The
+            // route values are applied in source order, so the final delta carries
+            // the newest branch heads for the whole branch.
+            let branch_heads = deltas
+                .last()
+                .expect("grouped BlobPin deltas non-empty")
+                .current_branch_heads
+                .clone();
             for delta in deltas {
-                if let Some(seen) = &seen_branch_heads {
-                    if seen != &delta.current_branch_heads {
-                        return Err(ferr!(
-                            "BlobPin facet deltas disagree on branch heads in one revision"
-                        ));
-                    }
-                } else {
-                    seen_branch_heads = Some(delta.current_branch_heads.clone());
-                }
                 let Some(current) = &delta.current else {
                     next.remove(&delta.key.facet_key.id);
                     continue;
@@ -300,7 +298,7 @@ impl Ctx {
             prepared.push(PreparedBranchDelta {
                 document_id,
                 branch_id,
-                branch_heads: seen_branch_heads.expect("grouped BlobPin deltas non-empty"),
+                branch_heads,
                 prior,
                 next,
             });
@@ -505,7 +503,17 @@ async fn run_blob_pins_part_task(
         .map(|branch| branch.document_id.clone())
         .collect::<BTreeSet<_>>();
     let before = ctx.load_doc_states(&documents).await?;
+    tracing::debug!(
+        cursor = task.cursor,
+        prepared_branches = prepared.len(),
+        documents = ?documents,
+        "blob-pins-part part-store reconciliation starting"
+    );
     ctx.reconcile_part_store(&before, &prepared).await?;
+    tracing::debug!(
+        cursor = task.cursor,
+        "blob-pins-part part-store reconciliation finished; SQLite settlement pending"
+    );
     let mut tx = state
         .begin()
         .await
@@ -515,6 +523,10 @@ async fn run_blob_pins_part_task(
     tx.commit()
         .await
         .map_err(|error| ferr!("committing blob-pins-part settlement: {error}"))?;
+    tracing::debug!(
+        cursor = task.cursor,
+        "blob-pins-part SQLite settlement committed"
+    );
     Ok(BlobPinsPartTaskOutput::Applied)
 }
 
@@ -700,6 +712,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::facet_delta::{FacetRouteKey, FacetSnapshot};
     use crate::test_support::test_cx;
     use big_sync::DeltaWalkerStateRepo;
     use daybook_types::doc::{AddDocArgs, BlobPin, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
@@ -741,6 +754,133 @@ mod tests {
         .bind(doc_id)
         .fetch_all(&sql.read_pool)
         .await?)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_facet_deltas_accepts_merged_revisions_with_newest_heads() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let sql = test_context
+            .rt
+            .sqlite_local_state_repo
+            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .await?;
+        let ctx = Ctx {
+            part_store: Arc::clone(&test_context.rt.rcx.blob_part_store),
+            sql,
+        };
+        let blob_id_1 = crate::blobs::BlobId::random();
+        let blob_id_2 = crate::blobs::BlobId::random();
+        let hash_1 = blob_id_1.to_string();
+        let hash_2 = blob_id_2.to_string();
+        let key_pin_1 = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_1.clone(),
+        };
+        let key_pin_2 = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: hash_2.clone(),
+        };
+        let doc_id = test_context
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    key_pin_1.clone(),
+                    FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 150 })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        let branch_id = BranchId::from(doc_id.to_string());
+        let heads_1 = test_context
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("missing first branch heads")?;
+        let state_1 = test_context
+            .drawer_repo
+            .hydrate_dmeta_state_at_heads(&branch_id, heads_1.clone())
+            .await?
+            .ok_or_eyre("missing first dmeta state")?;
+        let (facet_heads_1, actor_id_1) = state_1
+            .facets
+            .get(&key_pin_1)
+            .cloned()
+            .ok_or_eyre("missing first BlobPin facet")?;
+        test_context
+            .drawer_repo
+            .update_at_heads(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        key_pin_2.clone(),
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 250 })),
+                    )]
+                    .into(),
+                    facets_remove: Vec::new(),
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+            )
+            .await?;
+        let heads_2 = test_context
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
+            .await?
+            .ok_or_eyre("missing second branch heads")?;
+        let state_2 = test_context
+            .drawer_repo
+            .hydrate_dmeta_state_at_heads(&branch_id, heads_2.clone())
+            .await?
+            .ok_or_eyre("missing second dmeta state")?;
+        let (facet_heads_2, actor_id_2) = state_2
+            .facets
+            .get(&key_pin_2)
+            .cloned()
+            .ok_or_eyre("missing second BlobPin facet")?;
+        let deltas = vec![
+            FacetDelta {
+                key: FacetRouteKey {
+                    document_id: doc_id.clone(),
+                    branch_id: branch_id.clone(),
+                    facet_key: key_pin_1.clone(),
+                },
+                current: Some(FacetSnapshot {
+                    branch_heads: heads_1.clone(),
+                    facet_heads: facet_heads_1,
+                    actor_id: actor_id_1,
+                }),
+                current_branch_heads: Some(heads_1),
+                removed_local: false,
+            },
+            FacetDelta {
+                key: FacetRouteKey {
+                    document_id: doc_id.clone(),
+                    branch_id,
+                    facet_key: key_pin_2,
+                },
+                current: Some(FacetSnapshot {
+                    branch_heads: heads_2.clone(),
+                    facet_heads: facet_heads_2,
+                    actor_id: actor_id_2,
+                }),
+                current_branch_heads: Some(heads_2.clone()),
+                removed_local: false,
+            },
+        ];
+        let Preparation::Ready(prepared) = ctx
+            .prepare_facet_deltas(&test_context.drawer_repo, &deltas)
+            .await?;
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].branch_heads, Some(heads_2));
+        assert_eq!(
+            prepared[0].next,
+            BTreeMap::from([(hash_1, 150_u64), (hash_2, 250_u64)])
+        );
+        test_context.stop().await?;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -914,6 +1054,12 @@ mod tests {
             )
             .await?;
         wait_for_partition_member_count(blob_part_store, part_id, 0).await?;
+        loop {
+            if list_hashes_for_doc(&sql, &doc_id).await?.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(
             list_hashes_for_doc(&sql, &doc_id).await?,
             Vec::<String>::new()

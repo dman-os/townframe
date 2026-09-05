@@ -29,6 +29,20 @@ impl PlugsRepo {
             .drawer
             .get()
             .ok_or_eyre("plugs repo drawer not attached")?;
+        // Never infer that the core config is absent from a temporarily
+        // unavailable config document. In particular, do not create another
+        // core manifest while reopen materialization is still pending.
+        let config_doc_id: big_repo::DocumentId = self.doc_config_id.parse()?;
+        match self.big_repo.get_doc(&config_doc_id).await? {
+            big_repo::DocLookup::Ready(_) => {}
+            big_repo::DocLookup::PendingMaterialization => {
+                eyre::bail!("plugs config document is pending materialization")
+            }
+            big_repo::DocLookup::Missing => {
+                eyre::bail!("plugs config document is missing")
+            }
+        }
+
         // Register the repo config doc in the drawer (idempotent) so the plugg
         // config facet writes go through the drawer like any facet write.
         drawer
@@ -134,12 +148,14 @@ impl PlugsRepo {
         } else {
             ref_url.clone()
         };
+        let _guard = self.mutation_mutex.lock().await;
         // ADR 007 §5 gate: an explicit activation must be valid and a
-        // valid upgrade of the last seen version.
+        // valid upgrade of the last seen version. Keep the gate under the
+        // mutation lock so the config consumer cannot replace its snapshot
+        // between the check and the write.
         if let Some(reason) = self.check_activation(&plug_id, &manifest, &ref_url).await? {
             eyre::bail!("activation rejected for {plug_id}: {reason}");
         }
-        let _guard = self.mutation_mutex.lock().await;
         // ADR 007 §2: the plug's config doc is created at enablement and the
         // mapping recorded in the config facet, so an enabled plug always has
         // a config doc. The mapping is retained across disablement (disable
@@ -609,6 +625,18 @@ impl PlugsRepo {
             .config_store()?
             .query_sync(|config| config.known_plugs.get(&plug_id).cloned())
             .await;
+        tracing::debug!(
+            %doc_id,
+            %plug_id,
+            incoming_version = %incoming_version,
+            ?heads,
+            track = ?track.as_ref().map(|track| (
+                track.latest_version.clone(),
+                track.last_enabled_version.clone(),
+                track.latest_rejection.is_some(),
+            )),
+            "recording manifest version in plugs config"
+        );
         if let Some(track) = &track
             && track.latest == ref_url
         {
@@ -679,6 +707,17 @@ impl PlugsRepo {
                 }
             })
             .await?;
+        let after = self
+            .config_store()?
+            .query_sync(|config| {
+                config.known_plugs.get(&plug_id).map(|track| (
+                    track.latest_version.clone(),
+                    track.last_enabled_version.clone(),
+                    track.latest_rejection.is_some(),
+                ))
+            })
+            .await;
+        tracing::debug!(%plug_id, ?after, "recorded manifest version in plugs config");
         match reason {
             None => {
                 surelock::key::lock_scope(|key| {

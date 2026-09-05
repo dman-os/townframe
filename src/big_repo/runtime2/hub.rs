@@ -827,6 +827,13 @@ where
             }
             Runtime2Cmd::WaitForKeyhiveReconciliation { resp } => {
                 let captured = self.admitted_head;
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    captured,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    active_keyhive_syncs = self.active_keyhive_syncs.len(),
+                    "keyhive reconciliation wait requested"
+                );
                 if self.group_part_settled_seq >= captured {
                     resp.send(Ok(()))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1654,10 +1661,25 @@ where
             }
             Runtime2Evt::KeyhiveAdmissionAdvanced { seq } => {
                 self.admitted_head = self.admitted_head.max(seq);
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    seq,
+                    admitted_head = self.admitted_head,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    "keyhive admission head advanced"
+                );
                 self.try_resolve_quiescence()?;
             }
             Runtime2Evt::GroupPartWorkerSettled { seq } => {
                 self.group_part_settled_seq = self.group_part_settled_seq.max(seq);
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    seq,
+                    admitted_head = self.admitted_head,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    waiters = self.keyhive_reconciliation_waiters.len(),
+                    "group-part settled admission watermark"
+                );
                 let mut pending = Vec::new();
                 for (captured, waiter) in std::mem::take(&mut self.keyhive_reconciliation_waiters) {
                     if self.group_part_settled_seq >= captured {
@@ -1720,7 +1742,7 @@ where
                             // this Pending may be stale; re-verify with the
                             // fresher key state (B6).
                             debug!(%doc_id, "re-verifying stale materialization retry");
-                            self.retry_doc_materialization(doc_id)?;
+                            self.retry_existing_doc_materialization(doc_id)?;
                         }
                     }
                     crate::runtime2::MaterializationStatus::Ready {
@@ -1752,23 +1774,22 @@ where
             Runtime2Evt::CgkaOp { data } => {
                 // Every CGKA op is a document key rotation.
                 let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
-                let was_pending = self.pending_materialization.contains(&doc_id);
+                let worker_present = self.doc_workers.contains_key(&doc_id);
                 debug!(
                     local_peer_id = %self.local_peer_id,
                     %doc_id,
-                    was_pending,
+                    worker_present,
                     pending_count = self.pending_materialization.len(),
-                    "processing CGKA operation; retrying pending materialization after key update"
+                    "processing CGKA operation; routing document materialization update"
                 );
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
-                // Targeted retry: only this doc's keys moved; live docs are
-                // not re-walked (B6).
-                if was_pending {
-                    self.retry_doc_materialization(doc_id)?;
-                }
+                // Route the per-document key update to an existing worker. The
+                // admission-driven AFW path handles cold documents; this path
+                // must never create a worker merely because Keyhive changed.
+                self.retry_existing_doc_materialization(doc_id)?;
             }
             Runtime2Evt::DelegationReceived { target, data } => {
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
@@ -1977,10 +1998,6 @@ where
     /// Start a keyhive sync round with `peer_id` if not already active.
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn start_keyhive_sync(&mut self, peer_id: PeerId) -> eyre::Result<()> {
-        self.start_keyhive_sync_round(peer_id)
-    }
-
-    fn start_keyhive_sync_round(&mut self, peer_id: PeerId) -> eyre::Result<()> {
         if self.active_keyhive_syncs.contains_key(&peer_id) {
             return Ok(());
         }
@@ -2108,12 +2125,12 @@ where
         request_id: subduction_keyhive::message::RequestId,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
-            debug!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
+            warn!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
             self.reattempt_pending_materialization()?;
             return Ok(());
         };
         if round.request_id != request_id {
-            debug!(
+            warn!(
                 %peer_id,
                 expected_request_id = ?round.request_id,
                 request_id = ?request_id,
@@ -2206,18 +2223,30 @@ where
     /// acks the worker's status back through `DocWorkerMaterializationRetryCompleted`,
     /// where a stale `Pending` (state advanced while the walk ran) re-verifies.
     fn retry_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        let (worker, lease) = self.doc_worker_handle(doc_id)?;
+        self.send_materialization_retry(doc_id, worker, lease)
+    }
+
+    /// CGKA notifications are routed only to workers that already exist. Cold
+    /// documents are admitted and materialized by AFW instead of being spawned
+    /// merely because a keyhive operation arrived.
+    fn retry_existing_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        let Some((worker, lease)) = self.acquire_existing_doc_worker_handle(doc_id)? else {
+            debug!(%doc_id, "skipping materialization retry without an existing document worker");
+            return Ok(());
+        };
+        self.send_materialization_retry(doc_id, worker, lease)
+    }
+
+    fn send_materialization_retry(
+        &mut self,
+        doc_id: DocumentId,
+        worker: DocWorkerHandle,
+        lease: DocWorkerInternalLease,
+    ) -> eyre::Result<()> {
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
             return Ok(());
         }
-        let (worker, _lease) = match self.doc_worker_handle(doc_id) {
-            Ok(pair) => pair,
-            Err(_) => {
-                debug!(%doc_id, "dropping pending materialization without document worker");
-                self.pending_materialization.remove(&doc_id);
-                self.schedule_doc_worker_eviction_if_idle(doc_id);
-                return Ok(());
-            }
-        };
         let start_seq = self.admitted_head;
         self.materialization_retries_in_flight
             .insert(doc_id, start_seq);
@@ -2231,7 +2260,7 @@ where
             origin: crate::changes::BigRepoChangeOrigin::Keyhive,
             keyhive_seq: None,
             resp,
-            _lease,
+            _lease: lease,
         }) {
             self.materialization_retries_in_flight.remove(&doc_id);
             return Err(error).wrap_err(ERROR_CHANNEL);

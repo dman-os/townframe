@@ -1,5 +1,9 @@
 use crate::interlude::*;
 use big_repo::BigRepoLocalFilter;
+use big_repo::{AutomergeFrontierEvent, AutomergeFrontierSelector, AutomergeFrontierTarget};
+use big_sync_core::revisioned_store::{
+    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
+};
 
 use super::{DrawerRepo, MaterializationWake};
 
@@ -12,9 +16,165 @@ use automerge::ReadDoc;
 use daybook_types::doc::{
     BranchId, ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
+use std::collections::{BTreeSet, HashMap, VecDeque};
+
+/// A Drawer-owned view of AFW materialization publications.
+///
+/// The underlying AFW stream is cursor-based because it is also used as a
+/// durable revision source. Drawer consumers should not manage that cursor:
+/// this reader owns its replay lower bound and suppresses duplicate wakeups
+/// when its object subscription is reopened with a changed document set.
+pub(crate) struct DrawerMaterializationReader {
+    source: big_repo::AutomergeFrontierRevisionStore,
+    documents: Option<BTreeSet<DocId>>,
+    reader: Box<dyn RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report>>,
+    lower_bound: u64,
+    last_seen: HashMap<DocId, u64>,
+    pending: VecDeque<DrawerMaterializationChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DrawerMaterializationChange {
+    pub(crate) doc_id: DocId,
+    pub(crate) heads: Arc<[automerge::ChangeHash]>,
+    pub(crate) causal_epoch: Option<[u8; 32]>,
+    pub(crate) revision: u64,
+}
+
+impl DrawerMaterializationReader {
+    fn record_new_revision(
+        last_seen: &mut HashMap<DocId, u64>,
+        doc_id: &DocId,
+        revision: u64,
+    ) -> bool {
+        if last_seen.get(doc_id).is_some_and(|seen| *seen >= revision) {
+            return false;
+        }
+        last_seen.insert(doc_id.clone(), revision);
+        true
+    }
+
+    async fn open_reader(
+        source: &big_repo::AutomergeFrontierRevisionStore,
+        documents: Option<&BTreeSet<DocId>>,
+        lower_bound: u64,
+    ) -> Res<Box<dyn RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report>>> {
+        let targets = if let Some(documents) = documents {
+            let mut targets = Vec::with_capacity(documents.len());
+            for doc_id in documents {
+                let doc_id = doc_id.parse::<big_repo::DocumentId>()?;
+                targets.push(AutomergeFrontierTarget::Object {
+                    obj_id: big_repo::automerge_doc_obj_id(doc_id),
+                });
+            }
+            targets
+        } else {
+            vec![AutomergeFrontierTarget::Part {
+                part_id: big_repo::GLOBAL_PART_ID,
+            }]
+        };
+        Ok(Box::new(
+            source
+                .open(AutomergeFrontierSelector { targets }, lower_bound)
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn open(drawer: &DrawerRepo, documents: Option<BTreeSet<DocId>>) -> Res<Self> {
+        let source =
+            big_repo::AutomergeFrontierRevisionStore::new(drawer.big_repo.frontier_part_store());
+        let reader = Self::open_reader(&source, documents.as_ref(), 0).await?;
+        Ok(Self {
+            source,
+            documents,
+            reader,
+            lower_bound: 0,
+            last_seen: HashMap::new(),
+            pending: VecDeque::new(),
+        })
+    }
+
+    /// Reopen the object subscription without exposing its cursor to callers.
+    /// The per-document revision map prevents replaying an old publication for
+    /// a document that is newly added to the selection.
+    pub(crate) async fn set_documents(&mut self, documents: Option<BTreeSet<DocId>>) -> Res<()> {
+        if self.documents == documents {
+            return Ok(());
+        }
+        // Object targets share the request lower bound, so reopening at the
+        // current global bound would hide the latest state of newly-added
+        // documents. Replay from the beginning and let last_seen deduplicate
+        // documents that were already selected.
+        self.reader = Self::open_reader(&self.source, documents.as_ref(), 0).await?;
+        self.documents = documents;
+        self.pending.clear();
+        Ok(())
+    }
+
+    pub(crate) async fn next(&mut self) -> Res<DrawerMaterializationChange> {
+        loop {
+            if let Some(change) = self.pending.pop_front() {
+                return Ok(change);
+            }
+            match self.reader.next(RevisionReadLimits::default()).await? {
+                RevisionRead::ReplayComplete { through } => {
+                    self.lower_bound = self.lower_bound.max(through);
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    self.lower_bound = self.lower_bound.max(revision);
+                    for event in entries {
+                        let change = match event {
+                            AutomergeFrontierEvent::Added {
+                                doc_id,
+                                heads,
+                                causal_epoch,
+                                revision,
+                                ..
+                            }
+                            | AutomergeFrontierEvent::Changed {
+                                doc_id,
+                                heads,
+                                causal_epoch,
+                                revision,
+                                ..
+                            } => DrawerMaterializationChange {
+                                doc_id: doc_id.to_string(),
+                                heads,
+                                causal_epoch,
+                                revision,
+                            },
+                            AutomergeFrontierEvent::Removed { .. } => continue,
+                        };
+                        if !Self::record_new_revision(
+                            &mut self.last_seen,
+                            &change.doc_id,
+                            change.revision,
+                        ) {
+                            continue;
+                        }
+                        self.pending.push_back(change);
+                    }
+                }
+            }
+        }
+    }
+}
 
 // queries
 impl DrawerRepo {
+    /// Open the AFW-backed materialization stream used by Drawer projections.
+    ///
+    /// `None` selects the whole frontier partition. A document set uses
+    /// object subscriptions and can be changed later through
+    /// `DrawerMaterializationReader::set_documents` without exposing AFW
+    /// cursors to the caller.
+    pub(crate) async fn open_materialization_reader(
+        &self,
+        documents: Option<BTreeSet<DocId>>,
+    ) -> Res<DrawerMaterializationReader> {
+        DrawerMaterializationReader::open(self, documents).await
+    }
+
     pub(crate) async fn subscribe_document_materialization(
         &self,
         physical_branch_id: &BranchId,
@@ -55,7 +215,22 @@ impl DrawerRepo {
         let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
         let handle = match self.big_repo.get_doc(&physical_id).await? {
             big_repo::DocLookup::Ready(handle) => handle,
-            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+            big_repo::DocLookup::PendingMaterialization => {
+                tracing::debug!(
+                    ?physical_branch_id,
+                    lookup = "PendingMaterialization",
+                    op = "resolve_system_branch_identity_at_heads",
+                    "branch identity deferred until document materializes"
+                );
+                return Ok(BranchIdentityResolution::Deferred);
+            }
+            big_repo::DocLookup::Missing => {
+                tracing::warn!(
+                    ?physical_branch_id,
+                    lookup = "Missing",
+                    op = "resolve_system_branch_identity_at_heads",
+                    "branch identity deferred because branch document is missing"
+                );
                 return Ok(BranchIdentityResolution::Deferred);
             }
         };
@@ -111,7 +286,22 @@ impl DrawerRepo {
         let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
         let handle = match self.big_repo.get_doc(&physical_id).await? {
             big_repo::DocLookup::Ready(handle) => handle,
-            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+            big_repo::DocLookup::PendingMaterialization => {
+                tracing::debug!(
+                    ?physical_branch_id,
+                    lookup = "PendingMaterialization",
+                    op = "hydrate_dmeta_state_at_heads",
+                    "dmeta hydration deferred until document materializes"
+                );
+                return Ok(None);
+            }
+            big_repo::DocLookup::Missing => {
+                tracing::warn!(
+                    ?physical_branch_id,
+                    lookup = "Missing",
+                    op = "hydrate_dmeta_state_at_heads",
+                    "dmeta hydration unavailable because branch document is missing"
+                );
                 return Ok(None);
             }
         };
@@ -871,5 +1061,41 @@ impl DrawerRepo {
                 crate::drawer::facet_recovery::facet_write_points(am_doc, facet_key, from, to)
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod materialization_reader_tests {
+    use super::DrawerMaterializationReader;
+    use std::collections::HashMap;
+
+    #[test]
+    fn per_document_revisions_are_deduplicated() {
+        let mut last_seen = HashMap::new();
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            7,
+        ));
+        assert!(!DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            7,
+        ));
+        assert!(!DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            6,
+        ));
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            8,
+        ));
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-b".to_owned(),
+            7,
+        ));
     }
 }

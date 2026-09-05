@@ -191,17 +191,12 @@ pub(crate) struct FacetSetRevisionStore {
     input_state: big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FacetSetApplyOutcome {
-    Applied { revision: u64 },
-    Deferred,
-}
-
 struct PreparedFacetSetProjection {
     desired: BTreeMap<FacetRouteKey, FacetSnapshot>,
     affected: BTreeSet<(DocId, String)>,
     branch_heads: BTreeMap<(DocId, String), Option<ChangeHashSet>>,
     removed_local: BTreeSet<(DocId, String, FacetKey)>,
+    settled_current_heads: Option<ChangeHashSet>,
 }
 
 impl FacetSetRevisionStore {
@@ -245,34 +240,98 @@ impl FacetSetRevisionStore {
         let mut affected = BTreeSet::<(DocId, String)>::new();
         let mut branch_heads = BTreeMap::<(DocId, String), Option<ChangeHashSet>>::new();
         let mut removed_local = BTreeSet::new();
+        let mut settled_current_heads = None;
         for delta in entries {
-            let Some(heads) = delta.current_heads.as_ref() else {
-                eyre::bail!("projection cannot run on un-hydrated deltas");
+            let Some(event_heads) = delta.current_heads.as_ref() else {
+                // A removed branch has no current heads. Its previous heads
+                // still identify the logical branch so the old projection can
+                // be removed without hydrating a deleted document.
+                let Some(previous_heads) = delta.previous_heads.as_ref() else {
+                    eyre::bail!("projection cannot identify removed branch without previous heads");
+                };
+                let identity = match drawer
+                    .resolve_system_branch_identity_at_heads(&delta.branch_id, previous_heads)
+                    .await?
+                {
+                    BranchIdentityResolution::Found(identity) => identity,
+                    BranchIdentityResolution::Ignored
+                    | BranchIdentityResolution::ImportedHistory => continue,
+                    BranchIdentityResolution::Deferred => {
+                        return Ok(None);
+                    }
+                };
+                let branch_key = (identity.document_id.clone(), delta.branch_id.0.clone());
+                if !affected.insert(branch_key.clone()) {
+                    return Err(ferr!("duplicate DocDelta branch in one source revision"));
+                }
+                branch_heads.insert(branch_key, None);
+                continue;
             };
+
+            // The frontier event's heads are the source transition, not
+            // necessarily the latest materialized version of the document.
+            // Hydrate the latest version so one projection task accounts for
+            // all changes already visible to the drawer, and settle sparse
+            // memory to those heads atomically with the projection.
+            // Do not project an older drawer snapshot when the source event's
+            // heads have arrived before the branch document. The latest-head
+            // lookup below can still return the old heads in that window.
+            match drawer
+                .resolve_system_branch_identity_at_heads(&delta.branch_id, event_heads)
+                .await?
+            {
+                BranchIdentityResolution::Deferred => {
+                    tracing::debug!(
+                        branch_id = %delta.branch_id.0,
+                        event_heads = ?event_heads,
+                        "facet-set projection deferred until source heads materialize"
+                    );
+                    return Ok(None);
+                }
+                BranchIdentityResolution::Ignored | BranchIdentityResolution::ImportedHistory => {
+                    continue;
+                }
+                BranchIdentityResolution::Found(_) => {}
+            }
+            let physical_id = delta.branch_id.0.parse::<big_repo::DocumentId>()?;
+            let Some(latest_heads) = drawer
+                .get_branch_heads_by_doc_id(physical_id)
+                .await?
+            else {
+                tracing::debug!(
+                    branch_id = %delta.branch_id.0,
+                    event_heads = ?event_heads,
+                    "facet-set projection deferred until document heads materialize"
+                );
+                return Ok(None);
+            };
+            tracing::debug!(
+                branch_id = %delta.branch_id.0,
+                event_heads = ?event_heads,
+                latest_heads = ?latest_heads,
+                heads_advanced = event_heads != &latest_heads,
+                "facet-set projecting latest materialized document heads"
+            );
+            settled_current_heads = Some(latest_heads.clone());
+
             // TEMPORARY system-doc filter: the walker source reads
             // GLOBAL_PART_ID, which mirrors every known Automerge object -
             // including system docs (app_doc, drawer_doc, config doc, plug
             // manifest docs) that have not been migrated to the facet-based
             // format yet and carry no Branch facet. Only content docs may be
-            // projected here, so resolve the identity at the delta's heads and
-            // skip everything else. A genuinely corrupted content doc whose
-            // Branch facet is missing at projection time is silently skipped
-            // instead of erroring; accepted tradeoff for the temporary hack.
-            // The real fix is routing the doc delta source through a
-            // content-doc group part instead of GLOBAL_PART_ID, after which
-            // this resolution disappears.
+            // projected here, so resolve the identity at the latest materialized
+            // heads and skip everything else. The real fix is routing the doc
+            // delta source through a content-doc group part instead of
+            // GLOBAL_PART_ID, after which this resolution disappears.
             let identity = match drawer
-                .resolve_system_branch_identity_at_heads(&delta.branch_id, heads)
+                .resolve_system_branch_identity_at_heads(&delta.branch_id, &latest_heads)
                 .await?
             {
                 BranchIdentityResolution::Ignored | BranchIdentityResolution::ImportedHistory => {
                     continue;
                 }
                 BranchIdentityResolution::Deferred => {
-                    eyre::bail!(
-                        "facet-set source event heads are not materialized for branch {}",
-                        delta.branch_id.0
-                    )
+                    return Ok(None);
                 }
                 BranchIdentityResolution::Found(identity) => identity,
             };
@@ -280,15 +339,17 @@ impl FacetSetRevisionStore {
             if !affected.insert(branch_key.clone()) {
                 return Err(ferr!("duplicate DocDelta branch in one source revision"));
             }
-            branch_heads.insert(branch_key, delta.current_heads.clone());
+            branch_heads.insert(branch_key, Some(latest_heads.clone()));
             let Some(state) = drawer
-                .hydrate_dmeta_state_at_heads(&delta.branch_id, heads.clone())
+                .hydrate_dmeta_state_at_heads(&delta.branch_id, latest_heads.clone())
                 .await?
             else {
-                eyre::bail!(
-                    "facet-set source event heads have no materialized dmeta for branch {}",
-                    delta.branch_id.0
+                tracing::warn!(
+                    branch_id = %delta.branch_id.0,
+                    latest_heads = ?latest_heads,
+                    "facet-set latest document disappeared before dmeta hydration"
                 );
+                return Ok(None);
             };
             if state.document_id != identity.document_id {
                 return Err(ferr!("dmeta state identity does not match Branch facet"));
@@ -331,6 +392,7 @@ impl FacetSetRevisionStore {
             affected,
             branch_heads,
             removed_local,
+            settled_current_heads,
         }))
     }
 
@@ -342,7 +404,7 @@ impl FacetSetRevisionStore {
         &self,
         prepared: &PreparedFacetSetProjection,
         tx: &mut Transaction<'_, Sqlite>,
-    ) -> Res<FacetSetApplyOutcome> {
+    ) -> Res<()> {
         let old_keys = load_route_keys(tx, &prepared.affected).await?;
         let mut mutations = Vec::new();
         for key in old_keys
@@ -397,13 +459,12 @@ impl FacetSetRevisionStore {
 
         delete_routes(tx, &prepared.affected).await?;
         insert_routes(tx, &prepared.desired).await?;
-        let revision = self
-            .frontier
+        self.frontier
             .apply_in_context(tx, mutations)
             .await
             .map_err(|error| ferr!("applying facet-set frontier: {error}"))?;
 
-        Ok(FacetSetApplyOutcome::Applied { revision })
+        Ok(())
     }
 
     /// Wake downstream walkers/watches after a committed frontier revision.
@@ -626,6 +687,7 @@ struct FacetSetDeltaTask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FacetSetTaskOutput {
     Applied,
+    Deferred,
 }
 
 async fn run_facet_set_delta_task(
@@ -634,13 +696,24 @@ async fn run_facet_set_delta_task(
     store: Arc<FacetSetRevisionStore>,
     memory: big_sync::SqliteDeltaWalkerStateRepo,
 ) -> Res<FacetSetTaskOutput> {
+    if task.delta.epoch_only {
+        begin_settlement(&memory, &task.delta)
+            .await?
+            .settle()
+            .await?;
+        return Ok(FacetSetTaskOutput::Applied);
+    }
     // All hydration completes before the settlement transaction opens; the
     // projection write and the memory advance then commit as one SQLite unit.
-    let prepared = store
+    let Some(prepared) = store
         .prepare_projection(&drawer, vec![task.delta.clone()])
         .await?
-        .expect("facet-set projection preparation must produce a projection");
-    let mut settlement = begin_settlement(&memory, &task.delta).await?;
+    else {
+        return Ok(FacetSetTaskOutput::Deferred);
+    };
+    let mut settled_delta = task.delta.clone();
+    settled_delta.current_heads = prepared.settled_current_heads.clone();
+    let mut settlement = begin_settlement(&memory, &settled_delta).await?;
     store
         .apply_projection_in_context(&prepared, settlement.context_mut())
         .await?;
@@ -682,22 +755,56 @@ impl DocFacetSetIndexRepo {
         })
         .await?;
         let mut tasks = TokioKeyedScheduler::new(FACET_SET_TASK_BUDGET);
+        // One AFW-backed reader avoids one BigRepo listener per parked branch;
+        // its Drawer wrapper owns the frontier cursor and per-document dedup.
+        let mut materialization_wake = drawer.open_materialization_reader(None).await?;
         // The newest unacked delta per key.
         let mut pending: HashMap<DocDeltaKey, FacetSetDeltaTask> = HashMap::new();
+        // A materialization wake can race with task completion. Remember wakes
+        // observed while a key is still active and consume them after parking.
+        let mut pending_wakes = BTreeSet::new();
         loop {
             let available = FACET_SET_TASK_BUDGET.saturating_sub(tasks.active_count());
             let next_deadline = tasks.next_deadline();
             tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => return Ok(()),
+                change = materialization_wake.next() => {
+                    let change = change?;
+                    let key = doc_delta_key(&BranchId(change.doc_id.to_string()));
+                    if let Some(task) = pending.get(&key).cloned() {
+                        let future = run_facet_set_delta_task(
+                            task.clone(),
+                            Arc::clone(&drawer),
+                            Arc::clone(&self.revision_store),
+                            state.clone(),
+                        );
+                        if !tasks.wake(key, future)? {
+                            pending_wakes.insert(key);
+                        }
+                    }
+                }
                 completion = tasks.next_completion() => {
-                    self.on_task_completion(
-                        &mut walker,
-                        &mut tasks,
-                        &mut pending,
-                        completion?,
-                    )
-                    .await?
+                    if let Some(task) = self
+                        .on_task_completion(
+                            &mut walker,
+                            &mut tasks,
+                            &mut pending,
+                            &mut pending_wakes,
+                            completion?,
+                        )
+                        .await?
+                        && pending_wakes.remove(&task.key)
+                    {
+                        let key = task.key;
+                        let future = run_facet_set_delta_task(
+                            task,
+                            Arc::clone(&drawer),
+                            Arc::clone(&self.revision_store),
+                            state.clone(),
+                        );
+                        tasks.wake(key, future)?;
+                    }
                 }
                 read = async {
                     if available == 0 {
@@ -747,11 +854,13 @@ impl DocFacetSetIndexRepo {
         >,
         tasks: &mut TokioKeyedScheduler<DocDeltaKey, FacetSetDeltaTask, FacetSetTaskOutput>,
         pending: &mut HashMap<DocDeltaKey, FacetSetDeltaTask>,
+        pending_wakes: &mut BTreeSet<DocDeltaKey>,
         completion: TokioTaskCompletion<FacetSetDeltaTask, FacetSetTaskOutput>,
-    ) -> Res<()> {
+    ) -> Res<Option<FacetSetDeltaTask>> {
         let task = completion.command;
         match completion.result {
             Ok(FacetSetTaskOutput::Applied) => {
+                pending_wakes.remove(&task.key);
                 // The command's effect is durable; only now may the walker
                 // cursor advance past it.
                 walker.ack(task.key, task.cursor).await?;
@@ -761,10 +870,16 @@ impl DocFacetSetIndexRepo {
                 {
                     pending.remove(&task.key);
                 }
+                Ok(None)
+            }
+            Ok(FacetSetTaskOutput::Deferred) => {
+                // Keep the source cursor and command pending until AFW
+                // publishes that this branch can be materialized.
+                tasks.park(task.key, task.clone());
+                Ok(Some(task))
             }
             Err(error) => panic!("facet-set task failed: {error:?}"),
         }
-        Ok(())
     }
 
     fn on_delta(
@@ -775,14 +890,26 @@ impl DocFacetSetIndexRepo {
         pending: &mut HashMap<DocDeltaKey, FacetSetDeltaTask>,
         delta: ConcurrentDelta<DocDeltaKey, DocDelta>,
     ) -> Res<()> {
-        let task = FacetSetDeltaTask {
+        let mut task = FacetSetDeltaTask {
             key: delta.key,
             cursor: delta.cursor,
             delta: delta.entry,
         };
-        match pending.get(&delta.key) {
-            Some(existing) if existing.cursor >= task.cursor => return Ok(()),
-            _ => {}
+        if let Some(existing) = pending.get(&delta.key)
+            && existing.cursor >= task.cursor
+        {
+            return Ok(());
+        }
+        if task.delta.epoch_only
+            && let Some(existing) = pending.get(&delta.key)
+        {
+            // An epoch-only event must not replace a parked head transition.
+            // Advance that transition's settlement cursor and epoch instead. If
+            // there is no projection pending, the fast path settles directly.
+            let mut merged = existing.clone();
+            merged.cursor = task.cursor;
+            merged.delta.current_causal_epoch = task.delta.current_causal_epoch;
+            task = merged;
         }
         pending.insert(task.key, task.clone());
         self.start_task(drawer, state, tasks, task)
@@ -1155,11 +1282,17 @@ mod tests {
             branch_id: BranchId(content_doc_id.clone()),
             previous_heads: None,
             current_heads: Some(content_heads),
+            previous_causal_epoch: None,
+            current_causal_epoch: None,
+            epoch_only: false,
         };
         let system_delta = DocDelta {
             branch_id: BranchId(system_doc_id.clone()),
             previous_heads: None,
             current_heads: Some(system_heads),
+            previous_causal_epoch: None,
+            current_causal_epoch: None,
+            epoch_only: false,
         };
 
         let projection = store

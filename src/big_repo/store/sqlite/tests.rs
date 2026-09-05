@@ -1547,6 +1547,30 @@ async fn sqlite_big_repo_admission_log_appends_dedups_and_replays() -> Res<()> {
 }
 
 #[tokio::test]
+async fn sqlite_big_repo_admission_log_sequences_cross_chunk_boundary() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store =
+        SqliteBigRepoStore::new(sql, "keyhive-admission-chunk-boundary", BuckId::MAX_LEVEL)
+            .await?;
+    let mut hashes = Vec::new();
+    for n in 0..=160u8 {
+        let hash = subduction_keyhive::storage::StorageHash::new([n; 32]);
+        store.save_keyhive_event(hash, vec![n], None).await?;
+        hashes.push(hash);
+    }
+
+    assert_eq!(store.append_admitted_events(hashes, None).await?, 161);
+
+    let rows = store.admission_events_after(0, 200).await?;
+    assert_eq!(rows.len(), 161);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.seq, u64::try_from(index + 1).expect(ERROR_IMPOSSIBLE));
+        assert_eq!(row.bytes, vec![u8::try_from(index).expect(ERROR_IMPOSSIBLE)]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_big_repo_admission_fault_leaves_reconciliation_candidate() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-admission-fault", BuckId::MAX_LEVEL).await?;

@@ -46,6 +46,7 @@ where
         state: DocState::Unloaded,
         partially_decrypted: false,
         latest_keyhive_seq: 0,
+        causal_epoch: None,
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
         io,
@@ -148,6 +149,8 @@ struct DocWorker2<F: FutureForm> {
     /// Latest durable Keyhive admission incorporated into this worker's
     /// materialized document state.
     latest_keyhive_seq: u64,
+    /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
+    causal_epoch: Option<[u8; 32]>,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -435,6 +438,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .persist_initial_document(self.sed_id, staged, initial_keys)
             .await?;
 
+        self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
@@ -447,6 +451,7 @@ impl<F: FutureForm> DocWorker2<F> {
             ),
             false,
             self.latest_keyhive_seq,
+            self.causal_epoch,
         ));
 
         self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -501,6 +506,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 else {
                     unreachable!();
                 };
+                self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
@@ -511,6 +517,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     ),
                     self.partially_decrypted,
                     self.latest_keyhive_seq,
+                    self.causal_epoch,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -643,6 +650,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
             DocState::Transient(doc) => {
+                self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
@@ -653,6 +661,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     ),
                     self.partially_decrypted,
                     self.latest_keyhive_seq,
+                    self.causal_epoch,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -672,6 +681,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.blocked_refs = blocked_refs.into_iter().collect();
                         self.causal_checkpoints.extend(causal_checkpoints);
                         self.sync_partial_state().await?;
+                        self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                         let bundle = Arc::new(LiveDocBundle::new(
                             self.doc_id,
                             doc,
@@ -682,6 +692,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             ),
                             partially_decrypted,
                             self.latest_keyhive_seq,
+                            self.causal_epoch,
                         ));
                         self.state = DocState::Live(Arc::downgrade(&bundle));
                         self.register_bundle_lease().await?;
@@ -1757,6 +1768,8 @@ impl<F: FutureForm> DocWorker2<F> {
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");
             }
+            self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
+            bundle.update_causal_epoch(self.causal_epoch);
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,

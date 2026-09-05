@@ -1158,6 +1158,11 @@ impl BigDocHandle {
         self.bundle.is_partially_decrypted()
     }
 
+    /// The current BeeKEM/PCS epoch observed by this document handle.
+    pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
+        self.bundle.current_causal_epoch()
+    }
+
     pub async fn with_document_read<F, R>(&self, operation: F) -> R
     where
         F: FnOnce(&automerge::Automerge) -> R,

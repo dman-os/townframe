@@ -418,6 +418,9 @@ where
     /// The driver decides when the queued task becomes physically active; this
     /// transition never bypasses the driver's execution budget.
     pub fn wake(&mut self, now: Instant, key: K) -> bool {
+        if self.active_by_key.contains_key(&key) {
+            return false;
+        }
         let Some(seed) = self.seed_by_key.remove(&key) else {
             return false;
         };
@@ -513,6 +516,16 @@ mod tests {
         assert!(scheduler.active_task(1).is_some());
         assert_eq!(scheduler.counts().spawn_queue, 1);
         assert_eq!(scheduler.drain_spawn_queue().count(), 1);
+    }
+
+    #[test]
+    fn waking_active_key_is_a_noop() {
+        let now = t(0);
+        let mut scheduler = KeyedScheduler::<u64, Seed>::default();
+        let task = scheduler.replace(now, 1, Seed::Diff);
+        scheduler.drain_spawn_queue();
+        assert!(!scheduler.wake(now, 1));
+        assert!(scheduler.complete(task));
     }
 
     #[test]

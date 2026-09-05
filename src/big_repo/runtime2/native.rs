@@ -637,15 +637,23 @@ where
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
-            if access.is_some_and(|access| access.is_editor()) {
-                return Ok(true);
-            }
+            let local_write = access.is_some_and(|access| access.is_editor());
             // Public-member path: a doc that grants editor access to the
             // well-known Public agent may be written by anyone (the writer
             // encrypts through Public's well-known keys).
             let public_ident = keyhive_core::principal::public::Public.id();
             let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
-            Ok(public_access.is_some_and(|access| access.is_editor()))
+            let public_write = public_access.is_some_and(|access| access.is_editor());
+            tracing::debug!(
+                %doc_id,
+                local_peer_id = %self.local_peer_id,
+                local_access = ?access,
+                public_access = ?public_access,
+                local_write,
+                public_write,
+                "document write-access probe"
+            );
+            Ok(local_write || public_write)
         })
     }
 
@@ -2056,7 +2064,7 @@ where
                     })
                     .is_err()
                 {
-                    tracing::debug!(
+                    tracing::warn!(
                         %peer_id,
                         "runtime2 stopped before keyhive sync-done event"
                     );

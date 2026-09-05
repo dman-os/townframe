@@ -272,14 +272,48 @@ impl PlugsRepo {
     pub(crate) async fn apply_config_revision(&self, revision: &PlugsConfigRevision) -> Res<()> {
         let _guard = self.mutation_mutex.lock().await;
         let store = self.config_store()?;
-        store
-            .apply_external_snapshot(revision.config.clone(), revision.heads.clone())
-            .await?;
+        let describe_tracks = |config: &PlugsConfig| {
+            config
+                .known_plugs
+                .iter()
+                .map(|(id, track)| {
+                    (
+                        id.clone(),
+                        track.latest_version.clone(),
+                        track.last_enabled_version.clone(),
+                        track.latest_rejection.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before_tracks = store.query_sync(describe_tracks).await;
+        tracing::debug!(
+            revision_heads = ?revision.heads,
+            events = ?revision.events,
+            ?before_tracks,
+            "applying plugs config revision"
+        );
+        let (_, current_heads) = store.latest_snapshot().await?;
+        if current_heads.as_ref() == Some(&revision.heads) {
+            store
+                .apply_external_snapshot(revision.config.clone(), revision.heads.clone())
+                .await?;
+        } else {
+            tracing::debug!(
+                revision_heads = ?revision.heads,
+                ?current_heads,
+                "discarding stale plugs config snapshot in favor of current drawer state"
+            );
+            store.reload().await?;
+        }
+        let current_config = store.query_sync(|config| config.clone()).await;
+        let after_tracks = store.query_sync(describe_tracks).await;
+        tracing::debug!(?after_tracks, "applied plugs config revision snapshot");
         for event in &revision.events {
             match event {
                 PlugsEvent::PlugEnabled { plug_id, .. }
                 | PlugsEvent::PlugUpdated { plug_id, .. } => {
-                    if let Some(ref_url) = revision.config.enabled.get(plug_id) {
+                    if let Some(ref_url) = current_config.enabled.get(plug_id) {
                         self.activate_from_ref(plug_id, ref_url).await?;
                     }
                 }
@@ -400,12 +434,11 @@ impl PlugsRepo {
         if self.drawer.set(drawer).is_err() {
             eyre::bail!("drawer already attached to plugs repo");
         }
-        // Ensure the config doc is registered in this drawer. `ensure_core_plug`
-        // only registers it during repo init; on a reopen a fresh DrawerRepo
-        // has no entry for it, so the config store would hydrate to its empty
-        // seed and the derived cache would stay cold. register_existing_doc is
-        // idempotent (no-op when already known) and is required for
-        // FacetStoreHandle::load below to read the persisted config facet.
+        // Register the config doc before loading its facet store. A reopened
+        // DrawerRepo has no local registry entry yet; register_existing_doc is
+        // idempotent and is required for FacetStoreHandle::load to read the
+        // persisted config facet. The core invariant is established below,
+        // after that store is attached.
         let drawer_ref = self.drawer.get().expect("just set");
         drawer_ref
             .register_existing_doc(
@@ -425,12 +458,16 @@ impl PlugsRepo {
         if self.config_store.set(store).is_err() {
             eyre::bail!("plugs config store already attached");
         }
+        // Establish the core plug invariant at the plugs repo's boot boundary,
+        // before exposing the attached repo to drawer callers. This is also
+        // what makes fresh init independent of a later repo-init dance.
+        self.ensure_core_plug().await?;
         // Warm the derived cache from the durable config so drawer facet
         // validation (and plug-init queueing at rt boot) works immediately on
         // this open — including a reopen where the facet-set consumers have
         // already settled the config/manifest revisions and will not re-apply
-        // them. Unreadable manifest refs are treated as pending (deferred)
-        // exactly like the live consumer, never a fatal error.
+        // them. Unreadable non-core manifest refs are treated as pending
+        // (deferred) exactly like the live consumer, never a fatal error.
         self.warm_cache().await?;
         Ok(())
     }

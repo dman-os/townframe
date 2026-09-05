@@ -260,13 +260,17 @@ async fn publish_heads(
     if let Some(target_seq) = keyhive_watermark {
         bundle.await_keyhive_watermark(target_seq).await?;
     }
+    let causal_epoch = bundle.current_causal_epoch();
     let heads = surelock::key::lock_scope(|key| {
         let (doc, _key) = key.lock(&bundle.doc);
         doc.get_heads()
     });
     let heads_formatted = am_utils_rs::serialize_commit_heads(&heads);
     let am_obj_id = automerge_doc_obj_id(doc_id);
-    let payload = serde_json::json!({ "heads": heads_formatted });
+    let payload = serde_json::json!({
+        "heads": heads_formatted,
+        "causal_epoch": causal_epoch,
+    });
     frontier_store.set_obj_payload(am_obj_id, payload).await?;
     let desired_parts = big_sync_store
         .obj_parts(am_obj_id)

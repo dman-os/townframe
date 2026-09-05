@@ -393,11 +393,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     if !ready.initial {
         eyre::bail!("clone Keyhive subscription did not send its readiness event");
     }
-    tokio::time::timeout(timeout, async {
-        big_repo.sync_keyhive_with_peer(peer_id).await?;
-        big_repo.wait_for_keyhive_reconciliation().await?;
-        eyre::Ok(())
-    })
+    tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id))
     .await
     .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
     let big_sync_rpc_client =

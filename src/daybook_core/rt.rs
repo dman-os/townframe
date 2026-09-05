@@ -280,7 +280,7 @@ impl Rt {
             crate::index::DocFacetSetIndexRepo::boot(
                 Arc::clone(&sqlite_local_state_repo),
                 Arc::clone(&drawer),
-                Arc::clone(&rcx.part_store),
+                Arc::clone(&rcx.frontier_part_store),
                 cancel_token.clone(),
             )
             .await?;

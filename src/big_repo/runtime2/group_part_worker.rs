@@ -266,6 +266,12 @@ impl<'a> Worker<'a> {
                     match admission? {
                         ConcurrentDeltaRead::ReplayComplete { .. } => {}
                         ConcurrentDeltaRead::Entries { entries, .. } => {
+                            tracing::debug!(
+                                count = entries.len(),
+                                active_tasks = self.tasks.active_count(),
+                                pending_sources = self.pending_sources.len(),
+                                "group-part admission batch read"
+                            );
                             for delta in entries {
                                 self.start_task(
                                     GroupPartKey::Decode(delta.entry.seq),
@@ -364,6 +370,14 @@ impl<'a> Worker<'a> {
 
     async fn on_decoded(&mut self, source: SourceCursor, affected: AffectedEvent) -> Res<()> {
         let docs: HashSet<_> = affected.docs.into_iter().collect();
+        tracing::debug!(
+            source_key = source.key,
+            source_cursor = source.cursor,
+            docs = docs.len(),
+            group_parts = affected.group_parts.len(),
+            pending_sources = self.pending_sources.len(),
+            "group-part admission decoded"
+        );
         if docs.is_empty() && affected.group_parts.is_empty() {
             return self.acknowledge_source(source).await;
         }
@@ -476,6 +490,11 @@ impl<'a> Worker<'a> {
     }
 
     async fn settle_sources(&mut self, sources: Vec<SourceCursor>) -> Res<()> {
+        tracing::debug!(
+            source_count = sources.len(),
+            pending_sources = self.pending_sources.len(),
+            "group-part derived task settling sources"
+        );
         let mut settled = Vec::new();
         for source in sources {
             let pending = self
@@ -495,9 +514,18 @@ impl<'a> Worker<'a> {
     }
 
     async fn acknowledge_source(&mut self, source: SourceCursor) -> Res<()> {
+        let ack = self.admission.ack(source.key, source.cursor).await?;
+        tracing::debug!(
+            source_key = source.key,
+            source_cursor = source.cursor,
+            ?ack,
+            durable_revision = self.admission.durable_revision(),
+            pending_sources = self.pending_sources.len(),
+            "group-part admission source acknowledged"
+        );
         if let DeltaAck::Accepted {
             through: Some(through),
-        } = self.admission.ack(source.key, source.cursor).await?
+        } = ack
         {
             self.outbox.push(Cmd::AdvanceCursor(through), ());
             self.outbox.push(Cmd::AnnounceSettled(through), ());
@@ -514,6 +542,14 @@ impl<'a> Worker<'a> {
                         .await?;
                 }
                 Cmd::AnnounceSettled(seq) => {
+                    tracing::debug!(
+                        seq = *seq,
+                        durable_revision = self.admission.durable_revision(),
+                        pending_sources = self.pending_sources.len(),
+                        pending_documents = self.pending_documents.len(),
+                        pending_group_parts = self.pending_group_parts.len(),
+                        "group-part worker announcing settled admission"
+                    );
                     self.evt_tx
                         .send(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled { seq: *seq })
                         .await

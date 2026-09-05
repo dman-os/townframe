@@ -873,6 +873,7 @@ async fn run_plug_pin_task(
     ctx: Arc<Ctx>,
     plugs_repo: Arc<crate::plugs::PlugsRepo>,
 ) -> Res<PlugPinTaskOutput> {
+    tracing::debug!(event = ?task.event, ref_url = ?task.ref_url, "blob-pin plug task starting");
     match &task.event {
         crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
         | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. } => {
@@ -887,7 +888,9 @@ async fn run_plug_pin_task(
                     &live_ref
                 }
             };
+            tracing::debug!(%plug_id, %ref_url, "blob-pin plug task resolved manifest ref");
             let Some(pins) = ctx.manifest_blob_pins(ref_url).await? else {
+                tracing::debug!(%plug_id, %ref_url, "blob-pin plug task deferred: manifest is not readable");
                 return Ok(PlugPinTaskOutput::Deferred);
             };
             let _guard = ctx.inventory_lock.lock().await;
@@ -925,6 +928,7 @@ impl Worker {
         task: PlugPinTask,
     ) -> Res<()> {
         let key = task.key;
+        tracing::debug!(?key, event = ?task.event, "blob-pin plug machine scheduling task");
         tasks.replace(
             key,
             task.clone(),
@@ -933,12 +937,14 @@ impl Worker {
         let mut attempted_after_subscription = false;
         loop {
             let completion = tasks.next_completion().await?;
+            tracing::debug!(?key, result = ?completion.result, "blob-pin plug machine task completed");
             match completion.result {
                 Ok(PlugPinTaskOutput::Applied) => {
                     subscriptions.remove(&key);
                     return Ok(());
                 }
                 Ok(PlugPinTaskOutput::Deferred) => {
+                    tracing::debug!(?key, "blob-pin plug machine task deferred");
                     let ref_url = match task.ref_url.as_ref() {
                         Some(ref_url) => ref_url.clone(),
                         None => plugs_repo
@@ -962,9 +968,11 @@ impl Worker {
                                 .subscribe_document_materialization(&branch_id)
                                 .await?,
                         );
+                        tracing::debug!(?key, ?branch_id, "blob-pin plug machine subscribed to manifest materialization");
                     }
                     if !attempted_after_subscription {
                         attempted_after_subscription = true;
+                        tracing::debug!(?key, "blob-pin plug machine retrying once after subscription");
                         tasks.replace(
                             key,
                             task.clone(),
@@ -976,13 +984,15 @@ impl Worker {
                         )?;
                         continue;
                     }
+                    tracing::debug!(?key, "blob-pin plug machine parking until materialization");
                     tasks.park(key, task.clone());
                     loop {
-                        subscriptions
+                        let change = subscriptions
                             .get_mut(&key)
                             .expect("parked plug task has a materialization subscription")
                             .ready_changed()
                             .await?;
+                        tracing::debug!(?key, ?change, "blob-pin plug machine woke for materialization");
                         tasks.wake(
                             key,
                             run_plug_pin_task(

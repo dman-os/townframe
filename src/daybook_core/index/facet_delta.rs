@@ -148,6 +148,9 @@ mod tests {
             branch_id: BranchId::from("branch"),
             previous_heads: None,
             current_heads: None,
+            previous_causal_epoch: None,
+            current_causal_epoch: None,
+            epoch_only: false,
         };
         let delta = transition_for_doc_delta(&source, key(), None, None, None).expect("change");
         assert_eq!(delta.current, None);

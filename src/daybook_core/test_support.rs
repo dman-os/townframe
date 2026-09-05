@@ -293,8 +293,6 @@ pub async fn test_cx_with_options(
             .wrap_err("error storing e2e mltools config")?;
     }
 
-    plugs_repo.ensure_core_plug().await?;
-
     let repo_root = temp_dir.path().join("repo");
     tokio::fs::create_dir_all(&repo_root).await?;
     let layout = crate::repo::RepoLayout {

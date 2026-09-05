@@ -43,6 +43,8 @@ use std::collections::{BTreeSet, HashMap};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocDeltaBranchState {
     pub heads: Option<ChangeHashSet>,
+    #[serde(default)]
+    pub causal_epoch: Option<[u8; 32]>,
 }
 
 /// One head transition for one physical branch, as seen by one site.
@@ -51,6 +53,10 @@ pub struct DocDelta {
     pub branch_id: BranchId,
     pub previous_heads: Option<ChangeHashSet>,
     pub current_heads: Option<ChangeHashSet>,
+    pub previous_causal_epoch: Option<[u8; 32]>,
+    pub current_causal_epoch: Option<[u8; 32]>,
+    /// True when only the materialization epoch changed; heads were already acknowledged.
+    pub epoch_only: bool,
 }
 
 /// Branch filter, applied per event. This is the ONLY post-event filter:
@@ -211,35 +217,16 @@ where
                 if !self.filter.admits(&branch_id) {
                     continue;
                 }
-                let heads = event_heads(&event);
-                // Tombstone on Removed: only tracked branches transition
-                // (an untracked removal carries no transition), and an
-                // already-tombstoned branch has nothing to transition.
-                let previous_heads = match &heads {
-                    Some(_) => stored.get(&branch_id).map(|state| state.heads.clone()),
-                    None => match stored.get(&branch_id) {
-                        Some(state) if state.heads.is_some() => Some(state.heads.clone()),
-                        _ => continue,
-                    },
-                };
-                // No-op transition: the site's memory already holds these
-                // heads, so the effect is durably applied (it committed with
-                // the memory write). Dropping the entry lets the walker settle
-                // the revision through `finish` with no job at all — this is
-                // the replay catch-up path after a crash between the memory
-                // commit and the ack.
-                if previous_heads
-                    .as_ref()
-                    .is_some_and(|prev| prev.as_ref() == heads.as_ref())
-                {
-                    continue 'entry;
-                }
-
-                out.push(DocDelta {
+                let previous = stored.get(&branch_id);
+                let Some(delta) = frontier_delta(
                     branch_id,
-                    previous_heads: previous_heads.flatten(),
-                    current_heads: heads,
-                });
+                    previous,
+                    event_heads(&event),
+                    event_causal_epoch(&event),
+                ) else {
+                    continue 'entry;
+                };
+                out.push(delta);
             }
 
             // An all-no-op revision yields zero entries; the concurrent walker
@@ -277,6 +264,7 @@ where
         let mut tx = self.tx;
         let state = DocDeltaBranchState {
             heads: self.delta.current_heads.clone(),
+            causal_epoch: self.delta.current_causal_epoch,
         };
         tx.put(
             state_key(&self.delta.branch_id),
@@ -319,6 +307,32 @@ fn state_key_to_branch(key: Vec<u8>) -> BranchId {
     BranchId(String::from_utf8(key).expect("branch state keys are utf-8 branch ids"))
 }
 
+fn frontier_delta(
+    branch_id: BranchId,
+    stored: Option<&DocDeltaBranchState>,
+    current_heads: Option<ChangeHashSet>,
+    current_causal_epoch: Option<[u8; 32]>,
+) -> Option<DocDelta> {
+    let previous_heads = match &current_heads {
+        Some(_) => stored.and_then(|state| state.heads.clone()),
+        None => match stored {
+            Some(state) if state.heads.is_some() => state.heads.clone(),
+            _ => return None,
+        },
+    };
+    let previous_causal_epoch = stored.and_then(|state| state.causal_epoch);
+    let heads_changed = previous_heads != current_heads;
+    let epoch_changed = previous_causal_epoch != current_causal_epoch;
+    (heads_changed || epoch_changed).then_some(DocDelta {
+        branch_id,
+        previous_heads,
+        current_heads,
+        previous_causal_epoch,
+        current_causal_epoch,
+        epoch_only: !heads_changed && epoch_changed,
+    })
+}
+
 fn event_branch_id(event: &AutomergeFrontierEvent) -> BranchId {
     let doc_id = match event {
         AutomergeFrontierEvent::Added { doc_id, .. }
@@ -332,6 +346,14 @@ fn event_heads(event: &AutomergeFrontierEvent) -> Option<ChangeHashSet> {
     match event {
         AutomergeFrontierEvent::Added { heads, .. }
         | AutomergeFrontierEvent::Changed { heads, .. } => Some(ChangeHashSet(Arc::clone(heads))),
+        AutomergeFrontierEvent::Removed { .. } => None,
+    }
+}
+
+fn event_causal_epoch(event: &AutomergeFrontierEvent) -> Option<[u8; 32]> {
+    match event {
+        AutomergeFrontierEvent::Added { causal_epoch, .. }
+        | AutomergeFrontierEvent::Changed { causal_epoch, .. } => *causal_epoch,
         AutomergeFrontierEvent::Removed { .. } => None,
     }
 }
@@ -489,6 +511,29 @@ mod tests {
                 .filter_map(|k| rows.get(k).map(|v| (k.clone(), v.clone())))
                 .collect())
         }
+    }
+
+    #[test]
+    fn equal_heads_with_new_epoch_emit_epoch_only_delta() {
+        let heads = ChangeHashSet(vec![automerge::ChangeHash([1; 32])].into());
+        let previous_epoch = [2; 32];
+        let current_epoch = [3; 32];
+        let stored = DocDeltaBranchState {
+            heads: Some(heads.clone()),
+            causal_epoch: Some(previous_epoch),
+        };
+        let delta = frontier_delta(
+            BranchId::from("branch"),
+            Some(&stored),
+            Some(heads.clone()),
+            Some(current_epoch),
+        )
+        .expect("epoch transition must be emitted");
+        assert!(delta.epoch_only);
+        assert_eq!(delta.previous_heads, Some(heads.clone()));
+        assert_eq!(delta.current_heads, Some(heads));
+        assert_eq!(delta.previous_causal_epoch, Some(previous_epoch));
+        assert_eq!(delta.current_causal_epoch, Some(current_epoch));
     }
 
     // ---- tests (to be written) --------------------------------------------
