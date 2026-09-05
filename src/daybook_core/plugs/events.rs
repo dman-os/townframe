@@ -18,6 +18,7 @@ use super::*;
 use crate::drawer::{DrawerRepo, MaterializationChange};
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetReader, FacetSetRevisionStore, FacetSetSelector};
+use crate::stores::FacetStore;
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
 use big_sync_core::revisioned_store::{
@@ -45,18 +46,15 @@ impl PendingManifestWakes {
         }
     }
 
-    async fn watch(
-        &mut self,
-        drawer: &DrawerRepo,
-        plug_id: &str,
-        ref_url: &url::Url,
-    ) -> Res<bool> {
+    async fn watch(&mut self, drawer: &DrawerRepo, plug_id: &str, ref_url: &url::Url) -> Res<bool> {
         if self.registrations.contains_key(plug_id) {
             return Ok(false);
         }
         let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(ref_url)?;
         let branch_id = daybook_types::doc::BranchId(parsed.doc_id.to_string());
-        let mut wake = drawer.subscribe_document_materialization(&branch_id).await?;
+        let mut wake = drawer
+            .subscribe_document_materialization(&branch_id)
+            .await?;
         let registration_id = self.next_id;
         self.next_id += 1;
         let plug_id = plug_id.to_owned();
@@ -190,7 +188,7 @@ fn ref_pinned_heads(ref_url: &url::Url) -> ChangeHashSet {
     PlugsRepo::parse_enabled_ref(ref_url)
         .ok()
         .and_then(|parsed| parsed.at)
-        .and_then(|at| am_utils_rs::parse_commit_heads(at).ok())
+        .and_then(|at| am_utils_rs::parse_commit_heads(at.as_ref()).ok())
         .map(ChangeHashSet)
         .unwrap_or_default()
 }
@@ -229,10 +227,7 @@ impl PlugsConfigEventStore {
     }
 
     /// Hydrate the config facet value at one revision's branch heads.
-    async fn hydrate_config_at(
-        &self,
-        heads: &ChangeHashSet,
-    ) -> Res<PlugsConfig> {
+    async fn hydrate_config_at(&self, heads: &ChangeHashSet) -> Res<PlugsConfig> {
         let Some(doc) = self
             .drawer
             .get_doc_with_facets_at_branch_heads(
@@ -310,9 +305,7 @@ pub struct PlugsConfigEventReader<'a> {
 }
 
 #[async_trait]
-impl RevisionedStoreReader<u64, PlugsConfigRevision, eyre::Report>
-    for PlugsConfigEventReader<'_>
-{
+impl RevisionedStoreReader<u64, PlugsConfigRevision, eyre::Report> for PlugsConfigEventReader<'_> {
     async fn next(
         &mut self,
         limits: RevisionReadLimits,
@@ -408,16 +401,14 @@ pub(crate) async fn spawn_plugs_config_consumer(
             .await
             .expect(ERROR_IMPOSSIBLE)
             .upstream_revision;
-        let reader = event_store
-            .open((), durable)
-            .await
-            .expect(ERROR_IMPOSSIBLE);
-        let mut walker = SerialDeltaWalker::open(reader, &state)
-            .await
-            .expect(ERROR_IMPOSSIBLE);
+        let reader = event_store.open((), durable).await.expect(ERROR_IMPOSSIBLE);
+        let mut walker: SerialDeltaWalker<'_, PlugsConfigEventStore, _> =
+            SerialDeltaWalker::open(reader, &state)
+                .await
+                .expect(ERROR_IMPOSSIBLE);
         let mut pending_wakes = PendingManifestWakes::default();
         loop {
-            let read = tokio::select! {
+            let read: RevisionRead<u64, PlugsConfigRevision> = tokio::select! {
                 biased;
                 _ = worker_cancel_token.cancelled() => break,
                 wake = pending_wakes.next() => {
@@ -543,14 +534,18 @@ async fn run_facet_set_plugs_manifest_consumer(
 ) -> Res<()> {
     let durable = state.progress().await?.upstream_revision;
     let reader = facet_set_store
-        .open(FacetSetSelector::Tag(WellKnownFacetTag::PlugManifest), durable)
+        .open(
+            FacetSetSelector::Tag(WellKnownFacetTag::PlugManifest),
+            durable,
+        )
         .await
         .map_err(|error| ferr!("opening Plugs manifest FacetSet reader: {error}"))?;
-    let mut walker = SerialDeltaWalker::open(reader, &state)
-        .await
-        .map_err(|error| ferr!("opening Plugs manifest FacetSet walker: {error}"))?;
+    let mut walker: SerialDeltaWalker<'_, FacetSetRevisionStore, SqliteDeltaWalkerStateRepo> =
+        SerialDeltaWalker::open(reader, &state)
+            .await
+            .map_err(|error| ferr!("opening Plugs manifest FacetSet walker: {error}"))?;
     loop {
-        let read = tokio::select! {
+        let read: RevisionRead<u64, FacetDelta> = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => return Ok(()),
             read = walker.next() => read.map_err(|error| ferr!("reading Plugs manifest FacetSet walker: {error}"))?,

@@ -26,6 +26,9 @@
 
 use crate::interlude::*;
 use big_repo::{AutomergeFrontierEvent, AutomergeFrontierSelector};
+use big_sync_core::delta_walker_sparse_state::{
+    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+};
 use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
 use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
 use daybook_types::doc::{BranchId, ChangeHashSet};
@@ -130,7 +133,7 @@ where
             Selector = AutomergeFrontierSelector,
             Error = eyre::Report,
         >,
-    M: DeltaWalkerStateRepo + 'static,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo + 'static,
 {
     type Revision = u64;
     type Entry = DocDelta;
@@ -161,7 +164,7 @@ where
 pub struct DocDeltaReader<'a, S, M>
 where
     S: RevisionedStore<Revision = u64, Entry = AutomergeFrontierEvent> + 'a,
-    M: DeltaWalkerStateRepo + 'a,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo + 'a,
 {
     source: S::Reader<'a>,
     memory: M,
@@ -172,7 +175,7 @@ where
 impl<S, M> RevisionedStoreReader<u64, DocDelta, eyre::Report> for DocDeltaReader<'_, S, M>
 where
     S: RevisionedStore<Revision = u64, Entry = AutomergeFrontierEvent, Error = eyre::Report>,
-    M: DeltaWalkerStateRepo,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo,
 {
     async fn next(
         &mut self,
@@ -254,7 +257,8 @@ where
 /// advance); `settle` persists the memory row and commits.
 pub struct DocDeltaSettlement<'a, M>
 where
-    M: DeltaWalkerStateRepo + 'a,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo + 'a,
+    M::Transaction<'a>: DeltaWalkerSparseStateTransaction,
 {
     tx: M::Transaction<'a>,
     delta: DocDelta,
@@ -262,7 +266,8 @@ where
 
 impl<'a, M> DocDeltaSettlement<'a, M>
 where
-    M: DeltaWalkerStateRepo + 'a,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo + 'a,
+    M::Transaction<'a>: DeltaWalkerSparseStateTransaction,
 {
     pub fn context_mut(&mut self) -> &mut M::Context<'a> {
         self.tx.context_mut()
@@ -296,7 +301,8 @@ pub async fn begin_settlement<'a, M>(
     delta: &DocDelta,
 ) -> Res<DocDeltaSettlement<'a, M>>
 where
-    M: DeltaWalkerStateRepo + 'a,
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo + 'a,
+    M::Transaction<'a>: DeltaWalkerSparseStateTransaction,
 {
     let tx = memory.begin().await.map_err(memory_error)?;
     Ok(DocDeltaSettlement {
@@ -367,6 +373,9 @@ fn memory_error(error: impl std::fmt::Display) -> eyre::Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync_core::delta_walker_sparse_state::{
+        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+    };
     use big_sync_core::delta_walker_state::{DeltaWalkerProgress, DeltaWalkerStateResult};
     use std::sync::Mutex;
 
@@ -397,6 +406,22 @@ mod tests {
             })
         }
 
+        async fn advance_from(&mut self, _expected: u64, _next: u64) -> DeltaWalkerStateResult<()> {
+            Ok(())
+        }
+
+        async fn commit(self) -> DeltaWalkerStateResult<()> {
+            self.rows.lock().unwrap().extend(self.staged);
+            Ok(())
+        }
+
+        async fn rollback(self) -> DeltaWalkerStateResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeltaWalkerSparseStateTransaction for MemoryTx<'_> {
         async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
             Ok(self
                 .staged
@@ -411,19 +436,6 @@ mod tests {
         }
 
         async fn delete(&mut self, _key: &[u8]) -> DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-
-        async fn advance_from(&mut self, _expected: u64, _next: u64) -> DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-
-        async fn commit(self) -> DeltaWalkerStateResult<()> {
-            self.rows.lock().unwrap().extend(self.staged);
-            Ok(())
-        }
-
-        async fn rollback(self) -> DeltaWalkerStateResult<()> {
             Ok(())
         }
     }
@@ -445,21 +457,6 @@ mod tests {
             })
         }
 
-        async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(self.rows.lock().unwrap().get(key).cloned())
-        }
-
-        async fn get_many(
-            &self,
-            keys: &[Vec<u8>],
-        ) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
-            let rows = self.rows.lock().unwrap();
-            Ok(keys
-                .iter()
-                .filter_map(|k| rows.get(k).map(|v| (k.clone(), v.clone())))
-                .collect())
-        }
-
         async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
             Ok(MemoryTx {
                 rows: &self.rows,
@@ -473,6 +470,24 @@ mod tests {
             _context: Self::Context<'a>,
         ) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
             self.begin().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeltaWalkerSparseStateRepo for MemoryRepo {
+        async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
+            Ok(self.rows.lock().unwrap().get(key).cloned())
+        }
+
+        async fn get_many(
+            &self,
+            keys: &[Vec<u8>],
+        ) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
+            let rows = self.rows.lock().unwrap();
+            Ok(keys
+                .iter()
+                .filter_map(|k| rows.get(k).map(|v| (k.clone(), v.clone())))
+                .collect())
         }
     }
 

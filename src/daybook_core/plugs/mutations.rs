@@ -495,7 +495,7 @@ impl PlugsRepo {
                     continue;
                 }
                 if let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>()
-                    && let Ok(path) = self.blobs.get_path(&blob_id).await
+                    && let Ok(path) = self.blobs.get_path(blob_id).await
                     && let Ok(meta) = tokio::fs::metadata(&path).await
                 {
                     blob_lengths.insert(hash.to_string(), meta.len());
@@ -520,11 +520,7 @@ impl PlugsRepo {
                     length_octets,
                     digest: hash.clone(),
                     inline: None,
-                    urls: Some(vec![format!(
-                        "{}:///{}",
-                        crate::blobs::BLOB_SCHEME,
-                        hash
-                    )]),
+                    urls: Some(vec![format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash)]),
                 })
                 .into(),
             );

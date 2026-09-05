@@ -30,6 +30,7 @@ use bucket::*;
 mod cursor;
 use cursor::*;
 pub mod concurrent_delta_walker;
+pub mod delta_walker_sparse_state;
 pub mod delta_walker_state;
 mod fingerprint;
 mod ids;

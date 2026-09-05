@@ -19,10 +19,10 @@ pub(crate) use sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_read
 pub mod contract {
     use big_sync_core::keyed_frontier::{
         FrontierEntry, FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision,
-        KeyedFrontier, KeyedFrontierError, KeyedFrontierReader, KeyedFrontierTransaction,
-        TransactionIsolation,
+        KeyedFrontier, KeyedFrontierReader, KeyedFrontierTransaction, TransactionIsolation,
     };
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
     /// Supplies a frontier and selector constructors to the reusable
     /// KeyedFrontier contract suite. Backends can implement this once and run
     /// [`assert_keyed_frontier_contract`] against their own storage.
@@ -202,17 +202,6 @@ pub mod contract {
         );
         assert_eq!(transaction.commit().await.expect("empty commit"), 0);
 
-        let mut invalid_limit = frontier
-            .open(harness.all_selector(0))
-            .await
-            .expect("open reader");
-        assert!(matches!(
-            invalid_limit
-                .next(FrontierReadLimits { max_entries: 0 })
-                .await,
-            Err(KeyedFrontierError::EmptyReadLimit)
-        ));
-
         let revision = commit(
             frontier,
             [
@@ -264,7 +253,9 @@ pub mod contract {
         let mut replay_markers = 0;
         loop {
             match reader
-                .next(FrontierReadLimits { max_entries: 2 })
+                .next(FrontierReadLimits {
+                    max_entries: NonZeroUsize::new(2).expect("literal is non-zero"),
+                })
                 .await
                 .expect("bounded replay read")
             {
@@ -556,6 +547,7 @@ mod tests {
         KeyedFrontierReader, KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
     };
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
     use utils_rs::prelude::async_trait;
     struct MemoryContractHarness {
         frontier: MemoryKeyedFrontier<u64, u64>,
@@ -731,7 +723,9 @@ mod tests {
             .await
             .unwrap();
         let FrontierRead::Entries { entries, through } = reader
-            .next(FrontierReadLimits { max_entries: 2 })
+            .next(FrontierReadLimits {
+                max_entries: NonZeroUsize::new(2).expect("literal is non-zero"),
+            })
             .await
             .unwrap()
         else {
@@ -770,7 +764,9 @@ mod tests {
             .await
             .unwrap();
         let FrontierRead::Entries { entries, through } = reader
-            .next(FrontierReadLimits { max_entries: 2 })
+            .next(FrontierReadLimits {
+                max_entries: NonZeroUsize::new(2).expect("literal is non-zero"),
+            })
             .await
             .unwrap()
         else {
@@ -779,7 +775,9 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(through, 2);
         let FrontierRead::Entries { entries, through } = reader
-            .next(FrontierReadLimits { max_entries: 2 })
+            .next(FrontierReadLimits {
+                max_entries: NonZeroUsize::new(2).expect("literal is non-zero"),
+            })
             .await
             .unwrap()
         else {
@@ -807,7 +805,9 @@ mod tests {
             .unwrap();
 
         let FrontierRead::Entries { entries, through } = reader
-            .next(FrontierReadLimits { max_entries: 1 })
+            .next(FrontierReadLimits {
+                max_entries: NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
             .await
             .unwrap()
         else {
@@ -824,7 +824,9 @@ mod tests {
         assert_eq!(tx.commit().await.unwrap(), 3);
 
         let FrontierRead::Entries { entries, through } = reader
-            .next(FrontierReadLimits { max_entries: 1 })
+            .next(FrontierReadLimits {
+                max_entries: NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
             .await
             .unwrap()
         else {

@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 use crate::keyed_frontier::{
     FrontierEntry, FrontierRead, FrontierRevision, KeyedFrontierError, KeyedFrontierReader,
@@ -23,12 +24,14 @@ pub enum RevisionRead<R, E> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevisionReadLimits {
-    pub max_entries: usize,
+    pub max_entries: NonZeroUsize,
 }
 
 impl Default for RevisionReadLimits {
     fn default() -> Self {
-        Self { max_entries: 256 }
+        Self {
+            max_entries: NonZeroUsize::new(256).expect("literal is non-zero"),
+        }
     }
 }
 
@@ -273,11 +276,13 @@ mod tests {
                 ]),
             };
             let store_ref = &store;
-            let mut watch = LiveRevisionWatch::open(&store, |after| async move {
-                store_ref.open((), after).await
-            })
-            .await
-            .unwrap();
+            let mut watch =
+                LiveRevisionWatch::open(
+                    &store,
+                    |after| async move { store_ref.open((), after).await },
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 watch.next(RevisionReadLimits::default()).await.unwrap(),
                 RevisionRead::Entries {

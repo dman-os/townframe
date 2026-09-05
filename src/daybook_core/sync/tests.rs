@@ -13,6 +13,25 @@ use daybook_types::doc::{
     AddDocArgs, BlobPin, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
 
+async fn facet_set_hash_rows(
+    sql: &sqlx::SqlitePool,
+    doc_id: &DocId,
+    facet_tag: &str,
+) -> Res<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT facet_id
+          FROM facet_set_doc_facets
+         WHERE document_id = ?1
+           AND facet_tag = ?2
+        "#,
+    )
+    .bind(doc_id)
+    .bind(facet_tag)
+    .fetch_all(sql)
+    .await?)
+}
+
 struct SyncTestNode {
     ctx: Arc<RepoCtx>,
     rt: Arc<crate::rt::Rt>,
@@ -682,28 +701,15 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     // facet routes (the projection the retired doc-blobs index derived from).
     let facet_set_sql = node_b.rt.doc_facet_set_index_repo.sql().clone();
     let blob_pin_tag = daybook_types::doc::WellKnownFacetTag::BlobPin.as_str();
-    let facet_set_hash_rows = |sql: &sqlx::SqlitePool| {
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT DISTINCT facet_id
-              FROM facet_set_doc_facets
-             WHERE document_id = ?1
-               AND facet_tag = ?2
-            "#,
-        )
-        .bind(&doc_id)
-        .bind(blob_pin_tag)
-        .fetch_all(sql)
-    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
         if hashes.contains(&hash_1) && hashes.contains(&hash_2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_b = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
+    let hashes_b = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
     assert!(hashes_b.contains(&hash_1));
     assert!(hashes_b.contains(&hash_2));
 
@@ -746,13 +752,13 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
         if hashes.len() == 1 && hashes.contains(&hash_1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_after = facet_set_hash_rows(&facet_set_sql.read_pool).await?;
+    let hashes_after = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
     assert_eq!(hashes_after, vec![hash_1.clone()]);
 
     node_b.stop().await?;

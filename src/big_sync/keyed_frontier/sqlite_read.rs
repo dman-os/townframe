@@ -140,9 +140,6 @@ where
         &mut self,
         limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<FrontierRead<S::Key, S::Value>> {
-        if limits.max_entries == 0 {
-            return Err(KeyedFrontierError::EmptyReadLimit);
-        }
         loop {
             let Some(phase_through) = self.initial_through else {
                 // Registration precedes the confirming cursor query.  The
@@ -162,7 +159,7 @@ where
                     &self.selector,
                     self.after,
                     current,
-                    limits.max_entries,
+                    limits.max_entries.get(),
                 )
                 .await
                 .map_err(backend_error)?;
@@ -180,7 +177,7 @@ where
                 &self.selector,
                 self.after,
                 phase_through,
-                limits.max_entries,
+                limits.max_entries.get(),
             )
             .await
             .map_err(backend_error)?;

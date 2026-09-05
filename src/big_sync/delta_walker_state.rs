@@ -1,5 +1,8 @@
 //! SQLite state for one embedder-owned delta walker.
 
+use big_sync_core::delta_walker_sparse_state::{
+    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+};
 use big_sync_core::delta_walker_state::{
     DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateResult,
     DeltaWalkerStateTransaction,
@@ -118,6 +121,22 @@ impl DeltaWalkerStateRepo for SqliteDeltaWalkerStateRepo {
         })
     }
 
+    async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
+        SqliteDeltaWalkerStateRepo::begin(self).await
+    }
+
+    async fn begin_with_context<'a>(
+        &'a self,
+        context: Self::Context<'a>,
+    ) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
+        Ok(SqliteDeltaWalkerStateRepo::begin_with_context(
+            self, context,
+        ))
+    }
+}
+
+#[async_trait]
+impl DeltaWalkerSparseStateRepo for SqliteDeltaWalkerStateRepo {
     async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
         sqlx::query_scalar(
             "SELECT state_value FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
@@ -160,19 +179,6 @@ impl DeltaWalkerStateRepo for SqliteDeltaWalkerStateRepo {
                 ))
             })
             .collect()
-    }
-
-    async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
-        SqliteDeltaWalkerStateRepo::begin(self).await
-    }
-
-    async fn begin_with_context<'a>(
-        &'a self,
-        context: Self::Context<'a>,
-    ) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
-        Ok(SqliteDeltaWalkerStateRepo::begin_with_context(
-            self, context,
-        ))
     }
 }
 
@@ -222,47 +228,6 @@ impl<'a> DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
         })
     }
 
-    async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-        let namespace = Arc::clone(&self.namespace);
-        let consumer_id = Arc::clone(&self.consumer_id);
-        sqlx::query_scalar(
-            "SELECT state_value FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
-        )
-        .bind(namespace.as_ref())
-        .bind(consumer_id.as_ref())
-        .bind(key)
-        .fetch_optional(&mut **self.tx()?)
-        .await
-        .map_err(backend)
-    }
-
-    async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
-        sqlx::query(
-            "INSERT INTO delta_walker_key_state(namespace, consumer_id, state_key, state_value) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, consumer_id, state_key) DO UPDATE SET state_value = excluded.state_value",
-        )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(key)
-        .bind(value)
-        .execute(&mut **self.tx()?)
-        .await
-        .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()> {
-        sqlx::query(
-            "DELETE FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
-        )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(key)
-        .execute(&mut **self.tx()?)
-        .await
-        .map_err(backend)?;
-        Ok(())
-    }
-
     async fn advance_from(&mut self, expected: u64, next: u64) -> DeltaWalkerStateResult<()> {
         if next <= expected {
             return Err(DeltaWalkerStateError::NonAdvancingRevision {
@@ -303,6 +268,50 @@ impl<'a> DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
             .rollback()
             .await
             .map_err(backend)
+    }
+}
+
+#[async_trait]
+impl<'a> DeltaWalkerSparseStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
+    async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
+        let namespace = Arc::clone(&self.namespace);
+        let consumer_id = Arc::clone(&self.consumer_id);
+        sqlx::query_scalar(
+            "SELECT state_value FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
+        )
+        .bind(namespace.as_ref())
+        .bind(consumer_id.as_ref())
+        .bind(key)
+        .fetch_optional(&mut **self.tx()?)
+        .await
+        .map_err(backend)
+    }
+
+    async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
+        sqlx::query(
+            "INSERT INTO delta_walker_key_state(namespace, consumer_id, state_key, state_value) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, consumer_id, state_key) DO UPDATE SET state_value = excluded.state_value",
+        )
+        .bind(self.namespace.as_ref())
+        .bind(self.consumer_id.as_ref())
+        .bind(key)
+        .bind(value)
+        .execute(&mut **self.tx()?)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()> {
+        sqlx::query(
+            "DELETE FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
+        )
+        .bind(self.namespace.as_ref())
+        .bind(self.consumer_id.as_ref())
+        .bind(key)
+        .execute(&mut **self.tx()?)
+        .await
+        .map_err(backend)?;
+        Ok(())
     }
 }
 

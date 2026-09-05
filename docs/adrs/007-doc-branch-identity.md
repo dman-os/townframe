@@ -152,7 +152,7 @@ The main branch contains a `daybook.branches` directory keyed by stable
 ```text
 BranchDeclaration {
     name: optional String,
-    publication: Shared | Archived,
+    publication: Shared,
     scope: AuthorityScope,
     created_from: optional BranchVersion,
 }
@@ -320,7 +320,7 @@ inputs, not the new source of truth.
 
 - The exact dmeta v2 encoding, signed revision format, and historical authority
   proof.
-- The final branch publication state and authority-scope schema.
+- The final authority-scope schema.
 - Retention duration and implementation details for abandoned pre-authority
   allocations.
 - Representation and creation rules for future non-Automerge documents.

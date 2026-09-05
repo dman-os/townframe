@@ -62,7 +62,8 @@ impl DrawerRepo {
         })
         .into();
         let branches_facet: serde_json::Value = WellKnownFacet::Branches(Branches {
-            declarations: HashMap::new(),
+            by_name: HashMap::new(),
+            by_id: HashMap::new(),
         })
         .into();
         let system_facets = [
@@ -357,7 +358,8 @@ impl DrawerRepo {
         })
         .into();
         let branches_facet: serde_json::Value = WellKnownFacet::Branches(Branches {
-            declarations: HashMap::new(),
+            by_name: HashMap::new(),
+            by_id: HashMap::new(),
         })
         .into();
         let dmeta_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Dmeta);
@@ -779,10 +781,12 @@ impl DrawerRepo {
                     other => panic!("main branches facet has wrong type: {:?}", other.tag()),
                 })
                 .unwrap_or(Branches {
-                    declarations: HashMap::new(),
+                    by_name: HashMap::new(),
+                    by_id: HashMap::new(),
                 });
-            branches.declarations.insert(
-                BranchId::from(branch_doc_id.to_string()),
+            let branch_id = BranchId::from(branch_doc_id.to_string());
+            branches.insert_declaration(
+                branch_id,
                 BranchDeclaration {
                     name: Some(to_branch.to_string()),
                     publication: BranchPublication::Shared,

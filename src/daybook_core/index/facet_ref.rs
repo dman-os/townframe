@@ -5,12 +5,12 @@ use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
 use big_sync::DeltaWalkerStateTransaction;
-use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
-use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::concurrent_delta_walker::{
     ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
 };
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
 use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
@@ -500,7 +500,6 @@ async fn run_facet_ref_task(
 /// plug revisions break out to a fresh epoch. The epoch's mutable machine
 /// state (walker, scheduler, pending, and parked keys) lives as stack locals in
 /// `run_machine`; helpers take `&self` plus `&mut` references to it.
-
 impl DocFacetRefIndexRepo {
     async fn on_task_completion(
         self: &Arc<Self>,
@@ -516,7 +515,7 @@ impl DocFacetRefIndexRepo {
     ) -> Res<()> {
         let task = completion.command;
         match completion.result {
-            FacetRefTaskOutput::Applied => {
+            Ok(FacetRefTaskOutput::Applied) => {
                 // The command's effect is durable; only now may the walker
                 // cursor advance past it.
                 walker.ack(task.key, task.cursor).await?;
@@ -558,15 +557,10 @@ impl DocFacetRefIndexRepo {
         tasks: &mut TokioKeyedScheduler<FacetRefKey, FacetRefTask, FacetRefTaskOutput>,
         task: FacetRefTask,
     ) -> Res<()> {
-        let future = run_facet_ref_task(
-            task.clone(),
-            Arc::clone(self),
-            facet_state.clone(),
-        );
+        let future = run_facet_ref_task(task.clone(), Arc::clone(self), facet_state.clone());
         tasks.replace(task.key, task.clone(), future)?;
         Ok(())
     }
-
 }
 
 impl DocFacetRefIndexRepo {
@@ -665,9 +659,10 @@ impl DocFacetRefIndexRepo {
             .open((), plugs_durable)
             .await
             .map_err(|error| ferr!("opening facet-ref Plugs reader: {error}"))?;
-        let mut plugs_walker = SerialDeltaWalker::open(plugs_reader, &plugs_state)
-            .await
-            .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
+        let mut plugs_walker: SerialDeltaWalker<'_, crate::plugs::PlugsConfigEventStore, _> =
+            SerialDeltaWalker::open(plugs_reader, &plugs_state)
+                .await
+                .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
         'reopen: loop {
             // The epoch's mutable machine state lives on the stack.
             let tags = self.reference_tags().await;
@@ -678,13 +673,12 @@ impl DocFacetRefIndexRepo {
                 .open(selector, durable)
                 .await
                 .map_err(|error| ferr!("opening facet-ref FacetSet reader: {error}"))?;
-            let mut walker = ConcurrentDeltaWalker::open(
-                reader,
-                facet_state.clone(),
-                |entry: &FacetDelta| facet_ref_key(&entry.key),
-            )
-            .await
-            .map_err(|error| ferr!("opening facet-ref FacetSet walker: {error}"))?;
+            let mut walker =
+                ConcurrentDeltaWalker::open(reader, facet_state.clone(), |entry: &FacetDelta| {
+                    facet_ref_key(&entry.key)
+                })
+                .await
+                .map_err(|error| ferr!("opening facet-ref FacetSet walker: {error}"))?;
             let mut tasks = TokioKeyedScheduler::new(FACET_REF_TASK_BUDGET);
             // The newest unacked delta per key.
             let mut pending: HashMap<FacetRefKey, FacetRefTask> = HashMap::new();
@@ -732,7 +726,9 @@ impl DocFacetRefIndexRepo {
                         if available == 0 {
                             std::future::pending().await
                         } else {
-                            walker.next(available).await
+                            walker
+                                .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                                .await
                         }
                     } => match read? {
                         ConcurrentDeltaRead::ReplayComplete { .. } => {}
@@ -766,7 +762,6 @@ impl DocFacetRefIndexRepo {
             }
         }
     }
-
 
     async fn apply_facet_set_revision_in_tx(
         &self,

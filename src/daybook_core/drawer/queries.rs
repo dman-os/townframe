@@ -19,7 +19,8 @@ impl DrawerRepo {
         &self,
         physical_branch_id: &BranchId,
     ) -> Res<MaterializationWake> {
-        self.subscribe_materialization_wake(Some(physical_branch_id)).await
+        self.subscribe_materialization_wake(Some(physical_branch_id))
+            .await
     }
 
     pub(crate) async fn subscribe_materialization_wake(

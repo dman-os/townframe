@@ -32,7 +32,10 @@ impl PlugsRepo {
     /// Used by broadcast-driven consumers that carry no config snapshot (the
     /// durable rev-store path uses each revision's own config instead).
     pub(crate) async fn enabled_ref(&self, plug_id: &str) -> Res<Option<url::Url>> {
-        let store = self.config_store.get()?;
+        let store = self
+            .config_store
+            .get()
+            .ok_or_eyre("plugs config store not attached")?;
         Ok(store
             .query_sync(|config| config.enabled.get(plug_id).cloned())
             .await)

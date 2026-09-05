@@ -620,9 +620,12 @@ async fn apply_processor_revision(
         );
     }
     let prior_rows =
-        big_sync_core::delta_walker_state::DeltaWalkerStateRepo::get_many(state, &lookup_keys)
-            .await
-            .map_err(|error| ferr!("reading DocProcessor sparse state: {error}"))?;
+        big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo::get_many(
+            state,
+            &lookup_keys,
+        )
+        .await
+        .map_err(|error| ferr!("reading DocProcessor sparse state: {error}"))?;
     let mut prior_snapshots = HashMap::new();
     let mut prior_docs = HashMap::new();
     for (key, value) in prior_rows {
@@ -763,9 +766,10 @@ async fn run_doc_processor_driver(
         .open((), plugs_durable)
         .await
         .map_err(|error| ferr!("opening DocProcessor Plugs reader: {error}"))?;
-    let mut plugs_walker = SerialDeltaWalker::open(plugs_reader, &plugs_state)
-        .await
-        .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
+    let mut plugs_walker: SerialDeltaWalker<'_, crate::plugs::PlugsConfigEventStore, _> =
+        SerialDeltaWalker::open(plugs_reader, &plugs_state)
+            .await
+            .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
     let facet_durable = facet_state.progress().await?.upstream_revision;
     let facet_reader = facet_set_store
         .open(FacetSetSelector::All, facet_durable)

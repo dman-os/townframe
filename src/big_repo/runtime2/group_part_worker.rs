@@ -14,8 +14,8 @@ use big_sync_core::concurrent_delta_walker::{
     ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
 };
 use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::outbox::Outbox;
+use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::collections::{HashMap, HashSet};
@@ -122,7 +122,12 @@ pub fn spawn_group_part_worker(
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
-            let admission = ConcurrentDeltaWalker::open(reader, state, |row: &keyhive_admission::AdmittedRow| row.seq).await?;
+            let admission = ConcurrentDeltaWalker::open(
+                reader,
+                state,
+                |row: &keyhive_admission::AdmittedRow| row.seq,
+            )
+            .await?;
             let worker = Worker {
                 store,
                 keyhive,
@@ -253,7 +258,9 @@ impl<'a> Worker<'a> {
                     if available == 0 {
                         std::future::pending().await
                     } else {
-                        self.admission.next(available).await
+                        self.admission
+                            .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
                 } => {
                     match admission? {
@@ -296,20 +303,20 @@ impl<'a> Worker<'a> {
         completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
     ) -> Res<()> {
         match (completion.command, completion.result) {
-            (Task::Decode { source, .. }, TaskOutput::Decoded(affected)) => {
+            (Task::Decode { source, .. }, Ok(TaskOutput::Decoded(affected))) => {
                 self.on_decoded(source, affected).await?;
             }
-            (Task::ReconcileDocument { doc, sources, .. }, TaskOutput::Reconciled) => {
+            (Task::ReconcileDocument { doc, sources, .. }, Ok(TaskOutput::Reconciled)) => {
                 self.finish_document_task(doc, sources).await?;
             }
-            (Task::EnsurePart { part, sources }, TaskOutput::Ensured) => {
+            (Task::EnsurePart { part, sources }, Ok(TaskOutput::Ensured)) => {
                 self.finish_group_part_task(part, sources).await?;
             }
-            (Task::Decode { .. }, TaskOutput::Reconciled | TaskOutput::Ensured)
-            | (Task::ReconcileDocument { .. }, TaskOutput::Decoded(_))
-            | (Task::EnsurePart { .. }, TaskOutput::Decoded(_))
-            | (Task::ReconcileDocument { .. }, TaskOutput::Ensured)
-            | (Task::EnsurePart { .. }, TaskOutput::Reconciled) => {
+            (Task::Decode { .. }, Ok(TaskOutput::Reconciled | TaskOutput::Ensured))
+            | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Decoded(_)))
+            | (Task::EnsurePart { .. }, Ok(TaskOutput::Decoded(_)))
+            | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Ensured))
+            | (Task::EnsurePart { .. }, Ok(TaskOutput::Reconciled)) => {
                 unreachable!("group-part task produced an incompatible output")
             }
             (_, Err(error)) => panic!("group-part task failed: {error:?}"),

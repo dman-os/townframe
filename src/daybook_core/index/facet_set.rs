@@ -661,8 +661,7 @@ impl DocFacetSetIndexRepo {
         part_store: big_repo::SharedPartStore,
         cancel_token: CancellationToken,
     ) -> Res<()> {
-        let source =
-            DocDeltaRevisionStore::new(AutomergeFrontierRevisionStore::new(part_store));
+        let source = DocDeltaRevisionStore::new(AutomergeFrontierRevisionStore::new(part_store));
         // The walker cursor and the site memory share one state repo: the
         // progress table keys are disjoint from the per-branch memory keys.
         // Legacy rows without the cursor key are replayed.
@@ -678,11 +677,9 @@ impl DocFacetSetIndexRepo {
         };
         let durable = state.progress().await?.upstream_revision;
         let reader = source.open(selector, durable).await?;
-        let mut walker = ConcurrentDeltaWalker::open(
-            reader,
-            state.clone(),
-            |delta: &DocDelta| doc_delta_key(&delta.branch_id),
-        )
+        let mut walker = ConcurrentDeltaWalker::open(reader, state.clone(), |delta: &DocDelta| {
+            doc_delta_key(&delta.branch_id)
+        })
         .await?;
         let mut tasks = TokioKeyedScheduler::new(FACET_SET_TASK_BUDGET);
         // The newest unacked delta per key.
@@ -706,7 +703,9 @@ impl DocFacetSetIndexRepo {
                     if available == 0 {
                         std::future::pending().await
                     } else {
-                        walker.next(available).await
+                        walker
+                            .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
                 } => match read? {
                     ConcurrentDeltaRead::ReplayComplete { .. } => {}
@@ -739,7 +738,10 @@ impl DocFacetSetIndexRepo {
         &self,
         walker: &mut ConcurrentDeltaWalker<
             '_,
-            DocDeltaRevisionStore<AutomergeFrontierRevisionStore, big_sync::SqliteDeltaWalkerStateRepo>,
+            DocDeltaRevisionStore<
+                AutomergeFrontierRevisionStore,
+                big_sync::SqliteDeltaWalkerStateRepo,
+            >,
             big_sync::SqliteDeltaWalkerStateRepo,
             DocDeltaKey,
         >,
@@ -749,7 +751,7 @@ impl DocFacetSetIndexRepo {
     ) -> Res<()> {
         let task = completion.command;
         match completion.result {
-            FacetSetTaskOutput::Applied => {
+            Ok(FacetSetTaskOutput::Applied) => {
                 // The command's effect is durable; only now may the walker
                 // cursor advance past it.
                 walker.ack(task.key, task.cursor).await?;

@@ -39,6 +39,7 @@ use big_sync_core::rpc::SubEvent;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub struct SpawnedAutomergeFrontierWorker<F: FutureForm> {
     pub run: F::Future<'static, eyre::Result<()>>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn spawn_automerge_frontier_worker(
     store: SqliteBigRepoStore,
     big_sync_store: Arc<dyn HostPartStore>,
@@ -128,8 +129,10 @@ pub fn spawn_automerge_frontier_worker(
             };
             let admission_durable = admission_state.progress().await?.upstream_revision;
             let admission_reader = admission_source.open((), admission_durable).await?;
-            let admission =
-                ConcurrentDeltaWalker::open(admission_reader, admission_state, |row: &keyhive_admission::AdmittedRow| {
+            let admission = ConcurrentDeltaWalker::open(
+                admission_reader,
+                admission_state,
+                |row: &keyhive_admission::AdmittedRow| {
                     let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
                         .expect("persisted keyhive admission event must decode");
                     match event {
@@ -138,8 +141,9 @@ pub fn spawn_automerge_frontier_worker(
                         ),
                         _ => FrontierKey::Decode(row.seq),
                     }
-                })
-                .await?;
+                },
+            )
+            .await?;
 
             let part_source = LocalPartRevisionStore {
                 store: Arc::clone(&big_sync_store),
@@ -240,7 +244,7 @@ enum FrontierKey {
 /// a full re-materialization to `Ready`) or once the bundle exists, and any
 /// later materialization completion re-triggers a keyed replacement publish
 /// that overwrites the frontier with the newer heads.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn publish_heads(
     doc_id: crate::DocumentId,
     runtime: &crate::runtime2::Runtime2Handle<Sendable>,
@@ -428,7 +432,9 @@ impl<'a> Worker<'a> {
                     if available == 0 {
                         std::future::pending().await
                     } else {
-                        self.admission.next(available).await
+                        self.admission
+                            .next(NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
                 } => {
                     match admission? {
@@ -445,7 +451,9 @@ impl<'a> Worker<'a> {
                     if available == 0 {
                         std::future::pending().await
                     } else {
-                        self.parts.next(available).await
+                        self.parts
+                            .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
                 } => {
                     match parts? {
@@ -670,7 +678,7 @@ impl<'a> Worker<'a> {
                     part_source,
                     part_cursor: _,
                 },
-                ConcurrentTaskOutput::Published { through },
+                Ok(ConcurrentTaskOutput::Published { through }),
             ) => {
                 if let Some(source) = admission {
                     self.acknowledge_source(source).await?;
@@ -695,7 +703,7 @@ impl<'a> Worker<'a> {
                     part_source,
                     part_cursor: _,
                 },
-                ConcurrentTaskOutput::OutOfScope,
+                Ok(ConcurrentTaskOutput::OutOfScope),
             ) => {
                 if let Some(source) = admission {
                     self.acknowledge_source(source).await?;
@@ -711,7 +719,7 @@ impl<'a> Worker<'a> {
                 }
                 self.pending_parts.remove(&doc_id);
             }
-            (task @ FrontierTask::Publish { doc_id, .. }, ConcurrentTaskOutput::Deferred) => {
+            (task @ FrontierTask::Publish { doc_id, .. }, Ok(ConcurrentTaskOutput::Deferred)) => {
                 self.tasks.park(FrontierKey::Document(doc_id), task);
             }
             (_, Err(error)) => panic!("automerge frontier task failed: {error:?}"),

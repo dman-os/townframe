@@ -4,16 +4,15 @@ use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::interlude::*;
 use big_repo::SharedPartStore;
 use big_sync::{DeltaWalkerStateRepo as _, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::concurrent_delta_walker::{
     ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
 };
+use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, DocId, WellKnownFacetTag};
+use daybook_types::doc::{BranchId, ChangeHashSet, DocId, WellKnownFacetTag};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_util::sync::CancellationToken;
-}
 
 #[cfg(test)]
 use daybook_types::doc::FacetKey;
@@ -80,7 +79,6 @@ impl std::ops::Deref for Worker {
 }
 
 impl Ctx {
-
     async fn init_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
@@ -439,7 +437,6 @@ impl Ctx {
         }
         Ok(())
     }
-
 }
 
 enum Preparation {
@@ -453,7 +450,6 @@ struct PreparedBranchDelta {
     prior: BTreeMap<String, u64>,
     next: BTreeMap<String, u64>,
 }
-
 
 /// Keyed execution budget for the blob-pins-part machine; mirrors the
 /// frontier worker's concurrent budget.
@@ -499,9 +495,7 @@ async fn run_blob_pins_part_task(
 ) -> Res<BlobPinsPartTaskOutput> {
     // All hydration completes before the reconcile section opens; the
     // reindex write and its commit are then one SQLite unit.
-    let Preparation::Ready(prepared) = ctx
-        .prepare_facet_deltas(&drawer, &task.deltas)
-        .await?;
+    let Preparation::Ready(prepared) = ctx.prepare_facet_deltas(&drawer, &task.deltas).await?;
     // The part-store inventory is per document: concurrent branch tasks of
     // one document reconcile against fresh states inside this section, so
     // their inventory diffs cannot interleave.
@@ -526,82 +520,86 @@ async fn run_blob_pins_part_task(
 
 impl Worker {
     /// The keyed blob-pins-part machine: a `ConcurrentDeltaWalker` over the
-/// facet-set source, keyed by branch, with per-branch reconcile tasks.
-/// Mutable machine state lives as stack locals here.
-async fn run_facet_machine(
-    &mut self,
-    drawer: Arc<DrawerRepo>,
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    cancel_token: CancellationToken,
-) -> Res<()> {
-    let state = big_sync::SqliteDeltaWalkerStateRepo::new(
-        self.sql.read_pool.clone(),
-        self.sql.write_pool.clone(),
-        "@daybook/core/blob-pins-part-worker",
-        "facets",
-    )
-    .await
-    .map_err(|error| ferr!("initializing blob-pins-part FacetSet state: {error}"))?;
-    let durable = state.progress().await?.upstream_revision;
-    let reader = facet_set_store
-        .open(FacetSetSelector::Tag(WellKnownFacetTag::BlobPin), durable)
+    /// facet-set source, keyed by branch, with per-branch reconcile tasks.
+    /// Mutable machine state lives as stack locals here.
+    async fn run_facet_machine(
+        &mut self,
+        drawer: Arc<DrawerRepo>,
+        facet_set_store: Arc<FacetSetRevisionStore>,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
+        let state = big_sync::SqliteDeltaWalkerStateRepo::new(
+            self.sql.read_pool.clone(),
+            self.sql.write_pool.clone(),
+            "@daybook/core/blob-pins-part-worker",
+            "facets",
+        )
         .await
-        .map_err(|error| ferr!("opening blob-pins-part FacetSet reader: {error}"))?;
-    let mut walker = ConcurrentDeltaWalker::open(
-        reader,
-        state.clone(),
-        |entry: &FacetDelta| blob_pins_part_key(&entry.key.branch_id),
-    )
-    .await
-    .map_err(|error| ferr!("opening blob-pins-part FacetSet walker: {error}"))?;
-    let mut tasks = TokioKeyedScheduler::new(BLOB_PINS_PART_TASK_BUDGET);
-    // Per-document reconcile lock: concurrent branch tasks of one document
-    // reconcile against fresh states inside the task's lock section.
-    let reconcile_lock = Arc::new(tokio::sync::Mutex::new(()));
-    // The newest unacked delta per key.
-    let mut pending: HashMap<BlobPinsPartKey, BlobPinsPartTask> = HashMap::new();
-    loop {
-        let available = BLOB_PINS_PART_TASK_BUDGET.saturating_sub(tasks.active_count());
-        let next_deadline = tasks.next_deadline();
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return Ok(()),
-            completion = tasks.next_completion() => {
-                self.on_task_completion(
-                    &mut walker,
-                    &mut tasks,
-                    &mut pending,
-                    completion?,
-                )
-                .await?;
-            }
-            read = async {
-                if available == 0 {
-                    std::future::pending().await
-                } else {
-                    walker.next(available).await
+        .map_err(|error| ferr!("initializing blob-pins-part FacetSet state: {error}"))?;
+        let durable = state.progress().await?.upstream_revision;
+        let reader = facet_set_store
+            .open(FacetSetSelector::Tag(WellKnownFacetTag::BlobPin), durable)
+            .await
+            .map_err(|error| ferr!("opening blob-pins-part FacetSet reader: {error}"))?;
+        let mut walker =
+            ConcurrentDeltaWalker::open(reader, state.clone(), |entry: &FacetDelta| {
+                blob_pins_part_key(&entry.key.branch_id)
+            })
+            .await
+            .map_err(|error| ferr!("opening blob-pins-part FacetSet walker: {error}"))?;
+        let mut tasks = TokioKeyedScheduler::new(BLOB_PINS_PART_TASK_BUDGET);
+        // Per-document reconcile lock: concurrent branch tasks of one document
+        // reconcile against fresh states inside the task's lock section.
+        let reconcile_lock = Arc::new(tokio::sync::Mutex::new(()));
+        // The newest unacked delta per key.
+        let mut pending: HashMap<BlobPinsPartKey, BlobPinsPartTask> = HashMap::new();
+        loop {
+            let available = BLOB_PINS_PART_TASK_BUDGET.saturating_sub(tasks.active_count());
+            let next_deadline = tasks.next_deadline();
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                completion = tasks.next_completion() => {
+                    self.on_task_completion(
+                        &mut walker,
+                        &mut tasks,
+                        &mut pending,
+                        completion?,
+                    )
+                    .await?;
                 }
-            } => match read? {
-                ConcurrentDeltaRead::ReplayComplete { .. } => {}
-                ConcurrentDeltaRead::Entries { entries, .. } => {
-                    for delta in entries {
-                        self.on_delta(
-                            &state,
-                            &mut tasks,
-                            &mut pending,
-                            delta,
-                        )?;
+                read = async {
+                    if available == 0 {
+                        std::future::pending().await
+                    } else {
+                        walker
+                            .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
+                } => match read? {
+                    ConcurrentDeltaRead::ReplayComplete { .. } => {}
+                    ConcurrentDeltaRead::Entries { entries, .. } => {
+                        for delta in entries {
+                            self.on_delta(
+                                &drawer,
+                                &state,
+                                &reconcile_lock,
+                                &mut tasks,
+                                &mut pending,
+                                delta,
+                            )?;
+                        }
+                    }
+                },
+                _ = async {
+                    if let Some(deadline) = next_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    tasks.tick(std::time::Instant::now())?;
                 }
-            },
-            _ = async {
-                if let Some(deadline) = next_deadline {
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                tasks.tick(std::time::Instant::now())?;
             }
         }
     }
@@ -609,95 +607,94 @@ async fn run_facet_machine(
     async fn on_task_completion(
         &mut self,
         walker: &mut ConcurrentDeltaWalker<
-        '_,
-        FacetSetRevisionStore,
-        big_sync::SqliteDeltaWalkerStateRepo,
-        BlobPinsPartKey,
-    >,
-    tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
-    pending: &mut HashMap<BlobPinsPartKey, BlobPinsPartTask>,
-    completion: TokioTaskCompletion<BlobPinsPartTask, BlobPinsPartTaskOutput>,
-) -> Res<()> {
-    let task = completion.command;
-    match completion.result {
-        BlobPinsPartTaskOutput::Applied => {
-            // The command's effect is durable; only now may the walker
-            // cursor advance past it.
-            walker.ack(task.key, task.cursor).await?;
-            if pending
-                .get(&task.key)
-                .is_some_and(|t| t.cursor == task.cursor)
-            {
-                pending.remove(&task.key);
+            '_,
+            FacetSetRevisionStore,
+            big_sync::SqliteDeltaWalkerStateRepo,
+            BlobPinsPartKey,
+        >,
+        tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
+        pending: &mut HashMap<BlobPinsPartKey, BlobPinsPartTask>,
+        completion: TokioTaskCompletion<BlobPinsPartTask, BlobPinsPartTaskOutput>,
+    ) -> Res<()> {
+        let task = completion.command;
+        match completion.result {
+            Ok(BlobPinsPartTaskOutput::Applied) => {
+                // The command's effect is durable; only now may the walker
+                // cursor advance past it.
+                walker.ack(task.key, task.cursor).await?;
+                if pending
+                    .get(&task.key)
+                    .is_some_and(|t| t.cursor == task.cursor)
+                {
+                    pending.remove(&task.key);
+                }
             }
+            Err(error) => panic!("blob-pins-part task failed: {error:?}"),
         }
-        Err(error) => panic!("blob-pins-part task failed: {error:?}"),
+        Ok(())
     }
-    Ok(())
-}
 
-/// Merge a delta into the key's pending batch.
-///
-/// One revision may carry several BlobPin routes of the same branch (all
-/// sharing the branch key), and the walker delivers a newer revision of a
-/// key while an older one is still un-acked. Arrivals therefore accumulate
-/// per route — a stale-cursor arrival for a key whose batch already covers
-/// a newer revision is the only drop. If a task is already in flight,
-/// `start_task` replaces it with the union: hydration is read-only and the
-/// reconcile write commits in one transaction, so re-running a delta is
-/// safe. The cursor advances to the highest batch covered, and the walker
-/// ack happens strictly after the union is durable.
-fn on_delta(
-    &mut self,
-    drawer: &Arc<DrawerRepo>,
-    state: &big_sync::SqliteDeltaWalkerStateRepo,
-    reconcile_lock: &Arc<tokio::sync::Mutex<()>>,
-    tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
-    pending: &mut HashMap<BlobPinsPartKey, BlobPinsPartTask>,
-    delta: ConcurrentDelta<BlobPinsPartKey, FacetDelta>,
-) -> Res<()> {
-    // Take the pending batch out of the map and merge in place: no
-    // per-arrival clone of the accumulated work.
-    let task = match pending.remove(&delta.key) {
-        Some(existing) if existing.cursor > delta.cursor => {
-            pending.insert(existing.key, existing);
-            return Ok(());
-        }
-        Some(mut existing) => {
-            existing.deltas.retain(|d| d.key != delta.entry.key);
-            existing.deltas.push(delta.entry.clone());
-            existing.cursor = existing.cursor.max(delta.cursor);
-            existing
-        }
-        None => BlobPinsPartTask {
-            key: delta.key,
-            cursor: delta.cursor,
-            deltas: vec![delta.entry],
-        },
-    };
-    pending.insert(task.key, task.clone());
-    self.start_task(drawer, state, reconcile_lock, tasks, task)
-}
+    /// Merge a delta into the key's pending batch.
+    ///
+    /// One revision may carry several BlobPin routes of the same branch (all
+    /// sharing the branch key), and the walker delivers a newer revision of a
+    /// key while an older one is still un-acked. Arrivals therefore accumulate
+    /// per route — a stale-cursor arrival for a key whose batch already covers
+    /// a newer revision is the only drop. If a task is already in flight,
+    /// `start_task` replaces it with the union: hydration is read-only and the
+    /// reconcile write commits in one transaction, so re-running a delta is
+    /// safe. The cursor advances to the highest batch covered, and the walker
+    /// ack happens strictly after the union is durable.
+    fn on_delta(
+        &mut self,
+        drawer: &Arc<DrawerRepo>,
+        state: &big_sync::SqliteDeltaWalkerStateRepo,
+        reconcile_lock: &Arc<tokio::sync::Mutex<()>>,
+        tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
+        pending: &mut HashMap<BlobPinsPartKey, BlobPinsPartTask>,
+        delta: ConcurrentDelta<BlobPinsPartKey, FacetDelta>,
+    ) -> Res<()> {
+        // Take the pending batch out of the map and merge in place: no
+        // per-arrival clone of the accumulated work.
+        let task = match pending.remove(&delta.key) {
+            Some(existing) if existing.cursor > delta.cursor => {
+                pending.insert(existing.key, existing);
+                return Ok(());
+            }
+            Some(mut existing) => {
+                existing.deltas.retain(|d| d.key != delta.entry.key);
+                existing.deltas.push(delta.entry.clone());
+                existing.cursor = existing.cursor.max(delta.cursor);
+                existing
+            }
+            None => BlobPinsPartTask {
+                key: delta.key,
+                cursor: delta.cursor,
+                deltas: vec![delta.entry],
+            },
+        };
+        pending.insert(task.key, task.clone());
+        self.start_task(drawer, state, reconcile_lock, tasks, task)
+    }
 
-fn start_task(
-    &mut self,
-    drawer: &Arc<DrawerRepo>,
-    state: &big_sync::SqliteDeltaWalkerStateRepo,
-    reconcile_lock: &Arc<tokio::sync::Mutex<()>>,
-    tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
-    task: BlobPinsPartTask,
-) -> Res<()> {
-    let future = run_blob_pins_part_task(
-        task.clone(),
-        Arc::clone(&self.ctx),
-        Arc::clone(drawer),
-        state.clone(),
-        Arc::clone(reconcile_lock),
-    );
-    tasks.replace(task.key, task.clone(), future)?;
-    Ok(())
-}
-
+    fn start_task(
+        &mut self,
+        drawer: &Arc<DrawerRepo>,
+        state: &big_sync::SqliteDeltaWalkerStateRepo,
+        reconcile_lock: &Arc<tokio::sync::Mutex<()>>,
+        tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
+        task: BlobPinsPartTask,
+    ) -> Res<()> {
+        let future = run_blob_pins_part_task(
+            task.clone(),
+            Arc::clone(&self.ctx),
+            Arc::clone(drawer),
+            state.clone(),
+            Arc::clone(reconcile_lock),
+        );
+        tasks.replace(task.key, task.clone(), future)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

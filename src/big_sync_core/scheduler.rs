@@ -458,6 +458,11 @@ where
         self.active_by_key.get(&key).copied()
     }
 
+    /// Return retry bookkeeping for a current keyed task.
+    pub fn retry_of(&self, task: TaskId) -> Option<Retry> {
+        self.scheduler.retry_of(task)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn stopped_count(&self) -> usize {
         self.scheduler.stopped_count()

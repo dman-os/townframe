@@ -21,6 +21,9 @@ mod trap;
 mod worker;
 
 pub use backend::SyncBackend;
+pub use big_sync_core::delta_walker_sparse_state::{
+    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+};
 pub use big_sync_core::delta_walker_state::{
     DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateResult,
     DeltaWalkerStateTransaction,

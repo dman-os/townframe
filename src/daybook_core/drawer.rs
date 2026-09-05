@@ -53,20 +53,6 @@ pub(crate) fn facet_snapshot_metadata(
     Ok((ChangeHashSet(Arc::from(facet_heads)), actor_id))
 }
 
-/// Exact-head facet hydration owned by the drawer, which is the sole owner
-/// of BigRepo document handles at this layer.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExactFacetHydration {
-    Deferred,
-    Absent,
-    Present {
-        branch_heads: ChangeHashSet,
-        facet_heads: ChangeHashSet,
-        actor_id: ActorId,
-    },
-}
-
 /// Exact-head user-facet value hydration owned by the drawer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExactFacetValueHydration {

@@ -10,6 +10,7 @@
 //! compiled into the store's query) and hands the opened reader to
 //! [`SerialDeltaWalker::open`].
 
+use crate::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
 use crate::delta_walker_state::{
     DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
 };
@@ -228,14 +229,6 @@ where
         self.transaction.context_mut()
     }
 
-    pub async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DeltaWalkerStateError> {
-        self.transaction.put(key, value).await
-    }
-
-    pub async fn delete(&mut self, key: &[u8]) -> Result<(), DeltaWalkerStateError> {
-        self.transaction.delete(key).await
-    }
-
     pub async fn settle(self) -> Result<(), DeltaWalkerStateError> {
         let Self {
             pending,
@@ -261,9 +254,26 @@ where
     }
 }
 
+impl<'s, 'a, R> SerialDeltaSettlement<'s, 'a, R>
+where
+    R: DeltaWalkerStateRepo + 'a,
+    R::Transaction<'a>: DeltaWalkerSparseStateTransaction,
+{
+    pub async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DeltaWalkerStateError> {
+        self.transaction.put(key, value).await
+    }
+
+    pub async fn delete(&mut self, key: &[u8]) -> Result<(), DeltaWalkerStateError> {
+        self.transaction.delete(key).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta_walker_sparse_state::{
+        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+    };
     use crate::delta_walker_state::{DeltaWalkerProgress, DeltaWalkerStateResult};
     use async_trait::async_trait;
     use std::collections::{BTreeMap, VecDeque};
@@ -293,7 +303,6 @@ mod tests {
             }
         }
     }
-
 
     async fn open_walker<'a>(
         store: &'a ScriptedStore,
@@ -330,20 +339,6 @@ mod tests {
             })
         }
 
-        async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(self.inner.lock().unwrap().keys.get(key).cloned())
-        }
-
-        async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
-            self.inner.lock().unwrap().keys.insert(key, value);
-            Ok(())
-        }
-
-        async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()> {
-            self.inner.lock().unwrap().keys.remove(key);
-            Ok(())
-        }
-
         async fn advance_from(&mut self, expected: u64, next: u64) -> DeltaWalkerStateResult<()> {
             let state = self.inner.lock().unwrap();
             if state.progress != expected {
@@ -372,6 +367,23 @@ mod tests {
     }
 
     #[async_trait]
+    impl DeltaWalkerSparseStateTransaction for MemoryStateTx<'_> {
+        async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
+            Ok(self.inner.lock().unwrap().keys.get(key).cloned())
+        }
+
+        async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
+            self.inner.lock().unwrap().keys.insert(key, value);
+            Ok(())
+        }
+
+        async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()> {
+            self.inner.lock().unwrap().keys.remove(key);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
     impl DeltaWalkerStateRepo for MemoryStateRepo {
         type Context<'a>
             = ()
@@ -387,26 +399,6 @@ mod tests {
             Ok(DeltaWalkerProgress {
                 upstream_revision: state.progress,
             })
-        }
-
-        async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(self.inner.lock().unwrap().keys.get(key).cloned())
-        }
-
-        async fn get_many(
-            &self,
-            keys: &[Vec<u8>],
-        ) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
-            let state = self.inner.lock().unwrap();
-            Ok(keys
-                .iter()
-                .filter_map(|key| {
-                    state
-                        .keys
-                        .get(key)
-                        .map(|value| (key.clone(), value.clone()))
-                })
-                .collect())
         }
 
         async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
@@ -426,6 +418,29 @@ mod tests {
                 ctx: context,
                 staged_progress: None,
             })
+        }
+    }
+
+    #[async_trait]
+    impl DeltaWalkerSparseStateRepo for MemoryStateRepo {
+        async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
+            Ok(self.inner.lock().unwrap().keys.get(key).cloned())
+        }
+
+        async fn get_many(
+            &self,
+            keys: &[Vec<u8>],
+        ) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
+            let state = self.inner.lock().unwrap();
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    state
+                        .keys
+                        .get(key)
+                        .map(|value| (key.clone(), value.clone()))
+                })
+                .collect())
         }
     }
 
@@ -543,7 +558,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(4); // durable == head
-            let mut walker = open_walker(&store, &state).await.unwrap();
+            let mut walker = open_walker(&store, &state).await;
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 4 }
@@ -571,7 +586,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(2);
-            let mut walker = open_walker(&store, &state).await.unwrap();
+            let mut walker = open_walker(&store, &state).await;
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -592,7 +607,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = open_walker(&store, &state).await.unwrap();
+            let mut walker = open_walker(&store, &state).await;
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -615,7 +630,7 @@ mod tests {
                 entries: vec![50],
             }]));
             let state = MemoryStateRepo::new(5);
-            let mut walker = open_walker(&store, &state).await.unwrap();
+            let mut walker = open_walker(&store, &state).await;
             assert!(matches!(
                 walker.next().await,
                 Err(SerialDeltaWalkerError::NonAdvancingRevision)
@@ -635,7 +650,7 @@ mod tests {
                 explicit_reads: false,
             };
             let state = MemoryStateRepo::new(0);
-            let mut walker = open_walker(&store, &state).await.unwrap();
+            let mut walker = open_walker(&store, &state).await;
             assert_eq!(
                 walker.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -656,7 +671,7 @@ mod tests {
             assert_eq!(state.progress().await.unwrap().upstream_revision, 2);
             drop(walker);
 
-            let mut reopened = open_walker(&store, &state).await.unwrap();
+            let mut reopened = open_walker(&store, &state).await;
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::ReplayComplete { through: 2 }
@@ -679,7 +694,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = open_walker(&store, &state).await.unwrap();
+                let mut first = open_walker(&store, &state).await;
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -690,7 +705,7 @@ mod tests {
                 // consumer retains (revision 1, entries) and the session is
                 // dropped without settling, exactly like a reopen mid-defer.
             }
-            let mut reopened = open_walker(&store, &state).await.unwrap();
+            let mut reopened = open_walker(&store, &state).await;
             assert_eq!(
                 reopened.next().await.unwrap(),
                 RevisionRead::Entries {
@@ -718,7 +733,7 @@ mod tests {
             };
             let state = MemoryStateRepo::new(0);
             {
-                let mut first = open_walker(&store, &state).await.unwrap();
+                let mut first = open_walker(&store, &state).await;
                 assert_eq!(
                     first.next().await.unwrap(),
                     RevisionRead::Entries {
@@ -727,7 +742,7 @@ mod tests {
                     }
                 );
             }
-            let mut fresh = open_walker(&store, &state).await.unwrap();
+            let mut fresh = open_walker(&store, &state).await;
             assert!(matches!(
                 fresh.begin_settlement(1).await,
                 Err(SerialDeltaWalkerError::NoPendingRevision)

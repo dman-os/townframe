@@ -32,7 +32,8 @@ use utils_rs::batching::{DebouncePolicy, KeyedBatcher};
 use uuid::Uuid;
 
 /// Maximum admission rows classified per reader call.
-const ADMISSION_BATCH: usize = 256;
+const ADMISSION_BATCH: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(256).expect("literal is non-zero");
 
 #[derive(Clone)]
 pub(crate) struct SubscriptionEntry {

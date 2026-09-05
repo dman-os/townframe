@@ -17,6 +17,7 @@ use crate::revisioned_store::{
 };
 use crate::watermark::WatermarkMachine;
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 
 /// A source entry with the key used by the embedder when acknowledging it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,12 +118,10 @@ where
     /// registered atomically on the first call.
     pub async fn next(
         &mut self,
-        limit: usize,
+        limit: NonZeroUsize,
     ) -> Result<ConcurrentDeltaRead<K, S::Entry>, ConcurrentDeltaWalkerError<S::Error>> {
-        assert!(limit > 0, "delta walker read limit must be non-zero");
-
         if !self.buffered.is_empty() {
-            let count = limit.min(self.buffered.len());
+            let count = limit.get().min(self.buffered.len());
             return Ok(ConcurrentDeltaRead::Entries {
                 revision: self.buffered.front().expect("buffer is non-empty").cursor,
                 entries: self.buffered.drain(..count).collect(),
@@ -159,7 +158,7 @@ where
                         continue;
                     }
 
-                    let count = limit.min(self.buffered.len());
+                    let count = limit.get().min(self.buffered.len());
                     return Ok(ConcurrentDeltaRead::Entries {
                         revision,
                         entries: self.buffered.drain(..count).collect(),
@@ -233,6 +232,8 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
 
+    const TEST_BATCH_LIMIT: NonZeroUsize = NonZeroUsize::new(10).expect("literal is non-zero");
+
     // In-memory durable state double, mirroring the SQLite backend's
     // strictly-advancing settlement semantics (see serial_delta_walker
     // tests for the original).
@@ -273,28 +274,6 @@ mod tests {
             Ok(DeltaWalkerProgress {
                 upstream_revision: self.inner.lock().unwrap().progress,
             })
-        }
-
-        async fn get(
-            &mut self,
-            _key: &[u8],
-        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(None)
-        }
-
-        async fn put(
-            &mut self,
-            _key: Vec<u8>,
-            _value: Vec<u8>,
-        ) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-
-        async fn delete(
-            &mut self,
-            _key: &[u8],
-        ) -> crate::delta_walker_state::DeltaWalkerStateResult<()> {
-            Ok(())
         }
 
         async fn advance_from(
@@ -345,20 +324,6 @@ mod tests {
             Ok(DeltaWalkerProgress {
                 upstream_revision: self.inner.lock().unwrap().progress,
             })
-        }
-
-        async fn get(
-            &self,
-            _key: &[u8],
-        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(None)
-        }
-
-        async fn get_many(
-            &self,
-            _keys: &[Vec<u8>],
-        ) -> crate::delta_walker_state::DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
-            Ok(Vec::new())
         }
 
         async fn begin<'a>(
@@ -479,8 +444,10 @@ mod tests {
             let state = MemoryStateRepo::new(0);
             let mut walker = open_walker(&source, state.clone()).await;
 
-            let ConcurrentDeltaRead::Entries { entries, .. } =
-                walker.next(10).await.expect("batch read must succeed")
+            let ConcurrentDeltaRead::Entries { entries, .. } = walker
+                .next(TEST_BATCH_LIMIT)
+                .await
+                .expect("batch read must succeed")
             else {
                 panic!("expected entries");
             };
@@ -508,8 +475,8 @@ mod tests {
             let state = MemoryStateRepo::new(0);
             let mut walker = open_walker(&source, state.clone()).await;
 
-            walker.next(10).await.expect("first batch");
-            walker.next(10).await.expect("second batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("first batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("second batch");
 
             // The single ack for the duplicated key finishes cursor 10's
             // slot (both rows are one waiter), but cursor 11 still gates.
@@ -530,8 +497,8 @@ mod tests {
             let state = MemoryStateRepo::new(0);
             let mut walker = open_walker(&source, state.clone()).await;
 
-            walker.next(10).await.expect("first batch");
-            walker.next(10).await.expect("second batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("first batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("second batch");
 
             // Out-of-order settles: neither 9 nor 8 alone unblocks the prefix.
             walker.ack(9, 11).await.expect("ack must succeed");
@@ -552,8 +519,8 @@ mod tests {
             let state = MemoryStateRepo::new(0);
             let mut walker = open_walker(&source, state.clone()).await;
 
-            walker.next(10).await.expect("first batch");
-            walker.next(10).await.expect("second batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("first batch");
+            walker.next(TEST_BATCH_LIMIT).await.expect("second batch");
 
             // Acking the newest cursor supersedes the older one for the key;
             // both slots free and the watermark drains to 11.
@@ -572,9 +539,12 @@ mod tests {
             ]);
             let state = MemoryStateRepo::new(0);
             let mut walker = open_walker(&source, state.clone()).await;
-            walker.next(10).await.expect("batch read");
+            walker.next(TEST_BATCH_LIMIT).await.expect("batch read");
             assert!(matches!(
-                walker.next(10).await.expect("replay boundary"),
+                walker
+                    .next(TEST_BATCH_LIMIT)
+                    .await
+                    .expect("replay boundary"),
                 ConcurrentDeltaRead::ReplayComplete { through: 10 }
             ));
             walker.ack(7, 10).await.expect("ack must succeed");
@@ -584,8 +554,10 @@ mod tests {
             // A fresh walker over the same durable state replays from 0: the
             // unsuperseded sibling is re-delivered (at-least-once).
             let mut restarted = open_walker(&source, state.clone()).await;
-            let ConcurrentDeltaRead::Entries { entries, .. } =
-                restarted.next(10).await.expect("replayed batch")
+            let ConcurrentDeltaRead::Entries { entries, .. } = restarted
+                .next(TEST_BATCH_LIMIT)
+                .await
+                .expect("replayed batch")
             else {
                 panic!("expected replayed entries");
             };

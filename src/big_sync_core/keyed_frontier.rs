@@ -13,6 +13,8 @@
 //! point-in-time snapshot beyond this handoff contract.
 
 /// Globally ordered position assigned to one atomic mutation batch.
+use std::num::NonZeroUsize;
+
 pub type FrontierRevision = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +40,14 @@ pub struct FrontierEntry<K, V> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontierReadLimits {
     /// Soft limit: one atomic revision is never split across batches.
-    pub max_entries: usize,
+    pub max_entries: NonZeroUsize,
 }
 
 impl Default for FrontierReadLimits {
     fn default() -> Self {
-        Self { max_entries: 256 }
+        Self {
+            max_entries: NonZeroUsize::new(256).expect("literal is non-zero"),
+        }
     }
 }
 
@@ -67,8 +71,6 @@ pub enum KeyedFrontierError {
         current: FrontierRevision,
         next: FrontierRevision,
     },
-    #[error("frontier read max_entries must be greater than zero")]
-    EmptyReadLimit,
     #[error("keyed frontier backend error: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }

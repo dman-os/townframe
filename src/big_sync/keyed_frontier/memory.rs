@@ -340,9 +340,6 @@ where
         &mut self,
         limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<FrontierRead<K, V>> {
-        if limits.max_entries == 0 {
-            return Err(KeyedFrontierError::EmptyReadLimit);
-        }
         loop {
             if let Some(root) = self.initial_root.as_ref() {
                 let (entries, through) = self.read_root(
@@ -350,7 +347,7 @@ where
                     self.after,
                     self.initial_through,
                     true,
-                    limits.max_entries,
+                    limits.max_entries.get(),
                 );
                 self.after = through;
                 if !entries.is_empty() {
@@ -375,7 +372,7 @@ where
                 self.after,
                 view.through,
                 false,
-                limits.max_entries,
+                limits.max_entries.get(),
             );
             self.after = through;
             if !entries.is_empty() {

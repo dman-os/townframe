@@ -860,8 +860,11 @@ pub mod host_contract {
 
         // Opened before any part or object exists.
         let mut reader = store.open_local_revision_reader_all(latest).await??;
-        while let RevisionRead::Entries { entries, .. } =
-            reader.next(RevisionReadLimits { max_entries: 1 }).await?
+        while let RevisionRead::Entries { entries, .. } = reader
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
         {
             assert!(entries.is_empty(), "an empty scope replays nothing");
         }
@@ -898,8 +901,11 @@ pub mod host_contract {
         // A reader opened after the writes replays nothing.
         let after = store.latest_revision().await?;
         let mut bounded = store.open_local_revision_reader_all(after).await??;
-        while let RevisionRead::Entries { entries, .. } =
-            bounded.next(RevisionReadLimits { max_entries: 1 }).await?
+        while let RevisionRead::Entries { entries, .. } = bounded
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
         {
             assert!(entries.is_empty(), "the after bound must skip the prefix");
         }
@@ -939,7 +945,12 @@ pub mod host_contract {
         let mut last_revision = 0;
         let mut grouped_revision = None;
         let replay_through = loop {
-            match reader.next(RevisionReadLimits { max_entries: 1 }).await? {
+            match reader
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?
+            {
                 RevisionRead::Entries { revision, entries } => {
                     assert!(
                         revision > last_revision,
@@ -990,7 +1001,12 @@ pub mod host_contract {
                 }]),
             })
             .await??;
-        let filtered_through = match filtered.next(RevisionReadLimits { max_entries: 1 }).await? {
+        let filtered_through = match filtered
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision >= replay_through);
                 assert!(entries.is_empty());
@@ -999,7 +1015,11 @@ pub mod host_contract {
             other => panic!("expected empty filtered progress, got {other:?}"),
         };
         assert!(matches!(
-            filtered.next(RevisionReadLimits { max_entries: 1 }).await?,
+            filtered
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
             RevisionRead::ReplayComplete { through } if through == filtered_through
         ));
 
@@ -1012,7 +1032,12 @@ pub mod host_contract {
                 }]),
             })
             .await??;
-        let bounded_through = match bounded.next(RevisionReadLimits { max_entries: 1 }).await? {
+        let bounded_through = match bounded
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision >= replay_through);
                 assert!(entries.is_empty());
@@ -1021,7 +1046,11 @@ pub mod host_contract {
             other => panic!("expected empty bounded progress, got {other:?}"),
         };
         assert!(matches!(
-            bounded.next(RevisionReadLimits { max_entries: 1 }).await?,
+            bounded
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
             RevisionRead::ReplayComplete { through } if through == bounded_through
         ));
 
@@ -1030,7 +1059,11 @@ pub mod host_contract {
             .set_obj_payload(unrelated_obj, payload("revision-filtered", 5))
             .await?;
         assert!(matches!(
-            filtered.next(RevisionReadLimits { max_entries: 1 }).await?,
+            filtered
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
             RevisionRead::Entries {
                 revision,
                 entries

@@ -163,13 +163,9 @@ where
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
-        let task_id = self.scheduler.retry_delayed(
-            Instant::now(),
-            key,
-            command,
-            retry,
-            min_delay,
-        );
+        let task_id = self
+            .scheduler
+            .retry_delayed(Instant::now(), key, command, retry, min_delay);
         let old = self.retry_futures.insert(task_id, Box::pin(future));
         assert!(old.is_none(), "retry task id was reused");
         self.abort_stopped();
@@ -219,7 +215,10 @@ where
                 // Completion is also the admission point for work that was
                 // ready but waiting for the physical budget.
                 self.spawn_queued()?;
-                return Ok(TokioTaskCompletion { retry, ..completion });
+                return Ok(TokioTaskCompletion {
+                    retry,
+                    ..completion
+                });
             }
         }
     }
@@ -251,7 +250,7 @@ where
             let result = future.await;
             // Closing the receiver means the owning worker is shutting down;
             // the task has no consumer left to report to.
-            let _ = completion_tx
+            match completion_tx
                 .send(TokioTaskCompletion {
                     task_id,
                     command,
@@ -263,7 +262,13 @@ where
                         queued_at: Instant::now(),
                     },
                 })
-                .await;
+                .await
+            {
+                Ok(()) => {}
+                Err(_closed) => {
+                    // A closed receiver is the owning worker's shutdown signal.
+                }
+            }
         })?;
         self.handles.insert(task_id, handle);
         Ok(())
@@ -285,7 +290,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn waking_parked_work_waits_for_physical_capacity() {
         let mut tasks = TokioKeyedScheduler::<u64, u64, u32>::new(1);
-        tasks.replace(1, 1, std::future::pending::<Res<u32>>()).unwrap();
+        tasks
+            .replace(1, 1, std::future::pending::<Res<u32>>())
+            .unwrap();
         tasks.park(2, 2);
 
         assert!(tasks.wake(2, async { Ok(2u32) }).unwrap());

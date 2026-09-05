@@ -194,7 +194,7 @@ impl Node {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn boot_with_store(
         seed: u8,
         label: &'static str,

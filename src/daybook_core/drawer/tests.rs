@@ -85,7 +85,8 @@ async fn system_facet_validation_requires_privileged_scope() -> Res<()> {
         (
             branches_key.clone(),
             WellKnownFacet::Branches(daybook_types::doc::Branches {
-                declarations: HashMap::new(),
+                by_name: HashMap::new(),
+                by_id: HashMap::new(),
             })
             .into(),
         ),
@@ -220,7 +221,8 @@ async fn test_v2_smoke() -> Res<()> {
     let WellKnownFacet::Branches(branches) = branches else {
         eyre::bail!("initial branches facet has the wrong type");
     };
-    assert!(branches.declarations.is_empty());
+    assert!(branches.by_name.is_empty());
+    assert!(branches.by_id.is_empty());
     // 2. List docs
     let list = repo.list().await?;
     assert_eq!(list.len(), 1);
@@ -485,7 +487,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         eyre::bail!("main branches facet has wrong type");
     };
     let declaration = main_branches
-        .declarations
+        .by_id
         .get(&replicated_branch_ref.branch_doc_id.to_string().into())
         .expect("replicated branch declaration missing");
     assert_eq!(declaration.name.as_deref(), Some("/test-device/branch-a"));
@@ -609,7 +611,8 @@ async fn register_existing_doc_initializes_branch_system_facets() -> Res<()> {
     let WellKnownFacet::Branches(branches) = branches else {
         eyre::bail!("registered Branches facet has the wrong type");
     };
-    assert!(branches.declarations.is_empty());
+    assert!(branches.by_name.is_empty());
+    assert!(branches.by_id.is_empty());
 
     stop_token.stop().await?;
     acx_stop().await?;

@@ -1,7 +1,8 @@
 //! Durable state primitives for embedder-driven delta walkers.
 //!
-//! The repository stores only consumer progress and sparse opaque per-key
-//! state. It does not read a source, schedule work, or own an event loop.
+//! The repository stores consumer progress for one durable delta walker. It
+//! does not read a source, schedule work, or own an event loop. Consumers that
+//! need sparse per-key memory opt into the separate sparse-state capability.
 
 use async_trait::async_trait;
 
@@ -29,9 +30,6 @@ pub trait DeltaWalkerStateTransaction: Send {
 
     fn context_mut(&mut self) -> &mut Self::Context;
     async fn progress(&mut self) -> DeltaWalkerStateResult<DeltaWalkerProgress>;
-    async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>>;
-    async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()>;
-    async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()>;
     async fn advance_from(&mut self, expected: u64, next: u64) -> DeltaWalkerStateResult<()>;
     async fn commit(self) -> DeltaWalkerStateResult<()>;
     async fn rollback(self) -> DeltaWalkerStateResult<()>;
@@ -48,11 +46,6 @@ pub trait DeltaWalkerStateRepo: Send + Sync {
         Self: 'a;
 
     async fn progress(&self) -> DeltaWalkerStateResult<DeltaWalkerProgress>;
-    /// Read one sparse state value without opening a write transaction.
-    async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>>;
-    /// Read the present values for a bounded set of sparse keys. Missing keys
-    /// are omitted; returned keys are the original opaque state keys.
-    async fn get_many(&self, keys: &[Vec<u8>]) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>>;
     async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>>;
     async fn begin_with_context<'a>(
         &'a self,

@@ -13,8 +13,8 @@ use big_sync_core::concurrent_delta_walker::{
     ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
 };
 use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::outbox::Outbox;
+use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ pub struct SpawnedCausalCheckpointWorker<F: FutureForm> {
     pub run: F::Future<'static, eyre::Result<()>>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn spawn_causal_checkpoint_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
@@ -99,17 +99,20 @@ pub fn spawn_causal_checkpoint_worker(
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
-            let admission =
-                ConcurrentDeltaWalker::open(reader, state, |row: &keyhive_admission::AdmittedRow| {
-                let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
-                    .expect("persisted keyhive admission event must decode");
-                match event {
-                    StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
-                        crate::DocumentId::new(*operation.payload().doc_id().as_bytes()),
-                    ),
-                    _ => FrontierKey::Decode(row.seq),
-                }
-            })
+            let admission = ConcurrentDeltaWalker::open(
+                reader,
+                state,
+                |row: &keyhive_admission::AdmittedRow| {
+                    let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
+                        .expect("persisted keyhive admission event must decode");
+                    match event {
+                        StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
+                            crate::DocumentId::new(*operation.payload().doc_id().as_bytes()),
+                        ),
+                        _ => FrontierKey::Decode(row.seq),
+                    }
+                },
+            )
             .await?;
             let worker = Worker {
                 store,
@@ -210,7 +213,9 @@ impl<'a> Worker<'a> {
                     if available == 0 {
                         std::future::pending().await
                     } else {
-                        self.admission.next(available).await
+                        self.admission
+                            .next(std::num::NonZeroUsize::new(available).expect("available is non-zero"))
+                            .await
                     }
                 } => {
                     match admission? {
@@ -296,8 +301,8 @@ impl<'a> Worker<'a> {
         completion: big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion<Task, TaskOutput>,
     ) -> Res<()> {
         match (completion.command, completion.result) {
-            (Task::EnsureCoverage { doc_id, source }, TaskOutput::Covered)
-            | (Task::EnsureCoverage { doc_id, source }, TaskOutput::OutOfScope) => {
+            (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::Covered))
+            | (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::OutOfScope)) => {
                 if std::env::var_os("DAYB_REST_DIAG").is_some() {
                     tracing::warn!(?doc_id, ?source, "CAUSAL coverage done");
                 }
@@ -336,7 +341,6 @@ impl<'a> Worker<'a> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_task(
     task: Task,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,

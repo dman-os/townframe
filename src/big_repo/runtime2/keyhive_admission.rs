@@ -71,10 +71,6 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
         &mut self,
         limits: RevisionReadLimits,
     ) -> Result<RevisionRead<u64, AdmittedRow>, eyre::Report> {
-        assert!(
-            limits.max_entries > 0,
-            "admission read limit must be non-zero"
-        );
         loop {
             if !self.replay_complete && self.cursor >= self.through {
                 self.replay_complete = true;
@@ -86,16 +82,16 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
             let rows = if self.replay_complete {
                 if self.buffered.is_empty() {
                     self.store
-                        .admission_events_after(self.cursor, limits.max_entries as u32)
+                        .admission_events_after(self.cursor, limits.max_entries.get() as u32)
                         .await?
                 } else {
                     self.buffered
-                        .drain(..limits.max_entries.min(self.buffered.len()))
+                        .drain(..limits.max_entries.get().min(self.buffered.len()))
                         .collect()
                 }
             } else {
                 self.store
-                    .admission_events_after(self.cursor, limits.max_entries as u32)
+                    .admission_events_after(self.cursor, limits.max_entries.get() as u32)
                     .await?
             };
             let rows = if self.replay_complete {

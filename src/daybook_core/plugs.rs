@@ -8,8 +8,7 @@ use self::cache::PlugsCache;
 pub use self::events::PlugsEvent;
 pub(crate) use self::events::{
     PLUG_MANIFEST_CONSUMER_STATE_ID, PLUGS_CONFIG_CONSUMER_STATE_ID, PlugsConfigEventStore,
-    PlugsConfigRevision, spawn_facet_set_plugs_manifest_consumer,
-    spawn_plugs_config_consumer,
+    PlugsConfigRevision, spawn_facet_set_plugs_manifest_consumer, spawn_plugs_config_consumer,
 };
 pub use self::oci::OciImportOptions;
 
@@ -262,7 +261,7 @@ impl PlugsRepo {
     pub(crate) fn publish_event(&self, event: PlugsEvent) {
         // Broadcast with zero receivers is a no-op, not an error to surface:
         // subscribers come and go, and the durable stream is the event store.
-        let _ = self.events_tx.send(event);
+        drop(self.events_tx.send(event));
     }
 
     /// Apply one config revision's events to the derived cache and publish
@@ -270,10 +269,7 @@ impl PlugsRepo {
     /// in-memory snapshot first, so subsequent local mutations build patches
     /// on fresh state (stale, coalesced, local, and out-of-order revisions all
     /// converge through the hydrated snapshot).
-    pub(crate) async fn apply_config_revision(
-        &self,
-        revision: &PlugsConfigRevision,
-    ) -> Res<()> {
+    pub(crate) async fn apply_config_revision(&self, revision: &PlugsConfigRevision) -> Res<()> {
         let _guard = self.mutation_mutex.lock().await;
         let store = self.config_store()?;
         store
@@ -281,7 +277,8 @@ impl PlugsRepo {
             .await?;
         for event in &revision.events {
             match event {
-                PlugsEvent::PlugEnabled { plug_id, .. } | PlugsEvent::PlugUpdated { plug_id, .. } => {
+                PlugsEvent::PlugEnabled { plug_id, .. }
+                | PlugsEvent::PlugUpdated { plug_id, .. } => {
                     if let Some(ref_url) = revision.config.enabled.get(plug_id) {
                         self.activate_from_ref(plug_id, ref_url).await?;
                     }
