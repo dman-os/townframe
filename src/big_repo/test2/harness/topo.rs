@@ -194,7 +194,6 @@ impl Node {
         .await
     }
 
-    #[expect(clippy::too_many_arguments)]
     async fn boot_with_store(
         seed: u8,
         label: &'static str,
@@ -462,6 +461,7 @@ impl ShutdownGuard {
     }
 
     /// Boot N disconnected nodes managed under this RAII shutdown guard.
+    #[expect(unused)]
     pub(crate) async fn boot(specs: &[(u8, &'static str)]) -> crate::Res<Self> {
         let mut nodes = Vec::with_capacity(specs.len());
         for &(seed, label) in specs {

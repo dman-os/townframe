@@ -8,15 +8,11 @@ const CORE_PLUG_ID: &str = "@daybook/core";
 /// Outcome of recording a manifest doc in the config facet.
 pub(crate) enum RecordKnownOutcome {
     /// Recorded (or already current) and the derived cache updated.
-    Recorded { plug_id: String },
+    Recorded,
     /// No manifest facet readable at the given heads.
     Unreadable,
     /// The version/compat gate rejected the update; nothing recorded.
-    Rejected {
-        plug_id: String,
-        version: semver::Version,
-        reason: String,
-    },
+    Rejected { reason: String },
 }
 
 impl PlugsRepo {
@@ -367,7 +363,7 @@ impl PlugsRepo {
             RecordKnownOutcome::Unreadable => {
                 eyre::bail!("manifest doc unreadable at given heads")
             }
-            RecordKnownOutcome::Recorded { .. } => {}
+            RecordKnownOutcome::Recorded => {}
         }
         if !no_enable {
             self.enable_plug(&ref_url).await?;
@@ -589,7 +585,7 @@ impl PlugsRepo {
             RecordKnownOutcome::Unreadable => {
                 eyre::bail!("manifest doc unreadable after add")
             }
-            RecordKnownOutcome::Recorded { .. } => {}
+            RecordKnownOutcome::Recorded => {}
         }
 
         Ok(doc_id)
@@ -645,7 +641,7 @@ impl PlugsRepo {
                 let (mut cache, _key) = key.lock(&self.cache);
                 cache.upsert_known(&plug_id, &manifest);
             });
-            return Ok(RecordKnownOutcome::Recorded { plug_id });
+            return Ok(RecordKnownOutcome::Recorded);
         }
         let mut reason = None;
         // Gate A: version must strictly bump over the latest version seen.
@@ -710,11 +706,13 @@ impl PlugsRepo {
         let after = self
             .config_store()?
             .query_sync(|config| {
-                config.known_plugs.get(&plug_id).map(|track| (
-                    track.latest_version.clone(),
-                    track.last_enabled_version.clone(),
-                    track.latest_rejection.is_some(),
-                ))
+                config.known_plugs.get(&plug_id).map(|track| {
+                    (
+                        track.latest_version.clone(),
+                        track.last_enabled_version.clone(),
+                        track.latest_rejection.is_some(),
+                    )
+                })
             })
             .await;
         tracing::debug!(%plug_id, ?after, "recorded manifest version in plugs config");
@@ -724,13 +722,9 @@ impl PlugsRepo {
                     let (mut cache, _key) = key.lock(&self.cache);
                     cache.upsert_known(&plug_id, &manifest);
                 });
-                Ok(RecordKnownOutcome::Recorded { plug_id })
+                Ok(RecordKnownOutcome::Recorded)
             }
-            Some(reason) => Ok(RecordKnownOutcome::Rejected {
-                plug_id,
-                version: incoming_version,
-                reason,
-            }),
+            Some(reason) => Ok(RecordKnownOutcome::Rejected { reason }),
         }
     }
 

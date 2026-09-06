@@ -56,7 +56,7 @@ enum FacetSetBranchPreparation {
 }
 
 impl DocFacetRefIndexRepo {
-    pub async fn boot(
+    pub(crate) async fn boot(
         drawer_repo: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
@@ -509,7 +509,6 @@ impl DocFacetRefIndexRepo {
             big_sync::SqliteDeltaWalkerStateRepo,
             FacetRefKey,
         >,
-        tasks: &mut TokioKeyedScheduler<FacetRefKey, FacetRefTask, FacetRefTaskOutput>,
         pending: &mut HashMap<FacetRefKey, FacetRefTask>,
         completion: TokioTaskCompletion<FacetRefTask, FacetRefTaskOutput>,
     ) -> Res<()> {
@@ -521,7 +520,7 @@ impl DocFacetRefIndexRepo {
                 walker.ack(task.key, task.cursor).await?;
                 if pending
                     .get(&task.key)
-                    .is_some_and(|t| t.cursor == task.cursor)
+                    .is_some_and(|existing| existing.cursor == task.cursor)
                 {
                     pending.remove(&task.key);
                 }
@@ -694,7 +693,6 @@ impl DocFacetRefIndexRepo {
                     completion = tasks.next_completion() => {
                         self.on_task_completion(
                             &mut walker,
-                            &mut tasks,
                             &mut pending,
                             completion?,
                         )

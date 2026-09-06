@@ -394,8 +394,8 @@ async fn pull_required_partitions_via_big_sync_worker(
         eyre::bail!("clone Keyhive subscription did not send its readiness event");
     }
     tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id))
-    .await
-    .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
+        .await
+        .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
     let big_sync_rpc_client =
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
     let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =

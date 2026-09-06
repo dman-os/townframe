@@ -294,10 +294,7 @@ impl FacetSetRevisionStore {
                 BranchIdentityResolution::Found(_) => {}
             }
             let physical_id = delta.branch_id.0.parse::<big_repo::DocumentId>()?;
-            let Some(latest_heads) = drawer
-                .get_branch_heads_by_doc_id(physical_id)
-                .await?
-            else {
+            let Some(latest_heads) = drawer.get_branch_heads_by_doc_id(physical_id).await? else {
                 tracing::debug!(
                     branch_id = %delta.branch_id.0,
                     event_heads = ?event_heads,
@@ -314,15 +311,11 @@ impl FacetSetRevisionStore {
             );
             settled_current_heads = Some(latest_heads.clone());
 
-            // TEMPORARY system-doc filter: the walker source reads
-            // GLOBAL_PART_ID, which mirrors every known Automerge object -
-            // including system docs (app_doc, drawer_doc, config doc, plug
-            // manifest docs) that have not been migrated to the facet-based
-            // format yet and carry no Branch facet. Only content docs may be
-            // projected here, so resolve the identity at the latest materialized
-            // heads and skip everything else. The real fix is routing the doc
-            // delta source through a content-doc group part instead of
-            // GLOBAL_PART_ID, after which this resolution disappears.
+            // The all-parts source includes system docs (app_doc, drawer_doc,
+            // config doc, plug manifest docs) that have not been migrated to
+            // the facet-based format and carry no Branch facet. Only content
+            // docs may be projected here, so resolve the identity at the latest
+            // materialized heads and skip everything else.
             let identity = match drawer
                 .resolve_system_branch_identity_at_heads(&delta.branch_id, &latest_heads)
                 .await?
@@ -742,9 +735,7 @@ impl DocFacetSetIndexRepo {
         let selector = DocDeltaSelector {
             memory: state.clone(),
             source: AutomergeFrontierSelector {
-                targets: vec![AutomergeFrontierTarget::Part {
-                    part_id: big_repo::GLOBAL_PART_ID,
-                }],
+                targets: vec![AutomergeFrontierTarget::All],
             },
             filter: DocDeltaBranchFilter::All,
         };
@@ -760,8 +751,9 @@ impl DocFacetSetIndexRepo {
         let mut materialization_wake = drawer.open_materialization_reader(None).await?;
         // The newest unacked delta per key.
         let mut pending: HashMap<DocDeltaKey, FacetSetDeltaTask> = HashMap::new();
-        // A materialization wake can race with task completion. Remember wakes
-        // observed while a key is still active and consume them after parking.
+        // Materialization wakes can race with task publication and completion.
+        // Remember wakes that cannot immediately wake a task and consume them
+        // after parking.
         let mut pending_wakes = BTreeSet::new();
         loop {
             let available = FACET_SET_TASK_BUDGET.saturating_sub(tasks.active_count());
@@ -782,6 +774,10 @@ impl DocFacetSetIndexRepo {
                         if !tasks.wake(key, future)? {
                             pending_wakes.insert(key);
                         }
+                    } else {
+                        // Retain an early wake until the walker publishes the
+                        // corresponding delta and its task can be retried.
+                        pending_wakes.insert(key);
                     }
                 }
                 completion = tasks.next_completion() => {
@@ -860,14 +856,14 @@ impl DocFacetSetIndexRepo {
         let task = completion.command;
         match completion.result {
             Ok(FacetSetTaskOutput::Applied) => {
-                pending_wakes.remove(&task.key);
                 // The command's effect is durable; only now may the walker
                 // cursor advance past it.
                 walker.ack(task.key, task.cursor).await?;
                 if pending
                     .get(&task.key)
-                    .is_some_and(|t| t.cursor == task.cursor)
+                    .is_some_and(|existing| existing.cursor == task.cursor)
                 {
+                    pending_wakes.remove(&task.key);
                     pending.remove(&task.key);
                 }
                 Ok(None)
@@ -964,7 +960,7 @@ impl DocFacetSetIndexRepo {
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             let drawer = Arc::clone(&drawer);
-            let part_store = part_store.clone();
+            let part_store = Arc::clone(&part_store);
             let cancel_token = cancel_token.clone();
             async move {
                 repo.machine_loop(drawer, part_store, cancel_token)

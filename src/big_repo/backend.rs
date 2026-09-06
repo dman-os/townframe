@@ -47,21 +47,27 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             remote_payload = remote_payload.is_some(),
             "big repo sync_obj",
         );
-        // short circuit if the payloads are equal
+        // Equal advertised heads only prove logical convergence. A partially
+        // materialized sedimentree can still be missing the blobs needed to
+        // reconstruct those heads, so it must run the backend sync.
         let local_heads = repo.doc_payload_heads(doc_id).await?;
-        if let Some(remote_payload) = &remote_payload
-            && let Some(local_heads) = &local_heads
-        {
-            let remote_heads = super::doc_heads_from_payload(remote_payload);
-            if local_heads.as_ref() == remote_heads.as_ref() {
-                return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                    big_sync_core::SyncTaskCompletion {
-                        obj_id,
-                        deets: big_sync_core::SyncCompletionDeets::Noop,
-                    },
-                ));
-            }
-        }
+        // Equal heads cannot safely settle a cursor until connection-time set
+        // reconciliation proves the underlying object state is complete.
+        // if let Some(remote_payload) = &remote_payload
+        //     && let Some(local_heads) = &local_heads
+        //     && repo.doc_head_state(doc_id).await?.state
+        //         == crate::runtime2::MaterializationState::Materialized
+        // {
+        //     let remote_heads = super::doc_heads_from_payload(remote_payload);
+        //     if local_heads.as_ref() == remote_heads.as_ref() {
+        //         return Ok(big_sync::SyncTaskRunOutcome::Completion(
+        //             big_sync_core::SyncTaskCompletion {
+        //                 obj_id,
+        //                 deets: big_sync_core::SyncCompletionDeets::Noop,
+        //             },
+        //         ));
+        //     }
+        // }
         let timeout = repo.sync_policy().backend_doc_sync_timeout;
         let receipt = match tokio::time::timeout(
             timeout,
@@ -81,7 +87,15 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 eyre::bail!("remote doc was not found");
             }
             Ok(Err(crate::SyncDocError::Unauthorized)) => {
-                eyre::bail!("remote doc sync was unauthorized");
+                // The peer advertised an object it will not serve to us. This
+                // cursor is terminal for that peer; retrying it forever prevents
+                // full-sync/quiescence even after every document has converged.
+                return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                    big_sync_core::SyncTaskCompletion {
+                        obj_id,
+                        deets: big_sync_core::SyncCompletionDeets::Noop,
+                    },
+                ));
             }
             Ok(Err(crate::SyncDocError::Policy(error))) => {
                 eyre::bail!(

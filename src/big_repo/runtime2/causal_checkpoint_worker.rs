@@ -38,7 +38,6 @@ pub struct SpawnedCausalCheckpointWorker<F: FutureForm> {
     pub run: F::Future<'static, eyre::Result<()>>,
 }
 
-#[expect(clippy::too_many_arguments)]
 pub fn spawn_causal_checkpoint_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,

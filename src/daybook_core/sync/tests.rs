@@ -463,7 +463,7 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     // leak and the repos would be cleaned up.
     let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
     if outcome.is_err() || matches!(&outcome, Ok(Err(_))) {
-        let keep = temp_root.into_path();
+        let keep = temp_root.keep();
         tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
         eyre::bail!(
             "clone sync test failed; repos preserved at {}",
@@ -564,7 +564,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
         eyre::Ok((node_a, node_b))
     };
     let Ok((node_a, node_b)) = run.await else {
-        let keep = temp_root.into_path();
+        let keep = temp_root.keep();
         tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
         eyre::bail!(
             "clone sync test failed; repos preserved at {}",
@@ -630,7 +630,7 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
         eyre::Ok((node_a, node_b))
     };
     let Ok((node_a, node_b)) = run.await else {
-        let keep = temp_root.into_path();
+        let keep = temp_root.keep();
         tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
         eyre::bail!(
             "clone sync test failed; repos preserved at {}",

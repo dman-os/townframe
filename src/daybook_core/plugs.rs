@@ -245,11 +245,7 @@ pub struct ImportedPlug {
     pub source_digest: Option<String>,
 }
 
-#[expect(
-    clippy::clone_on_ref_ptr,
-    clippy::disallowed_names,
-    clippy::while_let_loop
-)]
+#[expect(clippy::clone_on_ref_ptr)]
 impl PlugsRepo {
     /// Live tap of the config event stream: the same [`PlugsEvent`]s the
     /// revisioned store replays, plus pending→active transitions (live-only,

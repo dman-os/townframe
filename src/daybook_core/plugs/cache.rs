@@ -69,22 +69,4 @@ impl PlugsCache {
                 .insert(facet.key_tag.to_string(), facet.clone());
         }
     }
-
-    /// Drop the known entry + its indices; returns whether it was present.
-    pub(crate) fn drop_known(&mut self, plug_id: &str) -> bool {
-        if self.manifests.remove(plug_id).is_none() {
-            return false;
-        }
-        let stale_tags: Vec<String> = self
-            .tag_to_plug
-            .iter()
-            .filter(|(_, pid)| *pid == plug_id)
-            .map(|(tag, _)| tag.clone())
-            .collect();
-        for tag in stale_tags {
-            self.facet_manifests.remove(&tag);
-        }
-        self.tag_to_plug.retain(|_, pid| pid != plug_id);
-        true
-    }
 }

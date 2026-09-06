@@ -36,7 +36,7 @@ pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-p
 /// interleave. The machines' stop handle rides the returned
 /// [`RepoStopToken`]. No public surface: observers read the inventory
 /// docs through the drawer.
-pub async fn spawn_blob_pin_worker(
+pub(crate) async fn spawn_blob_pin_worker(
     drawer_repo: Arc<DrawerRepo>,
     sql: SqlCtx,
     core_inventory_doc_id: DocumentId,
@@ -765,7 +765,6 @@ impl Worker {
                 completion = tasks.next_completion() => {
                     self.on_task_completion(
                         &mut facet_walker,
-                        &mut tasks,
                         &mut pending,
                         completion?,
                     )
@@ -808,7 +807,6 @@ impl Worker {
             SqliteDeltaWalkerStateRepo,
             BlobPinKey,
         >,
-        tasks: &mut TokioKeyedScheduler<BlobPinKey, BlobPinTask, BlobPinTaskOutput>,
         pending: &mut HashMap<BlobPinKey, BlobPinTask>,
         completion: TokioTaskCompletion<BlobPinTask, BlobPinTaskOutput>,
     ) -> Res<()> {
@@ -820,7 +818,7 @@ impl Worker {
                 facet_walker.ack(task.key, task.cursor).await?;
                 if pending
                     .get(&task.key)
-                    .is_some_and(|t| t.cursor == task.cursor)
+                    .is_some_and(|existing| existing.cursor == task.cursor)
                 {
                     pending.remove(&task.key);
                 }
@@ -959,20 +957,28 @@ impl Worker {
                             .await?
                             .ok_or_else(|| ferr!("enabled plug disappeared while materializing"))?,
                     };
-                    if !subscriptions.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        subscriptions.entry(key)
+                    {
                         let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(&ref_url)?;
                         let branch_id = BranchId(parsed.doc_id.to_string());
-                        subscriptions.insert(
-                            key,
+                        entry.insert(
                             drawer
                                 .subscribe_document_materialization(&branch_id)
                                 .await?,
                         );
-                        tracing::debug!(?key, ?branch_id, "blob-pin plug machine subscribed to manifest materialization");
+                        tracing::debug!(
+                            ?key,
+                            ?branch_id,
+                            "blob-pin plug machine subscribed to manifest materialization"
+                        );
                     }
                     if !attempted_after_subscription {
                         attempted_after_subscription = true;
-                        tracing::debug!(?key, "blob-pin plug machine retrying once after subscription");
+                        tracing::debug!(
+                            ?key,
+                            "blob-pin plug machine retrying once after subscription"
+                        );
                         tasks.replace(
                             key,
                             task.clone(),
@@ -992,7 +998,11 @@ impl Worker {
                             .expect("parked plug task has a materialization subscription")
                             .ready_changed()
                             .await?;
-                        tracing::debug!(?key, ?change, "blob-pin plug machine woke for materialization");
+                        tracing::debug!(
+                            ?key,
+                            ?change,
+                            "blob-pin plug machine woke for materialization"
+                        );
                         tasks.wake(
                             key,
                             run_plug_pin_task(
@@ -1095,7 +1105,7 @@ impl Worker {
                                 crate::plugs::PlugsEvent::PlugEnabled { plug_id, .. }
                                 | crate::plugs::PlugsEvent::PlugUpdated { plug_id, .. }
                                 | crate::plugs::PlugsEvent::PlugDisabled { plug_id } => {
-                                    plug_pin_key(&plug_id)
+                                    plug_pin_key(plug_id)
                                 }
                                 crate::plugs::PlugsEvent::PlugsConfigChanged { .. } => continue,
                             };

@@ -3,7 +3,6 @@ use crate::interlude::*;
 
 use crate::repos::blobs::BlobsRepoFfi;
 use crate::repos::config::ConfigRepoFfi;
-use crate::repos::drawer::DrawerRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 
 use daybook_core::sync::{IrohSyncRepo, IrohSyncRepoStopToken};
@@ -19,12 +18,11 @@ pub struct SyncRepoFfi {
 #[uniffi::export]
 impl SyncRepoFfi {
     #[uniffi::constructor]
-    #[tracing::instrument(err, skip(fcx, config_repo, blobs_repo, drawer_repo, progress_repo))]
+    #[tracing::instrument(err, skip(fcx, config_repo, blobs_repo, progress_repo))]
     async fn load(
         fcx: SharedFfiCtx,
         config_repo: Arc<ConfigRepoFfi>,
         blobs_repo: Arc<BlobsRepoFfi>,
-        drawer_repo: Arc<DrawerRepoFfi>,
         progress_repo: Arc<ProgressRepoFfi>,
     ) -> Result<Arc<Self>, FfiError> {
         let (repo, sync_stop_token) = fcx

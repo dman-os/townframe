@@ -244,7 +244,6 @@ enum FrontierKey {
 /// a full re-materialization to `Ready`) or once the bundle exists, and any
 /// later materialization completion re-triggers a keyed replacement publish
 /// that overwrites the frontier with the newer heads.
-#[expect(clippy::too_many_arguments)]
 async fn publish_heads(
     doc_id: crate::DocumentId,
     runtime: &crate::runtime2::Runtime2Handle<Sendable>,

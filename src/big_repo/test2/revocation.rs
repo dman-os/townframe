@@ -2,6 +2,7 @@
 
 use super::harness::{Pair, fixtures};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use big_sync::SyncBackend;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 
@@ -361,5 +362,68 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
         access, None,
         "after the revocation propagates the reader must lose effective document access"
     );
+    Ok(())
+}
+
+/// A remote authorization rejection is not evidence that a BigSync cursor can
+/// be acknowledged.  The backend must retain enough state for a later
+/// authorization reconciliation to distinguish revocation from a stale view.
+///
+/// This deliberately exercises the production backend at the same boundary
+/// used by BigSync's sync task, rather than accepting the permissive result of
+/// `BigRepoConnection::sync_doc_with_peer`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot_without_keyhive_notifs(240, 241, "Owner", "StaleReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "shared"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    drop(reader_doc);
+
+    // Keep the reader's authorization view stale.  The serving owner now
+    // rejects the same object at the wire boundary with Unauthorized.
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id, reader_agent)
+        .await?;
+
+    let backend =
+        crate::BigRepoSyncBackend::boot(std::sync::Arc::downgrade(&pair.right().repo)).await?;
+    let outcome = backend
+        .sync_obj(
+            pair.left().peer_id(),
+            doc_id,
+            vec![crate::GLOBAL_PART_ID],
+            None,
+        )
+        .await?;
+
+    match outcome {
+        big_sync::SyncTaskRunOutcome::Completion(completion) => {
+            assert_ne!(
+                completion.deets,
+                big_sync_core::SyncCompletionDeets::Noop,
+                "remote Unauthorized must not acknowledge a cursor as Noop"
+            );
+        }
+        big_sync::SyncTaskRunOutcome::Stale => {}
+    }
+
+    drop(owner_doc);
     Ok(())
 }

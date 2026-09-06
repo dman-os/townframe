@@ -14,6 +14,7 @@
 //! 2. the effect and the memory advance commit in ONE transaction
 //!    (`commit_transition` codifies this);
 //! 3. the walker cursor is acked only after that commit.
+//!
 //! With that contract, `memory(branch)` may lead the durable cursor (never
 //! lag the durable effect). A crash between the memory commit and the ack
 //! replays the entry, the reader diffs the new memory against the same heads,
@@ -82,6 +83,9 @@ pub enum DocDeltaBranchFilter {
     /// Every branch in the source scope.
     All,
     /// Only branches whose logical branch name (== physical doc id) matches.
+    // No consumer constructs this yet; the branch-name filter is a designed
+    // capability (see the module docs above) kept for per-doc consumers.
+    #[expect(dead_code)]
     Named { names: BTreeSet<String> },
 }
 
@@ -163,6 +167,7 @@ where
             source: self.source.open(selector.source, after).await?,
             memory: selector.memory,
             filter: selector.filter,
+            pending_source_read: None,
         })
     }
 }
@@ -175,6 +180,7 @@ where
     source: S::Reader<'a>,
     memory: M,
     filter: DocDeltaBranchFilter,
+    pending_source_read: Option<RevisionRead<u64, AutomergeFrontierEvent>>,
 }
 
 #[async_trait::async_trait]
@@ -188,11 +194,20 @@ where
         limits: big_sync_core::revisioned_store::RevisionReadLimits,
     ) -> Result<RevisionRead<u64, DocDelta>, eyre::Report> {
         {
-            let (revision, entries) = match self.source.next(limits).await? {
+            if self.pending_source_read.is_none() {
+                self.pending_source_read = Some(self.source.next(limits).await?);
+            }
+            let (revision, entries) = match self
+                .pending_source_read
+                .as_ref()
+                .expect("pending source read initialized")
+            {
                 RevisionRead::ReplayComplete { through } => {
+                    let through = *through;
+                    self.pending_source_read = None;
                     return Ok(RevisionRead::ReplayComplete { through });
                 }
-                RevisionRead::Entries { revision, entries } => (revision, entries),
+                RevisionRead::Entries { revision, entries } => (*revision, entries.clone()),
             };
 
             let keys: Vec<Vec<u8>> = entries
@@ -231,6 +246,7 @@ where
 
             // An all-no-op revision yields zero entries; the concurrent walker
             // settles entry-less revisions directly and re-reads.
+            self.pending_source_read = None;
             return Ok(RevisionRead::Entries {
                 revision,
                 entries: out,
@@ -274,10 +290,6 @@ where
         .map_err(memory_error)?;
         tx.commit().await.map_err(memory_error)?;
         Ok(())
-    }
-
-    pub async fn rollback(self) -> Res<()> {
-        self.tx.rollback().await.map_err(memory_error)
     }
 }
 
@@ -395,123 +407,6 @@ fn memory_error(error: impl std::fmt::Display) -> eyre::Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::delta_walker_sparse_state::{
-        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-    };
-    use big_sync_core::delta_walker_state::{DeltaWalkerProgress, DeltaWalkerStateResult};
-    use std::sync::Mutex;
-
-    // ---- memory double (mirrors SqliteDeltaWalkerStateRepo get/put) -------
-
-    #[derive(Clone, Default)]
-    struct MemoryRepo {
-        rows: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-    }
-
-    struct MemoryTx<'a> {
-        rows: &'a Mutex<HashMap<Vec<u8>, Vec<u8>>>,
-        ctx: (),
-        staged: HashMap<Vec<u8>, Vec<u8>>,
-    }
-
-    #[async_trait::async_trait]
-    impl<'a> DeltaWalkerStateTransaction for MemoryTx<'a> {
-        type Context = ();
-
-        fn context_mut(&mut self) -> &mut Self::Context {
-            &mut self.ctx
-        }
-
-        async fn progress(&mut self) -> DeltaWalkerStateResult<DeltaWalkerProgress> {
-            Ok(DeltaWalkerProgress {
-                upstream_revision: 0,
-            })
-        }
-
-        async fn advance_from(&mut self, _expected: u64, _next: u64) -> DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-
-        async fn commit(self) -> DeltaWalkerStateResult<()> {
-            self.rows.lock().unwrap().extend(self.staged);
-            Ok(())
-        }
-
-        async fn rollback(self) -> DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl DeltaWalkerSparseStateTransaction for MemoryTx<'_> {
-        async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(self
-                .staged
-                .get(key)
-                .cloned()
-                .or_else(|| self.rows.lock().unwrap().get(key).cloned()))
-        }
-
-        async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
-            self.staged.insert(key, value);
-            Ok(())
-        }
-
-        async fn delete(&mut self, _key: &[u8]) -> DeltaWalkerStateResult<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl DeltaWalkerStateRepo for MemoryRepo {
-        type Context<'a>
-            = ()
-        where
-            Self: 'a;
-        type Transaction<'a>
-            = MemoryTx<'a>
-        where
-            Self: 'a;
-
-        async fn progress(&self) -> DeltaWalkerStateResult<DeltaWalkerProgress> {
-            Ok(DeltaWalkerProgress {
-                upstream_revision: 0,
-            })
-        }
-
-        async fn begin<'a>(&'a self) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
-            Ok(MemoryTx {
-                rows: &self.rows,
-                ctx: (),
-                staged: HashMap::new(),
-            })
-        }
-
-        async fn begin_with_context<'a>(
-            &'a self,
-            _context: Self::Context<'a>,
-        ) -> DeltaWalkerStateResult<Self::Transaction<'a>> {
-            self.begin().await
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl DeltaWalkerSparseStateRepo for MemoryRepo {
-        async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-            Ok(self.rows.lock().unwrap().get(key).cloned())
-        }
-
-        async fn get_many(
-            &self,
-            keys: &[Vec<u8>],
-        ) -> DeltaWalkerStateResult<Vec<(Vec<u8>, Vec<u8>)>> {
-            let rows = self.rows.lock().unwrap();
-            Ok(keys
-                .iter()
-                .filter_map(|k| rows.get(k).map(|v| (k.clone(), v.clone())))
-                .collect())
-        }
-    }
 
     #[test]
     fn equal_heads_with_new_epoch_emit_epoch_only_delta() {

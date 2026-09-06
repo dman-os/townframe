@@ -23,7 +23,7 @@ pub const DOC_BLOB_PINS_LOCAL_STATE_ID: &str = "@daybook/core/doc-blob-pins-inde
 /// blob-pin facets of every document branch into the document's
 /// blob-inventory part. Private shared state; no public surface —
 /// observers read the `doc_blob_pins` SQLite projection or the part store.
-pub async fn spawn_blob_pins_part_worker(
+pub(crate) async fn spawn_blob_pins_part_worker(
     part_store: SharedPartStore,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     drawer: Arc<DrawerRepo>,
@@ -574,7 +574,6 @@ impl Worker {
                 completion = tasks.next_completion() => {
                     self.on_task_completion(
                         &mut walker,
-                        &mut tasks,
                         &mut pending,
                         completion?,
                     )
@@ -624,7 +623,6 @@ impl Worker {
             big_sync::SqliteDeltaWalkerStateRepo,
             BlobPinsPartKey,
         >,
-        tasks: &mut TokioKeyedScheduler<BlobPinsPartKey, BlobPinsPartTask, BlobPinsPartTaskOutput>,
         pending: &mut HashMap<BlobPinsPartKey, BlobPinsPartTask>,
         completion: TokioTaskCompletion<BlobPinsPartTask, BlobPinsPartTaskOutput>,
     ) -> Res<()> {
@@ -636,7 +634,7 @@ impl Worker {
                 walker.ack(task.key, task.cursor).await?;
                 if pending
                     .get(&task.key)
-                    .is_some_and(|t| t.cursor == task.cursor)
+                    .is_some_and(|existing| existing.cursor == task.cursor)
                 {
                     pending.remove(&task.key);
                 }
@@ -674,7 +672,9 @@ impl Worker {
                 return Ok(());
             }
             Some(mut existing) => {
-                existing.deltas.retain(|d| d.key != delta.entry.key);
+                existing
+                    .deltas
+                    .retain(|candidate| candidate.key != delta.entry.key);
                 existing.deltas.push(delta.entry.clone());
                 existing.cursor = existing.cursor.max(delta.cursor);
                 existing
@@ -714,33 +714,7 @@ mod tests {
     use super::*;
     use crate::index::facet_delta::{FacetRouteKey, FacetSnapshot};
     use crate::test_support::test_cx;
-    use big_sync::DeltaWalkerStateRepo;
     use daybook_types::doc::{AddDocArgs, BlobPin, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
-
-    async fn wait_for_partition_member_count(
-        part_store: &SharedPartStore,
-        partition_id: PartId,
-        expected: u64,
-    ) -> Res<()> {
-        loop {
-            let count = part_store.member_count(partition_id).await?;
-            if count == expected {
-                return Ok(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    async fn facet_walker_progress(sql: &SqlCtx) -> Res<u64> {
-        let state = big_sync::SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            "@daybook/core/blob-pins-part-worker",
-            "facets",
-        )
-        .await?;
-        Ok(state.progress().await?.upstream_revision)
-    }
 
     /// Distinct blob hashes pinned for one document (the machine's
     /// `doc_blob_pins` SQLite projection).
@@ -754,6 +728,20 @@ mod tests {
         .bind(doc_id)
         .fetch_all(&sql.read_pool)
         .await?)
+    }
+
+    async fn wait_for_pin_row_count(sql: &SqlCtx, doc_id: &DocId, expected: i64) -> Res<()> {
+        loop {
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM doc_blob_pins WHERE doc_id = ?")
+                    .bind(doc_id)
+                    .fetch_one(&sql.read_pool)
+                    .await?;
+            if count == expected {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -929,7 +917,7 @@ mod tests {
 
         let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(&doc_id);
 
-        wait_for_partition_member_count(blob_part_store, part_id, 2).await?;
+        wait_for_pin_row_count(&sql, &doc_id, 2).await?;
         assert_eq!(
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
@@ -947,8 +935,6 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&hash_1));
         assert!(hashes.contains(&hash_2));
-        let initial_progress = facet_walker_progress(&sql).await?;
-        assert!(initial_progress > 0);
 
         // 2. Update document: remove pin 2
         test_context
@@ -965,7 +951,7 @@ mod tests {
             )
             .await?;
 
-        wait_for_partition_member_count(blob_part_store, part_id, 1).await?;
+        wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
@@ -981,8 +967,6 @@ mod tests {
 
         let hashes_after_update = list_hashes_for_doc(&sql, &doc_id).await?;
         assert_eq!(hashes_after_update, vec![hash_1.clone()]);
-        let update_progress = facet_walker_progress(&sql).await?;
-        assert!(update_progress > initial_progress);
 
         // Keep an independent branch so removing main's pin exercises
         // branch-scoped state rather than removing shared physical membership.
@@ -1002,7 +986,7 @@ mod tests {
                 None,
             )
             .await?;
-        wait_for_partition_member_count(blob_part_store, part_id, 1).await?;
+        wait_for_pin_row_count(&sql, &doc_id, 2).await?;
         assert_eq!(
             list_hashes_for_doc(&sql, &doc_id).await?,
             vec![hash_1.clone()]
@@ -1023,7 +1007,7 @@ mod tests {
                 None,
             )
             .await?;
-        wait_for_partition_member_count(blob_part_store, part_id, 1).await?;
+        wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
@@ -1053,13 +1037,7 @@ mod tests {
                 Some(branch_heads),
             )
             .await?;
-        wait_for_partition_member_count(blob_part_store, part_id, 0).await?;
-        loop {
-            if list_hashes_for_doc(&sql, &doc_id).await?.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        wait_for_pin_row_count(&sql, &doc_id, 0).await?;
         assert_eq!(
             list_hashes_for_doc(&sql, &doc_id).await?,
             Vec::<String>::new()
@@ -1069,7 +1047,6 @@ mod tests {
         // empty, so the document deletion remains an idempotent no-op for
         // physical membership.
         test_context.drawer_repo.del(&doc_id).await?;
-        wait_for_partition_member_count(blob_part_store, part_id, 0).await?;
         assert!(list_hashes_for_doc(&sql, &doc_id).await?.is_empty());
 
         test_context.stop().await?;

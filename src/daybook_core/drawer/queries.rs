@@ -23,10 +23,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// The underlying AFW stream is cursor-based because it is also used as a
 /// durable revision source. Drawer consumers should not manage that cursor:
 /// this reader owns its replay lower bound and suppresses duplicate wakeups
-/// when its object subscription is reopened with a changed document set.
+/// for documents that appear in multiple source revisions.
 pub(crate) struct DrawerMaterializationReader {
-    source: big_repo::AutomergeFrontierRevisionStore,
-    documents: Option<BTreeSet<DocId>>,
     reader: Box<dyn RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report>>,
     lower_bound: u64,
     last_seen: HashMap<DocId, u64>,
@@ -69,9 +67,7 @@ impl DrawerMaterializationReader {
             }
             targets
         } else {
-            vec![AutomergeFrontierTarget::Part {
-                part_id: big_repo::GLOBAL_PART_ID,
-            }]
+            vec![AutomergeFrontierTarget::All]
         };
         Ok(Box::new(
             source
@@ -85,30 +81,11 @@ impl DrawerMaterializationReader {
             big_repo::AutomergeFrontierRevisionStore::new(drawer.big_repo.frontier_part_store());
         let reader = Self::open_reader(&source, documents.as_ref(), 0).await?;
         Ok(Self {
-            source,
-            documents,
             reader,
             lower_bound: 0,
             last_seen: HashMap::new(),
             pending: VecDeque::new(),
         })
-    }
-
-    /// Reopen the object subscription without exposing its cursor to callers.
-    /// The per-document revision map prevents replaying an old publication for
-    /// a document that is newly added to the selection.
-    pub(crate) async fn set_documents(&mut self, documents: Option<BTreeSet<DocId>>) -> Res<()> {
-        if self.documents == documents {
-            return Ok(());
-        }
-        // Object targets share the request lower bound, so reopening at the
-        // current global bound would hide the latest state of newly-added
-        // documents. Replay from the beginning and let last_seen deduplicate
-        // documents that were already selected.
-        self.reader = Self::open_reader(&self.source, documents.as_ref(), 0).await?;
-        self.documents = documents;
-        self.pending.clear();
-        Ok(())
     }
 
     pub(crate) async fn next(&mut self) -> Res<DrawerMaterializationChange> {
@@ -164,10 +141,8 @@ impl DrawerMaterializationReader {
 impl DrawerRepo {
     /// Open the AFW-backed materialization stream used by Drawer projections.
     ///
-    /// `None` selects the whole frontier partition. A document set uses
-    /// object subscriptions and can be changed later through
-    /// `DrawerMaterializationReader::set_documents` without exposing AFW
-    /// cursors to the caller.
+    /// `None` selects all local frontier parts and objects. A document set uses
+    /// object subscriptions scoped to those documents.
     pub(crate) async fn open_materialization_reader(
         &self,
         documents: Option<BTreeSet<DocId>>,

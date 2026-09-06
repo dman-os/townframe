@@ -263,12 +263,71 @@ async fn classify_rows(
 
     let now = Instant::now();
     for (source, changed) in grouped {
-        let targets = protocol
+        let cached_started = Instant::now();
+        let mut targets = protocol
             .notification_targets(subduction_keyhive::VisibilityBatch {
                 connected: &connected,
                 changed: &changed,
             })
             .await?;
+        let cached_elapsed = cached_started.elapsed();
+        if dispatch_diag() {
+            let direct_started = Instant::now();
+            let direct = protocol.all_agent_events(&BTreeSet::new()).await?;
+            let direct_elapsed = direct_started.elapsed();
+            let public_peer =
+                KeyhivePeerId::from_identifier(&keyhive_core::principal::public::Public.id());
+            let public_hit = direct
+                .agent_hashes
+                .get(&public_peer)
+                .is_some_and(|visible| visible.intersection(&changed).next().is_some());
+            let mut direct_peers = BTreeSet::new();
+            if public_hit {
+                direct_peers.extend(connected.iter().cloned());
+            } else {
+                for peer in &connected {
+                    if direct
+                        .agent_hashes
+                        .get(peer)
+                        .is_some_and(|visible| visible.intersection(&changed).next().is_some())
+                    {
+                        direct_peers.insert(peer.clone());
+                    }
+                }
+            }
+            let local_visible = direct.agent_hashes.get(&protocol.peer_id());
+            let direct_unclassified = changed
+                .iter()
+                .filter(|hash| {
+                    !direct
+                        .agent_hashes
+                        .get(&public_peer)
+                        .is_some_and(|visible| visible.contains(*hash))
+                        && !local_visible.is_some_and(|visible| visible.contains(*hash))
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let after = protocol
+                .notification_targets(subduction_keyhive::VisibilityBatch {
+                    connected: &connected,
+                    changed: &changed,
+                })
+                .await?;
+            tracing::warn!(
+                stable = targets.published_generation == after.published_generation,
+                generation = after.published_generation,
+                cached_peers = after.peers.len(),
+                direct_peers = direct_peers.len(),
+                cached_unclassified = after.unclassified.len(),
+                direct_unclassified = direct_unclassified.len(),
+                peers_equal = after.peers == direct_peers,
+                unclassified_equal = after.unclassified == direct_unclassified,
+                cached_elapsed_micros = cached_elapsed.as_micros(),
+                direct_elapsed_micros = direct_elapsed.as_micros(),
+                "KEYHIVE_DISPATCH_DIAG cache/direct comparison"
+            );
+            targets = after;
+        }
         // Unattributable hashes (prekey/contact-card ops) wake everyone:
         // the visibility projection has no narrower audience for them.
         let unattributed = !targets.unclassified.is_empty();

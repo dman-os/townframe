@@ -481,10 +481,10 @@ async fn refresh_pending_manifest_wakes(
         pending_wakes.remove(&plug_id);
     }
     for (plug_id, ref_url) in pending {
-        if pending_wakes.watch(drawer, &plug_id, &ref_url).await? {
-            if plugs_repo.resolve_pending_enabled_plug(&plug_id).await? {
-                pending_wakes.remove(&plug_id);
-            }
+        if pending_wakes.watch(drawer, &plug_id, &ref_url).await?
+            && plugs_repo.resolve_pending_enabled_plug(&plug_id).await?
+        {
+            pending_wakes.remove(&plug_id);
         }
     }
     Ok(())
