@@ -5,8 +5,9 @@ use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
 use crate::rt::dispatch::DispatchOnSuccessHook;
 use crate::rt::{DispatchArgs, Rt};
-use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore};
+use big_sync::DeltaWalkerStateRepo as _;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
 
@@ -706,17 +707,6 @@ pub(crate) async fn spawn_doc_processor_driver(
     plugs_repo: Arc<PlugsRepo>,
     parent_cancel_token: CancellationToken,
 ) -> Res<DocProcessorStopToken> {
-    // Table renamed off "plugs": the old state tracked the retired plugs
-    // frontier's revision numbering, which is unrelated to the facet
-    // revisions the plug event store replays.
-    let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-        rt.rcx.sql.read_pool.clone(),
-        rt.rcx.sql.write_pool.clone(),
-        "@daybook/core/doc-processor",
-        "plug-events",
-    )
-    .await
-    .map_err(|error| ferr!("initializing DocProcessor Plugs walker state: {error}"))?;
     let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
         rt.rcx.sql.read_pool.clone(),
         rt.rcx.sql.write_pool.clone(),
@@ -733,7 +723,6 @@ pub(crate) async fn spawn_doc_processor_driver(
             facet_set_store,
             plugs_repo,
             facet_state,
-            plugs_state,
             worker_cancel_token,
             wake,
         )
@@ -751,25 +740,16 @@ async fn run_doc_processor_driver(
     facet_set_store: Arc<FacetSetRevisionStore>,
     plugs_repo: Arc<PlugsRepo>,
     facet_state: big_sync::SqliteDeltaWalkerStateRepo,
-    plugs_state: big_sync::SqliteDeltaWalkerStateRepo,
     cancel_token: CancellationToken,
     mut wake: crate::drawer::MaterializationWake,
 ) -> Res<()> {
     let mut triage = new_doc_processor_listener(Arc::clone(&rt));
-    let plugs_durable = plugs_state.progress().await?.upstream_revision;
-    let plugs_events = crate::plugs::PlugsConfigEventStore::new(
-        Arc::clone(&facet_set_store),
-        Arc::clone(&rt.drawer),
-        &plugs_repo,
-    );
-    let plugs_reader = plugs_events
-        .open((), plugs_durable)
-        .await
-        .map_err(|error| ferr!("opening DocProcessor Plugs reader: {error}"))?;
-    let mut plugs_walker: SerialDeltaWalker<'_, crate::plugs::PlugsConfigEventStore, _> =
-        SerialDeltaWalker::open(plugs_reader, &plugs_state)
-            .await
-            .map_err(|error| ferr!("opening DocProcessor Plugs walker: {error}"))?;
+    let mut plugs_events = plugs_repo.subscribe_events();
+    // The plugs repository warms its cache before attaching to the runtime,
+    // so this snapshot is the complete initial processor set. Subscribe
+    // first so an enablement cannot fall between the snapshot and the live
+    // event stream.
+    triage.refresh_processors(&rt).await?;
     let facet_durable = facet_state.progress().await?.upstream_revision;
     let facet_reader = facet_set_store
         .open(FacetSetSelector::All, facet_durable)
@@ -786,23 +766,18 @@ async fn run_doc_processor_driver(
             tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => return Ok(()),
-                plug_read = plugs_walker.next() => {
-                    match plug_read.map_err(|error| ferr!("reading DocProcessor Plugs walker: {error:?}"))? {
-                        RevisionRead::ReplayComplete { .. } => continue,
-                        RevisionRead::Entries { revision, entries } => {
-                            let touched = entries
-                                .iter()
-                                .any(|entry| !entry.events.is_empty());
-                            if touched {
-                                triage.refresh_processors(&rt).await?;
-                            }
-                            plugs_walker
-                                .settle(revision)
-                                .await
-                                .map_err(|error| ferr!("settling DocProcessor Plugs walker: {error}"))?;
-                            continue;
+                plug_event = plugs_events.recv() => {
+                    match plug_event {
+                        Ok(_) => triage.refresh_processors(&rt).await?,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            warn!(missed, "DocProcessor plugs event broadcast lagged; refreshing processor set");
+                            triage.refresh_processors(&rt).await?;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(ferr!("DocProcessor plugs event broadcast closed"));
                         }
                     }
+                    continue;
                 }
                 read = facet_walker.next() => read.map_err(|error| ferr!("reading DocProcessor FacetSet walker: {error:?}"))?,
             }

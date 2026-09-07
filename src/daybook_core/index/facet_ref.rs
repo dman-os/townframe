@@ -4,14 +4,12 @@ use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
 use crate::plugs::PlugsRepo;
+use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::DeltaWalkerStateTransaction;
 use big_sync_core::concurrent_delta_walker::{
     ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
 };
-use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
-use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionedStore as _;
-use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
@@ -80,11 +78,10 @@ impl DocFacetRefIndexRepo {
         let cancel_token = parent_cancel_token.child_token();
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let drawer = Arc::clone(&drawer_repo);
             let facet_set_store = Arc::clone(&facet_set_store);
             let cancel_token = cancel_token.clone();
             async move {
-                repo.run_machine(drawer, facet_set_store, cancel_token)
+                repo.run_machine(facet_set_store, cancel_token)
                     .await
                     .expect("facet-ref machine error")
             }
@@ -625,7 +622,6 @@ impl DocFacetRefIndexRepo {
 
     async fn run_machine(
         self: Arc<Self>,
-        drawer: Arc<DrawerRepo>,
         facet_set_store: Arc<FacetSetRevisionStore>,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -637,31 +633,10 @@ impl DocFacetRefIndexRepo {
         )
         .await
         .map_err(|error| ferr!("initializing facet-ref FacetSet walker state: {error}"))?;
-        // Table renamed off "plugs": the old state tracked the retired plugs
-        // frontier's revision numbering, which is unrelated to the facet
-        // revisions the plug event store replays.
-        let plugs_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
-            FACET_REF_LOCAL_STATE_ID,
-            "plug-events",
-        )
-        .await
-        .map_err(|error| ferr!("initializing facet-ref Plugs walker state: {error}"))?;
-        let plugs_durable = plugs_state.progress().await?.upstream_revision;
-        let plugs_events = Arc::new(crate::plugs::PlugsConfigEventStore::new(
-            Arc::clone(&facet_set_store),
-            Arc::clone(&drawer),
-            &self.plugs_repo,
-        ));
-        let plugs_reader = plugs_events
-            .open((), plugs_durable)
-            .await
-            .map_err(|error| ferr!("opening facet-ref Plugs reader: {error}"))?;
-        let mut plugs_walker: SerialDeltaWalker<'_, crate::plugs::PlugsConfigEventStore, _> =
-            SerialDeltaWalker::open(plugs_reader, &plugs_state)
-                .await
-                .map_err(|error| ferr!("opening facet-ref Plugs walker: {error}"))?;
+        let mut plugs_events = self.plugs_repo.subscribe_events();
+        // Refresh after subscribing as well: boot-time cache warming may have
+        // raced with a config projection, and this closes that snapshot gap.
+        self.refresh_reference_specs().await?;
         'reopen: loop {
             // The epoch's mutable machine state lives on the stack.
             let tags = self.reference_tags().await;
@@ -698,25 +673,19 @@ impl DocFacetRefIndexRepo {
                         )
                         .await?;
                     }
-                    plug_read = plugs_walker.next() => {
-                        match plug_read
-                            .map_err(|error| ferr!("reading facet-ref Plugs walker: {error}"))?
-                        {
-                            RevisionRead::ReplayComplete { .. } => continue,
-                            RevisionRead::Entries { revision, entries } => {
-                                let touched = entries
-                                    .iter()
-                                    .any(|entry| !entry.events.is_empty());
-                                if touched {
-                                    self.refresh_reference_specs_and_reindex_all().await?;
-                                }
-                                plugs_walker
-                                    .settle(revision)
-                                    .await
-                                    .map_err(|error| ferr!("settling facet-ref Plugs walker: {error}"))?;
-                                if touched {
-                                    break FacetRefMachineSignal::Reopen;
-                                }
+                    plug_event = plugs_events.recv() => {
+                        match plug_event {
+                            Ok(_) => {
+                                self.refresh_reference_specs_and_reindex_all().await?;
+                                break FacetRefMachineSignal::Reopen;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                                warn!(missed, "facet-ref plugs event broadcast lagged; rebuilding reference index");
+                                self.refresh_reference_specs_and_reindex_all().await?;
+                                break FacetRefMachineSignal::Reopen;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Err(ferr!("facet-ref plugs event broadcast closed"));
                             }
                         }
                     }
