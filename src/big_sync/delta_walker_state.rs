@@ -318,3 +318,173 @@ impl<'a> DeltaWalkerSparseStateTransaction for SqliteDeltaWalkerStateTransaction
 fn backend<E: std::error::Error + Send + Sync + 'static>(error: E) -> DeltaWalkerStateError {
     DeltaWalkerStateError::Backend(Box::new(error))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use big_sync_core::delta_walker_state::contract::{
+        DeltaWalkerStateContractHarness, assert_delta_walker_state_contract,
+    };
+    use sqlx_utils_rs::SqlCtx;
+
+    struct SqliteContractHarness {
+        _sql: SqlCtx,
+        repo: SqliteDeltaWalkerStateRepo,
+    }
+
+    impl SqliteContractHarness {
+        async fn new() -> Self {
+            let sql = SqlCtx::memory()
+                .await
+                .expect("create sqlite contract database");
+            let repo = SqliteDeltaWalkerStateRepo::new(
+                sql.read_pool.clone(),
+                sql.write_pool.clone(),
+                "contract-namespace",
+                "contract-consumer",
+            )
+            .await
+            .expect("create sqlite delta walker state repo");
+            Self { _sql: sql, repo }
+        }
+    }
+
+    impl DeltaWalkerStateContractHarness for SqliteContractHarness {
+        type Repo = SqliteDeltaWalkerStateRepo;
+
+        fn repo(&self) -> &Self::Repo {
+            &self.repo
+        }
+
+        fn key(&self, index: u64) -> Vec<u8> {
+            format!("branch-{index}").into_bytes()
+        }
+
+        fn value(&self, index: u64) -> Vec<u8> {
+            format!("heads-{index}").into_bytes()
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_delta_walker_state_contract() {
+        assert_delta_walker_state_contract(&SqliteContractHarness::new().await).await;
+    }
+
+    #[tokio::test]
+    async fn namespaces_and_consumers_are_isolated() {
+        let sql = SqlCtx::memory().await.expect("create sqlite database");
+        let repo_a = SqliteDeltaWalkerStateRepo::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            "ns-a",
+            "consumer-a",
+        )
+        .await
+        .expect("create repo a");
+        let repo_b = SqliteDeltaWalkerStateRepo::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            "ns-b",
+            "consumer-b",
+        )
+        .await
+        .expect("create repo b");
+
+        let mut tx = repo_a.begin().await.expect("begin repo a transaction");
+        tx.put(b"key".to_vec(), b"value-a".to_vec())
+            .await
+            .expect("stage repo a sparse put");
+        tx.advance_from(0, 5).await.expect("advance repo a cursor");
+        tx.commit().await.expect("commit repo a");
+
+        assert_eq!(
+            repo_b
+                .progress()
+                .await
+                .expect("repo b progress")
+                .upstream_revision,
+            0,
+            "repo b cursor must not see repo a's advance"
+        );
+        assert_eq!(
+            repo_b.get(b"key").await.expect("repo b sparse get"),
+            None,
+            "repo b sparse state must not see repo a's rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_with_context_round_trips_a_caller_owned_transaction() {
+        let sql = SqlCtx::memory().await.expect("create sqlite database");
+        let repo = SqliteDeltaWalkerStateRepo::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            "ctx-namespace",
+            "ctx-consumer",
+        )
+        .await
+        .expect("create sqlite delta walker state repo");
+
+        // The settlement path: the consumer's effect and the walker state
+        // advance share one caller-owned transaction, so a rollback discards
+        // both.
+        let outer = sql
+            .write_pool
+            .begin()
+            .await
+            .expect("begin outer transaction");
+        let mut tx = repo.begin_with_context(outer);
+        tx.put(b"branch-1".to_vec(), b"heads-1".to_vec())
+            .await
+            .expect("stage sparse put in outer transaction");
+        tx.advance_from(0, 1)
+            .await
+            .expect("stage cursor advance in outer transaction");
+        tx.rollback().await.expect("rollback outer transaction");
+
+        assert_eq!(
+            repo.progress()
+                .await
+                .expect("progress after outer rollback")
+                .upstream_revision,
+            0,
+            "cursor advance must roll back with the caller-owned transaction"
+        );
+        assert_eq!(
+            repo.get(b"branch-1")
+                .await
+                .expect("sparse get after outer rollback"),
+            None,
+            "sparse put must roll back with the caller-owned transaction"
+        );
+
+        // A committed caller-owned transaction persists both.
+        let outer = sql
+            .write_pool
+            .begin()
+            .await
+            .expect("begin outer transaction");
+        let mut tx = repo.begin_with_context(outer);
+        tx.put(b"branch-1".to_vec(), b"heads-1".to_vec())
+            .await
+            .expect("stage sparse put in outer transaction");
+        tx.advance_from(0, 1)
+            .await
+            .expect("stage cursor advance in outer transaction");
+        tx.commit().await.expect("commit outer transaction");
+
+        assert_eq!(
+            repo.progress()
+                .await
+                .expect("progress after outer commit")
+                .upstream_revision,
+            1
+        );
+        assert_eq!(
+            repo.get(b"branch-1")
+                .await
+                .expect("sparse get after outer commit"),
+            Some(b"heads-1".to_vec())
+        );
+    }
+}

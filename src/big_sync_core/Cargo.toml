@@ -39,6 +39,7 @@ thiserror.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 future_form.workspace = true
+parking_lot.workspace = true
 
 #
 # logging

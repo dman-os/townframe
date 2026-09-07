@@ -853,4 +853,121 @@ mod tests {
         );
         assert_eq!(through, 3);
     }
+
+    /// A `RevisionedStore` backed by a `MemoryKeyedFrontier`, exercising the
+    /// `KeyedFrontierRevisionReader` adapter against the revisioned-store
+    /// contract suite.
+    struct MemoryRevisionedStore {
+        frontier: MemoryKeyedFrontier<u64, u64>,
+        latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait]
+    impl big_sync_core::revisioned_store::RevisionedStore for MemoryRevisionedStore {
+        type Revision = u64;
+        type Entry = big_sync_core::keyed_frontier::FrontierEntry<u64, u64>;
+        type Selector = MemoryKeySelector<u64>;
+        type Error = big_sync_core::keyed_frontier::KeyedFrontierError;
+        type Reader<'a>
+            = big_sync_core::revisioned_store::KeyedFrontierRevisionReader<'a, u64, u64>
+        where
+            Self: 'a;
+
+        async fn latest_revision(&self) -> Result<Self::Revision, Self::Error> {
+            Ok(self.latest.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        async fn open<'a>(
+            &'a self,
+            selector: Self::Selector,
+            _after: u64,
+        ) -> Result<Self::Reader<'a>, Self::Error> {
+            let reader = self.frontier.open(selector).await?;
+            Ok(big_sync_core::revisioned_store::KeyedFrontierRevisionReader::new(reader))
+        }
+    }
+
+    struct MemoryRevisionedStoreHarness {
+        frontier: MemoryKeyedFrontier<u64, u64>,
+        latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        store: MemoryRevisionedStore,
+    }
+
+    impl Default for MemoryRevisionedStoreHarness {
+        fn default() -> Self {
+            let frontier = MemoryKeyedFrontier::default();
+            let latest = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            Self {
+                store: MemoryRevisionedStore {
+                    frontier: frontier.clone(),
+                    latest: std::sync::Arc::clone(&latest),
+                },
+                frontier,
+                latest,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl big_sync_core::revisioned_store::contract::RevisionedStoreContractHarness
+        for MemoryRevisionedStoreHarness
+    {
+        type Store = MemoryRevisionedStore;
+
+        fn store(&self) -> &Self::Store {
+            &self.store
+        }
+
+        async fn commit(
+            &self,
+            entry: <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+        ) -> Result<u64, <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Error>
+        {
+            let mut tx = self
+                .frontier
+                .begin()
+                .await
+                .expect("begin frontier transaction");
+            tx.put(entry.key, entry.value.expect("committed entry has a value"))
+                .await
+                .expect("stage frontier put");
+            let revision = tx.commit().await.expect("commit frontier transaction");
+            self.latest
+                .store(revision, std::sync::atomic::Ordering::SeqCst);
+            Ok(revision)
+        }
+
+        fn entry(
+            &self,
+            index: u64,
+        ) -> <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry {
+            big_sync_core::keyed_frontier::FrontierEntry {
+                key: index,
+                revision: 0,
+                value: Some(index),
+            }
+        }
+
+        fn entries_match(
+            &self,
+            expected: &<Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+            actual: &<Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+        ) -> bool {
+            // The reader stamps the delivered revision into the entry; the
+            // harness's expected entries carry a placeholder revision.
+            expected.key == actual.key && expected.value == actual.value
+        }
+
+        fn all_selector(&self, after: u64) -> MemoryKeySelector<u64> {
+            MemoryKeySelector::All { after }
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_revisioned_store_contract() {
+        big_sync_core::revisioned_store::contract::assert_revisioned_store_contract(
+            &MemoryRevisionedStoreHarness::default(),
+        )
+        .await;
+    }
 }

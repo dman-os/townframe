@@ -466,4 +466,119 @@ mod tests {
         );
         assert!(err.is_err());
     }
+
+    /// A `RevisionedStore` harness over the real `AutomergeFrontierRevisionStore`
+    /// backed by a `MemoryPartStore`, exercising the adapter's event mapping
+    /// and replay-boundary handoff against the contract suite.
+    struct AutomergeFrontierHarness {
+        store: AutomergeFrontierRevisionStore,
+        part_store: Arc<dyn HostPartStore>,
+    }
+
+    impl AutomergeFrontierHarness {
+        fn new() -> Self {
+            let part_store: Arc<dyn HostPartStore> = Arc::new(big_sync::MemoryPartStore::new());
+            Self {
+                store: AutomergeFrontierRevisionStore::new(Arc::clone(&part_store)),
+                part_store,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl big_sync_core::revisioned_store::contract::RevisionedStoreContractHarness
+        for AutomergeFrontierHarness
+    {
+        type Store = AutomergeFrontierRevisionStore;
+
+        fn store(&self) -> &Self::Store {
+            &self.store
+        }
+
+        async fn commit(
+            &self,
+            entry: <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+        ) -> Result<u64, <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Error>
+        {
+            let AutomergeFrontierEvent::Added {
+                doc_id,
+                heads,
+                route,
+                ..
+            } = entry
+            else {
+                panic!("harness commits Added events only");
+            };
+            let obj_id = crate::runtime2::automerge_doc_obj_id(doc_id);
+            // Add the part first (no event while the payload is absent), then
+            // set the payload — one frontier event per commit.
+            self.part_store
+                .add_obj_to_parts(obj_id, vec![route])
+                .await
+                .expect("add object to part");
+            self.part_store
+                .set_obj_payload(obj_id, payload(heads[0].0[0]))
+                .await
+                .expect("set frontier payload");
+            Ok(self
+                .part_store
+                .latest_revision()
+                .await
+                .expect("latest revision"))
+        }
+
+        fn entry(
+            &self,
+            index: u64,
+        ) -> <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry {
+            AutomergeFrontierEvent::Added {
+                doc_id: crate::DocumentId::new([index as u8; 32]),
+                heads: Arc::from([automerge::ChangeHash([index as u8; 32])]),
+                causal_epoch: None,
+                route: PartId::new([index as u8; 32]),
+                revision: 0,
+            }
+        }
+
+        fn entries_match(
+            &self,
+            expected: &<Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+            actual: &<Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
+        ) -> bool {
+            // The reader stamps the delivered revision into the event; the
+            // harness's expected events carry a placeholder revision.
+            match (expected, actual) {
+                (
+                    AutomergeFrontierEvent::Added {
+                        doc_id: expected_doc,
+                        heads: expected_heads,
+                        ..
+                    },
+                    AutomergeFrontierEvent::Added {
+                        doc_id: actual_doc,
+                        heads: actual_heads,
+                        ..
+                    },
+                ) => expected_doc == actual_doc && expected_heads == actual_heads,
+                _ => false,
+            }
+        }
+
+        fn all_selector(
+            &self,
+            _after: u64,
+        ) -> <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Selector {
+            AutomergeFrontierSelector {
+                targets: vec![AutomergeFrontierTarget::All],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn automerge_frontier_revisioned_store_contract() {
+        big_sync_core::revisioned_store::contract::assert_revisioned_store_contract(
+            &AutomergeFrontierHarness::new(),
+        )
+        .await;
+    }
 }

@@ -130,3 +130,98 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime2::tasks::TokioTimer;
+    use crate::store::sqlite::SqliteBigRepoStore;
+    use big_sync_core::BuckId;
+    use big_sync_core::revisioned_store::contract::{
+        RevisionedStoreContractHarness, assert_revisioned_store_contract,
+    };
+    use sqlx_utils_rs::SqlCtx;
+    use subduction_keyhive::storage::StorageHash;
+    use utils_rs::prelude::async_trait;
+
+    struct SqliteAdmissionHarness {
+        _sql: SqlCtx,
+        store: SqliteBigRepoStore,
+        source: Store,
+    }
+
+    impl SqliteAdmissionHarness {
+        async fn new() -> Self {
+            let sql = SqlCtx::memory().await.expect("create sqlite database");
+            let store =
+                SqliteBigRepoStore::new(sql.clone(), "admission-contract", BuckId::MAX_LEVEL)
+                    .await
+                    .expect("create sqlite big repo store");
+            let source = Store {
+                store: store.clone(),
+                timer: Arc::new(TokioTimer),
+            };
+            Self {
+                _sql: sql,
+                store,
+                source,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RevisionedStoreContractHarness for SqliteAdmissionHarness {
+        type Store = Store;
+
+        fn store(&self) -> &Self::Store {
+            &self.source
+        }
+
+        async fn commit(
+            &self,
+            entry: <Self::Store as RevisionedStore>::Entry,
+        ) -> Result<u64, <Self::Store as RevisionedStore>::Error> {
+            self.store
+                .save_keyhive_event(
+                    StorageHash::new(entry.event_hash),
+                    entry.bytes.to_vec(),
+                    entry.source_id.map(|bytes| {
+                        subduction_keyhive::KeyhivePeerId::from_bytes(
+                            bytes.try_into().expect("source id is 32 bytes"),
+                        )
+                    }),
+                )
+                .await
+                .expect("save keyhive event");
+            self.store
+                .append_admitted_events(vec![StorageHash::new(entry.event_hash)], None)
+                .await
+        }
+
+        fn entry(&self, index: u64) -> <Self::Store as RevisionedStore>::Entry {
+            AdmittedRow {
+                seq: index,
+                bytes: Arc::from(vec![index as u8]),
+                event_hash: [index as u8; 32],
+                source_id: None,
+            }
+        }
+
+        fn entries_match(
+            &self,
+            expected: &<Self::Store as RevisionedStore>::Entry,
+            actual: &<Self::Store as RevisionedStore>::Entry,
+        ) -> bool {
+            // The reader stamps the delivered seq into the row; the harness's
+            // expected rows carry a placeholder seq.
+            expected.event_hash == actual.event_hash && expected.bytes == actual.bytes
+        }
+
+        fn all_selector(&self, _after: u64) -> <Self::Store as RevisionedStore>::Selector {}
+    }
+
+    #[tokio::test]
+    async fn sqlite_admission_revisioned_store_contract() {
+        assert_revisioned_store_contract(&SqliteAdmissionHarness::new().await).await;
+    }
+}

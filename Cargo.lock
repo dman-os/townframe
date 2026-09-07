@@ -1175,6 +1175,7 @@ dependencies = [
  "bs58",
  "future_form",
  "futures",
+ "parking_lot",
  "rand 0.9.5",
  "serde",
  "siphasher",
