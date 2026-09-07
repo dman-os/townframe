@@ -564,7 +564,6 @@ class AppRuntimeViewModel(
             fcx = container.ffiCtx,
             configRepo = container.configRepo,
             blobsRepo = container.blobsRepo,
-            drawerRepo = container.drawerRepo,
             progressRepo = container.progressRepo,
         )
     }

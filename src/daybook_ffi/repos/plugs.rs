@@ -133,6 +133,15 @@ impl PlugsRepoFfi {
             })
             .await
     }
+    async fn enable_known_plug(&self, plug_id: String) -> Result<(), FfiError> {
+        let repo = Arc::clone(&self.repo);
+        self.fcx
+            .do_on_rt(async move {
+                repo.enable_known_plug(&plug_id).await?;
+                Ok::<(), FfiError>(())
+            })
+            .await
+    }
 
     async fn inspect_oci_layout(&self, path: String) -> Result<PlugSummary, FfiError> {
         let repo = Arc::clone(&self.repo);

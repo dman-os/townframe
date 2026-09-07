@@ -128,7 +128,21 @@ impl PlugsRepo {
         Ok(())
     }
 
-    /// ADR 007 §3: enable a plug by pinning a full ref. The ref must point at a
+    /// Enable the latest imported revision for a plug by id.
+    pub async fn enable_known_plug(&self, plug_id: &str) -> Res<ChangeHashSet> {
+        let ref_url = self
+            .config_store()?
+            .query_sync(|config| {
+                config
+                    .known_plugs
+                    .get(plug_id)
+                    .map(|plug| plug.latest.clone())
+            })
+            .await
+            .ok_or_else(|| eyre::eyre!("plug not imported: {plug_id}"))?;
+        self.enable_plug(&ref_url).await
+    }
+
     /// readable `plugManifest/main` facet; the manifest id becomes the key.
     pub async fn enable_plug(&self, ref_url: &url::Url) -> Res<ChangeHashSet> {
         if self.cancel_token.is_cancelled() {

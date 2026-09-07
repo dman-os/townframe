@@ -112,5 +112,3 @@ pub(crate) async fn compute_doc_facet_diff(
         local_changed_facet_keys,
     })
 }
-
-}

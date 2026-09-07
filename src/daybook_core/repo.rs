@@ -711,6 +711,14 @@ impl RepoCtx {
             )
             .await?;
 
+            info!("repo init dance: ensuring core plug");
+            plugs_repo
+                .as_ref()
+                .expect("plugs repo must be loaded")
+                .ensure_core_plug()
+                .await?;
+            info!("repo init dance: core plug ensured");
+
             Ok((core_inventory_doc_id, docs_inventory_doc_id))
         }
         .await;
