@@ -39,7 +39,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     child_tasks: R::Tasks,
 
     // ── determinism levers ─────────────────────────────────────────────────
-    timer: Arc<dyn crate::runtime2::Timer<F>>,
+    // timer: Arc<dyn crate::runtime2::Timer<F>>,
     clock: Arc<dyn crate::runtime2::Clock>,
 
     // ── channels ───────────────────────────────────────────────────────────
@@ -2809,7 +2809,7 @@ where
         doc_io,
         change_manager,
         child_tasks: child_tasks.clone(),
-        timer: Arc::clone(&timer),
+        // timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
@@ -2841,7 +2841,7 @@ where
         cmd_tx.clone(),
         hub.sync_policy,
         #[cfg(any(test, feature = "test-support"))]
-        Arc::clone(&hub.timer),
+        Arc::clone(&timer),
         doc_sync_waiter_ids,
         keyhive_sync_waiter_ids,
     );

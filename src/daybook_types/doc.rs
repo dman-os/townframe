@@ -1370,8 +1370,8 @@ mod tests {
         {
             let schema = schemars::schema_for!(BranchDirectory);
             let schema = serde_json::to_value(schema).unwrap().to_string();
-            assert!(schema.contains("by_name"));
-            assert!(schema.contains("by_id"));
+            assert!(schema.contains("byName"));
+            assert!(schema.contains("byId"));
             assert!(!schema.contains("declarations"));
         }
 
@@ -1404,7 +1404,7 @@ mod tests {
                 created_from: None,
             },
         );
-        assert!(!branches.by_name.contains_key("shared"));
+        assert_eq!(branches.by_name["shared"], vec![second]);
         assert_eq!(branches.by_name["renamed"], vec![first]);
     }
 

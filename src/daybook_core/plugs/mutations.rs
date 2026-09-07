@@ -108,6 +108,9 @@ impl PlugsRepo {
                         .enabled
                         .insert(CORE_PLUG_ID.to_string(), ref_url.clone());
                     let version = core_manifest.version.to_string();
+                    config
+                        .plug_config_doc_ids
+                        .insert(CORE_PLUG_ID.to_string(), self.doc_config_id.clone());
                     config.known_plugs.insert(
                         CORE_PLUG_ID.to_string(),
                         KnownPlug {

@@ -139,7 +139,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
-    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     keyhive_storage: BigRepoKeyhiveStorage,
     #[educe(Debug(ignore))]
     sync_policy: runtime2::types::BigRepoSyncPolicy,
@@ -148,7 +147,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     frontier_store: SharedPartStore,
     #[educe(Debug(ignore))]
-    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     sqlite_store: SqliteBigRepoStore,
     #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
