@@ -331,20 +331,71 @@ async fn classify_rows(
         // Unattributable hashes (prekey/contact-card ops) wake everyone:
         // the visibility projection has no narrower audience for them.
         let unattributed = !targets.unclassified.is_empty();
+        let changed_prefixes = changed
+            .iter()
+            .map(|hash| {
+                format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    hash[0], hash[1], hash[2], hash[3]
+                )
+            })
+            .collect::<Vec<_>>();
+        let unclassified_prefixes = targets
+            .unclassified
+            .iter()
+            .map(|hash| {
+                format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    hash[0], hash[1], hash[2], hash[3]
+                )
+            })
+            .collect::<Vec<_>>();
         if dispatch_diag() {
             tracing::warn!(
                 source = ?source,
                 changed = changed.len(),
+                ?changed_prefixes,
                 peers = targets.peers.len(),
                 unclassified = targets.unclassified.len(),
+                ?unclassified_prefixes,
                 connected = connected.len(),
+                generation = targets.published_generation,
                 "KEYHIVE_DISPATCH_DIAG classify group"
             );
         }
         for peer in &connected {
             let is_source = Some(peer) == source.as_ref();
-            let selected = targets.peers.contains(peer) || (unattributed && !is_source);
-            if true || selected {
+            let visibility_selected = targets.peers.contains(peer);
+            let source_suppressed = is_source && unattributed && !visibility_selected;
+            let fallback_selected = unattributed && !is_source;
+            let selected = visibility_selected || fallback_selected;
+            if dispatch_diag() {
+                let reason = if source_suppressed {
+                    "source_suppressed"
+                } else if visibility_selected {
+                    "visible_hash"
+                } else if fallback_selected {
+                    "unclassified_fallback"
+                } else {
+                    "not_visible"
+                };
+                tracing::warn!(
+                    source = ?source,
+                    peer = ?peer,
+                    selected,
+                    is_source,
+                    source_suppressed,
+                    visibility_selected,
+                    fallback_selected,
+                    reason,
+                    generation = targets.published_generation,
+                    changed = changed.len(),
+                    ?changed_prefixes,
+                    ?unclassified_prefixes,
+                    "KEYHIVE_DISPATCH_DIAG fanout decision"
+                );
+            }
+            if selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
             }
@@ -388,8 +439,24 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
             .await
             .is_err()
         {
+            if dispatch_diag() {
+                tracing::warn!(
+                    %peer_id,
+                    sub_id = ?sub_id,
+                    outcome = "send_error",
+                    "KEYHIVE_DISPATCH_DIAG notification delivery"
+                );
+            }
             Some((peer_id, sub_id))
         } else {
+            if dispatch_diag() {
+                tracing::warn!(
+                    %peer_id,
+                    sub_id = ?sub_id,
+                    outcome = "delivered",
+                    "KEYHIVE_DISPATCH_DIAG notification delivery"
+                );
+            }
             tracing::debug!(%peer_id, "keyhive change notification delivered");
             None
         }

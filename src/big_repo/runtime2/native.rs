@@ -1316,7 +1316,7 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
             // TEMP-HUNT: has_doc_fetch_access shortcircuit disabled — see below.
-            let _doc_id = crate::DocumentId::new(*sed_id.as_bytes());
+            let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
             // match self.has_doc_fetch_access(doc_id).await {
             //     Ok(true) => {}
             //     Ok(false) => {
@@ -1344,6 +1344,17 @@ where
 
             match result {
                 Ok((had_success, stats, conn_errs)) => {
+                    if std::env::var_os("DAYB_KEYHIVE_DIAG").is_some() {
+                        tracing::warn!(
+                            %doc_id,
+                            %peer_id,
+                            had_success,
+                            local_policy_rejections = stats.local_policy_rejections.len(),
+                            remote_rejection = ?stats.remote_rejection,
+                            transport_errors = conn_errs.len(),
+                            "KEYHIVE_DISPATCH_DIAG document sync classification"
+                        );
+                    }
                     if let Some(rejection) = stats.local_policy_rejections.first() {
                         Ok(SyncDocAttempt::Policy(rejection.kind))
                     } else if had_success {

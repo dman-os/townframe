@@ -128,6 +128,19 @@ struct KeyhiveWaiters {
     ids: std::collections::HashSet<u64>,
 }
 
+/// Select one follow-up round for demand that arrived while a round was
+/// active. A queued waiter is already an explicit demand for that round, so a
+/// notification latched for the same peer is consumed rather than creating a
+/// second round.
+fn coalesce_keyhive_demand(has_remaining_waiters: bool, notification_pending: &mut bool) -> bool {
+    if has_remaining_waiters {
+        *notification_pending = false;
+        true
+    } else {
+        std::mem::take(notification_pending)
+    }
+}
+
 struct PendingDocSyncWaiter {
     doc_id: DocumentId,
     peer_id: PeerId,
@@ -2187,15 +2200,22 @@ where
             has_remaining,
             "completing Keyhive sync round"
         );
-        if has_remaining {
-            self.start_keyhive_sync(peer_id)?;
-        }
-        if self.keyhive_notif_pending.remove(&peer_id) {
-            debug!(
-                %peer_id,
-                round_id,
-                "change notification latched during round; starting follow-up round"
-            );
+        let mut notification_pending = self.keyhive_notif_pending.remove(&peer_id);
+        let was_notification_pending = notification_pending;
+        if coalesce_keyhive_demand(has_remaining, &mut notification_pending) {
+            if has_remaining && was_notification_pending {
+                debug!(
+                    %peer_id,
+                    round_id,
+                    "coalescing change notification into waiter follow-up round"
+                );
+            } else if was_notification_pending {
+                debug!(
+                    %peer_id,
+                    round_id,
+                    "change notification latched during round; starting follow-up round"
+                );
+            }
             self.start_keyhive_sync(peer_id)?;
         }
         self.reattempt_pending_materialization()?;
@@ -2849,4 +2869,33 @@ where
             keyhive_dispatcher_stop: None,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn notification_overlapping_explicit_waiter_coalesces_to_one_follow_up_round() {
+        let (reply, _reply_rx) = futures::channel::oneshot::channel();
+        let mut waiters = super::KeyhiveWaiters::default();
+        waiters.ids.insert(7);
+        waiters.waiters.push((7, reply));
+        let mut notification_pending = true;
+
+        // The explicit/backend waiter remains queued when the active round
+        // completes. It is sufficient demand for the next round; the
+        // notification must not schedule another one.
+        assert!(super::coalesce_keyhive_demand(
+            !waiters.waiters.is_empty(),
+            &mut notification_pending,
+        ));
+        assert!(!notification_pending);
+        assert_eq!(waiters.waiters.len(), 1);
+
+        // The consumed notification cannot create a second round after the
+        // waiter-triggered follow-up has been admitted.
+        assert!(!super::coalesce_keyhive_demand(
+            waiters.waiters.is_empty(),
+            &mut notification_pending,
+        ));
+    }
 }

@@ -87,9 +87,95 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 eyre::bail!("remote doc was not found");
             }
             Ok(Err(crate::SyncDocError::Unauthorized)) => {
-                // The peer advertised an object it will not serve to us. This
-                // cursor is terminal for that peer; retrying it forever prevents
-                // full-sync/quiescence even after every document has converged.
+                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                enum LocalAuthorization {
+                    Unknown,
+                    Authorized,
+                    NotAuthorized,
+                }
+
+                let local_key =
+                    ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes())
+                        .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
+                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .map_err(|_| eyre::eyre!("document id is not a verifying key"))?;
+                let local = keyhive_core::principal::identifier::Identifier::from(local_key);
+                let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
+                let kh_document = keyhive_core::principal::document::id::DocumentId::from(document);
+                let before = if repo
+                    .keyhive()
+                    .clone_keyhive()
+                    .get_document(kh_document)
+                    .await
+                    .is_none()
+                {
+                    LocalAuthorization::Unknown
+                } else if repo
+                    .keyhive()
+                    .agent_access_on(&local, document)
+                    .await
+                    .is_some()
+                {
+                    LocalAuthorization::Authorized
+                } else {
+                    LocalAuthorization::NotAuthorized
+                };
+
+                // A remote rejection races Keyhive propagation. Reconcile the
+                // membership view before deciding whether this object is truly
+                // revoked: an object can be advertised locally while its grant
+                // is still only in the remote admission log.
+                repo.sync_keyhive_with_peer(peer_id)
+                    .await
+                    .wrap_err("keyhive reconciliation after remote Unauthorized failed")?;
+                let after = if repo
+                    .keyhive()
+                    .clone_keyhive()
+                    .get_document(kh_document)
+                    .await
+                    .is_none()
+                {
+                    LocalAuthorization::Unknown
+                } else if repo
+                    .keyhive()
+                    .agent_access_on(&local, document)
+                    .await
+                    .is_some()
+                {
+                    LocalAuthorization::Authorized
+                } else {
+                    LocalAuthorization::NotAuthorized
+                };
+
+                tracing::debug!(
+                    %peer_id,
+                    %doc_id,
+                    ?before,
+                    ?after,
+                    "classified remote Unauthorized after Keyhive reconciliation",
+                );
+
+                if after == LocalAuthorization::Authorized {
+                    // The serving peer rejected a document that this peer is
+                    // still authorized to fetch. Do not acknowledge the cursor;
+                    // this is an inconsistency that needs a later retry and
+                    // must remain visible in diagnostics.
+                    eyre::bail!(
+                        "remote peer {peer_id} rejected document {doc_id} while local Keyhive still grants access"
+                    );
+                }
+                if after == LocalAuthorization::Unknown {
+                    // The local Keyhive still does not know the document after
+                    // reconciling with the serving peer. This is admission lag or
+                    // a broken admission pipeline, not proof of revocation.
+                    return Ok(big_sync::SyncTaskRunOutcome::Stale);
+                }
+
+                // The local round confirmed that a previously authorized
+                // document is no longer authorized. Re-grants publish a fresh
+                // frontier object through the existing Keyhive admission path,
+                // so this obsolete cursor may be settled without turning
+                // revocation into a retry storm.
                 return Ok(big_sync::SyncTaskRunOutcome::Completion(
                     big_sync_core::SyncTaskCompletion {
                         obj_id,

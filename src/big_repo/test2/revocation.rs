@@ -2,7 +2,7 @@
 
 use super::harness::{Pair, fixtures};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
-use big_sync::SyncBackend;
+use big_sync::HostPartStore;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 
@@ -365,13 +365,10 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
     Ok(())
 }
 
-/// A remote authorization rejection is not evidence that a BigSync cursor can
-/// be acknowledged.  The backend must retain enough state for a later
-/// authorization reconciliation to distinguish revocation from a stale view.
-///
-/// This deliberately exercises the production backend at the same boundary
-/// used by BigSync's sync task, rather than accepting the permissive result of
-/// `BigRepoConnection::sync_doc_with_peer`.
+/// A remote authorization rejection must settle the old BigSync cursor, while
+/// a regrant of the unchanged document must publish and process fresh work.
+/// This exercises the production backend through the real worker subscription:
+/// no direct backend call or explicit document sync is used for either edge.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -394,35 +391,130 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     drop(reader_doc);
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
 
-    // Keep the reader's authorization view stale.  The serving owner now
+    let old_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    let mut sync_stats = pair.right().worker.subscribe_stats();
+
+    // Keep the reader's authorization view stale. The serving owner now
     // rejects the same object at the wire boundary with Unauthorized.
     pair.left()
         .repo
         .revoke_doc_access(doc_id, reader_agent)
         .await?;
 
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match sync_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| crate::ferr!("revocation work was not processed by the BigSync worker"))??;
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
+    let revoked_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    assert!(
+        revoked_cursor > old_cursor,
+        "confirmed Unauthorized must settle the old cursor: old={old_cursor}, revoked={revoked_cursor}"
+    );
+
+    // A notification-driven Keyhive round may win the race with the backend
+    // rejection. An already-applied revocation must still settle rather than
+    // requiring this backend invocation to observe the access transition.
     let backend =
-        crate::BigRepoSyncBackend::boot(std::sync::Arc::downgrade(&pair.right().repo)).await?;
-    let outcome = backend
-        .sync_obj(
-            pair.left().peer_id(),
-            doc_id,
-            vec![crate::GLOBAL_PART_ID],
-            None,
-        )
+        crate::backend::BigRepoSyncBackend::boot(std::sync::Arc::downgrade(&pair.right().repo))
+            .await?;
+    let outcome = big_sync::SyncBackend::sync_obj(
+        &backend,
+        pair.left().peer_id(),
+        doc_id,
+        vec![crate::GLOBAL_PART_ID],
+        None,
+    )
+    .await?;
+    assert!(matches!(
+        outcome,
+        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
+            deets: big_sync_core::SyncCompletionDeets::Noop,
+            ..
+        })
+    ));
+    while sync_stats.try_recv().is_ok() {}
+
+    // Re-grant without mutating Automerge. The owner-side group-part
+    // publication must produce a new subscription event, and that event must
+    // drive the reader's worker through the backend after it reconciles access.
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    match outcome {
-        big_sync::SyncTaskRunOutcome::Completion(completion) => {
-            assert_ne!(
-                completion.deets,
-                big_sync_core::SyncCompletionDeets::Noop,
-                "remote Unauthorized must not acknowledge a cursor as Noop"
-            );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match sync_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
         }
-        big_sync::SyncTaskRunOutcome::Stale => {}
-    }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| crate::ferr!("regrant work was not processed by the BigSync worker"))??;
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
+    let fresh_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    assert!(
+        fresh_cursor > revoked_cursor,
+        "regrant without mutation must publish fresh BigSync work: revoked={revoked_cursor}, fresh={fresh_cursor}"
+    );
+    pair.right().repo.wait_for_quiescence(None).await?;
+    assert!(
+        matches!(
+            pair.right().repo.get_doc(&doc_id).await?,
+            crate::DocLookup::Ready(_)
+        ),
+        "fresh regrant work must materialize the unchanged document"
+    );
 
     drop(owner_doc);
     Ok(())

@@ -130,6 +130,14 @@ Do not search only for the word `unauthorized`: count exact classifications sepa
 
 When temporary broad notification fan-out makes the deterministic failure pass while normal visibility-selected fan-out fails, prioritize notification target classification and the visible-event/syncpoint projection. Disabling the local policy check only proves that direct document synchronization can bypass the missing Keyhive admission; it is not evidence that admission converged.
 
+## Keyhive dispatcher cache/direct experiment
+
+Set `DAYB_KEYHIVE_DIAG=1` and run the deterministic stress test with nextest `--no-capture`, redirecting all output to a file. Normal captured nextest output hides successful-test tracing. Analyze the file with a parser that strips ANSI escapes and emits only aggregate counts plus a few bounded examples.
+
+The dispatcher diagnostics report cache generation, changed-hash prefixes, connected peers, per-peer selection reason, source suppression, and delivery outcomes. Compare `cache/direct comparison` records by `peers_equal` and `unclassified_equal`; `stable=false` only means the Keyhive generation changed during the expensive direct walk, not necessarily a set mismatch.
+
+For the local-policy experiment, distinguish: `has_doc_fetch_access` preflight rejection (the disabled historical gate) from `stats.local_policy_rejections` after the wire sync begins. The latter means the receiving local policy rejected incoming commits/fragments. A true remote authorization rejection appears in `stats.remote_rejection` and maps to `SyncDocAttempt::Unauthorized`. Count exact `Policy(DocumentNotFound)` and remote Unauthorized separately.
+
 ## Validation
 
 After a demonstrated fix:
