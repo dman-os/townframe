@@ -26,6 +26,8 @@ mod interlude {
     pub use utils_rs::CHeapStr;
 }
 
+use crate::interlude::*;
+
 pub(crate) mod authority;
 pub mod blobs;
 pub mod config;
@@ -57,7 +59,6 @@ daybook_types::custom_type_set!();
 
 #[cfg(feature = "uniffi")]
 use crate::stores::VersionTag;
-use big_sync_core::{PartId, PeerId};
 
 #[cfg(feature = "uniffi")]
 uniffi::custom_type!(VersionTag, String, {
@@ -86,6 +87,7 @@ uniffi::custom_type!(VersionTag, String, {
     }
 });
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn peer_id_from_label(label: &str) -> PeerId {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -101,9 +103,6 @@ pub fn part_id_from_label(label: &str) -> PartId {
     PartId::new(*digest.as_bytes())
 }
 
-pub use blobs::{
-    BlobPinWorkItem, BlobPinWorker, BlobPinsPartEvent, BlobPinsPartWorker, blob_inventory_part_id,
-    blob_inventory_part_id_from_doc_id,
-};
+pub use blobs::{blob_inventory_part_id, blob_inventory_part_id_from_doc_id};
 
 pub mod app;

@@ -6,7 +6,10 @@ use daybook_types::manifest;
 use self::cache::PlugsCache;
 
 pub use self::events::PlugsEvent;
-pub(crate) use self::events::{PlugsNotif, PlugsSwitchSink};
+pub(crate) use self::events::{
+    PLUG_MANIFEST_CONSUMER_STATE_ID, PLUGS_CONFIG_CONSUMER_STATE_ID, PlugsConfigEventStore,
+    PlugsConfigRevision, spawn_facet_set_plugs_manifest_consumer, spawn_plugs_config_consumer,
+};
 pub use self::oci::OciImportOptions;
 
 mod cache;
@@ -38,10 +41,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 Arc::new(LocalStateManifest::SqliteFile {}),
             ),
             (
-                "doc-blobs-index".into(),
-                Arc::new(LocalStateManifest::SqliteFile {}),
-            ),
-            (
                 "doc-facet-ref-index".into(),
                 Arc::new(LocalStateManifest::SqliteFile {}),
             ),
@@ -68,6 +67,18 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             FacetManifest {
                 key_tag: WellKnownFacetTag::PlugsConfig.into(),
                 value_schema: schemars::schema_for!(daybook_types::doc::PlugsConfig),
+                display_config: default(),
+                references: default(),
+            },
+            FacetManifest {
+                key_tag: WellKnownFacetTag::Branch.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Branch),
+                display_config: default(),
+                references: default(),
+            },
+            FacetManifest {
+                key_tag: WellKnownFacetTag::Branches.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Branches),
                 display_config: default(),
                 references: default(),
             },
@@ -197,7 +208,6 @@ pub enum FacetManifestLookup {
 }
 
 pub struct PlugsRepo {
-    pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     blobs: Arc<crate::blobs::BlobsRepo>,
     doc_config_id: daybook_types::doc::DocId,
@@ -206,10 +216,23 @@ pub struct PlugsRepo {
     config_store: tokio::sync::OnceCell<crate::stores::FacetStoreHandle<PlugsConfig>>,
 
     mutation_mutex: tokio::sync::Mutex<()>,
-    local_actor_id: ActorId,
     cancel_token: CancellationToken,
     cache: surelock::mutex::Mutex<PlugsCache>,
-    notif_tx: tokio::sync::mpsc::UnboundedSender<PlugsNotif>,
+    /// Live tap of the config-facet event stream. The durable stream is
+    /// [`PlugsConfigEventStore`]; this broadcast carries the same events plus
+    /// pending→active transitions, which are live-only (they depend on local
+    /// materialization state, so replay cannot reproduce them).
+    pub(crate) events_tx: tokio::sync::broadcast::Sender<PlugsEvent>,
+}
+
+/// FFI-facing projection of [`PlugsEvent`]: the named `Clone` record
+/// cross-language listeners need. Enabled/updated map to `active`, disabled
+/// to `!active`; config-only changes carry no plug id and are not surfaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PlugsWatchChange {
+    pub plug_id: String,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -222,35 +245,162 @@ pub struct ImportedPlug {
     pub source_digest: Option<String>,
 }
 
-impl crate::repos::Repo for PlugsRepo {
-    type Event = PlugsEvent;
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
-        &self.registry
-    }
-    fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
-    }
-}
-
+#[expect(clippy::clone_on_ref_ptr)]
 impl PlugsRepo {
-    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
-        crate::event_origin::SwitchEventOrigin::Local {
-            actor_id: self.local_actor_id.to_string(),
+    /// Live tap of the config event stream: the same [`PlugsEvent`]s the
+    /// revisioned store replays, plus pending→active transitions (live-only,
+    /// see [`PlugsRepo::events_tx`]).
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<PlugsEvent> {
+        self.events_tx.subscribe()
+    }
+
+    fn publish_event(&self, event: PlugsEvent) {
+        // Broadcast with zero receivers is a no-op, not an error to surface:
+        // subscribers come and go, and the durable stream is the event store.
+        drop(self.events_tx.send(event));
+    }
+
+    /// Apply one config revision's events to the derived cache and publish
+    /// them. The revision's hydrated config is installed as the config store's
+    /// in-memory snapshot first, so subsequent local mutations build patches
+    /// on fresh state (stale, coalesced, local, and out-of-order revisions all
+    /// converge through the hydrated snapshot).
+    pub(crate) async fn apply_config_revision(&self, revision: &PlugsConfigRevision) -> Res<()> {
+        let _guard = self.mutation_mutex.lock().await;
+        let store = self.config_store()?;
+        let describe_tracks = |config: &PlugsConfig| {
+            config
+                .known_plugs
+                .iter()
+                .map(|(id, track)| {
+                    (
+                        id.clone(),
+                        track.latest_version.clone(),
+                        track.last_enabled_version.clone(),
+                        track.latest_rejection.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before_tracks = store.query_sync(describe_tracks).await;
+        tracing::debug!(
+            revision_heads = ?revision.heads,
+            events = ?revision.events,
+            ?before_tracks,
+            "applying plugs config revision"
+        );
+        let (_, current_heads) = store.latest_snapshot().await?;
+        if current_heads.as_ref() == Some(&revision.heads) {
+            store
+                .apply_external_snapshot(revision.config.clone(), revision.heads.clone())
+                .await?;
+        } else {
+            tracing::debug!(
+                revision_heads = ?revision.heads,
+                ?current_heads,
+                "discarding stale plugs config snapshot in favor of current drawer state"
+            );
+            store.reload().await?;
         }
+        let current_config = store.query_sync(|config| config.clone()).await;
+        let after_tracks = store.query_sync(describe_tracks).await;
+        tracing::debug!(?after_tracks, "applied plugs config revision snapshot");
+        for event in &revision.events {
+            match event {
+                PlugsEvent::PlugEnabled { plug_id, .. }
+                | PlugsEvent::PlugUpdated { plug_id, .. } => {
+                    if let Some(ref_url) = current_config.enabled.get(plug_id) {
+                        self.activate_from_ref(plug_id, ref_url).await?;
+                    }
+                }
+                PlugsEvent::PlugDisabled { plug_id } => {
+                    surelock::key::lock_scope(|key| {
+                        let (mut cache, _key) = key.lock(&self.cache);
+                        cache.clear_active(plug_id);
+                    });
+                }
+                PlugsEvent::PlugsConfigChanged { .. } => {
+                    self.refresh_known_cache().await?;
+                }
+            }
+            self.publish_event(event.clone());
+        }
+        Ok(())
+    }
+
+    /// Re-materialize one enabled-but-unreadable ref; publish `PlugEnabled`
+    /// when the manifest becomes readable.
+    pub(crate) async fn resolve_pending_enabled_plug(&self, plug_id: &str) -> Res<bool> {
+        let _guard = self.mutation_mutex.lock().await;
+        let Some(ref_url) = self
+            .config_store()?
+            .query_sync(|config| config.enabled.get(plug_id).cloned())
+            .await
+        else {
+            return Ok(false);
+        };
+        self.resolve_enabled_plug_locked(plug_id, &ref_url).await
+    }
+
+    async fn resolve_enabled_plug_locked(&self, plug_id: &str, ref_url: &url::Url) -> Res<bool> {
+        let was_active = surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache.active_manifests.contains_key(plug_id)
+        });
+        self.activate_from_ref(plug_id, ref_url).await?;
+        let is_active = surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            cache.active_manifests.contains_key(plug_id)
+        });
+        if !was_active && is_active {
+            let heads = surelock::key::lock_scope(|key| {
+                let (cache, _key) = key.lock(&self.cache);
+                cache
+                    .active_manifests
+                    .get(plug_id)
+                    .map(|(heads, _)| heads.clone())
+            });
+            if let Some(heads) = heads {
+                self.publish_event(PlugsEvent::PlugEnabled {
+                    plug_id: plug_id.to_owned(),
+                    heads,
+                });
+            }
+        }
+        Ok(is_active)
+    }
+
+    /// Re-materialize the known-manifest cache from the durable config's
+    /// known refs. The config-side rejections/versions stay as recorded.
+    pub(crate) async fn refresh_known_cache(&self) -> Res<()> {
+        let known = self
+            .config_store()?
+            .query_sync(|config| config.known_plugs.clone())
+            .await;
+        for (plug_id, track) in known {
+            let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await? else {
+                continue;
+            };
+            surelock::key::lock_scope(|key| {
+                let (mut cache, _key) = key.lock(&self.cache);
+                cache.upsert_known(&plug_id, &manifest);
+            });
+        }
+        Ok(())
     }
 
     pub async fn load(
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
         doc_config_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPathBuf,
+        _local_user_path: daybook_types::doc::UserPathBuf,
+        // Kept for API stability: the retired plugs-revision frontier was the
+        // only consumer of a local sqlite ctx here. The event store's walker
+        // state lives with its consumer (PLUGS_CONFIG_CONSUMER_STATE_ID).
+        _sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        let local_user_path =
-            daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-        let registry = crate::repos::ListenersRegistry::new();
         let cancel_token = CancellationToken::new();
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, _) = tokio::sync::broadcast::channel(256);
 
         let repo = Arc::new(Self {
             big_repo: Arc::clone(&big_repo),
@@ -259,30 +409,16 @@ impl PlugsRepo {
             drawer: tokio::sync::OnceCell::new(),
             config_store: tokio::sync::OnceCell::new(),
             mutation_mutex: tokio::sync::Mutex::new(()),
-            local_actor_id,
-            registry: Arc::clone(&registry),
             cancel_token: cancel_token.clone(),
             cache: surelock::mutex::Mutex::new(PlugsCache::default()),
-            notif_tx,
-        });
-
-        // ADR 007 §7: the notif loop maintains the derived cache and emits
-        // enabled-only events; fed by the switch sink (PlugsSwitchSink).
-        let worker_handle = tokio::spawn({
-            let repo = Arc::clone(&repo);
-            let cancel_token = cancel_token.child_token();
-            async move {
-                repo.notif_loop(notif_rx, cancel_token)
-                    .await
-                    .expect("error handling plugs notifs")
-            }
+            events_tx,
         });
 
         Ok((
             repo,
             crate::repos::RepoStopToken {
                 cancel_token,
-                worker_handle: Some(worker_handle),
+                worker_handle: None,
             },
         ))
     }
@@ -294,14 +430,70 @@ impl PlugsRepo {
         if self.drawer.set(drawer).is_err() {
             eyre::bail!("drawer already attached to plugs repo");
         }
+        // Register the config doc before loading its facet store. A reopened
+        // DrawerRepo has no local registry entry yet; register_existing_doc is
+        // idempotent and is required for FacetStoreHandle::load to read the
+        // persisted config facet. The core invariant is established below,
+        // after that store is attached.
+        let drawer_ref = self.drawer.get().expect("just set");
+        drawer_ref
+            .register_existing_doc(
+                &self.doc_config_id,
+                self.doc_config_id
+                    .parse()
+                    .map_err(|err| ferr!("invalid doc_config id: {err}"))?,
+                daybook_types::doc::BranchPath::new("main"),
+            )
+            .await?;
         let store = crate::stores::FacetStoreHandle::load(
-            Arc::clone(self.drawer.get().expect("just set")),
+            drawer_ref.clone(),
             self.doc_config_id.clone(),
             daybook_types::doc::BranchPathBuf::from("main"),
         )
         .await?;
         if self.config_store.set(store).is_err() {
             eyre::bail!("plugs config store already attached");
+        }
+        // Establish the core plug invariant at the plugs repo's boot boundary,
+        // before exposing the attached repo to drawer callers. This is also
+        // what makes fresh init independent of a later repo-init dance.
+        self.ensure_core_plug().await?;
+        // Warm the derived cache from the durable config so drawer facet
+        // validation (and plug-init queueing at rt boot) works immediately on
+        // this open — including a reopen where the facet-set consumers have
+        // already settled the config/manifest revisions and will not re-apply
+        // them. Unreadable non-core manifest refs are treated as pending
+        // (deferred) exactly like the live consumer, never a fatal error.
+        self.warm_cache().await?;
+        Ok(())
+    }
+
+    /// Rebuild the derived cache from the durable config store: every
+    /// known-manifest ref (materializes tag -> plug + tag -> facet manifest)
+    /// and every enabled ref (pins the active manifest). This is the boot-time
+    /// counterpart to the event consumer's incremental cache application; it is idempotent
+    /// against concurrent consumer writes (`upsert_known`/`set_active` are
+    /// monotonic under the cache lock).
+    async fn warm_cache(&self) -> Res<()> {
+        let (known_plugs, enabled) = match self.config_store() {
+            Ok(store) => {
+                store
+                    .query_sync(|config| (config.known_plugs.clone(), config.enabled.clone()))
+                    .await
+            }
+            Err(_) => return Ok(()),
+        };
+        for (plug_id, track) in &known_plugs {
+            let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await? else {
+                continue;
+            };
+            surelock::key::lock_scope(|key| {
+                let (mut cache, _key) = key.lock(&self.cache);
+                cache.upsert_known(plug_id, &manifest);
+            });
+        }
+        for (plug_id, ref_url) in &enabled {
+            self.activate_from_ref(plug_id, ref_url).await?;
         }
         Ok(())
     }
@@ -312,31 +504,25 @@ impl PlugsRepo {
             .ok_or_eyre("plugs config store not attached")
     }
 
-    /// The `FacetStoreSink` that keeps the config store's projection live
-    /// (registered in the rt switch sinks map).
-    pub fn config_store_sink(&self) -> Option<crate::stores::FacetStoreSink<PlugsConfig>> {
-        self.config_store.get().map(|store| store.sink())
+    pub(crate) fn config_doc_id(&self) -> daybook_types::doc::DocId {
+        self.doc_config_id.clone()
+    }
+
+    pub(crate) fn config_facet_route(&self) -> crate::index::FacetRouteKey {
+        let document_id = self.config_doc_id();
+        crate::index::FacetRouteKey {
+            branch_id: daybook_types::doc::BranchId(document_id.clone()),
+            document_id,
+            facet_key: <PlugsConfig as crate::stores::FacetStore>::facet_key(),
+        }
     }
 
     fn plug_manifest_facet_key() -> daybook_types::doc::FacetKey {
         daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::PlugManifest)
     }
 
-    /// Activate a plug from its enabled ref: materialize the manifest,
-    /// update the active cache, and emit the config-delta event — `added`
-    /// (the ref was newly enabled) → `PlugEnabled`; otherwise the ref
-    /// changed → `EnabledPlugUpdated`. The event type comes from the config
-    /// delta, not the cache; the cache is only the materialization side
-    /// effect (plus the idempotence fast path). A pending (unreadable) ref
-    /// clears the active entry and emits nothing — the config still enables
-    /// the plug; it emits `PlugEnabled` when it resolves.
-    async fn activate_from_ref(
-        &self,
-        plug_id: &str,
-        ref_url: &url::Url,
-        added: bool,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<Option<PlugsEvent>> {
+    /// Activate a plug from its enabled ref and update the active cache.
+    async fn activate_from_ref(&self, plug_id: &str, ref_url: &url::Url) -> Res<()> {
         let parsed = Self::parse_enabled_ref(ref_url)?;
         if let Some(at) = &parsed.at {
             let pinned = ChangeHashSet(am_utils_rs::parse_commit_heads(at)?);
@@ -344,7 +530,7 @@ impl PlugsRepo {
                 let (cache, _key) = key.lock(&self.cache);
                 cache.is_active_at(plug_id, &pinned)
             }) {
-                return Ok(None);
+                return Ok(());
             }
         }
         let Some((heads, manifest)) = self.materialize_active(plug_id, ref_url).await? else {
@@ -353,44 +539,12 @@ impl PlugsRepo {
                 let (mut cache, _key) = key.lock(&self.cache);
                 cache.clear_active(plug_id);
             });
-            return Ok(None);
+            return Ok(());
         };
         surelock::key::lock_scope(|key| {
             let (mut cache, _key) = key.lock(&self.cache);
             cache.set_active(plug_id, heads.clone(), manifest);
         });
-        Ok(Some(if added {
-            PlugsEvent::PlugEnabled {
-                id: plug_id.to_string(),
-                heads,
-                origin: origin.clone(),
-            }
-        } else {
-            PlugsEvent::EnabledPlugUpdated {
-                id: plug_id.to_string(),
-                heads,
-                origin: origin.clone(),
-            }
-        }))
-    }
-
-    /// ADR 007 §7: init snapshot synthesized from the plugg config facet —
-    /// `PlugEnabled` for the active set only (pending plugs emit on
-    /// resolution, §6 — the notif loop's active-set diff covers it).
-    pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
-        self.rebuild_cache().await?;
-        let events = surelock::key::lock_scope(|key| {
-            let (cache, _key) = key.lock(&self.cache);
-            let mut events = Vec::with_capacity(cache.active_manifests.len());
-            for (id, (heads, _)) in &cache.active_manifests {
-                events.push(PlugsEvent::PlugEnabled {
-                    id: id.clone(),
-                    heads: heads.clone(),
-                    origin: self.local_origin(),
-                });
-            }
-            events
-        });
-        Ok(events)
+        Ok(())
     }
 }

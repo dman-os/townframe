@@ -3,12 +3,13 @@ use future_form::FutureForm;
 
 pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
-pub(crate) mod driver;
+pub mod doc_revision_store;
 mod group_part_worker;
+pub(crate) mod keyhive_admission;
 
 pub use automerge_frontier_worker::{
-    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_docs_part_id,
-    automerge_obj_to_doc_id, spawn_automerge_frontier_worker,
+    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_obj_to_doc_id,
+    spawn_automerge_frontier_worker,
 };
 pub(crate) use causal_checkpoint_worker::{
     CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,
@@ -39,7 +40,7 @@ pub use lease::{
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
-pub use types::WorkerGroupScope;
+pub use types::{GroupScopeHandle, WorkerGroupScope};
 
 mod doc_worker;
 mod handle;
@@ -80,6 +81,13 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
         async_channel::Sender<Runtime2Evt>,
         async_channel::Receiver<Runtime2Evt>,
     )>,
+    /// Test-only: when false, skip the initial keyhive sync round that
+    /// `ConnEstablished` would otherwise start with a new peer. Mirrors
+    /// `BigRepoConfig::keyhive_change_notifs` so `boot_without_keyhive_notifs`
+    /// peers only learn keyhive changes through explicit
+    /// `sync_keyhive_with_peer` rounds — the connect itself never delivers
+    /// membership. Production always enables the connect sync.
+    pub keyhive_sync_on_connect: bool,
 }
 
 /// Transport-agnostic connect/accept/close — the seam that replaces iroh baked

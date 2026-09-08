@@ -439,14 +439,6 @@ impl SqliteBigRepoStore {
         format!("{name}:{}", self.scope_id)
     }
 
-    fn part_cursor_reader(&self, part_id: PartId) -> String {
-        let encoded: String = Self::part_blob(part_id)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        format!("automerge_part:{}:{encoded}", self.scope_id)
-    }
-
     pub(crate) async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query!(
@@ -788,33 +780,6 @@ impl SqliteBigRepoStore {
         .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn automerge_part_cursor(&self, part_id: PartId) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar!(
-            "SELECT seq FROM cursors WHERE reader = ?1",
-            self.part_cursor_reader(part_id)
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn commit_automerge_part_cursor(
-        &self,
-        part_id: PartId,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO cursors(reader, seq) VALUES (?1, ?2)
-             ON CONFLICT(reader)
-             DO UPDATE SET seq = MAX(seq, excluded.seq)",
-            self.part_cursor_reader(part_id),
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
     }
 
     pub(crate) async fn automerge_keyhive_cursor(&self) -> Res<u64> {

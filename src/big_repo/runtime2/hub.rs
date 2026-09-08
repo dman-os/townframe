@@ -19,6 +19,9 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── identity / config ──────────────────────────────────────────────────
     local_peer_id: PeerId,
     sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
+    /// When false, `ConnEstablished` skips the initial keyhive sync round
+    /// (mirrors `BigRepoConfig::keyhive_change_notifs`; test-only).
+    keyhive_sync_on_connect: bool,
 
     // ── injected IO facades ────────────────────────────────────────────────
     runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
@@ -39,7 +42,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     child_tasks: R::Tasks,
 
     // ── determinism levers ─────────────────────────────────────────────────
-    timer: Arc<dyn crate::runtime2::Timer<F>>,
+    // timer: Arc<dyn crate::runtime2::Timer<F>>,
     clock: Arc<dyn crate::runtime2::Clock>,
 
     // ── channels ───────────────────────────────────────────────────────────
@@ -128,6 +131,19 @@ struct KeyhiveWaiters {
     ids: std::collections::HashSet<u64>,
 }
 
+/// Select one follow-up round for demand that arrived while a round was
+/// active. A queued waiter is already an explicit demand for that round, so a
+/// notification latched for the same peer is consumed rather than creating a
+/// second round.
+fn coalesce_keyhive_demand(has_remaining_waiters: bool, notification_pending: &mut bool) -> bool {
+    if has_remaining_waiters {
+        *notification_pending = false;
+        true
+    } else {
+        std::mem::take(notification_pending)
+    }
+}
+
 struct PendingDocSyncWaiter {
     doc_id: DocumentId,
     peer_id: PeerId,
@@ -148,6 +164,24 @@ struct QuiescenceProbe {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(crate) trait HubCommandFuture<F: FutureForm> {
+    fn allocate_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn finalize_allocated_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        doc_id: crate::DocumentId,
+        initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn create_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -180,6 +214,125 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
 
 #[future_form::future_form(Sendable, Local)]
 impl<F: FutureForm> HubCommandFuture<F> for F {
+    fn allocate_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = runtime_io.allocate_document(parents).await;
+            resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
+            Ok(())
+        })
+    }
+
+    fn finalize_allocated_doc(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        doc_id: crate::DocumentId,
+        initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = async {
+                let content_heads = nonempty::NonEmpty::from_vec(
+                    initial_content
+                        .get_heads()
+                        .into_iter()
+                        .map(|head| head.0)
+                        .collect(),
+                )
+                .ok_or_else(|| ferr!("automerge document has no content heads"))?;
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                // Stage the plaintext before creating the Keyhive authority.
+                // This is the recovery record for a crash in any later step.
+                let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
+                runtime_io
+                    .stage_allocated_document(
+                        doc_id,
+                        initial_content.save(),
+                        initial_keys.clone(),
+                        already_persisted,
+                    )
+                    .await?;
+                // The initial content is encrypted against the Keyhive document,
+                // so authority creation precedes Sedimentree persistence.
+                runtime_io
+                    .finalize_document_authority(doc_id, content_heads.clone())
+                    .await?;
+                let bundle = if runtime_io.contains_sedimentree(sed_id).await? {
+                    let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
+                    cmd_tx
+                        .send(Runtime2Cmd::GetDocHandle {
+                            doc_id,
+                            resp: handle_resp,
+                        })
+                        .await
+                        .map_err(|_| ferr!(ERROR_ACTOR))?;
+                    let lookup = handle_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??;
+                    let bundle = match lookup {
+                        crate::runtime2::types::DocLookup::Ready(bundle) => bundle,
+                        crate::runtime2::types::DocLookup::Missing => {
+                            return Err(ferr!(
+                                "persisted document has no materialized handle: {doc_id}"
+                            ));
+                        }
+                        crate::runtime2::types::DocLookup::PendingMaterialization => {
+                            return Err(ferr!(
+                                "persisted document is pending materialization: {doc_id}"
+                            ));
+                        }
+                    };
+                    let (persisted_heads, persisted_content) = surelock::key::lock_scope(|key| {
+                        let (doc, _key) = key.lock(&bundle.doc);
+                        (
+                            doc.get_heads()
+                                .into_iter()
+                                .map(|head| head.0)
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            doc.save(),
+                        )
+                    });
+                    let requested_heads = content_heads
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if persisted_heads != requested_heads
+                        || persisted_content != initial_content.save()
+                    {
+                        return Err(ferr!(
+                            "persisted document initial content mismatch: {doc_id}"
+                        ));
+                    }
+                    bundle
+                } else {
+                    let (put_resp, put_rx) = futures::channel::oneshot::channel();
+                    cmd_tx
+                        .send(Runtime2Cmd::PutDoc {
+                            doc_id,
+                            initial_content,
+                            initial_keys: initial_keys.clone(),
+                            resp: put_resp,
+                        })
+                        .await
+                        .map_err(|_| ferr!(ERROR_ACTOR))?;
+                    put_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??
+                };
+                runtime_io
+                    .complete_document_authority(doc_id, pending_group, content_heads)
+                    .await?;
+                eyre::Ok(bundle)
+            }
+            .await;
+            resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
+            Ok(())
+        })
+    }
+
     fn create_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -197,6 +350,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
+                            initial_keys: Vec::new(),
                             resp,
                         })
                         .await
@@ -410,6 +564,12 @@ where
             self.note_activity();
         }
         match cmd {
+            Runtime2Cmd::AllocateDoc { parents, resp } => {
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CreateDoc,
+                    F::allocate_doc(Arc::clone(&self.runtime_io), parents, resp),
+                )?;
+            }
             Runtime2Cmd::CreateDoc {
                 initial_content,
                 parents,
@@ -431,16 +591,38 @@ where
             Runtime2Cmd::PutDoc {
                 doc_id,
                 initial_content,
+                initial_keys,
                 resp,
             } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
                     .send(DocWorkerMsg::PutDoc {
                         initial_content,
+                        initial_keys,
                         resp,
                         _lease,
                     })
                     .wrap_err(ERROR_CHANNEL)?;
+            }
+            Runtime2Cmd::FinalizeAllocatedDoc {
+                doc_id,
+                initial_content,
+                initial_keys,
+                pending_group,
+                resp,
+            } => {
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CreateDoc,
+                    F::finalize_allocated_doc(
+                        Arc::clone(&self.runtime_io),
+                        self.cmd_tx.clone(),
+                        doc_id,
+                        initial_content,
+                        initial_keys,
+                        pending_group,
+                        resp,
+                    ),
+                )?;
             }
             Runtime2Cmd::GetDocHandle { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
@@ -661,6 +843,13 @@ where
             }
             Runtime2Cmd::WaitForKeyhiveReconciliation { resp } => {
                 let captured = self.admitted_head;
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    captured,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    active_keyhive_syncs = self.active_keyhive_syncs.len(),
+                    "keyhive reconciliation wait requested"
+                );
                 if self.group_part_settled_seq >= captured {
                     resp.send(Ok(()))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -863,7 +1052,16 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                     .sync_keyhive_with_peer(peer_id, request_id.clone())
                     .await
                 {
-                    Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {}
+                    Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {
+                        // TEMP-DIAGNOSTIC: rounds completing with an empty exchange
+                        // (serving side sends 0 for an explicit hash request) are
+                        // invisible at debug level; surface every round here.
+                        tracing::warn!(
+                            %peer_id,
+                            nonce = request_id.nonce,
+                            "KEYHIVE_DIAG keyhive sync round initiated"
+                        );
+                    }
                     Ok(crate::runtime2::KeyhiveSyncOutcome::PeerDisappeared) => {
                         evt_tx
                             .send(Runtime2Evt::KeyhiveSyncFailed {
@@ -1479,10 +1677,25 @@ where
             }
             Runtime2Evt::KeyhiveAdmissionAdvanced { seq } => {
                 self.admitted_head = self.admitted_head.max(seq);
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    seq,
+                    admitted_head = self.admitted_head,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    "keyhive admission head advanced"
+                );
                 self.try_resolve_quiescence()?;
             }
             Runtime2Evt::GroupPartWorkerSettled { seq } => {
                 self.group_part_settled_seq = self.group_part_settled_seq.max(seq);
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    seq,
+                    admitted_head = self.admitted_head,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    waiters = self.keyhive_reconciliation_waiters.len(),
+                    "group-part settled admission watermark"
+                );
                 let mut pending = Vec::new();
                 for (captured, waiter) in std::mem::take(&mut self.keyhive_reconciliation_waiters) {
                     if self.group_part_settled_seq >= captured {
@@ -1545,7 +1758,7 @@ where
                             // this Pending may be stale; re-verify with the
                             // fresher key state (B6).
                             debug!(%doc_id, "re-verifying stale materialization retry");
-                            self.retry_doc_materialization(doc_id)?;
+                            self.retry_existing_doc_materialization(doc_id)?;
                         }
                     }
                     crate::runtime2::MaterializationStatus::Ready {
@@ -1577,23 +1790,22 @@ where
             Runtime2Evt::CgkaOp { data } => {
                 // Every CGKA op is a document key rotation.
                 let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
-                let was_pending = self.pending_materialization.contains(&doc_id);
+                let worker_present = self.doc_workers.contains_key(&doc_id);
                 debug!(
                     local_peer_id = %self.local_peer_id,
                     %doc_id,
-                    was_pending,
+                    worker_present,
                     pending_count = self.pending_materialization.len(),
-                    "processing CGKA operation; retrying pending materialization after key update"
+                    "processing CGKA operation; routing document materialization update"
                 );
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
-                // Targeted retry: only this doc's keys moved; live docs are
-                // not re-walked (B6).
-                if was_pending {
-                    self.retry_doc_materialization(doc_id)?;
-                }
+                // Route the per-document key update to an existing worker. The
+                // admission-driven AFW path handles cold documents; this path
+                // must never create a worker merely because Keyhive changed.
+                self.retry_existing_doc_materialization(doc_id)?;
             }
             Runtime2Evt::DelegationReceived { target, data } => {
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
@@ -1774,7 +1986,9 @@ where
                 closed: Arc::clone(&closed),
             },
         );
-        self.start_keyhive_sync(peer_id)?;
+        if self.keyhive_sync_on_connect {
+            self.start_keyhive_sync(peer_id)?;
+        }
         Ok(())
     }
 
@@ -1802,10 +2016,6 @@ where
     /// Start a keyhive sync round with `peer_id` if not already active.
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn start_keyhive_sync(&mut self, peer_id: PeerId) -> eyre::Result<()> {
-        self.start_keyhive_sync_round(peer_id)
-    }
-
-    fn start_keyhive_sync_round(&mut self, peer_id: PeerId) -> eyre::Result<()> {
         if self.active_keyhive_syncs.contains_key(&peer_id) {
             return Ok(());
         }
@@ -1933,12 +2143,12 @@ where
         request_id: subduction_keyhive::message::RequestId,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
-            debug!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
+            warn!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
             self.reattempt_pending_materialization()?;
             return Ok(());
         };
         if round.request_id != request_id {
-            debug!(
+            warn!(
                 %peer_id,
                 expected_request_id = ?round.request_id,
                 request_id = ?request_id,
@@ -1995,15 +2205,22 @@ where
             has_remaining,
             "completing Keyhive sync round"
         );
-        if has_remaining {
-            self.start_keyhive_sync(peer_id)?;
-        }
-        if self.keyhive_notif_pending.remove(&peer_id) {
-            debug!(
-                %peer_id,
-                round_id,
-                "change notification latched during round; starting follow-up round"
-            );
+        let mut notification_pending = self.keyhive_notif_pending.remove(&peer_id);
+        let was_notification_pending = notification_pending;
+        if coalesce_keyhive_demand(has_remaining, &mut notification_pending) {
+            if has_remaining && was_notification_pending {
+                debug!(
+                    %peer_id,
+                    round_id,
+                    "coalescing change notification into waiter follow-up round"
+                );
+            } else if was_notification_pending {
+                debug!(
+                    %peer_id,
+                    round_id,
+                    "change notification latched during round; starting follow-up round"
+                );
+            }
             self.start_keyhive_sync(peer_id)?;
         }
         self.reattempt_pending_materialization()?;
@@ -2031,18 +2248,30 @@ where
     /// acks the worker's status back through `DocWorkerMaterializationRetryCompleted`,
     /// where a stale `Pending` (state advanced while the walk ran) re-verifies.
     fn retry_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        let (worker, lease) = self.doc_worker_handle(doc_id)?;
+        self.send_materialization_retry(doc_id, worker, lease)
+    }
+
+    /// CGKA notifications are routed only to workers that already exist. Cold
+    /// documents are admitted and materialized by AFW instead of being spawned
+    /// merely because a keyhive operation arrived.
+    fn retry_existing_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        let Some((worker, lease)) = self.acquire_existing_doc_worker_handle(doc_id)? else {
+            debug!(%doc_id, "skipping materialization retry without an existing document worker");
+            return Ok(());
+        };
+        self.send_materialization_retry(doc_id, worker, lease)
+    }
+
+    fn send_materialization_retry(
+        &mut self,
+        doc_id: DocumentId,
+        worker: DocWorkerHandle,
+        lease: DocWorkerInternalLease,
+    ) -> eyre::Result<()> {
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
             return Ok(());
         }
-        let (worker, _lease) = match self.doc_worker_handle(doc_id) {
-            Ok(pair) => pair,
-            Err(_) => {
-                debug!(%doc_id, "dropping pending materialization without document worker");
-                self.pending_materialization.remove(&doc_id);
-                self.schedule_doc_worker_eviction_if_idle(doc_id);
-                return Ok(());
-            }
-        };
         let start_seq = self.admitted_head;
         self.materialization_retries_in_flight
             .insert(doc_id, start_seq);
@@ -2056,7 +2285,7 @@ where
             origin: crate::changes::BigRepoChangeOrigin::Keyhive,
             keyhive_seq: None,
             resp,
-            _lease,
+            _lease: lease,
         }) {
             self.materialization_retries_in_flight.remove(&doc_id);
             return Err(error).wrap_err(ERROR_CHANNEL);
@@ -2560,6 +2789,7 @@ where
         timer,
         clock,
         connect,
+        keyhive_sync_on_connect,
         event_channel,
     } = config;
 
@@ -2583,9 +2813,10 @@ where
         runtime_io: Arc::clone(&runtime_io),
         connect,
         doc_io,
+        keyhive_sync_on_connect,
         change_manager,
         child_tasks: child_tasks.clone(),
-        timer: Arc::clone(&timer),
+        // timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
@@ -2617,7 +2848,7 @@ where
         cmd_tx.clone(),
         hub.sync_policy,
         #[cfg(any(test, feature = "test-support"))]
-        Arc::clone(&hub.timer),
+        Arc::clone(&timer),
         doc_sync_waiter_ids,
         keyhive_sync_waiter_ids,
     );
@@ -2645,4 +2876,33 @@ where
             keyhive_dispatcher_stop: None,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn notification_overlapping_explicit_waiter_coalesces_to_one_follow_up_round() {
+        let (reply, _reply_rx) = futures::channel::oneshot::channel();
+        let mut waiters = super::KeyhiveWaiters::default();
+        waiters.ids.insert(7);
+        waiters.waiters.push((7, reply));
+        let mut notification_pending = true;
+
+        // The explicit/backend waiter remains queued when the active round
+        // completes. It is sufficient demand for the next round; the
+        // notification must not schedule another one.
+        assert!(super::coalesce_keyhive_demand(
+            !waiters.waiters.is_empty(),
+            &mut notification_pending,
+        ));
+        assert!(!notification_pending);
+        assert_eq!(waiters.waiters.len(), 1);
+
+        // The consumed notification cannot create a second round after the
+        // waiter-triggered follow-up has been admitted.
+        assert!(!super::coalesce_keyhive_demand(
+            waiters.waiters.is_empty(),
+            &mut notification_pending,
+        ));
+    }
 }

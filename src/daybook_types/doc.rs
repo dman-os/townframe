@@ -7,6 +7,83 @@ pub type Multihash = String;
 
 pub type MimeType = String;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct BranchId(pub String);
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(BranchId, String);
+
+impl From<String> for BranchId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for BranchId {
+    fn from(value: &str) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BranchVersion {
+    pub branch_id: BranchId,
+    pub heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct AccessSetId(pub String);
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(AccessSetId, String);
+
+impl From<String> for AccessSetId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for AccessSetId {
+    fn from(value: &str) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum AuthorityScope {
+    InheritDocument,
+    AccessSet(AccessSetId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum BranchPublication {
+    Shared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BranchDeclaration {
+    pub name: Option<String>,
+    pub publication: BranchPublication,
+    pub scope: AuthorityScope,
+    pub created_from: Option<BranchVersion>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +178,7 @@ crate::define_enum_and_tag!(
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase", untagged)]
     #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-    #[allow(clippy::large_enum_variant)] // the typed PlugManifest payload is intentionally big
+    #[expect(clippy::large_enum_variant)] // the typed PlugManifest payload is intentionally big
     WellKnownFacet {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -213,12 +290,12 @@ crate::define_enum_and_tag!(
         },
         // NOTE: the value is the full manifest JSON (ADR 007 §1); `PlugManifestFacet`
         // is the typed manifest, or raw JSON on the uniffi surface.
-        "plugManifest" PlugManifest type (PlugManifestFacet),
-        #[derive(Debug, Clone, Serialize, Deserialize)]
+        PlugManifest type (PlugManifestFacet),
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        "plugsConfig" PlugsConfig struct {
+        PlugsConfig struct {
             /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
             ///            ?branch=<branch>&at=<head1>|<head2>
             pub enabled: HashMap<String, Url>,
@@ -229,8 +306,65 @@ crate::define_enum_and_tag!(
             pub known_plugs: HashMap<String, KnownPlug>,
             pub plug_config_doc_ids: HashMap<String, String>,
         },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Branch struct {
+            pub document_id: DocId,
+            pub branch_id: BranchId,
+            pub created_from: Option<BranchVersion>,
+        },
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Branches struct {
+            pub by_name: HashMap<String, Vec<BranchId>>,
+            pub by_id: HashMap<BranchId, BranchDeclaration>,
+        },
     }
 );
+
+impl WellKnownFacetTag {
+    pub const fn is_system_managed(self) -> bool {
+        matches!(self, Self::Dmeta | Self::Branch | Self::Branches)
+    }
+}
+
+pub type BranchDirectory = Branches;
+
+impl Branches {
+    /// Add or replace a declaration while keeping both branch indexes in sync.
+    ///
+    /// A name is intentionally not unique: concurrent allocations may produce
+    /// multiple branch IDs under the same name.
+    pub fn insert_declaration(&mut self, branch_id: BranchId, declaration: BranchDeclaration) {
+        let new_name = declaration.name.clone();
+        let previous = self.by_id.insert(branch_id.clone(), declaration);
+        if let Some(previous_name) = previous.and_then(|declaration| declaration.name)
+            && new_name.as_deref() != Some(previous_name.as_str())
+        {
+            let remove_name = self
+                .by_name
+                .get_mut(&previous_name)
+                .map(|branch_ids| {
+                    branch_ids.retain(|id| id != &branch_id);
+                    branch_ids.is_empty()
+                })
+                .unwrap_or(false);
+            if remove_name {
+                self.by_name.remove(&previous_name);
+            }
+        }
+        if let Some(name) = new_name {
+            let branch_ids = self.by_name.entry(name).or_default();
+            if !branch_ids.contains(&branch_id) {
+                branch_ids.push(branch_id);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -1100,6 +1234,14 @@ mod ser_de {
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
+                WellKnownFacetTag::Branch => Self::Branch(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Branches => Self::Branches(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
             })
         }
     }
@@ -1195,6 +1337,76 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use autosurgeon::{hydrate_prop, reconcile_prop};
+
+    #[test]
+    fn branch_facets_round_trip_and_are_system_managed() {
+        let value = WellKnownFacet::Branch(Branch {
+            document_id: "doc".into(),
+            branch_id: BranchId::from("branch"),
+            created_from: None,
+        });
+        let raw: FacetRaw = value.clone().into();
+        assert_eq!(
+            serde_json::to_value(WellKnownFacet::from_json(raw, value.tag()).unwrap()).unwrap(),
+            serde_json::to_value(value).unwrap()
+        );
+        assert!(WellKnownFacetTag::Branch.is_system_managed());
+        assert!(WellKnownFacetTag::Branches.is_system_managed());
+        assert!(!WellKnownFacetTag::Note.is_system_managed());
+        let declaration = BranchDeclaration {
+            name: Some("shared".into()),
+            publication: BranchPublication::Shared,
+            scope: AuthorityScope::AccessSet(AccessSetId::from("writers")),
+            created_from: None,
+        };
+        assert_eq!(
+            serde_json::from_value::<BranchDeclaration>(
+                serde_json::to_value(&declaration).unwrap()
+            )
+            .unwrap(),
+            declaration
+        );
+        #[cfg(feature = "schemars")]
+        {
+            let schema = schemars::schema_for!(BranchDirectory);
+            let schema = serde_json::to_value(schema).unwrap().to_string();
+            assert!(schema.contains("byName"));
+            assert!(schema.contains("byId"));
+            assert!(!schema.contains("declarations"));
+        }
+
+        let mut branches = Branches {
+            by_name: HashMap::new(),
+            by_id: HashMap::new(),
+        };
+        let first = BranchId::from("branch-a");
+        let second = BranchId::from("branch-b");
+        let shared_declaration = BranchDeclaration {
+            name: Some("shared".into()),
+            publication: BranchPublication::Shared,
+            scope: AuthorityScope::InheritDocument,
+            created_from: None,
+        };
+        branches.insert_declaration(first.clone(), shared_declaration.clone());
+        branches.insert_declaration(second.clone(), shared_declaration);
+        assert_eq!(
+            branches.by_name["shared"],
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(branches.by_id.len(), 2);
+
+        branches.insert_declaration(
+            first.clone(),
+            BranchDeclaration {
+                name: Some("renamed".into()),
+                publication: BranchPublication::Shared,
+                scope: AuthorityScope::InheritDocument,
+                created_from: None,
+            },
+        );
+        assert_eq!(branches.by_name["shared"], vec![second]);
+        assert_eq!(branches.by_name["renamed"], vec![first]);
+    }
 
     #[test]
     fn test_doc_diff() {

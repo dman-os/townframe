@@ -8,15 +8,11 @@ const CORE_PLUG_ID: &str = "@daybook/core";
 /// Outcome of recording a manifest doc in the config facet.
 pub(crate) enum RecordKnownOutcome {
     /// Recorded (or already current) and the derived cache updated.
-    Recorded { plug_id: String },
+    Recorded,
     /// No manifest facet readable at the given heads.
     Unreadable,
     /// The version/compat gate rejected the update; nothing recorded.
-    Rejected {
-        plug_id: String,
-        version: semver::Version,
-        reason: String,
-    },
+    Rejected { reason: String },
 }
 
 impl PlugsRepo {
@@ -29,6 +25,20 @@ impl PlugsRepo {
             .drawer
             .get()
             .ok_or_eyre("plugs repo drawer not attached")?;
+        // Never infer that the core config is absent from a temporarily
+        // unavailable config document. In particular, do not create another
+        // core manifest while reopen materialization is still pending.
+        let config_doc_id: big_repo::DocumentId = self.doc_config_id.parse()?;
+        match self.big_repo.get_doc(&config_doc_id).await? {
+            big_repo::DocLookup::Ready(_) => {}
+            big_repo::DocLookup::PendingMaterialization => {
+                eyre::bail!("plugs config document is pending materialization")
+            }
+            big_repo::DocLookup::Missing => {
+                eyre::bail!("plugs config document is missing")
+            }
+        }
+
         // Register the repo config doc in the drawer (idempotent) so the plugg
         // config facet writes go through the drawer like any facet write.
         drawer
@@ -91,44 +101,51 @@ impl PlugsRepo {
 
         // Write the plugg config facet with core enabled at the core doc's
         // initial heads (validated against core's own plugConfig facet).
-        let (_, heads) = self
-            .config_store()?
-            .mutate_sync(|config| {
-                config
-                    .enabled
-                    .insert(CORE_PLUG_ID.to_string(), ref_url.clone());
-                let version = core_manifest.version.to_string();
-                config.known_plugs.insert(
-                    CORE_PLUG_ID.to_string(),
-                    KnownPlug {
-                        latest: ref_url.clone(),
-                        latest_version: version.clone(),
-                        latest_rejection: None,
-                        last_valid: ref_url.clone(),
-                        last_valid_version: version.clone(),
-                        last_enabled_version: Some(version),
-                    },
-                );
-            })
-            .await?;
+        drop(
+            self.config_store()?
+                .mutate_sync(|config| {
+                    config
+                        .enabled
+                        .insert(CORE_PLUG_ID.to_string(), ref_url.clone());
+                    let version = core_manifest.version.to_string();
+                    config
+                        .plug_config_doc_ids
+                        .insert(CORE_PLUG_ID.to_string(), self.doc_config_id.clone());
+                    config.known_plugs.insert(
+                        CORE_PLUG_ID.to_string(),
+                        KnownPlug {
+                            latest: ref_url.clone(),
+                            latest_version: version.clone(),
+                            latest_rejection: None,
+                            last_valid: ref_url.clone(),
+                            last_valid_version: version.clone(),
+                            last_enabled_version: Some(version),
+                        },
+                    );
+                })
+                .await?,
+        );
         // The manual cache seed above already made core active; re-apply
-        // from the ref for consistency (idempotent — no duplicate event).
-        let mut events = vec![];
-        if let Some(event) = self
-            .activate_from_ref(CORE_PLUG_ID, &ref_url, true, &self.local_origin())
-            .await?
-        {
-            events.push(event);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        // from the ref for consistency.
+        self.activate_from_ref(CORE_PLUG_ID, &ref_url).await?;
         Ok(())
     }
 
-    /// ADR 007 §3: enable a plug by pinning a full ref. The ref must point at a
+    /// Enable the latest imported revision for a plug by id.
+    pub async fn enable_known_plug(&self, plug_id: &str) -> Res<ChangeHashSet> {
+        let ref_url = self
+            .config_store()?
+            .query_sync(|config| {
+                config
+                    .known_plugs
+                    .get(plug_id)
+                    .map(|plug| plug.latest.clone())
+            })
+            .await
+            .ok_or_else(|| eyre::eyre!("plug not imported: {plug_id}"))?;
+        self.enable_plug(&ref_url).await
+    }
+
     /// readable `plugManifest/main` facet; the manifest id becomes the key.
     pub async fn enable_plug(&self, ref_url: &url::Url) -> Res<ChangeHashSet> {
         if self.cancel_token.is_cancelled() {
@@ -144,12 +161,14 @@ impl PlugsRepo {
         } else {
             ref_url.clone()
         };
+        let _guard = self.mutation_mutex.lock().await;
         // ADR 007 §5 gate: an explicit activation must be valid and a
-        // valid upgrade of the last seen version.
+        // valid upgrade of the last seen version. Keep the gate under the
+        // mutation lock so the config consumer cannot replace its snapshot
+        // between the check and the write.
         if let Some(reason) = self.check_activation(&plug_id, &manifest, &ref_url).await? {
             eyre::bail!("activation rejected for {plug_id}: {reason}");
         }
-        let _guard = self.mutation_mutex.lock().await;
         // ADR 007 §2: the plug's config doc is created at enablement and the
         // mapping recorded in the config facet, so an enabled plug always has
         // a config doc. The mapping is retained across disablement (disable
@@ -160,7 +179,7 @@ impl PlugsRepo {
             .config_store()?
             .query_sync(|config| {
                 (
-                    config.plug_config_doc_ids.contains_key(&plug_id),
+                    !config.plug_config_doc_ids.contains_key(&plug_id),
                     config.enabled.get(&plug_id).cloned(),
                 )
             })
@@ -221,27 +240,9 @@ impl PlugsRepo {
                 }
             })
             .await?;
-        // Config-delta event: newly enabled → `PlugEnabled`; re-pinned to a
-        // different ref → `EnabledPlugUpdated`; same ref re-enable → no-op.
-        // The cache is only the materialization side effect.
-        let mut events = vec![];
-        if already_enabled.as_ref() != Some(&ref_url)
-            && let Some(event) = self
-                .activate_from_ref(
-                    &plug_id,
-                    &ref_url,
-                    already_enabled.is_none(),
-                    &self.local_origin(),
-                )
-                .await?
-        {
-            events.push(event);
+        if already_enabled.as_ref() != Some(&ref_url) {
+            self.activate_from_ref(&plug_id, &ref_url).await?;
         }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
         Ok(new_heads)
     }
 
@@ -261,22 +262,10 @@ impl PlugsRepo {
                 config.enabled.remove(plug_id);
             })
             .await?;
-        // Config-delta event: the enabled entry was removed → `PlugDisabled`
-        // (regardless of whether it was materialized). The cache is only the
-        // side effect.
         surelock::key::lock_scope(|key| {
             let (mut cache, _key) = key.lock(&self.cache);
             cache.clear_active(plug_id);
         });
-        let mut events = vec![PlugsEvent::PlugDisabled {
-            id: plug_id.to_string(),
-            origin: self.local_origin(),
-        }];
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
         Ok(new_heads)
     }
 
@@ -345,18 +334,7 @@ impl PlugsRepo {
                 }
             })
             .await?;
-        let mut events = vec![];
-        if let Some(event) = self
-            .activate_from_ref(plug_id, &new_ref, false, &self.local_origin())
-            .await?
-        {
-            events.push(event);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: self.local_origin(),
-        });
-        self.registry.notify(events);
+        self.activate_from_ref(plug_id, &new_ref).await?;
         Ok(new_heads)
     }
 
@@ -402,7 +380,7 @@ impl PlugsRepo {
             RecordKnownOutcome::Unreadable => {
                 eyre::bail!("manifest doc unreadable at given heads")
             }
-            RecordKnownOutcome::Recorded { .. } => {}
+            RecordKnownOutcome::Recorded => {}
         }
         if !no_enable {
             self.enable_plug(&ref_url).await?;
@@ -528,6 +506,55 @@ impl PlugsRepo {
             }
         }
 
+        // 1.9 Bake the plug's blob references as Blob facets on the manifest
+        // doc (ADR 001 + the plugs rework): the manifest doc is a static
+        // artifact and these facets are its blob declarations, written once
+        // at authoring. Pinning is driven from these facets (enablement via
+        // the plugs config event stream), never by parsing the manifest back.
+        // Blobs we cannot size are skipped: their representation length is
+        // unknown until they land in the local blob store.
+        let mut blob_lengths = std::collections::HashMap::<String, u64>::new();
+        for bundle in manifest.wflow_bundles.values() {
+            for url in &bundle.component_urls {
+                if url.scheme() != crate::blobs::BLOB_SCHEME {
+                    continue;
+                }
+                let hash = url.path().trim_start_matches('/');
+                if blob_lengths.contains_key(hash) {
+                    continue;
+                }
+                if let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>()
+                    && let Ok(path) = self.blobs.get_path(blob_id).await
+                    && let Ok(meta) = tokio::fs::metadata(&path).await
+                {
+                    blob_lengths.insert(hash.to_string(), meta.len());
+                } else {
+                    tracing::warn!(hash, "authoring: blob not sized; facet skipped");
+                }
+            }
+        }
+        let mut facets = std::collections::HashMap::new();
+        facets.insert(
+            Self::plug_manifest_facet_key(),
+            daybook_types::doc::WellKnownFacet::PlugManifest(manifest).into(),
+        );
+        for (hash, length_octets) in blob_lengths {
+            facets.insert(
+                daybook_types::doc::FacetKey {
+                    tag: daybook_types::doc::WellKnownFacetTag::Blob.into(),
+                    id: hash.clone(),
+                },
+                daybook_types::doc::WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets,
+                    digest: hash.clone(),
+                    inline: None,
+                    urls: Some(vec![format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash)]),
+                })
+                .into(),
+            );
+        }
+
         // 2. Write a manifest doc through the drawer (validated).
         let drawer = self
             .drawer
@@ -536,11 +563,7 @@ impl PlugsRepo {
         let doc_id = drawer
             .add(daybook_types::doc::AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                facets: [(
-                    Self::plug_manifest_facet_key(),
-                    daybook_types::doc::WellKnownFacet::PlugManifest(manifest).into(),
-                )]
-                .into(),
+                facets,
                 user_path: None,
             })
             .await?;
@@ -579,7 +602,7 @@ impl PlugsRepo {
             RecordKnownOutcome::Unreadable => {
                 eyre::bail!("manifest doc unreadable after add")
             }
-            RecordKnownOutcome::Recorded { .. } => {}
+            RecordKnownOutcome::Recorded => {}
         }
 
         Ok(doc_id)
@@ -587,7 +610,8 @@ impl PlugsRepo {
 
     /// ADR 007 §5: ensure a manifest doc is recorded in the config facet's
     /// known_plugs (plug id -> track at the given heads). Called by the
-    /// authoring/import paths and by the notif loop on manifest doc changes.
+    /// authoring/import paths and by the durable manifest-doc revision
+    /// consumer on manifest doc changes.
     /// Updates the derived cache incrementally for this plug.
     ///
     /// Gate (ADR 007 §5): a manifest update must bump the version over the
@@ -597,7 +621,7 @@ impl PlugsRepo {
     /// or rejection reason) is recorded in the track, so it is durable and
     /// queryable without collecting events, and "update to latest" can be
     /// blocked. Rejections return `Rejected` — never an error — so a bad
-    /// remote manifest cannot take down the notif loop.
+    /// remote manifest cannot take down the manifest consumer.
     pub(crate) async fn record_known_manifest_doc(
         &self,
         doc_id: &daybook_types::doc::DocId,
@@ -614,6 +638,18 @@ impl PlugsRepo {
             .config_store()?
             .query_sync(|config| config.known_plugs.get(&plug_id).cloned())
             .await;
+        tracing::debug!(
+            %doc_id,
+            %plug_id,
+            incoming_version = %incoming_version,
+            ?heads,
+            track = ?track.as_ref().map(|track| (
+                track.latest_version.clone(),
+                track.last_enabled_version.clone(),
+                track.latest_rejection.is_some(),
+            )),
+            "recording manifest version in plugs config"
+        );
         if let Some(track) = &track
             && track.latest == ref_url
         {
@@ -622,7 +658,7 @@ impl PlugsRepo {
                 let (mut cache, _key) = key.lock(&self.cache);
                 cache.upsert_known(&plug_id, &manifest);
             });
-            return Ok(RecordKnownOutcome::Recorded { plug_id });
+            return Ok(RecordKnownOutcome::Recorded);
         }
         let mut reason = None;
         // Gate A: version must strictly bump over the latest version seen.
@@ -684,19 +720,28 @@ impl PlugsRepo {
                 }
             })
             .await?;
+        let after = self
+            .config_store()?
+            .query_sync(|config| {
+                config.known_plugs.get(&plug_id).map(|track| {
+                    (
+                        track.latest_version.clone(),
+                        track.last_enabled_version.clone(),
+                        track.latest_rejection.is_some(),
+                    )
+                })
+            })
+            .await;
+        tracing::debug!(%plug_id, ?after, "recorded manifest version in plugs config");
         match reason {
             None => {
                 surelock::key::lock_scope(|key| {
                     let (mut cache, _key) = key.lock(&self.cache);
                     cache.upsert_known(&plug_id, &manifest);
                 });
-                Ok(RecordKnownOutcome::Recorded { plug_id })
+                Ok(RecordKnownOutcome::Recorded)
             }
-            Some(reason) => Ok(RecordKnownOutcome::Rejected {
-                plug_id,
-                version: incoming_version,
-                reason,
-            }),
+            Some(reason) => Ok(RecordKnownOutcome::Rejected { reason }),
         }
     }
 

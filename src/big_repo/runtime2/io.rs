@@ -127,6 +127,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         staged: crate::runtime2::support::StagedAutomergeIngest,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Encrypt and persist a batch of serialized local document transitions.
@@ -187,6 +188,9 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
 
     /// Whether the local principal may fetch or sync this document (Fetch/Relay access
     /// or better). Used for early fail-fast validation prior to network sync.
+    // TEMP-HUNT: the sync_doc_with_peer call site is temporarily disabled in
+    // native.rs; keep the trait surface until it is re-enabled.
+    #[expect(dead_code)]
     fn has_doc_fetch_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Store a raw fragment bundle at a boundary commit. The implementation
@@ -248,6 +252,32 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
+
+    fn allocate_document(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+    ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
+
+    fn stage_allocated_document(
+        &self,
+        doc_id: crate::DocumentId,
+        initial_content: Vec<u8>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        already_persisted: bool,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
+    fn finalize_document_authority(
+        &self,
+        doc_id: crate::DocumentId,
+        content_heads: nonempty::NonEmpty<[u8; 32]>,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
+    fn complete_document_authority(
+        &self,
+        doc_id: crate::DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        content_heads: nonempty::NonEmpty<[u8; 32]>,
+    ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Check whether the sedimentree for `sed_id` is resident in storage.
     fn contains_sedimentree(

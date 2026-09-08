@@ -99,10 +99,10 @@ impl crate::stores::AmStore for ConfigStore {
 pub enum ConfigEvent {
     Changed {
         heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
     SyncDevicesChanged {
-        origin: crate::event_origin::SwitchEventOrigin,
+        origin: crate::event_origin::EventOrigin,
     },
 }
 
@@ -132,8 +132,8 @@ impl crate::repos::Repo for ConfigRepo {
 }
 
 impl ConfigRepo {
-    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
-        crate::event_origin::SwitchEventOrigin::Local {
+    fn local_origin(&self) -> crate::event_origin::EventOrigin {
+        crate::event_origin::EventOrigin::Local {
             actor_id: self.local_actor_id.to_string(),
         }
     }
@@ -141,19 +141,19 @@ impl ConfigRepo {
     fn origin_from_live(
         &self,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-    ) -> crate::event_origin::SwitchEventOrigin {
+    ) -> crate::event_origin::EventOrigin {
         match live_origin {
             Some(big_repo::BigRepoChangeOrigin::Local) => self.local_origin(),
             Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-                crate::event_origin::SwitchEventOrigin::Remote {
+                crate::event_origin::EventOrigin::Remote {
                     peer_id: peer_id.to_string(),
                 }
             }
             Some(big_repo::BigRepoChangeOrigin::Bootstrap)
             | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
-                crate::event_origin::SwitchEventOrigin::Bootstrap
+                crate::event_origin::EventOrigin::Bootstrap
             }
-            None => crate::event_origin::SwitchEventOrigin::Remote {
+            None => crate::event_origin::EventOrigin::Remote {
                 peer_id: "unknown".to_string(),
             },
         }
@@ -400,7 +400,7 @@ impl ConfigRepo {
         // Init snapshot is a single "current heads changed" event.
         Ok(vec![ConfigEvent::Changed {
             heads: ChangeHashSet(self.get_config_heads().await?),
-            origin: crate::event_origin::SwitchEventOrigin::Bootstrap,
+            origin: crate::event_origin::EventOrigin::Bootstrap,
         }])
     }
 
@@ -766,11 +766,14 @@ mod tests {
         let blobs_repo =
             crate::blobs::BlobsRepo::new(temp.path().join("blobs"), local_user_path.clone())
                 .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(temp.path().join("local_state")).await?;
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),
             app_doc_id,
             local_user_path.clone(),
+            Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
         let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
@@ -806,6 +809,7 @@ mod tests {
 
         config_stop.stop().await?;
         plugs_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
         blobs_repo.shutdown().await?;
         _acx_stop().await?;
         Ok(())

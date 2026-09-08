@@ -12,6 +12,7 @@
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "jsr:@std/internal@^1.0.14": "1.0.14",
     "jsr:@std/io@0.225": "0.225.3",
+    "jsr:@std/path@*": "1.1.6",
     "jsr:@std/path@1": "1.1.6",
     "jsr:@std/path@^1.1.4": "1.1.6"
   },

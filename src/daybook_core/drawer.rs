@@ -21,29 +21,160 @@ pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, 
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
 
-use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
+use big_repo::{
+    BigKeyhiveGroup, BigRepoLocalListenerRegistration, BigRepoLocalNotification, SharedBigRepo,
+    SharedPartStore,
+};
 use cache::FacetCacheKey;
 use cache::*;
 use types::{BranchSnapshot, DocDeleteTombstone};
 use utils_rs::lru::SharedKeyedLruPool;
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
+use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 
 use tokio_util::sync::CancellationToken;
+
+/// Recover the exact facet heads and author recorded by dmeta at one branch
+/// head set. This keeps index projections on the same write-point semantics
+/// as the existing drawer history APIs without requiring a branch path.
+pub(crate) fn facet_snapshot_metadata(
+    doc: &automerge::Automerge,
+    facet_key: &FacetKey,
+    heads: &[automerge::ChangeHash],
+) -> Res<(ChangeHashSet, ActorId)> {
+    let facet_heads = facet_recovery::recover_facet_heads_at(doc, facet_key, heads)?;
+    let actor_id = facet_recovery::facet_write_points(doc, facet_key, &[], heads)?
+        .into_iter()
+        .last()
+        .map(|(_, actor_id)| actor_id)
+        .ok_or_else(|| ferr!("active facet has no dmeta write point"))?;
+    Ok((ChangeHashSet(Arc::from(facet_heads)), actor_id))
+}
+
+/// Exact-head user-facet value hydration owned by the drawer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExactFacetValueHydration {
+    Deferred,
+    Absent,
+    Present(FacetRaw),
+}
+
+/// The complete current user-facet membership and dmeta provenance at exact
+/// branch heads. Values are intentionally not hydrated here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExactDmetaState {
+    pub document_id: DocId,
+    pub branch_id: daybook_types::doc::BranchId,
+    pub branch_heads: ChangeHashSet,
+    pub facets: HashMap<FacetKey, (ChangeHashSet, ActorId)>,
+    pub all_facet_keys: Vec<FacetKey>,
+}
+
+/// Branch identity validated from the system Branch facet at exact heads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchIdentity {
+    pub document_id: DocId,
+    pub branch_id: BranchId,
+}
+
+/// The outcome of validating a physical branch's system Branch facet at
+/// exact heads. `Ignored` marks docs with no Branch facet (system docs);
+/// `ImportedHistory` marks events whose Branch facet names a different
+/// branch — imported merge history in a destination sedimentree, known
+/// foreign history rather than unresolved materialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchIdentityResolution {
+    Found(BranchIdentity),
+    /// The branch document is not materialized yet; the identity may resolve
+    /// after the next materialization wake.
+    Deferred,
+    Ignored,
+    ImportedHistory,
+}
+
+/// Drawer-owned wakeup for projections waiting on local materialization.
+/// Payloads are intentionally hidden: consumers must retry from their durable
+/// source cursor rather than treating a notification as projection data.
+pub(crate) struct MaterializationWake {
+    _registration: BigRepoLocalListenerRegistration,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    pending: std::collections::VecDeque<MaterializationChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializationChange {
+    pub branch_id: daybook_types::doc::BranchId,
+    pub heads: Option<ChangeHashSet>,
+}
+
+impl MaterializationWake {
+    pub(crate) async fn changed(&mut self) -> Res<MaterializationChange> {
+        loop {
+            if let Some(change) = self.pending.pop_front() {
+                return Ok(change);
+            }
+            let Some(batch) = self.receiver.recv().await else {
+                return Err(ferr!("Drawer materialization listener closed"));
+            };
+            self.pending.extend(batch.into_iter().map(|notification| {
+                let (doc_id, heads) = match notification {
+                    BigRepoLocalNotification::DocCreated { doc_id, heads }
+                    | BigRepoLocalNotification::DocImported { doc_id, heads }
+                    | BigRepoLocalNotification::DocHeadsUpdated { doc_id, heads }
+                    | BigRepoLocalNotification::DocMaterializationReady { doc_id, heads } => {
+                        (doc_id, Some(heads))
+                    }
+                    BigRepoLocalNotification::DocMaterializationPending { doc_id } => {
+                        (doc_id, None)
+                    }
+                };
+                MaterializationChange {
+                    branch_id: daybook_types::doc::BranchId(doc_id.to_string()),
+                    heads: heads.map(ChangeHashSet),
+                }
+            }));
+        }
+    }
+
+    /// Wait for a notification that may make the document readable. Pending
+    /// notifications are state changes, not retry triggers for parked work.
+    pub(crate) async fn ready_changed(&mut self) -> Res<MaterializationChange> {
+        loop {
+            let change = self.changed().await?;
+            if change.heads.is_some() {
+                return Ok(change);
+            }
+        }
+    }
+
+    pub(crate) async fn wait(&mut self) -> Res<()> {
+        self.changed().await.map(|_| ())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchKind {
     Replicated,
     Local,
 }
+
+/// Identifies whether a facet mutation comes from an ordinary caller or from
+/// repository-owned system-facet machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FacetWriteScope {
+    User,
+    System,
+}
+
 pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
     content_docs_group: BigKeyhiveGroup,
     drawer_group: BigKeyhiveGroup,
+    pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
     local_peer_id: PeerId,
     local_user_path: daybook_types::doc::UserPathBuf,
@@ -143,6 +274,7 @@ impl DrawerRepo {
             drawer_doc_id,
             content_docs_group: authority.content_docs.clone(),
             drawer_group: authority.default_drawer.clone(),
+            pending_documents_group: authority.pending_documents_group(),
             local_actor_id,
             local_user_path,
             entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
@@ -162,6 +294,10 @@ impl DrawerRepo {
             #[cfg(test)]
             plugs_repo: plugs_repo.clone(),
         });
+        // The local branch schema must exist before the plugs repo's
+        // attach_drawer (which registers the config doc and warms the derived
+        // cache) runs; register/get call paths read drawer_local_branches.
+        repo.ensure_local_branch_schema().await?;
         // ADR 007 §2: the plugs repo is loaded before the drawer (the drawer
         // needs it for facet validation); attach the drawer back so the plugs
         // repo can read manifest docs and write the plugg config facet through
@@ -169,10 +305,8 @@ impl DrawerRepo {
         if let Some(plugs_repo) = &repo.plugs_repo {
             plugs_repo.attach_drawer(Arc::clone(&repo)).await?;
         }
-        repo.ensure_local_branch_schema().await?;
         repo.migrate_content_doc_authority().await?;
         repo.ensure_replicated_branch_partitions().await?;
-
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             let cancel_token = main_cancel_token.clone();
@@ -513,6 +647,7 @@ impl DrawerRepo {
     async fn facet_manifest_for_tag(
         &self,
         facet_tag: &str,
+        write_scope: FacetWriteScope,
     ) -> Res<Option<daybook_types::manifest::FacetManifest>> {
         if let Some(plugs_repo) = &self.plugs_repo {
             return match plugs_repo.get_facet_manifest_by_tag(facet_tag).await {
@@ -526,37 +661,49 @@ impl DrawerRepo {
                         plug_id
                     );
                 }
+                crate::plugs::FacetManifestLookup::UnknownTag
+                    if write_scope == FacetWriteScope::System =>
+                {
+                    Ok(Self::system_facet_manifest(facet_tag))
+                }
                 crate::plugs::FacetManifestLookup::UnknownTag => Ok(None),
             };
         }
-        // Drawer tests load without a plugs repo; fall back to the system plugs'
-        // facet manifests (ADR 007: only the enabled set gates production paths).
-        if cfg!(test) {
-            static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
-                HashMap<String, daybook_types::manifest::FacetManifest>,
-            > = std::sync::OnceLock::new();
-            let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
-                let mut out = HashMap::new();
-                for plug_manifest in crate::plugs::system_plugs() {
-                    for facet_manifest in &plug_manifest.facets {
-                        out.insert(facet_manifest.key_tag.to_string(), facet_manifest.clone());
-                    }
-                }
-                out
-            });
-            return Ok(system_facet_manifests.get(facet_tag).cloned());
+        if write_scope == FacetWriteScope::System || cfg!(test) {
+            return Ok(Self::system_facet_manifest(facet_tag));
         }
         Ok(None)
     }
 
-    pub async fn validate_facets(
+    fn system_facet_manifest(facet_tag: &str) -> Option<daybook_types::manifest::FacetManifest> {
+        static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
+            HashMap<String, daybook_types::manifest::FacetManifest>,
+        > = std::sync::OnceLock::new();
+        SYSTEM_FACET_MANIFESTS
+            .get_or_init(|| {
+                crate::plugs::system_plugs()
+                    .into_iter()
+                    .flat_map(|plug| plug.facets)
+                    .map(|manifest| (manifest.key_tag.to_string(), manifest))
+                    .collect()
+            })
+            .get(facet_tag)
+            .cloned()
+    }
+
+    pub(crate) async fn validate_facets(
         &self,
         incoming_facets: &HashMap<FacetKey, FacetRaw>,
+        removed_facet_keys: &[FacetKey],
         resulting_facet_keys: &HashSet<FacetKey>,
+        write_scope: FacetWriteScope,
     ) -> Res<()> {
+        Self::validate_facet_write_scope(incoming_facets, removed_facet_keys, write_scope)?;
+
         for (facet_key, facet_value) in incoming_facets {
             let facet_tag = facet_key.tag.to_string();
-            let Some(facet_manifest) = self.facet_manifest_for_tag(&facet_tag).await? else {
+            let facet_manifest = self.facet_manifest_for_tag(&facet_tag, write_scope).await?;
+            let Some(facet_manifest) = facet_manifest else {
                 eyre::bail!(
                     "facet tag '{}' has no registered manifest in plugs repo",
                     facet_tag
@@ -599,6 +746,29 @@ impl DrawerRepo {
                     reference_manifest,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_facet_write_scope(
+        incoming_facets: &HashMap<FacetKey, FacetRaw>,
+        removed_facet_keys: &[FacetKey],
+        write_scope: FacetWriteScope,
+    ) -> Res<()> {
+        if write_scope == FacetWriteScope::User
+            && let Some(facet_key) =
+                incoming_facets
+                    .keys()
+                    .chain(removed_facet_keys)
+                    .find(|facet_key| {
+                        matches!(
+                            &facet_key.tag,
+                            daybook_types::doc::FacetTag::WellKnown(tag)
+                                if tag.is_system_managed()
+                        )
+                    })
+        {
+            eyre::bail!("ordinary facet writes cannot modify system-managed facet '{facet_key}'");
         }
         Ok(())
     }
@@ -825,8 +995,8 @@ impl DrawerRepo {
         })
     }
 
-    fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
-        crate::event_origin::SwitchEventOrigin::Local {
+    fn local_origin(&self) -> crate::event_origin::EventOrigin {
+        crate::event_origin::EventOrigin::Local {
             actor_id: self.local_actor_id.to_string(),
         }
     }

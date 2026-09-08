@@ -41,7 +41,7 @@ use crate::{
     },
     runtime2::types::BigRepoSyncPolicy,
 };
-use keyhive_core::principal::document::{DecryptError, EncryptError};
+use keyhive_core::principal::document::{DecryptError, DocCausalDecryptionError, EncryptError};
 use keyhive_core::{
     crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
     principal::identifier::Identifier, store::ciphertext::CiphertextStore,
@@ -359,10 +359,11 @@ where
         &self,
         sed_id: SedimentreeId,
         staged: crate::runtime2::support::StagedAutomergeIngest,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let (sedimentree, blobs, cgka_ops, local_secrets) =
-                encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
+                encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id, initial_keys)
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
             if !cgka_ops.is_empty() {
@@ -636,15 +637,23 @@ where
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
-            if access.is_some_and(|access| access.is_editor()) {
-                return Ok(true);
-            }
+            let local_write = access.is_some_and(|access| access.is_editor());
             // Public-member path: a doc that grants editor access to the
             // well-known Public agent may be written by anyone (the writer
             // encrypts through Public's well-known keys).
             let public_ident = keyhive_core::principal::public::Public.id();
             let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
-            Ok(public_access.is_some_and(|access| access.is_editor()))
+            let public_write = public_access.is_some_and(|access| access.is_editor());
+            tracing::debug!(
+                %doc_id,
+                local_peer_id = %self.local_peer_id,
+                local_access = ?access,
+                public_access = ?public_access,
+                local_write,
+                public_write,
+                "document write-access probe"
+            );
+            Ok(local_write || public_write)
         })
     }
 
@@ -1005,16 +1014,31 @@ where
 
             // Attempt causal decrypt for the entrypoint's ancestors.
             tracing::debug!(%sed_id, "causal: before causal kh_doc lock (async IO across lock)");
+            // A partial causal decrypt is a transient materialization state,
+            // not a programming error: during clone bootstrap or catch-up a
+            // peer may not yet hold every ancestor ciphertext/key. The
+            // per-ancestor classification below turns the missing refs into
+            // blockers so the doc worker parks and retries; only structural
+            // failures remain fatal.
             let state = {
                 let mut doc = kh_doc.lock().await;
                 tracing::debug!(%sed_id, "causal: acquired causal kh_doc lock");
-                doc.try_causal_decrypt_content(&encrypted, &ct_store)
-                    .await
-                    .map_err(|err| {
-                        ferr!(
+                match doc.try_causal_decrypt_content(&encrypted, &ct_store).await {
+                    Ok(state) => state,
+                    Err(DocCausalDecryptionError::CausalDecryptionError(err)) => {
+                        tracing::warn!(
+                            content_ref = ?encrypted.content_ref,
+                            cannot = ?err.cannot.keys().collect::<Vec<_>>(),
+                            "causal decrypt partially failed; deferring failed refs as blockers"
+                        );
+                        err.progress
+                    }
+                    Err(err) => {
+                        return Err(ferr!(
                             "causal decrypt failed; BigRepo envelope is not causally closed: {err}"
-                        )
-                    })?
+                        ));
+                    }
+                }
             };
             tracing::debug!(%sed_id, "causal: released causal kh_doc lock");
             let mut missing_ciphertexts = Vec::new();
@@ -1125,6 +1149,85 @@ where
         })
     }
 
+    fn allocate_document(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
+        Sendable::from_future(async move {
+            let doc_id = self
+                .keyhive
+                .reserve_doc_id(parents, &self.keyhive_storage)
+                .await?;
+            Ok(doc_id)
+        })
+    }
+
+    fn stage_allocated_document(
+        &self,
+        doc_id: DocumentId,
+        initial_content: Vec<u8>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        already_persisted: bool,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            if already_persisted {
+                return Ok(());
+            }
+            self.keyhive
+                .stage_reserved_doc(doc_id, initial_content, initial_keys, &self.keyhive_storage)
+                .await
+        })
+    }
+
+    fn finalize_document_authority(
+        &self,
+        doc_id: DocumentId,
+        content_heads: NonEmpty<[u8; 32]>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            self.keyhive
+                .finalize_reserved_doc(
+                    doc_id,
+                    content_heads,
+                    &self.keyhive_protocol,
+                    &self.keyhive_storage,
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn complete_document_authority(
+        &self,
+        doc_id: DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        content_heads: NonEmpty<[u8; 32]>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            if !self
+                .storage
+                .contains_sedimentree_id(SedimentreeId::new(doc_id.into_bytes()))
+                .await
+                .map_err(|err| ferr!("failed checking finalized sedimentree: {err}"))?
+            {
+                return Err(ferr!(
+                    "cannot complete document {doc_id} before sedimentree persistence"
+                ));
+            }
+            let after_content = content_heads.iter().map(|head| head.to_vec()).collect();
+            self.keyhive
+                .complete_reserved_doc(
+                    &pending_group,
+                    doc_id,
+                    after_content,
+                    &self.keyhive_protocol,
+                    &self.keyhive_storage,
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
     fn contains_sedimentree(
         &self,
         sed_id: SedimentreeId,
@@ -1212,20 +1315,21 @@ where
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
+            // TEMP-HUNT: has_doc_fetch_access shortcircuit disabled — see below.
             let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
-            match self.has_doc_fetch_access(doc_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
-                    );
-                    return Ok(SyncDocAttempt::Policy(
-                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound,
-                    ));
-                }
-                Err(err) => {
-                    return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
-                }
-            }
+            // match self.has_doc_fetch_access(doc_id).await {
+            //     Ok(true) => {}
+            //     Ok(false) => {
+            //         debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
+            //         );
+            //         return Ok(SyncDocAttempt::Policy(
+            //             subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound,
+            //         ));
+            //     }
+            //     Err(err) => {
+            //         return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
+            //     }
+            // }
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
                 .subduction
@@ -1240,6 +1344,17 @@ where
 
             match result {
                 Ok((had_success, stats, conn_errs)) => {
+                    if std::env::var_os("DAYB_KEYHIVE_DIAG").is_some() {
+                        tracing::warn!(
+                            %doc_id,
+                            %peer_id,
+                            had_success,
+                            local_policy_rejections = stats.local_policy_rejections.len(),
+                            remote_rejection = ?stats.remote_rejection,
+                            transport_errors = conn_errs.len(),
+                            "KEYHIVE_DISPATCH_DIAG document sync classification"
+                        );
+                    }
                     if let Some(rejection) = stats.local_policy_rejections.first() {
                         Ok(SyncDocAttempt::Policy(rejection.kind))
                     } else if had_success {
@@ -1374,7 +1489,9 @@ async fn spawn_keyhive_change_subscription(
                 return;
             }
         };
-        // The first event confirms subscription readiness.
+        // The first event confirms subscription readiness. Connection
+        // establishment independently initiates the catch-up Keyhive sync; the
+        // notification stream is responsible only for subsequent dirty hints.
         match tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv()).await {
             Ok(Ok(Some(event))) if event.initial => {}
             Ok(Ok(Some(_))) => {
@@ -1825,9 +1942,10 @@ pub async fn spawn_native_runtime2<S>(
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
-    automerge_frontier_group_scope: crate::runtime2::WorkerGroupScope,
+    automerge_frontier_group_scope: crate::runtime2::GroupScopeHandle,
     causal_checkpoint_group_scope: crate::runtime2::WorkerGroupScope,
     group_part_group_scope: crate::runtime2::WorkerGroupScope,
+    keyhive_change_notifs: bool,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -1924,6 +2042,7 @@ where
         crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
             Arc::clone(&keyhive_protocol),
             group_part_store.clone(),
+            Arc::new(crate::runtime2::TokioTimer),
             Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
@@ -1956,7 +2075,7 @@ where
                     })
                     .is_err()
                 {
-                    tracing::debug!(
+                    tracing::warn!(
                         %peer_id,
                         "runtime2 stopped before keyhive sync-done event"
                     );
@@ -2016,7 +2135,7 @@ where
             std::collections::HashMap::new(),
         )),
         subscription_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
-        keyhive_notif: Some(KeyhiveNotifWiring {
+        keyhive_notif: keyhive_change_notifs.then(|| KeyhiveNotifWiring {
             evt_tx: evt_tx.clone(),
             cancels: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }),
@@ -2037,6 +2156,7 @@ where
         timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
+        keyhive_sync_on_connect: keyhive_change_notifs,
         event_channel: Some((evt_tx.clone(), evt_rx)),
     };
 
@@ -2076,6 +2196,7 @@ where
         frontier_store,
         handle.clone(),
         evt_tx.clone(),
+        Arc::clone(&change_manager),
         keyhive.clone(),
         automerge_frontier_group_scope,
     );

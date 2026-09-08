@@ -34,6 +34,25 @@
               allowUnfree = true;
             };
           };
+          gitignoreFilter = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
+          cleanWorkspace = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.intersection
+              # Base directory
+              ./.
+              (pkgs.lib.fileset.fromSource gitignoreFilter);
+              # # Explicitly match only files that are NOT part of your heavy folders
+              # (lib.fileset.difference
+              #   ./.
+              #   (lib.fileset.unions [
+              #     ./.jj
+              #     ./.git
+              #     ./node_modules
+              #     ./target
+              #     ./.venv
+              #   ])
+              # );
+          };
 
           androidBuildToolsVersion = "37.0.0";
           androidApiLevel = "31";
@@ -55,7 +74,7 @@
           androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
             includeNDK = true;
             platformToolsVersion = "37.0.1";
-            buildToolsVersions = [ androidBuildToolsVersion "36.0.0" ];
+            buildToolsVersions = [ androidBuildToolsVersion "36.0.0" "34.0.0" ];
             platformVersions = [ "35" "36" ];
           };
 
@@ -201,6 +220,7 @@
             libarchive
             prek
             zizmor
+            sqlx-cli
           ];
 
           rustLintInputs = with pkgs; [
@@ -251,7 +271,6 @@
             tailwindcss_4
             watchexec
 
-            sqlx-cli
             # maestro
           ];
 
@@ -301,6 +320,7 @@
 
           ciRustShell = pkgs.mkShell ({
             name = "ci-rust";
+            # src = cleanWorkspace;
             buildInputs =
               baseBuildInputs
               ++ rustLintInputs
@@ -324,11 +344,13 @@
           ciAndroidShell =
             pkgs.mkShell ({
               name = "ci-android";
+              # src = cleanWorkspace;
               buildInputs = baseBuildInputs ++ androidBuildInputs ++ [ rustAndroid ];
             } // ghjkMainEnv // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
 
           ciDesktopShell = pkgs.mkShell ({
             name = "ci-desktop";
+            # src = cleanWorkspace;
             buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
             shellHook = ''
               export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
@@ -340,12 +362,14 @@
 
           ciComposeShell = pkgs.mkShell ({
             name = "ci-compose";
+            # src = cleanWorkspace;
             buildInputs = baseBuildInputs ++ [ pkgs.openjdk21 rustRust ];
           } // ghjkMainEnv);
 
           devShell =
             pkgs.mkShell ({
               name = "dev";
+              # src = cleanWorkspace;
 
               buildInputs = devShellBuildInputs;
 
@@ -365,7 +389,7 @@
                 if [ -e .env ]; then
                   source "$PWD/x/load-dotenv-safe.sh" .env
                 fi
-                if [[ -t 0 ]]; then
+                if [[ -t 0 && -z "$NIX_SHELL_NO_EXEC" ]]; then
                   exec $(getent passwd $USER | cut -d: -f7)
                 fi
               '';

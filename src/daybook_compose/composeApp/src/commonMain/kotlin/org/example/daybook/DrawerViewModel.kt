@@ -11,11 +11,9 @@ import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.RtFfi
-import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.core.DocBundle
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.SwitchDocEvent
 import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
@@ -77,7 +75,6 @@ class DrawerViewModel(
 
     private var registerJob: Job? = null
     private var drawerRegistration: ListenerRegistration? = null
-    private var rtRegistration: ListenerRegistration? = null
 
     private val refreshRunner =
         CoalescingIntentRunner<DrawerRefreshIntent>(
@@ -111,36 +108,16 @@ class DrawerViewModel(
             }
         }
 
-    private val switchDocListener =
-        object : SwitchDocEventListener {
-            override fun onSwitchDocEvent(event: SwitchDocEvent) {
-                viewModelScope.launch {
-                    val shouldRefreshLoaded = _loadedDocs.value.containsKey(event.docId)
-                    val shouldRefreshSelected = event.docId == _selectedDocId.value
-                    if (!shouldRefreshLoaded && !shouldRefreshSelected) return@launch
-                    refreshRunner.submit(
-                        DrawerRefreshIntent(
-                            refreshDocIds = if (shouldRefreshLoaded) setOf(event.docId) else emptySet(),
-                            refreshSelectedDoc = shouldRefreshSelected,
-                        ),
-                    )
-                }
-            }
-        }
-
     init {
         refreshRunner.submit(DrawerRefreshIntent.ListOnly)
         registerJob =
             viewModelScope.launch {
                 val dReg = drawerRepo.ffiRegisterListener(drawerListener)
-                val rReg = rt?.ffiRegisterListener(switchDocListener)
                 if (!isActive) {
                     dReg.unregister()
-                    rReg?.unregister()
                     return@launch
                 }
                 drawerRegistration = dReg
-                rtRegistration = rReg
             }
     }
 
@@ -297,7 +274,6 @@ class DrawerViewModel(
         registerJob?.cancel()
         refreshRunner.cancel()
         drawerRegistration?.unregister()
-        rtRegistration?.unregister()
         super.onCleared()
     }
 }

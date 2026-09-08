@@ -2,6 +2,7 @@
 
 use super::harness::{Pair, fixtures};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use big_sync::HostPartStore;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 
@@ -294,7 +295,14 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let pair = Pair::boot(238, 239, "Owner", "StaleReader").await?;
+    // The keyhive change-notification subscription is unwired on both
+    // nodes: the revocation never propagates to the reader in the
+    // background, so the reader's membership view is stale by construction
+    // and the owner's serving policy is deterministically the rejecting
+    // side. (With notifications wired, the background propagation races the
+    // explicit doc sync below, and the reader's own stale-then-refreshed
+    // gate rejects first with Policy(DocumentNotFound).)
+    let pair = Pair::boot_without_keyhive_notifs(238, 239, "Owner", "StaleReader").await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
 
     let mut initial = automerge::Automerge::new();
@@ -315,10 +323,9 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
     drop(reader_doc);
     drop(owner_doc);
 
-    // Revoke without letting the reader's keyhive learn about it. The
-    // notification path debounces for at least `quiet_window` (100ms), so the
-    // doc-sync attempt below lands while the reader's local gate still passes
-    // and the owner's serving policy is the side that rejects.
+    // Revoke without letting the reader's keyhive learn about it (the
+    // notification subscription is unwired on both nodes), so the owner's
+    // serving policy is deterministically the side that rejects.
     pair.left()
         .repo
         .revoke_doc_access(doc_id, reader_agent)
@@ -355,5 +362,190 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
         access, None,
         "after the revocation propagates the reader must lose effective document access"
     );
+    Ok(())
+}
+
+/// A remote authorization rejection must settle the old BigSync cursor, while
+/// a regrant of the unchanged document must publish and process fresh work.
+/// This exercises the production backend through the real worker subscription:
+/// no direct backend call or explicit document sync is used for either edge.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot_without_keyhive_notifs(240, 241, "Owner", "StaleReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "shared"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    // Subscribe before the direct sync so the worker's replay task for this
+    // doc cannot complete unnoticed (stats is a broadcast: late subscribers
+    // miss earlier events).
+    let mut settle_stats = pair.right().worker.subscribe_stats();
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    drop(reader_doc);
+    // The worker's peer replay may schedule the doc task before the keyhive
+    // membership lands; that task fails with Policy(DocumentNotFound) and
+    // reschedules (intentional big_sync/keyhive race, converges once the
+    // pull lands). Wait for the doc's sync to actually settle rather than
+    // capping a blanket idle window that slow CI can blow past.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match settle_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| {
+        crate::ferr!("reader worker never settled the doc sync after keyhive membership")
+    })??;
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
+
+    let old_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    let mut sync_stats = pair.right().worker.subscribe_stats();
+
+    // Keep the reader's authorization view stale. The serving owner now
+    // rejects the same object at the wire boundary with Unauthorized.
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id, reader_agent)
+        .await?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match sync_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| crate::ferr!("revocation work was not processed by the BigSync worker"))??;
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
+    let revoked_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    assert!(
+        revoked_cursor > old_cursor,
+        "confirmed Unauthorized must settle the old cursor: old={old_cursor}, revoked={revoked_cursor}"
+    );
+
+    // A notification-driven Keyhive round may win the race with the backend
+    // rejection. An already-applied revocation must still settle rather than
+    // requiring this backend invocation to observe the access transition.
+    let backend =
+        crate::backend::BigRepoSyncBackend::boot(std::sync::Arc::downgrade(&pair.right().repo))
+            .await?;
+    let outcome = big_sync::SyncBackend::sync_obj(
+        &backend,
+        pair.left().peer_id(),
+        doc_id,
+        vec![crate::GLOBAL_PART_ID],
+        None,
+    )
+    .await?;
+    assert!(matches!(
+        outcome,
+        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
+            deets: big_sync_core::SyncCompletionDeets::Noop,
+            ..
+        })
+    ));
+    while sync_stats.try_recv().is_ok() {}
+
+    // Re-grant without mutating Automerge. The owner-side group-part
+    // publication must produce a new subscription event, and that event must
+    // drive the reader's worker through the backend after it reconciles access.
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .await?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match sync_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| crate::ferr!("regrant work was not processed by the BigSync worker"))??;
+    pair.right()
+        .worker
+        .wait_for_idle(std::time::Duration::from_secs(5))
+        .await?;
+    let fresh_cursor = pair
+        .right()
+        .store
+        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .await?;
+    assert!(
+        fresh_cursor > revoked_cursor,
+        "regrant without mutation must publish fresh BigSync work: revoked={revoked_cursor}, fresh={fresh_cursor}"
+    );
+    pair.right().repo.wait_for_quiescence(None).await?;
+    assert!(
+        matches!(
+            pair.right().repo.get_doc(&doc_id).await?,
+            crate::DocLookup::Ready(_)
+        ),
+        "fresh regrant work must materialize the unchanged document"
+    );
+
+    drop(owner_doc);
     Ok(())
 }

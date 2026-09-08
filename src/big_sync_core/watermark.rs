@@ -21,6 +21,11 @@
 //! - **Job aggregation**: one job key can have several in-flight cursors and
 //!   each cursor can wait on multiple lanes (e.g. membership + sync); a slot
 //!   only finishes when every lane settled.
+//! - **Shared slots finish only when every waiter settles**: several jobs may
+//!   gate the same `(stream, cursor)` slot (one source read batch tracks all
+//!   of its entries at the batch revision). The slot is force-finished only
+//!   when the last tracked waiter is released, so settling one job never
+//!   durably advances the stream past its unsettled siblings.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -30,6 +35,9 @@ use std::collections::{BTreeMap, HashMap};
 pub struct WatermarkBook<Cursor> {
     last_emitted: Option<Cursor>,
     slots: BTreeMap<Cursor, Slot>,
+    /// Tracked-waiter count per slot cursor. A slot is only finished when
+    /// its count reaches zero (every waiter settled or was superseded).
+    tracked: BTreeMap<Cursor, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +79,38 @@ where
     }
 
     /// Mark an admitted cursor as finished without requiring prior admission
-    /// (used by supersede paths that free cursors whose work was cancelled).
+    /// (used for empty source revisions, which have no tracked waiters).
     pub fn force_finish(&mut self, cursor: Cursor) {
         if let Some(slot) = self.slots.get_mut(&cursor) {
             *slot = Slot::Ready;
         }
+    }
+
+    /// Register a waiter gating the slot at `cursor`. The slot must have
+    /// been admitted and not yet emitted; tracking an emitted cursor is a
+    /// no-op (its gating is moot).
+    pub fn track_ref(&mut self, cursor: Cursor) {
+        if self.slots.contains_key(&cursor) {
+            *self.tracked.entry(cursor).or_default() += 1;
+        }
+    }
+
+    /// Release one waiter gating the slot at `cursor`. When the last waiter
+    /// is released the slot is force-finished and drained. Returns the newly
+    /// reachable watermark, if any. Releasing an untracked (or already
+    /// emitted) cursor is a no-op returning `None`.
+    pub fn release(&mut self, cursor: Cursor) -> Option<Cursor> {
+        let count = self.tracked.entry(cursor).or_default();
+        if *count > 1 {
+            *count -= 1;
+            return None;
+        }
+        self.tracked.remove(&cursor);
+        if !self.slots.contains_key(&cursor) {
+            return None;
+        }
+        self.force_finish(cursor);
+        self.drain()
     }
 
     /// Advance to the contiguous prefix of ready slots and report the new
@@ -96,6 +131,7 @@ where
             .is_some_and(|(slot_cursor, _)| *slot_cursor <= watermark)
         {
             self.slots.pop_first();
+            self.tracked.pop_first();
         }
         self.last_emitted = Some(watermark);
         Some(watermark)
@@ -170,7 +206,11 @@ where
 {
     /// Track in-flight work for `(job, cursor)`, adding `streams` and
     /// `lanes` to any existing waiter. Mirrors the waiter creation in
-    /// `on_subscription_evt`.
+    /// `on_subscription_evt`. Returns the streams that were newly
+    /// associated with the waiter — a duplicate association (the same job
+    /// tracked twice for one cursor, e.g. two source rows of one batch
+    /// carrying the same document key) must not double-count the stream
+    /// slot's waiter, or the slot can never finish.
     pub fn track(
         &mut self,
         job: JobKey,
@@ -178,9 +218,15 @@ where
         streams: impl IntoIterator<Item = StreamId>,
         lanes: impl IntoIterator<Item = Lane>,
         payload: Payload,
-    ) {
+    ) -> Vec<StreamId> {
         let waiter = self.jobs.entry(job).or_default().entry(cursor).or_default();
-        waiter.streams.extend(streams);
+        let mut new_streams = Vec::new();
+        for stream in streams {
+            if !waiter.streams.contains(&stream) {
+                waiter.streams.push(stream);
+                new_streams.push(stream);
+            }
+        }
         // Lanes are set-semantics like the original's boolean flags
         // (`pending_sync`/`pending_membership`): re-tracking the same job
         // cursor from another stream must not duplicate them.
@@ -190,6 +236,7 @@ where
             }
         }
         waiter.payload = payload;
+        new_streams
     }
 
     /// Settle one lane of `(job, cursor)` (mirrors `on_obj_sync_job_evt`).
@@ -239,9 +286,11 @@ where
 
     /// Supersede in-flight work for `job` on `stream` below `bound`: for
     /// every waiter with `cursor < bound` referencing `stream`, drop the
-    /// lanes for which `keep` returns `false`. Waiters left with neither
-    /// lanes nor other streams are removed and their cursors reported as
-    /// freed (the caller marks them finished on `stream` immediately).
+    /// lanes for which `keep` returns `false`. A waiter whose lanes are all
+    /// dropped owes no work and is removed across every stream that
+    /// referenced it (a lane-less waiter cannot gate anything — keeping it
+    /// alive would panic the next `settle` on a surviving stream), and its
+    /// cursor is reported as freed for the caller to release on `stream`.
     /// Mirrors `supersede_obj_part`, with the original's "pending membership
     /// must still finish before its cursor advances" special case expressed
     /// as a lane predicate.
@@ -255,17 +304,18 @@ where
         let Some(job_entry) = self.jobs.get_mut(&job) else {
             return Vec::new();
         };
-        let mut freed = Vec::new();
         let mut emptied = Vec::new();
+        let mut freed = Vec::new();
         for (&cursor, waiter) in job_entry.range_mut(..bound) {
             if !waiter.streams.contains(&stream) {
                 continue;
             }
             waiter.lanes.retain(|lane| keep(*lane));
             if waiter.lanes.is_empty() {
-                waiter.streams.retain(|candidate| *candidate != stream);
-                if waiter.streams.is_empty() {
-                    emptied.push(cursor);
+                // No work is owed anywhere: free the cursor on every
+                // surviving stream, not just the superseding one.
+                emptied.push(cursor);
+                if waiter.streams.contains(&stream) {
                     freed.push(cursor);
                 }
             }
@@ -354,6 +404,13 @@ where
     pub fn admit(&mut self, stream: StreamId, cursor: Cursor) -> bool {
         self.stream_book_mut(stream).begin(cursor)
     }
+    /// Finish an admitted cursor with no keyed job attached.  This is used for
+    /// empty source revisions, which still need to advance the stream book.
+    pub fn finish(&mut self, stream: StreamId, cursor: Cursor) -> Option<Cursor> {
+        let book = self.stream_book_mut(stream);
+        book.force_finish(cursor);
+        book.drain()
+    }
 
     /// Register the in-flight work admitted above: `(job, cursor)` waits on
     /// `lanes` and gates `stream`'s watermark.
@@ -365,7 +422,13 @@ where
         lanes: impl IntoIterator<Item = Lane>,
         payload: Payload,
     ) {
-        self.jobs.track(job, cursor, [stream], lanes, payload);
+        let new_streams = self.jobs.track(job, cursor, [stream], lanes, payload);
+        // Only a genuinely new association gates the slot: a duplicate
+        // track of the same (job, cursor) is one waiter, not two, and must
+        // release the slot exactly once on settle.
+        for stream in new_streams {
+            self.stream_book_mut(stream).track_ref(cursor);
+        }
     }
 
     /// A lane of `(job, cursor)` finished. When the waiter fully settles,
@@ -382,9 +445,8 @@ where
         streams
             .into_iter()
             .map(|stream| {
-                let book = self.stream_book_mut(stream);
-                book.force_finish(cursor);
-                (stream, book.drain())
+                let reached = self.stream_book_mut(stream).release(cursor);
+                (stream, reached)
             })
             .collect()
     }
@@ -397,9 +459,7 @@ where
         let mut out: Vec<(StreamId, Option<Cursor>)> = Vec::new();
         for (cursor, streams) in self.jobs.settle_job(job) {
             for stream in streams {
-                let book = self.stream_book_mut(stream);
-                book.force_finish(cursor);
-                let reached = book.drain();
+                let reached = self.stream_book_mut(stream).release(cursor);
                 match out.iter_mut().find(|(candidate, _)| candidate == &stream) {
                     Some((_, slot)) => {
                         if reached.is_some() {
@@ -428,10 +488,7 @@ where
         let book = self.stream_book_mut(stream);
         freed
             .into_iter()
-            .map(|cursor| {
-                book.force_finish(cursor);
-                book.drain()
-            })
+            .map(|cursor| book.release(cursor))
             .collect()
     }
 
@@ -441,6 +498,19 @@ where
     pub fn retire_stream(&mut self, stream: StreamId) {
         self.streams.remove(&stream);
         self.jobs.retire_stream(stream);
+        // The stream book is dropped wholesale, so its tracked counts go
+        // with it; surviving jobs keep their other stream references.
+    }
+
+    /// Diagnostics: every pending `(job, cursor)` waiter across streams.
+    pub fn pending_jobs(&self) -> Vec<(JobKey, Cursor)> {
+        let mut out = Vec::new();
+        for (job, cursors) in &self.jobs.jobs {
+            for cursor in cursors.keys() {
+                out.push((*job, *cursor));
+            }
+        }
+        out
     }
 
     /// Current emitted watermark for a stream.
@@ -471,6 +541,73 @@ mod tests {
     enum Lane {
         Membership,
         Sync,
+    }
+
+    #[test]
+    fn shared_batch_slot_finishes_only_when_every_waiter_settles() {
+        let mut m = Machine::default();
+        // One batch read at revision 10 carrying two jobs.
+        assert!(m.admit("p", 10));
+        m.track("p", 1, 10, [Lane::Sync], ());
+        m.track("p", 2, 10, [Lane::Sync], ());
+
+        // Settling the first job must NOT advance the durable watermark
+        // past the batch: the sibling is still in flight.
+        let advanced = m.settle(1, 10, Lane::Sync);
+        assert_eq!(advanced, vec![("p", None)]);
+        assert_eq!(m.watermark(&"p"), None);
+        assert!(!m.is_settled(&"p"));
+
+        // The last waiter settles: the batch slot finishes and advances.
+        let advanced = m.settle(2, 10, Lane::Sync);
+        assert_eq!(advanced, vec![("p", Some(10))]);
+        assert_eq!(m.watermark(&"p"), Some(10));
+        assert!(m.is_settled(&"p"));
+    }
+
+    #[test]
+    fn shared_batch_slot_across_contiguous_batches_waits_for_both() {
+        let mut m = Machine::default();
+        assert!(m.admit("p", 10));
+        m.track("p", 1, 10, [Lane::Sync], ());
+        m.track("p", 2, 10, [Lane::Sync], ());
+        assert!(m.admit("p", 11));
+        m.track("p", 1, 11, [Lane::Sync], ());
+
+        // Job 1's newer cursor supersedes its older one; the batch-10 slot
+        // still owes job 2, so nothing advances past 10.
+        let advanced = m.settle(1, 11, Lane::Sync);
+        assert_eq!(advanced, vec![("p", None)]);
+        let freed = m.supersede("p", 1, 11, |_| false);
+        // Superseding job 1's cursor-10 waiter does not finish the slot:
+        // job 2 still gates it.
+        assert_eq!(freed, vec![None]);
+        assert_eq!(m.watermark(&"p"), None);
+
+        // Job 2 settles: both slots are now ready (job 1 finished cursor 11
+        // earlier), so the watermark drains past both batches.
+        let advanced = m.settle(2, 10, Lane::Sync);
+        assert_eq!(advanced, vec![("p", Some(11))]);
+        assert_eq!(m.watermark(&"p"), Some(11));
+    }
+
+    #[test]
+    fn laneless_waiter_is_freed_across_all_streams() {
+        let mut m = Machine::default();
+        m.admit("a", 10);
+        m.admit("b", 10);
+        m.track("a", 9, 10, [Lane::Sync], ());
+        m.track("b", 9, 10, [Lane::Sync], ());
+
+        // Superseding stream "a" drops the only lane: the waiter owes no
+        // work on any stream and must be freed for both (a released slot
+        // here, b's released by the caller via the same freed cursor).
+        let freed = m.supersede("a", 9, 11, |_| false);
+        assert_eq!(freed, vec![Some(10)]);
+        // The waiter is gone: settling on the surviving stream is stale, not
+        // a "lane completion without a pending lane" panic.
+        assert!(m.settle(9, 10, Lane::Sync).is_empty());
+        assert!(m.is_settled(&"a"));
     }
 
     #[test]

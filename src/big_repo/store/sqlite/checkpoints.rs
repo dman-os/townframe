@@ -33,24 +33,4 @@ impl SqliteBigRepoStore {
         tx.commit().await?;
         Ok(())
     }
-
-    pub(crate) async fn get_sync_commit_watermark(
-        &self,
-        doc_id: crate::DocumentId,
-        big_sync_txid: u64,
-    ) -> Res<Option<i64>> {
-        let row_id: Option<i64> = sqlx::query_scalar!(
-            "SELECT latest_commit_row_id
-                 FROM big_repo_sync_commits_watermark
-                WHERE scope_id = ?1
-                  AND doc_id = ?2
-                  AND big_sync_txid = ?3",
-            self.scope().id(),
-            doc_id.as_bytes().as_slice(),
-            i64::try_from(big_sync_txid).expect(ERROR_IMPOSSIBLE)
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(row_id)
-    }
 }

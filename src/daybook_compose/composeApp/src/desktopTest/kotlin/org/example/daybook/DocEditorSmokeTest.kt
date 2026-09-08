@@ -56,6 +56,7 @@ import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
+import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.InitRepoFfi
 import org.example.daybook.uniffi.PlugsRepoFfi
 import org.example.daybook.uniffi.ProgressRepoFfi
@@ -1410,19 +1411,29 @@ private class RealRepoFixture(
 
     fun importPlugTestOci() = runBlocking(Dispatchers.IO) {
         plugsRepo.importFromOciLayout(plugTestOciPath().toString())
+        plugsRepo.enableKnownPlug(PLUG_TEST_ID)
     }
 
     fun importDayledgerOci() = runBlocking(Dispatchers.IO) {
-        plugsRepo.importFromOciLayout(dayledgerOciPath().toString())
+        try {
+            plugsRepo.importFromOciLayout(dayledgerOciPath().toString())
+        } catch (error: FfiException) {
+            throw IllegalStateException(error.`message`(), error)
+        }
+        plugsRepo.enableKnownPlug(DAYLEDGER_PLUG_ID)
     }
 
     fun setCoreNoteEditorConfig(configJson: String) = runBlocking(Dispatchers.IO) {
-        val configDocId = drawerRepo.getOrInitPlugConfigDocId("@daybook/core")
         val configFacetKey =
             FacetKey(
                 FacetTag.Any("org.example.daybook.note-editor-config"),
                 "main",
             )
+        val plugsConfigKey = FacetKey(FacetTag.WellKnown(WellKnownFacetTag.PLUGS_CONFIG), "main")
+        val configDocId =
+            drawerRepo.list().asSequence().map { it.docId }.firstOrNull { docId ->
+                drawerRepo.get(docId, "main")?.facets?.containsKey(plugsConfigKey) == true
+            } ?: error("core plug config document not found")
         val bundle = drawerRepo.getBundle(configDocId, "main")
         drawerRepo.update(
             DocPatch(
@@ -1507,7 +1518,13 @@ private class RealRepoFixture(
             }
             stopOnIo("init repo") { initRepo.stop() }
             stopOnIo("sqlite local state repo") { sqliteLsRepo.stop() }
+            stopOnIo("dispatch repo") { dispatchRepo.stop() }
+            stopOnIo("config repo") { configRepo.stop() }
+            stopOnIo("drawer repo") { drawerRepo.stop() }
+            stopOnIo("tables repo") { tablesRepo.stop() }
+            stopOnIo("plugs repo") { plugsRepo.stop() }
             stopOnIo("progress repo") { progressRepo.stop() }
+            stopOnIo("ffi ctx") { ffiCtx.stop() }
             closeSafely("camera preview ffi") { cameraPreviewFfi.close() }
             if (rtFfi != null) {
                 closeSafely("rt ffi") { rtFfi.close() }

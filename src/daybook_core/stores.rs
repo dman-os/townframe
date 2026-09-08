@@ -336,20 +336,8 @@ impl<T> Versioned<T> {
     }
 }
 
-/// A change notification forwarded from the switch sink to the store's
-/// notif loop (mirrors the AmStore change-listener pattern).
-#[derive(Debug, Clone)]
-pub(crate) enum FacetStoreNotif {
-    DocChanged {
-        doc_id: daybook_types::doc::DocId,
-        heads: ChangeHashSet,
-    },
-}
-
 /// A store that lives in a facet of a drawer doc — the drawer-doc counterpart
-/// of `AmStore`. Serialization is serde_json (drawer facets are JSON values);
-/// the in-memory projection is kept live by a notif loop fed by
-/// `FacetStoreSink` (which forwards switch Doc events for the store's doc).
+/// of `AmStore`. Serialization is serde_json (drawer facets are JSON values).
 #[async_trait]
 pub trait FacetStore:
     serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
@@ -372,16 +360,13 @@ pub struct FacetStoreVersion<S> {
     pub value: S,
     pub actor_id: ActorId,
 }
-/// Handle to a `FacetStore`: the in-memory projection plus the notif loop
-/// that keeps it live under remote updates. Writes go through the drawer at
-/// the heads the projection was loaded at; unseen remote writes become
-/// concurrent and merge by automerge rules (no CAS, no clobber).
+/// Handle to a `FacetStore`: the in-memory projection plus explicit snapshot
+/// updates from its revision consumer. Writes go through the drawer at the
+/// heads the projection was loaded at; unseen remote writes become concurrent
+/// and merge by automerge rules (no CAS, no clobber).
 pub struct FacetStoreHandle<S: FacetStore> {
     inner: Arc<tokio::sync::RwLock<FacetStoreInner<S>>>,
     doc_id: daybook_types::doc::DocId,
-    notif_tx: tokio::sync::mpsc::UnboundedSender<FacetStoreNotif>,
-    notif_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl<S: FacetStore> Clone for FacetStoreHandle<S> {
@@ -389,20 +374,6 @@ impl<S: FacetStore> Clone for FacetStoreHandle<S> {
         Self {
             inner: Arc::clone(&self.inner),
             doc_id: self.doc_id.clone(),
-            notif_tx: self.notif_tx.clone(),
-            notif_handle: Arc::clone(&self.notif_handle),
-            cancel_token: self.cancel_token.clone(),
-        }
-    }
-}
-
-impl<S: FacetStore> Drop for FacetStoreHandle<S> {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
-        if let Ok(mut guard) = self.notif_handle.try_lock()
-            && let Some(handle) = guard.take()
-        {
-            handle.abort();
         }
     }
 }
@@ -423,16 +394,14 @@ struct FacetStoreInner<S> {
 
 impl<S: FacetStore> FacetStoreHandle<S> {
     /// Load the store from the drawer doc's facet at the branch's current
-    /// heads (absent facet -> `S::seed()`), and spawn the notif loop.
+    /// heads (absent facet -> `S::seed()`).
     pub async fn load(
         drawer: Arc<DrawerRepo>,
         doc_id: daybook_types::doc::DocId,
         branch: daybook_types::doc::BranchPathBuf,
     ) -> Res<Self> {
         let (store, loaded_heads) = Self::hydrate(&drawer, &doc_id, &branch).await?;
-        let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        let handle = Self {
+        Ok(Self {
             inner: Arc::new(tokio::sync::RwLock::new(FacetStoreInner {
                 store,
                 drawer,
@@ -441,33 +410,12 @@ impl<S: FacetStore> FacetStoreHandle<S> {
                 local_writer_actor: None,
             })),
             doc_id,
-            notif_tx,
-            notif_handle: Arc::new(tokio::sync::Mutex::new(None)),
-            cancel_token: cancel_token.clone(),
-        };
-        let notif_handle = tokio::spawn({
-            let inner = Arc::clone(&handle.inner);
-            let doc_id = handle.doc_id.clone();
-            let cancel_token = cancel_token.child_token();
-            async move {
-                facet_store_notif_loop::<S>(inner, doc_id, notif_rx, cancel_token)
-                    .await
-                    .expect("error handling facet store notifs")
-            }
-        });
-        *handle.notif_handle.lock().await = Some(notif_handle);
-        Ok(handle)
+        })
     }
 
     /// The drawer doc id this store lives in (for the sink's doc-id check).
     pub fn doc_id(&self) -> &daybook_types::doc::DocId {
         &self.doc_id
-    }
-
-    /// The switch sink that keeps this store live: forwards Doc events for
-    /// the store's doc to the notif loop (no reads in the sink).
-    pub fn sink(&self) -> FacetStoreSink<S> {
-        FacetStoreSink::new(self.clone())
     }
 
     /// The drawer's content actor for this doc — the author of every write
@@ -572,15 +520,19 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         Ok(())
     }
 
-    /// Stop the notif loop and join it.
-    pub async fn stop(&self) -> Res<()> {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.notif_handle.lock().await.take() {
-            handle.await?;
-        }
+    pub(crate) async fn apply_external_snapshot(&self, value: S, heads: ChangeHashSet) -> Res<()> {
+        let mut guard = self.inner.write().await;
+        guard.store = value;
+        guard.loaded_heads = Some(heads);
         Ok(())
     }
 
+    /// Load the facet value and branch heads from one exact current frontier
+    /// without changing the in-memory store.
+    pub(crate) async fn latest_snapshot(&self) -> Res<(S, Option<ChangeHashSet>)> {
+        let guard = self.inner.read().await;
+        Self::hydrate(&guard.drawer, &self.doc_id, &guard.branch).await
+    }
     async fn hydrate(
         drawer: &DrawerRepo,
         doc_id: &daybook_types::doc::DocId,
@@ -590,17 +542,20 @@ impl<S: FacetStore> FacetStoreHandle<S> {
             .get_doc_branches(doc_id)
             .await?
             .and_then(|entry| entry.branches.get(branch.as_str()).cloned());
+        let Some(heads) = heads else {
+            return Ok((S::seed(), None));
+        };
         let Some(doc) = drawer
-            .get_doc_with_facets_at_branch(doc_id, branch, Some(vec![S::facet_key()]))
+            .get_doc_with_facets_at_branch_heads(doc_id, branch, &heads, Some(vec![S::facet_key()]))
             .await?
         else {
-            return Ok((S::seed(), heads));
+            return Ok((S::seed(), Some(heads)));
         };
         let store = match doc.facets.get(&S::facet_key()) {
             Some(raw) => serde_json::from_value(raw.clone())?,
             None => S::seed(),
         };
-        Ok((store, heads))
+        Ok((store, Some(heads)))
     }
 
     fn build_patch(&self, store: &S) -> Res<daybook_types::doc::DocPatch> {
@@ -613,10 +568,9 @@ impl<S: FacetStore> FacetStoreHandle<S> {
     }
 
     /// Write a patch through the drawer and advance the loaded heads. No
-    /// store lock is held here: the drawer write runs facet validation,
-    /// which re-enters the store (and the drawer notif feeds the switch,
-    /// whose sinks read the store) — holding the write lock across it would
-    /// self-deadlock.
+    /// store lock is held here: the drawer write runs facet validation and
+    /// downstream change consumers may read the store again. Holding the
+    /// write lock across either re-entry would self-deadlock.
     async fn flush_patch(&self, patch: daybook_types::doc::DocPatch) -> Res<ChangeHashSet> {
         let (drawer, branch, loaded_heads) = {
             let guard = self.inner.read().await;
@@ -712,80 +666,6 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         };
         let heads = self.flush_patch(patch).await?;
         Ok((res, heads))
-    }
-}
-
-/// The store's notif loop: reloads the in-memory projection on each
-/// forwarded Doc change. Holds only the inner + doc id (not the handle), so
-/// dropping the handle without `stop()` still aborts the loop.
-async fn facet_store_notif_loop<S: FacetStore>(
-    inner: Arc<tokio::sync::RwLock<FacetStoreInner<S>>>,
-    _doc_id: daybook_types::doc::DocId,
-    mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<FacetStoreNotif>,
-    cancel_token: tokio_util::sync::CancellationToken,
-) -> Res<()> {
-    loop {
-        let notif = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => break,
-            msg = notif_rx.recv() => match msg {
-                Some(notif) => notif,
-                None => break,
-            },
-        };
-        let FacetStoreNotif::DocChanged { doc_id, heads } = notif;
-        debug!(%doc_id, ?heads, "facet store notif: reloading");
-        FacetStoreHandle::<S>::reload_inner(&inner, &doc_id).await?;
-    }
-    Ok(())
-}
-
-/// Switch sink that keeps a `FacetStore` live: forwards Doc events for the
-/// store's doc to its notif loop. Cheap — no reads in the sink; the loop
-/// does the reload.
-pub struct FacetStoreSink<S: FacetStore> {
-    handle: FacetStoreHandle<S>,
-}
-
-impl<S: FacetStore> FacetStoreSink<S> {
-    pub fn new(handle: FacetStoreHandle<S>) -> Self {
-        Self { handle }
-    }
-}
-
-#[async_trait]
-impl<S: FacetStore> crate::rt::switch::SwitchSink for FacetStoreSink<S> {
-    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        crate::rt::switch::SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: false,
-            consume_plugs: false,
-            consume_dispatch: false,
-            consume_config: false,
-            drawer_predicate: Some(daybook_types::manifest::DocPredicateClause::HasTag(
-                S::facet_key().tag.to_string().into(),
-            )),
-        }
-    }
-
-    async fn on_event(
-        &mut self,
-        event: &crate::rt::switch::SwitchEvent,
-        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
-    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
-        let crate::rt::switch::SwitchEvent::Doc(evt) = event else {
-            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
-        };
-        if evt.doc_id == *self.handle.doc_id() {
-            self.handle
-                .notif_tx
-                .send(FacetStoreNotif::DocChanged {
-                    doc_id: evt.doc_id.clone(),
-                    heads: evt.new_heads.clone(),
-                })
-                .map_err(|_| ferr!("facet store notif channel closed"))?;
-        }
-        Ok(crate::rt::switch::SwitchSinkOutcome::default())
     }
 }
 

@@ -72,6 +72,7 @@ import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.NoteEditorConfig
 import org.example.daybook.uniffi.types.NoteMimeOption
 import org.example.daybook.uniffi.types.WellKnownFacet
+import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 private val noteEditorConfigJson =
     Json {
@@ -694,14 +695,18 @@ private fun loadDmeta(doc: Doc?): Dmeta? = doc?.facets?.get(dmetaFacetKey())
     ?.let { raw -> decodeWellKnownFacet<WellKnownFacet.Dmeta>(raw).getOrNull()?.v1 }
 
 private suspend fun loadNoteEditorConfig(drawerRepo: DrawerRepoFfi): BlockDetailsConfigState = try {
-    val configDocId = drawerRepo.getOrInitPlugConfigDocId(CORE_PLUG_ID)
-    val doc = drawerRepo.get(configDocId, "main")
-    val raw =
-        doc?.facets?.get(
-            FacetKey(FacetTag.Any(NOTE_EDITOR_CONFIG_FACET_TAG), NOTE_EDITOR_CONFIG_FACET_ID),
+    val configFacetKey =
+        FacetKey(
+            FacetTag.Any(NOTE_EDITOR_CONFIG_FACET_TAG),
+            NOTE_EDITOR_CONFIG_FACET_ID,
         )
-    val config = raw?.let { decodeNoteEditorConfig(it) }
-    BlockDetailsConfigState.Ready(config)
+    val plugsConfigKey = FacetKey(FacetTag.WellKnown(WellKnownFacetTag.PLUGS_CONFIG), "main")
+    val configDocId =
+        drawerRepo.list().asSequence().map { it.docId }.firstOrNull { docId ->
+            drawerRepo.get(docId, "main")?.facets?.containsKey(plugsConfigKey) == true
+        }
+    val raw = configDocId?.let { drawerRepo.get(it, "main")?.facets?.get(configFacetKey) }
+    BlockDetailsConfigState.Ready(raw?.let { decodeNoteEditorConfig(it) })
 } catch (exception: Throwable) {
     if (exception is CancellationException) {
         throw exception

@@ -15,7 +15,9 @@ use crate::{
 pub struct DecidePeerStrategyTask {
     pub peer_id: PeerId,
     pub parts: Set<PartId>,
-    /// Per-part sync mode; defaults to `Bucket` if not specified.
+    /// Per-part sync mode; defaults to `CursorOnly` if not specified (the
+    /// bucket-diff strategy is WIP and not safe for embedders that never opt
+    /// in).
     pub sync_modes: Map<PartId, SyncMode>,
 }
 
@@ -120,13 +122,25 @@ impl DecidePeerStrategyTask {
                 .part_store
                 .get_peer_part_cursor(self.peer_id, part_id)
                 .await;
-            // Per-part sync mode: look up from peer_state or default to Bucket.
-            // The mode is supplied by the embedder via set_peer's parts map.
+            // ─────────────────────────────────────────────────────────────
+            // ⚠️ BUCKET-STRAT DISABLED FOR UNCONFIGURED EMBEDDERS ⚠️
+            //
+            // The bucket-diff strategy DEADLOCKS in the big_repo/daybook
+            // offline-reopen scenario: with a >256-event cursor diff the
+            // picker chose Bucket, the bucket machine started post-reopen and
+            // never completed (multi_strat never cleared), permanently
+            // blocking `wait_for_full_sync` — the four-node stress hang.
+            //
+            // Until the bucket machine's stall is fixed, embedders that do
+            // not explicitly opt in via `sync_modes` always get CursorOnly.
+            // big_sync's own suite opts in explicitly where it tests the
+            // bucket path.
+            // ─────────────────────────────────────────────────────────────
             let sync_mode = self
                 .sync_modes
                 .get(&part_id)
                 .copied()
-                .unwrap_or(SyncMode::Bucket);
+                .unwrap_or(SyncMode::CursorOnly);
             let Some(latest_cursor) = cursor_summary else {
                 // No cursor strat advertised for this part (bucket-only).
                 // Drive it through the bucket path if a bucket summary exists;
