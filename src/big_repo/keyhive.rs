@@ -299,7 +299,13 @@ impl BigKeyhiveHandle {
     pub(crate) async fn rotate_prekey(
         &self,
         prekey: keyhive_crypto::share_key::ShareKey,
-    ) -> Res<Arc<keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::rotate_key::RotateKeyOp>>> {
+    ) -> Res<
+        Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::individual::op::rotate_key::RotateKeyOp,
+            >,
+        >,
+    > {
         self.keyhive
             .rotate_prekey(prekey)
             .await
@@ -309,7 +315,13 @@ impl BigKeyhiveHandle {
     /// Publish an additional prekey, growing the available pool.
     pub(crate) async fn expand_prekeys(
         &self,
-    ) -> Res<Arc<keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>>> {
+    ) -> Res<
+        Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::individual::op::add_key::AddKeyOp,
+            >,
+        >,
+    > {
         self.keyhive
             .expand_prekeys()
             .await

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT wrapped_dek, kek_version, algorithm\n               FROM big_repo_deks\n              WHERE scope_id = ?1 AND dek_id = ?2 AND dek_version = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "wrapped_dek",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_deks",
+            "name": "wrapped_dek"
+          }
+        }
+      },
+      {
+        "name": "kek_version",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_repo_deks",
+            "name": "kek_version"
+          }
+        }
+      },
+      {
+        "name": "algorithm",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_repo_deks",
+            "name": "algorithm"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3c40f89d3a8cb63f04758f1e1d184d9a704bfb33219dc74581378f62c06ccf06"
+}

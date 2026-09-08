@@ -297,7 +297,7 @@ pub async fn test_cx_with_options(
     tokio::fs::create_dir_all(&repo_root).await?;
     let layout = crate::repo::RepoLayout {
         repo_root: repo_root.clone(),
-        samod_root: repo_root.join("samod"),
+        big_repo_root: repo_root.join("big_repo"),
         sqlite_path: repo_root.join("sqlite.db"),
         blobs_root: repo_root.join("blobs"),
         marker_path: repo_root.join("db.repo.txt"),

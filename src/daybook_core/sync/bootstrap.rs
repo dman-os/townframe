@@ -504,7 +504,7 @@ pub async fn clone_repo_init_from_url(
     tokio::fs::create_dir_all(&staging).await?;
     let layout = crate::repo::RepoLayout {
         repo_root: destination.clone(),
-        samod_root: destination.join("samod"),
+        big_repo_root: destination.join("big_repo"),
         sqlite_path: destination.join("sqlite.db"),
         blobs_root: destination.join("blobs"),
         marker_path: destination.join("db.repo.txt"),
@@ -533,7 +533,7 @@ pub async fn clone_repo_init_from_url(
         let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
             node_identity_seed: identity.iroh_secret_key.to_bytes(),
             storage: big_repo::StorageConfig::Disk {
-                path: staging.join("samod"),
+                path: staging.join("big_repo"),
             },
             scope_key: Arc::from("daybook-core"),
             hidden_parts: Default::default(),

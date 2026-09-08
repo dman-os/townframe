@@ -1,92 +1,60 @@
-//! Secret storage backed by OS keyrings.
+//! DEK (data-encryption-key) storage backed by OS keyrings.
 //!
-//! Owns the [`SecretRepo`] abstraction previously inlined in
-//! `daybook_core::secrets`: repo identities for checkout provisioning plus an
-//! opaque, namespaced opaque-blob API for small key-material payloads
-//! (keyhive prekey/CGKA secrets).
+//! Owns the [`SecretRepo`] abstraction: repo identities for checkout
+//! provisioning, plus per-material-type data encryption keys (DEKs) used to
+//! encrypt secret blobs at rest in sqlite.
 //!
-//! Blob payloads are stored base58-multibase encoded so every backend sees
-//! printable text, mirroring how identities are persisted. Keyring backends
-//! bound credential payloads (e.g. kernel keyutils ≈ 32 KiB), so [`SecretRepo`]
-//! refuses oversized blobs up front with [`SecretsError::BlobTooLarge`] instead
-//! of letting a backend fail cryptically or truncate.
+//! DEKs are 32-byte random keys addressable by a string `dek_id` and an
+//! integer `version`. Versions make rotation incremental: a new version of a
+//! DEK id can be created without re-encrypting every blob at once — blobs
+//! record the version that encrypted them and old versions stay readable
+//! until the last referencing blob is migrated.
 //!
-//! Keyring calls are synchronous/blocking; async surfaces delegate to
+//! The keyring is a *key source*, not a blob store: it holds raw DEKs (and
+//! identities). Secret material itself lives encrypted in the sqlite layer
+//! via [`encrypt_blob`]/[`decrypt_blob`] (ChaCha20-Poly1305, random 12-byte
+//! nonce per blob, no AAD).
+//!
+//! Keyring entries are base58-multibase encoded so every backend sees
+//! printable text, mirroring how identities are persisted. Keyring calls are
+//! synchronous/blocking; async surfaces delegate to
 //! `tokio::task::spawn_blocking`, and store teardown happens off any Tokio
 //! runtime thread (the zbus backend must not drop on a runtime thread).
 
 use std::sync::Arc;
 
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
+use rand::RngCore;
 use utils_rs::expect_tags::{ERROR_IMPOSSIBLE, ERROR_TOKIO};
 use utils_rs::hash::{decode_base58_multibase, encode_base58_multibase};
-use utils_rs::prelude::eyre;
 use utils_rs::prelude::WrapErr;
+use utils_rs::prelude::eyre;
 
 pub type Res<T> = eyre::Result<T>;
 
-/// Service under which all material blobs are stored (distinct from the
+/// Service under which all DEK entries are stored (distinct from the
 /// `"daybook"` identity service so the two namespaces never collide).
 const MATERIAL_SERVICE: &str = "daybook.material.v1";
 
-/// Reserved blob id holding the per-namespace material index. Index entries
-/// are the ids of blobs registered through [`SecretRepo::add_to_index`]; a
-/// blob that is never indexed stays invisible to
-/// [`SecretRepo::list_blob_ids`].
-pub const MATERIAL_INDEX_ID: &str = "__index__";
-
-/// Hard cap on a single blob's raw byte length. Base58 encoding inflates
-/// payloads ~1.37x, and keyutils caps credential payloads around 32 KiB; 16
-/// KiB of raw bytes stays comfortably under that bound for every backend.
-pub const MAX_BLOB_BYTES: usize = 16 * 1024;
-
-/// Errors surfaced by the material blob API.
+/// Errors surfaced by the DEK / AEAD API.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
-    /// The blob exceeds [`MAX_BLOB_BYTES`] and cannot round-trip through
-    /// keyring backends; callers must split or persist it elsewhere.
-    #[error("material blob too large for keyring storage: {len} bytes exceeds {max} (id: {id})")]
-    BlobTooLarge { id: String, len: usize, max: usize },
-    /// Namespace or id contained characters keyring usernames must not.
+    /// `dek_id` contained characters keyring usernames must not.
     #[error("invalid secret storage name: {0}")]
     InvalidName(String),
     /// The backing keyring store rejected the operation.
     #[error("keyring error: {0}")]
     Keyring(#[from] keyring_core::Error),
-    /// A stored material blob could not be decoded.
-    #[error("stored material blob is corrupt: {0}")]
+    /// A stored DEK or version index could not be decoded.
+    #[error("stored material is corrupt: {0}")]
     Corrupt(String),
-    /// Index serialization failed.
+    /// DEK version index serialization failed.
     #[error("material index encoding failed: {0}")]
     Encoding(#[from] bincode::Error),
-}
-
-/// A single material index entry.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct MaterialIndex(Vec<String>);
-
-impl MaterialIndex {
-    fn load(bytes: &[u8]) -> Result<Self, SecretsError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|err| SecretsError::Corrupt(format!("material index is not utf-8: {err}")))?;
-        let decoded = decode_base58_multibase(text)
-            .map_err(|err| SecretsError::Corrupt(format!("material index multibase: {err}")))?;
-        Ok(Self(bincode::deserialize(&decoded)?))
-    }
-
-    fn store(&self) -> Result<Vec<u8>, SecretsError> {
-        let encoded = bincode::serialize(&self.0)?;
-        Ok(encode_base58_multibase(&encoded).into_bytes())
-    }
-
-    fn add(&mut self, id: &str) {
-        if !self.0.iter().any(|existing| existing == id) {
-            self.0.push(id.to_string());
-        }
-    }
-
-    fn remove(&mut self, id: &str) {
-        self.0.retain(|existing| existing != id);
-    }
+    /// AEAD encrypt/decrypt failed.
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }
 
 /// Identity for a provisioned repository checkout.
@@ -215,8 +183,8 @@ impl SecretRepo {
                         .wrap_err("failed reading iroh secret key from keyring");
                 }
                 Ok(secret) => {
-                    let secret = decode_base58_multibase(&secret)
-                        .wrap_err("error decode bs58 secret")?;
+                    let secret =
+                        decode_base58_multibase(&secret).wrap_err("error decode bs58 secret")?;
                     if secret.len() != 32 {
                         eyre::bail!("secret corruption, bad length");
                     }
@@ -267,124 +235,159 @@ impl SecretRepo {
         Ok(())
     }
 
-    async fn material_entry(
+    // ---- DEK API ----
+
+    /// The DEK for `(dek_id, version)`, generating and persisting it in the
+    /// keyring on first use.
+    ///
+    /// Deterministic: the same `(dek_id, version)` always yields the same 32
+    /// bytes. A fresh version starts a rotation — callers write new blobs
+    /// with it while old blobs stay readable via their recorded version.
+    pub async fn get_or_create_dek(
         &self,
-        namespace: &str,
-        id: &str,
-    ) -> Result<keyring_core::Entry, SecretsError> {
-        validate_name(namespace)?;
-        validate_name(id)?;
+        dek_id: &str,
+        version: u64,
+    ) -> Result<[u8; 32], SecretsError> {
+        validate_name(dek_id)?;
+        let dek_id = dek_id.to_string();
         let store = self.store();
-        Ok(store.build(MATERIAL_SERVICE, &format!("{namespace}.{id}"), None)?)
-    }
-
-    /// Store an opaque material blob under `{namespace}.{id}`.
-    ///
-    /// Overwrites any existing payload for the same namespace/id pair
-    /// (writes are idempotent for content-addressed callers).
-    /// Store an opaque material blob under `{namespace}.{id}`.
-    ///
-    /// Overwrites any existing payload for the same namespace/id pair
-    /// (writes are idempotent for content-addressed callers).
-    pub async fn put_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-        bytes: &[u8],
-    ) -> Result<(), SecretsError> {
-        if bytes.len() > MAX_BLOB_BYTES {
-            return Err(SecretsError::BlobTooLarge {
-                id: format!("{namespace}.{id}"),
-                len: bytes.len(),
-                max: MAX_BLOB_BYTES,
-            });
-        }
-        let entry = self.material_entry(namespace, id).await?;
-        let encoded = encode_base58_multibase(bytes);
-        tokio::task::spawn_blocking(move || {
-            entry
-                .set_password(&encoded)
-                .map_err(SecretsError::from)
-        })
-        .await
-        .expect(ERROR_TOKIO)
-    }
-
-    /// Load an opaque material blob previously stored with
-    /// [`Self::put_blob`]. Returns `Ok(None)` when absent.
-    pub async fn get_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-    ) -> Result<Option<Vec<u8>>, SecretsError> {
-        let entry = self.material_entry(namespace, id).await?;
-        let secret = tokio::task::spawn_blocking(move || entry.get_password())
-            .await
-            .expect(ERROR_TOKIO);
-        let decoded = match secret {
-            Err(keyring_core::Error::NoEntry) => return Ok(None),
-            Err(err) => return Err(SecretsError::from(err)),
-            Ok(secret) => decode_base58_multibase(&secret).map_err(|err| {
-                SecretsError::Corrupt(format!("material blob {namespace}.{id}: {err}"))
-            })?,
-        };
-        Ok(Some(decoded))
-    }
-
-    /// Delete an opaque material blob. Absent blobs delete to `Ok(())`,
-    /// mirroring the filesystem storage's tolerant `remove_file`.
-    pub async fn delete_blob(&self, namespace: &str, id: &str) -> Result<(), SecretsError> {
-        let entry = self.material_entry(namespace, id).await?;
-        tokio::task::spawn_blocking(move || {
-            match entry.delete_credential() {
-                // A NoEntry deletion is a no-op, same as a missing file.
-                Err(keyring_core::Error::NoEntry) | Ok(()) => Ok(()),
+        let username = dek_username(&dek_id, version);
+        let dek = tokio::task::spawn_blocking(move || {
+            let entry = store
+                .build(MATERIAL_SERVICE, &username, None)
+                .map_err(SecretsError::from)?;
+            match entry.get_password() {
+                Ok(secret) => decode_dek(&secret, &dek_id, version),
+                Err(keyring_core::Error::NoEntry) => {
+                    let mut dek = [0u8; 32];
+                    rand::rng().fill_bytes(&mut dek);
+                    entry
+                        .set_password(&encode_base58_multibase(dek))
+                        .map_err(SecretsError::from)?;
+                    let mut versions = load_dek_version_list(&*store, &dek_id)?;
+                    if !versions.contains(&version) {
+                        versions.push(version);
+                        versions.sort_unstable();
+                        save_dek_version_list(&*store, &dek_id, &versions)?;
+                    }
+                    Ok(dek)
+                }
                 Err(err) => Err(SecretsError::from(err)),
             }
         })
         .await
-        .expect(ERROR_TOKIO)
+        .expect(ERROR_TOKIO)?;
+        Ok(dek)
     }
 
-    async fn update_index<F>(&self, namespace: &str, update: F) -> Result<(), SecretsError>
-    where
-        F: FnOnce(&mut MaterialIndex) + Send + 'static,
-    {
-        let current = match self.get_blob(namespace, MATERIAL_INDEX_ID).await? {
-            Some(bytes) => MaterialIndex::load(&bytes)?,
-            None => MaterialIndex(Vec::new()),
-        };
-        let mut index = current;
-        update(&mut index);
-        let bytes = index.store()?;
-        self.put_blob(namespace, MATERIAL_INDEX_ID, &bytes).await
+    /// Start a rotation of `dek_id`: create the next version (max existing
+    /// version + 1, or 0 for a fresh id) and return `(version, dek)`.
+    pub async fn create_next_dek_version(
+        &self,
+        dek_id: &str,
+    ) -> Result<(u64, [u8; 32]), SecretsError> {
+        validate_name(dek_id)?;
+        let dek_id = dek_id.to_string();
+        let store = self.store();
+        let dek_id_next = dek_id.clone();
+        let next = tokio::task::spawn_blocking(move || {
+            let versions = load_dek_version_list(&*store, &dek_id_next)?;
+            Ok::<u64, SecretsError>(versions.iter().max().map_or(0, |version| version + 1))
+        })
+        .await
+        .expect(ERROR_TOKIO)?;
+        let dek = self.get_or_create_dek(&dek_id, next).await?;
+        Ok((next, dek))
     }
 
-    /// Register `id` in the namespace's material index so
-    /// [`Self::list_blob_ids`] surfaces it. Idempotent.
-    pub async fn add_to_index(&self, namespace: &str, id: &str) -> Result<(), SecretsError> {
-        // Capture owned strings so the index update closure is 'static.
-        let namespace = namespace.to_string();
-        let id = id.to_string();
-        self.update_index(&namespace, move |index| index.add(id.as_str())).await
+    /// All versions of `dek_id` that exist in the keyring, ascending.
+    pub async fn list_dek_versions(&self, dek_id: &str) -> Result<Vec<u64>, SecretsError> {
+        validate_name(dek_id)?;
+        let dek_id = dek_id.to_string();
+        let store = self.store();
+        tokio::task::spawn_blocking(move || load_dek_version_list(&*store, &dek_id))
+            .await
+            .expect(ERROR_TOKIO)
     }
+}
 
-    /// Unregister `id` from the namespace's material index. Idempotent; does
-    /// not touch the blob itself (see [`Self::delete_blob`]).
-    pub async fn remove_from_index(&self, namespace: &str, id: &str) -> Result<(), SecretsError> {
-        // Capture owned strings so the index update closure is 'static.
-        let namespace = namespace.to_string();
-        let id = id.to_string();
-        self.update_index(&namespace, move |index| index.remove(id.as_str())).await
+/// Keyring username for a DEK version entry: `{dek_id}.v{version}`.
+fn dek_username(dek_id: &str, version: u64) -> String {
+    format!("{dek_id}.v{version}")
+}
+
+/// Keyring username holding the version list for `dek_id`.
+fn version_index_username(dek_id: &str) -> String {
+    format!("{dek_id}.__versions__")
+}
+
+fn decode_dek(secret: &str, dek_id: &str, version: u64) -> Result<[u8; 32], SecretsError> {
+    let decoded = decode_base58_multibase(secret)
+        .map_err(|err| SecretsError::Corrupt(format!("dek {dek_id} v{version}: {err}")))?;
+    if decoded.len() != 32 {
+        return Err(SecretsError::Corrupt(format!(
+            "dek {dek_id} v{version}: bad length {}",
+            decoded.len()
+        )));
     }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&decoded);
+    Ok(bytes)
+}
 
-    /// All blob ids registered under `namespace`, in registration order.
-    pub async fn list_blob_ids(&self, namespace: &str) -> Result<Vec<String>, SecretsError> {
-        match self.get_blob(namespace, MATERIAL_INDEX_ID).await? {
-            Some(bytes) => Ok(MaterialIndex::load(&bytes)?.0),
-            None => Ok(Vec::new()),
+fn load_dek_version_list(
+    store: &keyring_core::CredentialStore,
+    dek_id: &str,
+) -> Result<Vec<u64>, SecretsError> {
+    let entry = store.build(MATERIAL_SERVICE, &version_index_username(dek_id), None)?;
+    match entry.get_password() {
+        Err(keyring_core::Error::NoEntry) => Ok(Vec::new()),
+        Err(err) => Err(SecretsError::from(err)),
+        Ok(secret) => {
+            let decoded = decode_base58_multibase(&secret).map_err(|err| {
+                SecretsError::Corrupt(format!("dek version index {dek_id}: {err}"))
+            })?;
+            bincode::deserialize(&decoded).map_err(SecretsError::from)
         }
     }
+}
+
+fn save_dek_version_list(
+    store: &keyring_core::CredentialStore,
+    dek_id: &str,
+    versions: &[u64],
+) -> Result<(), SecretsError> {
+    let encoded = bincode::serialize(versions)?;
+    let entry = store.build(MATERIAL_SERVICE, &version_index_username(dek_id), None)?;
+    entry
+        .set_password(&encode_base58_multibase(&encoded))
+        .map_err(SecretsError::from)
+}
+
+/// Encrypt `plaintext` under `dek` (ChaCha20-Poly1305, random 12-byte nonce,
+/// no AAD). Returns `(ciphertext, nonce)` for the caller to persist alongside
+/// the DEK id/version.
+pub fn encrypt_blob(dek: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12]), SecretsError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(dek));
+    let mut nonce = [0u8; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|err| SecretsError::Crypto(err.to_string()))?;
+    Ok((ciphertext, nonce))
+}
+
+/// Decrypt `ciphertext` produced by [`encrypt_blob`] under the same `dek` and
+/// `nonce`.
+pub fn decrypt_blob(
+    dek: &[u8; 32],
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, SecretsError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(dek));
+    cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|err| SecretsError::Crypto(err.to_string()))
 }
 
 fn validate_name(part: &str) -> Result<(), SecretsError> {
@@ -436,65 +439,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_round_trips_and_deletes() -> Result<(), SecretsError> {
+    async fn dek_is_deterministic_per_id_and_version() -> Res<()> {
         let repo = test_repo().await;
-        let namespace = "testns";
-        let bytes = b"secret material".to_vec();
-
-        assert!(repo.get_blob(namespace, "b1").await?.is_none());
-        repo.put_blob(namespace, "b1", &bytes).await?;
-        assert_eq!(repo.get_blob(namespace, "b1").await?, Some(bytes));
-        repo.delete_blob(namespace, "b1").await?;
-        // Deleting an absent blob stays idempotent.
-        repo.delete_blob(namespace, "b1").await?;
-        assert!(repo.get_blob(namespace, "b1").await?.is_none());
+        let v0_first = repo.get_or_create_dek("local-secret", 0).await?;
+        let v0_second = repo.get_or_create_dek("local-secret", 0).await?;
+        assert_eq!(v0_first, v0_second);
+        let v1 = repo.get_or_create_dek("local-secret", 1).await?;
+        assert_ne!(v0_first, v1);
         Ok(())
     }
 
     #[tokio::test]
-    async fn blob_overwrite_is_last_write_wins() -> Result<(), SecretsError> {
+    async fn next_version_starts_at_zero_and_increments() -> Res<()> {
         let repo = test_repo().await;
-        repo.put_blob("testns", "b2", b"first").await?;
-        repo.put_blob("testns", "b2", b"second").await?;
-        assert_eq!(repo.get_blob("testns", "b2").await?, Some(b"second".to_vec()));
+        let (v0, dek0) = repo.create_next_dek_version("reservation").await?;
+        assert_eq!(v0, 0);
+        let (v1, dek1) = repo.create_next_dek_version("reservation").await?;
+        assert_eq!(v1, 1);
+        assert_ne!(dek0, dek1);
+        assert_eq!(repo.list_dek_versions("reservation").await?, vec![0, 1]);
         Ok(())
     }
 
     #[tokio::test]
-    async fn oversized_blob_is_rejected() {
+    async fn version_list_tracks_explicit_versions() -> Res<()> {
         let repo = test_repo().await;
-        let oversized = vec![0u8; MAX_BLOB_BYTES + 1];
-        let error = repo.put_blob("testns", "big", &oversized).await.unwrap_err();
-        assert!(matches!(error, SecretsError::BlobTooLarge { .. }));
+        assert!(repo.list_dek_versions("prekey-sidecar").await?.is_empty());
+        repo.get_or_create_dek("prekey-sidecar", 2).await?;
+        repo.get_or_create_dek("prekey-sidecar", 5).await?;
+        assert_eq!(repo.list_dek_versions("prekey-sidecar").await?, vec![2, 5]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_round_trips() -> Res<()> {
+        let repo = test_repo().await;
+        let dek = repo.get_or_create_dek("local-secret", 0).await?;
+        let plaintext = b"secret material".to_vec();
+        let (ciphertext, nonce) = encrypt_blob(&dek, &plaintext)?;
+        assert_ne!(ciphertext, plaintext);
+        assert_eq!(decrypt_blob(&dek, &ciphertext, &nonce)?, plaintext);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decrypt_with_wrong_key_or_tampering_fails() -> Res<()> {
+        let repo = test_repo().await;
+        let dek = repo.get_or_create_dek("local-secret", 0).await?;
+        let other = repo.get_or_create_dek("local-secret", 1).await?;
+        let (ciphertext, nonce) = encrypt_blob(&dek, b"secret material")?;
+        assert!(decrypt_blob(&other, &ciphertext, &nonce).is_err());
+
+        let mut tampered = ciphertext.clone();
+        tampered[0] ^= 0xff;
+        assert!(decrypt_blob(&dek, &tampered, &nonce).is_err());
+        Ok(())
     }
 
     #[tokio::test]
     async fn invalid_names_are_rejected() {
         let repo = test_repo().await;
-        let error = repo.put_blob("bad/namespace", "id", b"x").await.unwrap_err();
+        let error = repo.get_or_create_dek("bad/name", 0).await.unwrap_err();
         assert!(matches!(error, SecretsError::InvalidName(_)));
-
-        let error = repo.put_blob("ns", "bad id with spaces", b"x").await.unwrap_err();
-        assert!(matches!(error, SecretsError::InvalidName(_)));
-    }
-
-    #[tokio::test]
-    async fn index_round_trips_and_updates() -> Result<(), SecretsError> {
-        let repo = test_repo().await;
-        let namespace = "indextest";
-        repo.add_to_index(namespace, "a").await?;
-        repo.add_to_index(namespace, "b").await?;
-        // Re-adding is idempotent.
-        repo.add_to_index(namespace, "a").await?;
-        let listed = repo.list_blob_ids(namespace).await?;
-        assert_eq!(listed, vec!["a".to_string(), "b".to_string()]);
-
-        repo.remove_from_index(namespace, "a").await?;
-        let listed = repo.list_blob_ids(namespace).await?;
-        assert_eq!(listed, vec!["b".to_string()]);
-
-        // Empty namespace lists cleanly.
-        assert!(repo.list_blob_ids("freshns").await?.is_empty());
-        Ok(())
     }
 }

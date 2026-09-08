@@ -667,9 +667,7 @@ impl Pair {
     /// the caller can inspect/manipulate the persistent SQLite state directly
     /// while the runtime is down. A fresh node over the same disk path
     /// ([`Node::boot_with_config`]) models the subsequent process restart.
-    pub(crate) async fn shutdown_take_right(
-        &mut self,
-    ) -> std::sync::Arc<SqliteBigRepoStore> {
+    pub(crate) async fn shutdown_take_right(&mut self) -> std::sync::Arc<SqliteBigRepoStore> {
         self.left_conn.take();
         self.right_conn.take();
         let node = self.guard.nodes.remove(self.right_idx);

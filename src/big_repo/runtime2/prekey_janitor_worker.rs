@@ -42,10 +42,7 @@ impl PrekeyJanitorWorkerStopToken {
 
 pub struct SpawnedPrekeyJanitorWorker {
     pub stop: PrekeyJanitorWorkerStopToken,
-    pub run: <future_form::Sendable as future_form::FutureForm>::Future<
-        'static,
-        eyre::Result<()>,
-    >,
+    pub run: <future_form::Sendable as future_form::FutureForm>::Future<'static, eyre::Result<()>>,
 }
 
 pub fn spawn_prekey_janitor_worker(
@@ -83,11 +80,10 @@ pub(crate) async fn process_admissions(
 ) -> Res<Option<u64>> {
     let mut handled_through: Option<u64> = None;
     for (seq, bytes) in rows {
-        let event: StaticEvent<Vec<u8>> = bincode::deserialize(&bytes)
-            .expect("persisted keyhive admission event must decode");
+        let event: StaticEvent<Vec<u8>> =
+            bincode::deserialize(&bytes).expect("persisted keyhive admission event must decode");
         if let StaticEvent::CgkaOperation(operation) = event
-            && let beekem::operation::CgkaOperation::Add { added_id, pk, .. } =
-                operation.payload()
+            && let beekem::operation::CgkaOperation::Add { added_id, pk, .. } = operation.payload()
         {
             super::prekey_janitor::housekeep_after_add(keyhive, added_id, pk).await?;
         }
@@ -143,4 +139,3 @@ async fn run_prekey_janitor_tail(
         }
     }
 }
-

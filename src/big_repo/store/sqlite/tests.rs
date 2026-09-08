@@ -1772,7 +1772,8 @@ async fn sqlite_big_repo_keyhive_archive_changes_do_not_prune_event_log() -> Res
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
         store.clone(),
         archive_dir.path().to_path_buf(),
-    )?;
+    )
+    .await?;
     let event_hash = subduction_keyhive::storage::StorageHash::new([7; 32]);
     let archive_hash = subduction_keyhive::storage::StorageHash::new([8; 32]);
     subduction_keyhive::storage::KeyhiveStorage::<Sendable>::save_event(
@@ -2525,5 +2526,142 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
         guard3.disarm();
     }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secret_blob_and_dek_crud() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store =
+        SqliteBigRepoStore::new(sql, "big-repo-sqlite-secret-blobs", BuckId::MAX_LEVEL).await?;
+
+    // DEK rows: absent, upsert, re-wrap same version, version list.
+    assert!(store.load_dek("local-secret", 0).await?.is_none());
+    store
+        .save_dek("local-secret", 0, vec![1, 2, 3], 1, "chacha20poly1305")
+        .await?;
+    let dek = store.load_dek("local-secret", 0).await?.expect("dek row");
+    assert_eq!(dek.wrapped_dek, vec![1, 2, 3]);
+    assert_eq!(dek.kek_version, 1);
+    assert_eq!(dek.algorithm, "chacha20poly1305");
+
+    // Re-wrapping the same version overwrites in place.
+    store
+        .save_dek("local-secret", 0, vec![4, 5, 6], 2, "chacha20poly1305")
+        .await?;
+    let rewrap = store.load_dek("local-secret", 0).await?.unwrap();
+    assert_eq!(rewrap.wrapped_dek, vec![4, 5, 6]);
+    assert_eq!(rewrap.kek_version, 2);
+
+    // Rotation adds versions without touching older ones.
+    store
+        .save_dek("local-secret", 1, vec![7, 8], 2, "chacha20poly1305")
+        .await?;
+    assert_eq!(store.list_dek_versions("local-secret").await?, vec![0, 1]);
+    assert_eq!(store.list_dek_ids().await?, vec!["local-secret"]);
+
+    // Blob CRUD.
+    assert!(
+        store
+            .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+            .await?
+            .is_none()
+    );
+    store
+        .save_secret_blob(
+            SecretBlobKind::LocalSecret,
+            &[9; 32],
+            "local-secret",
+            1,
+            vec![10, 11],
+            vec![12; 12],
+        )
+        .await?;
+    let blob = store
+        .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+        .await?
+        .expect("blob row");
+    assert_eq!(blob.dek_id, "local-secret");
+    assert_eq!(blob.dek_version, 1);
+    assert_eq!(blob.ciphertext, vec![10, 11]);
+    assert_eq!(blob.nonce, vec![12; 12]);
+
+    assert_eq!(
+        store
+            .list_secret_blob_ids(SecretBlobKind::LocalSecret)
+            .await?,
+        vec![vec![9; 32]]
+    );
+
+    // Upsert replaces ciphertext under a new DEK version.
+    store
+        .save_secret_blob(
+            SecretBlobKind::LocalSecret,
+            &[9; 32],
+            "local-secret",
+            2,
+            vec![20, 21],
+            vec![22; 12],
+        )
+        .await?;
+    let migrated = store
+        .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+        .await?
+        .unwrap();
+    assert_eq!(migrated.dek_version, 2);
+    assert_eq!(migrated.ciphertext, vec![20, 21]);
+
+    store
+        .delete_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+        .await?;
+    assert!(
+        store
+            .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+            .await?
+            .is_none()
+    );
+
+    // Kinds are independent namespaces.
+    store
+        .save_secret_blob(
+            SecretBlobKind::Reservation,
+            &[9; 32],
+            "reservation",
+            0,
+            vec![1],
+            vec![2; 12],
+        )
+        .await?;
+    assert!(
+        store
+            .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+            .await?
+            .is_none()
+    );
+    assert!(
+        store
+            .load_secret_blob(SecretBlobKind::Reservation, &[9; 32])
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .list_secret_blob_ids(SecretBlobKind::Reservation)
+            .await?,
+        vec![vec![9; 32]]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secret_blob_kind_roundtrips_through_i64() -> Res<()> {
+    for kind in [
+        SecretBlobKind::LocalSecret,
+        SecretBlobKind::PrekeySidecar,
+        SecretBlobKind::Reservation,
+    ] {
+        assert_eq!(SecretBlobKind::from_i64(kind.as_i64())?, kind);
+    }
+    assert!(SecretBlobKind::from_i64(99).is_err());
     Ok(())
 }

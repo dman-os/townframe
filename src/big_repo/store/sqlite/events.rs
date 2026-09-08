@@ -275,11 +275,8 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn advance_prekey_janitor_cursor(&self, cursor: u64) -> Res<()> {
-        self.register_keyhive_admission_reader(
-            KEYHIVE_ADMISSION_READER_PREKEY_JANITOR,
-            cursor,
-        )
-        .await
+        self.register_keyhive_admission_reader(KEYHIVE_ADMISSION_READER_PREKEY_JANITOR, cursor)
+            .await
     }
 
     #[cfg(test)]

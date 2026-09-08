@@ -1348,8 +1348,7 @@ async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crat
         let prekeys_now = pair.right().repo.keyhive().prekeys().await;
         let consumed: HashSet<_> = joiner_before.difference(&prekeys_now).copied().collect();
         if !consumed.is_empty()
-            && prekeys_now.len()
-                >= crate::runtime2::prekey_janitor::PREKEY_POOL_FLOOR
+            && prekeys_now.len() >= crate::runtime2::prekey_janitor::PREKEY_POOL_FLOOR
         {
             break (consumed, prekeys_now);
         }
@@ -1551,7 +1550,6 @@ fn synthetic_join_add_event(
     added_id: beekem::id::MemberId,
     pk: keyhive_crypto::share_key::ShareKey,
 ) -> crate::Res<keyhive_core::event::static_event::StaticEvent<Vec<u8>>> {
-
     let signer = keyhive_crypto::signer::memory::MemorySigner::generate(&mut rand_08::rngs::OsRng);
     let tree_id = beekem::id::TreeId(
         ed25519_dalek::VerifyingKey::from_bytes(&[0x2a; 32]).expect("valid point"),
@@ -1563,9 +1561,7 @@ fn synthetic_join_add_event(
         signer.0.verifying_key(),
         ed25519_dalek::Signer::sign(&signer.0, &payload),
     );
-    Ok(keyhive_core::event::static_event::StaticEvent::CgkaOperation(
-        Box::new(signed),
-    ))
+    Ok(keyhive_core::event::static_event::StaticEvent::CgkaOperation(Box::new(signed)))
 }
 
 /// A `CgkaOperation::Add` admitted into the durable incorporation log while
@@ -1596,7 +1592,10 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
         !joiner_before.is_empty(),
         "joiner must start with a published prekey pool"
     );
-    let consumed = *joiner_before.iter().next().expect("a published prekey exists");
+    let consumed = *joiner_before
+        .iter()
+        .next()
+        .expect("a published prekey exists");
 
     // The keyhive archive must be durably persisted before the restart so the
     // fresh process restores the same published pool (the archive is
@@ -1623,10 +1622,10 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
         let injected_store = pair.shutdown_take_right().await;
         // Build the synthetic Add while the runtime is down (its bytes are
         // what incorporation would have persisted).
-        let added_id = beekem::id::MemberId(ed25519_dalek::VerifyingKey::from_bytes(
-            local_id.0.as_bytes(),
-        )
-        .expect("individual id is a valid Ed25519 key"));
+        let added_id = beekem::id::MemberId(
+            ed25519_dalek::VerifyingKey::from_bytes(local_id.0.as_bytes())
+                .expect("individual id is a valid Ed25519 key"),
+        );
         let event = synthetic_join_add_event(added_id, consumed)?;
         let bytes = bincode::serialize(&event)?;
         let hash = subduction_keyhive::hash_event_bytes(&bytes);
@@ -1668,7 +1667,11 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(
-        pair.right().repo.keyhive().rotate_op_count_for(consumed).await,
+        pair.right()
+            .repo
+            .keyhive()
+            .rotate_op_count_for(consumed)
+            .await,
         1,
         "exactly one rotation must have happened for the consumed prekey"
     );
@@ -1739,18 +1742,19 @@ async fn tier6_prekey_janitor_replay_is_noop() -> crate::Res<()> {
         .await
         .map_err(|err| crate::ferr!("failed reading admission rows: {err}"))?;
     let rows = rows.into_iter().map(|row| (row.seq, row.bytes)).collect();
-    crate::runtime2::prekey_janitor_worker::process_admissions(
-        pair.right().repo.keyhive(),
-        rows,
-    )
-    .await?;
+    crate::runtime2::prekey_janitor_worker::process_admissions(pair.right().repo.keyhive(), rows)
+        .await?;
     assert_eq!(
         pair.right().repo.keyhive().prekeys().await,
         prekeys_snapshot,
         "replayed admissions must not rotate anything or resurrect keys"
     );
     assert_eq!(
-        pair.right().repo.keyhive().rotate_op_count_for(consumed).await,
+        pair.right()
+            .repo
+            .keyhive()
+            .rotate_op_count_for(consumed)
+            .await,
         1,
         "a consumed prekey must be rotated exactly once, across replays"
     );

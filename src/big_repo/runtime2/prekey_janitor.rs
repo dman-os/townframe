@@ -85,7 +85,11 @@ pub(crate) async fn refill_to_floor(keyhive: &crate::keyhive::BigKeyhiveHandle) 
         pool = keyhive.prekeys().await.len();
     }
     if pool != PREKEY_POOL_FLOOR {
-        tracing::debug!(pool, floor = PREKEY_POOL_FLOOR, "prekey janitor: pool refilled");
+        tracing::debug!(
+            pool,
+            floor = PREKEY_POOL_FLOOR,
+            "prekey janitor: pool refilled"
+        );
     }
     Ok(())
 }

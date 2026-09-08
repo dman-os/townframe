@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT dek_version AS \"dek_version: i64\"\n               FROM big_repo_deks\n              WHERE scope_id = ?1 AND dek_id = ?2\n              ORDER BY dek_version",
+  "describe": {
+    "columns": [
+      {
+        "name": "dek_version: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_repo_deks",
+            "name": "dek_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5644aec7a541f67f12523d3a699ac1a0f88b617a3cf25c32145a2bc84e06621"
+}

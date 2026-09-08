@@ -159,9 +159,8 @@ struct DocWorker2<F: FutureForm> {
     /// the blob falls back to the authoritative Keyhive derivation. The cache
     /// lives and dies with this worker instance, so a regenerated worker
     /// starts cold.
-    recovered_keys: std::sync::Mutex<
-        HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>,
-    >,
+    recovered_keys:
+        std::sync::Mutex<HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>>,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -612,7 +611,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 .get(&head)
                 .copied();
             if let Some(key) = cached_key {
-                match self.io.decrypt_with_cached_key(self.sed_id, locator, key).await? {
+                match self
+                    .io
+                    .decrypt_with_cached_key(self.sed_id, locator, key)
+                    .await?
+                {
                     Some(plaintext) => {
                         plaintexts.insert(head.as_bytes().to_vec(), plaintext);
                         continue;

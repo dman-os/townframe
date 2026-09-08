@@ -13,7 +13,7 @@ const REPO_MARKER_FILE: &str = "db.repo.txt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
     pub repo_root: PathBuf,
-    pub samod_root: PathBuf,
+    pub big_repo_root: PathBuf,
     pub sqlite_path: PathBuf,
     pub blobs_root: PathBuf,
     pub marker_path: PathBuf,
@@ -831,7 +831,7 @@ async fn boot_big_repo(
     let config = big_repo::Config {
         node_identity_seed: identity.iroh_secret_key.to_bytes(),
         storage: big_repo::StorageConfig::Disk {
-            path: layout.samod_root.clone(),
+            path: layout.big_repo_root.clone(),
         },
         scope_key: Arc::from("daybook-core"),
         hidden_parts: Default::default(),
@@ -984,7 +984,7 @@ fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
         .wrap_err_with(|| format!("error absolutizing repo root {}", repo_root.display()))?;
     Ok(RepoLayout {
         repo_root: repo_root.clone(),
-        samod_root: repo_root.join("samod"),
+        big_repo_root: repo_root.join("big_repo"),
         sqlite_path: repo_root.join("sqlite.db"),
         blobs_root: repo_root.join("blobs"),
         marker_path: repo_root.join(REPO_MARKER_FILE),

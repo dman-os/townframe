@@ -36,6 +36,8 @@ pub(crate) use events::{
 };
 mod ids;
 mod parts_cursors;
+mod secret_blobs;
+pub(crate) use secret_blobs::SecretBlobKind;
 mod sedimentree;
 mod tree_cache;
 use tree_cache::{TREE_CACHE_METADATA_CAPACITY, TreeCache, TreeCacheGuard};

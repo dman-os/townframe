@@ -2930,11 +2930,11 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
+async fn perf_big_repo_disk_add_like_drawer_baseline() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
     let temp_dir = tempfile::tempdir()?;
-    let storage_path = temp_dir.path().join("samod-amctx-disk");
+    let storage_path = temp_dir.path().join("big-repo-amctx-disk");
     tokio::fs::create_dir_all(&storage_path).await?;
 
     let (big_repo, _big_sync_host, acx_stop) = boot_disk_repo(storage_path.clone()).await?;
@@ -3036,7 +3036,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     let elapsed = started_at.elapsed();
     let docs_per_sec = total_docs as f64 / elapsed.as_secs_f64();
     eprintln!(
-        "samod+automerge via SharedBigRepo baseline: added {} docs in {:?} ({:.2} docs/sec)",
+        "big_repo+automerge via SharedBigRepo baseline: added {} docs in {:?} ({:.2} docs/sec)",
         total_docs, elapsed, docs_per_sec
     );
     assert!(docs_per_sec > 0.0);

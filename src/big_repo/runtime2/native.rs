@@ -920,9 +920,7 @@ where
             if key.try_decrypt(encrypted.nonce, &mut data).is_err() {
                 return Ok(None);
             }
-            let Ok(envelope) =
-                bincode::deserialize::<Envelope<Vec<u8>, Vec<u8>>>(&data)
-            else {
+            let Ok(envelope) = bincode::deserialize::<Envelope<Vec<u8>, Vec<u8>>>(&data) else {
                 return Ok(None);
             };
             Ok(Some(envelope.plaintext))
@@ -1123,12 +1121,15 @@ where
             // Surface the recovered application secrets so the doc worker's
             // per-document recovered-key cache can serve later walks without
             // repeating CGKA derivations.
-            let mut keys =
-                vec![(encrypted.content_ref.clone(), entrypoint_key)];
+            let mut keys = vec![(encrypted.content_ref.clone(), entrypoint_key)];
             for (content_ref, key) in &state.keys {
                 keys.push((content_ref.clone(), *key));
             }
-            Ok(CausalDecryptResult { complete, blockers, keys })
+            Ok(CausalDecryptResult {
+                complete,
+                blockers,
+                keys,
+            })
         };
         Sendable::from_future(fut)
     }
@@ -2255,9 +2256,7 @@ where
         Arc::clone(&timer),
     );
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
-    stop_token
-        .child_tasks
-        .spawn(spawned_prekey_janitor.run)?;
+    stop_token.child_tasks.spawn(spawned_prekey_janitor.run)?;
 
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),

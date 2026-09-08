@@ -53,15 +53,11 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         Sendable::from_future(async move {
-            let op = keyhive_core::principal::individual::op::KeyOp::Add(Arc::clone(
-                new_prekey,
-            ));
+            let op = keyhive_core::principal::individual::op::KeyOp::Add(Arc::clone(new_prekey));
             if let Some(local_secret) = local_secret {
                 self.save_prekey_change_durable(&op, local_secret)
                     .await
-                    .expect(
-                        "combined prekey change must be durable before its public operation",
-                    );
+                    .expect("combined prekey change must be durable before its public operation");
             }
             self.send_evt(crate::runtime2::Runtime2Evt::PrekeyExpanded {
                 new_prekey: Arc::clone(new_prekey),
@@ -75,15 +71,11 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         Sendable::from_future(async move {
-            let op = keyhive_core::principal::individual::op::KeyOp::Rotate(Arc::clone(
-                rotate_key,
-            ));
+            let op = keyhive_core::principal::individual::op::KeyOp::Rotate(Arc::clone(rotate_key));
             if let Some(local_secret) = local_secret {
                 self.save_prekey_change_durable(&op, local_secret)
                     .await
-                    .expect(
-                        "combined prekey change must be durable before its public operation",
-                    );
+                    .expect("combined prekey change must be durable before its public operation");
             }
             self.send_evt(crate::runtime2::Runtime2Evt::PrekeyRotated {
                 rotate_key: Arc::clone(rotate_key),
