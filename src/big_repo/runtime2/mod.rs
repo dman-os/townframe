@@ -81,6 +81,13 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
         async_channel::Sender<Runtime2Evt>,
         async_channel::Receiver<Runtime2Evt>,
     )>,
+    /// Test-only: when false, skip the initial keyhive sync round that
+    /// `ConnEstablished` would otherwise start with a new peer. Mirrors
+    /// `BigRepoConfig::keyhive_change_notifs` so `boot_without_keyhive_notifs`
+    /// peers only learn keyhive changes through explicit
+    /// `sync_keyhive_with_peer` rounds — the connect itself never delivers
+    /// membership. Production always enables the connect sync.
+    pub keyhive_sync_on_connect: bool,
 }
 
 /// Transport-agnostic connect/accept/close — the seam that replaces iroh baked

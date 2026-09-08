@@ -19,6 +19,9 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── identity / config ──────────────────────────────────────────────────
     local_peer_id: PeerId,
     sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
+    /// When false, `ConnEstablished` skips the initial keyhive sync round
+    /// (mirrors `BigRepoConfig::keyhive_change_notifs`; test-only).
+    keyhive_sync_on_connect: bool,
 
     // ── injected IO facades ────────────────────────────────────────────────
     runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
@@ -1983,7 +1986,9 @@ where
                 closed: Arc::clone(&closed),
             },
         );
-        self.start_keyhive_sync(peer_id)?;
+        if self.keyhive_sync_on_connect {
+            self.start_keyhive_sync(peer_id)?;
+        }
         Ok(())
     }
 
@@ -2784,6 +2789,7 @@ where
         timer,
         clock,
         connect,
+        keyhive_sync_on_connect,
         event_channel,
     } = config;
 
@@ -2807,6 +2813,7 @@ where
         runtime_io: Arc::clone(&runtime_io),
         connect,
         doc_io,
+        keyhive_sync_on_connect,
         change_manager,
         child_tasks: child_tasks.clone(),
         // timer: Arc::clone(&timer),

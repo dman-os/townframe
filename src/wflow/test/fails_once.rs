@@ -24,7 +24,10 @@ async fn test_fails_once() -> Res<()> {
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)
-    test_cx.wait_until_no_active_jobs(10).await?;
+    // The fail-once pipeline (schedule → fail → retry → archive) is event-driven;
+    // under shared CI runners 10s is too tight. 60s with nextest's hard timeout
+    // as the backstop.
+    test_cx.wait_until_no_active_jobs(60).await?;
 
     tracing::info!("wait_until_no_active_jobs completed, getting snapshot");
 
@@ -73,7 +76,8 @@ async fn test_fails_once_sqlite() -> Res<()> {
         .await?;
 
     // Wait until there are no active jobs (job completed or archived)
-    test_cx.wait_until_no_active_jobs(10).await?;
+    // Same arbitrary-cap fix as the memory-store twin above.
+    test_cx.wait_until_no_active_jobs(60).await?;
 
     tracing::info!("wait_until_no_active_jobs completed, getting snapshot");
 

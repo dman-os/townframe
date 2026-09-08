@@ -196,7 +196,18 @@ impl DocProcessorTriageListener {
             } else {
                 None
             };
-            let predicate_doc = predicate_doc_arc.map(|doc| doc.as_ref()).unwrap_or(doc);
+            // Predicates like `HasTag(A) AND HasTag(B)` where A and B land in
+            // different batches can never match the batch-only meta doc. When
+            // the full doc is already loaded (any processor needed it),
+            // evaluate every predicate against it; fall back to the meta doc
+            // only when the full doc is unavailable (deleted/unreadable).
+            let predicate_doc = match full_doc_for_reference_predicates
+                .as_ref()
+                .and_then(|opt| opt.as_ref())
+            {
+                Some(full) => full.as_ref(),
+                None => predicate_doc_arc.map(|doc| doc.as_ref()).unwrap_or(doc),
+            };
 
             self.predicate_resolved.clear();
             for requirement in &self.predicate_requirements {

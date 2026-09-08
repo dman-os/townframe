@@ -388,9 +388,39 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
+    // Subscribe before the direct sync so the worker's replay task for this
+    // doc cannot complete unnoticed (stats is a broadcast: late subscribers
+    // miss earlier events).
+    let mut settle_stats = pair.right().worker.subscribe_stats();
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     drop(reader_doc);
+    // The worker's peer replay may schedule the doc task before the keyhive
+    // membership lands; that task fails with Policy(DocumentNotFound) and
+    // reschedules (intentional big_sync/keyhive race, converges once the
+    // pull lands). Wait for the doc's sync to actually settle rather than
+    // capping a blanket idle window that slow CI can blow past.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match settle_stats
+                .recv()
+                .await
+                .map_err(|err| crate::ferr!("worker stats closed: {err}"))?
+            {
+                big_sync_core::SyncStatEvent::ObjectSynced { obj_id: synced, .. }
+                    if synced == doc_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, crate::eyre::Report>(())
+    })
+    .await
+    .map_err(|_| {
+        crate::ferr!("reader worker never settled the doc sync after keyhive membership")
+    })??;
     pair.right()
         .worker
         .wait_for_idle(std::time::Duration::from_secs(5))

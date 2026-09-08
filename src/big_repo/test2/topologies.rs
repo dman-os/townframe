@@ -773,9 +773,16 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // payload-first delivery is rejected for lack of local membership. With
     // notifications wired, B's dispatcher could propagate the grant to C in
     // the background and race the deliberate staleness below.
-    let guard =
-        ShutdownGuard::boot_mixed(&[(30, "Alice", true), (31, "Bob", true), (32, "Carol", false)])
-            .await?;
+    // All three boot without keyhive notifs: the connect-triggered keyhive
+    // sync is disabled, so membership only moves through the explicit
+    // `sync_keyhive_with_peer` rounds below. This pins the opposite-order
+    // premise: C connects to B but does not yet know the document.
+    let guard = ShutdownGuard::boot_mixed(&[
+        (30, "Alice", false),
+        (31, "Bob", false),
+        (32, "Carol", false),
+    ])
+    .await?;
     let node_a = guard.node(0);
     let node_b = guard.node(1);
     let node_c = guard.node(2);

@@ -2156,6 +2156,7 @@ where
         timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
+        keyhive_sync_on_connect: keyhive_change_notifs,
         event_channel: Some((evt_tx.clone(), evt_rx)),
     };
 

@@ -254,7 +254,7 @@ impl PlugsRepo {
         self.events_tx.subscribe()
     }
 
-    pub(crate) fn publish_event(&self, event: PlugsEvent) {
+    fn publish_event(&self, event: PlugsEvent) {
         // Broadcast with zero receivers is a no-op, not an error to surface:
         // subscribers come and go, and the durable stream is the event store.
         drop(self.events_tx.send(event));
