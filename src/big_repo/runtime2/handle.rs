@@ -90,7 +90,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         initial_content: automerge::Automerge,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
-    ) -> eyre::Result<std::sync::Arc<crate::runtime2::types::LiveDocBundle>> {
+    ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::FinalizeAllocatedDoc {
@@ -118,7 +118,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         initial_content: automerge::Automerge,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
-    ) -> eyre::Result<std::sync::Arc<crate::runtime2::types::LiveDocBundle>> {
+    ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
         use nonempty::NonEmpty;
         let heads = initial_content.get_heads();
         let content_heads = NonEmpty::from_vec(heads.iter().map(|head| head.0).collect())
@@ -148,35 +148,14 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn get_doc_handle(
         &self,
         doc_id: DocumentId,
-    ) -> eyre::Result<
-        crate::runtime2::types::DocLookup<std::sync::Arc<crate::runtime2::types::LiveDocBundle>>,
-    > {
+    ) -> eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>
+    {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
-    }
-
-    /// Apply the durable Keyhive admission to the document's materialized state.
-    pub(crate) async fn apply_keyhive_to_doc(
-        &self,
-        doc_id: DocumentId,
-        admission_seq: u64,
-    ) -> eyre::Result<crate::runtime2::MaterializationStatus> {
-        let (resp, rx) = futures::channel::oneshot::channel();
-        self.cmd_tx
-            .send(Runtime2Cmd::ApplyKeyhiveToDoc {
-                doc_id,
-                admission_seq,
-                resp,
-            })
-            .await
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await
-            .map_err(|_| ferr!(ERROR_CHANNEL))?
-            .map_err(|error| ferr!("keyhive materialization failed: {error}"))
     }
 
     /// Commit a delta (sets of encrypted commits) to a document.

@@ -283,7 +283,12 @@ impl BigKeyhiveHandle {
             }
         }
         for tombstone in tombstones {
-            set.remove(&tombstone);
+            // Mirror `PrekeyState::build` upstream: the published set must
+            // never become empty (a stale rotation cycle would otherwise
+            // tombstone every key). Skip a removal that would empty it.
+            if set.len() > 1 || !set.contains(&tombstone) {
+                set.remove(&tombstone);
+            }
         }
         set
     }
@@ -540,6 +545,21 @@ impl BigKeyhiveHandle {
                     .then_some(group_id.to_bytes())
             })
             .collect())
+    }
+
+    /// Current BeeKEM/PCS epoch fingerprint for a document, or `None` when
+    /// the document is unknown or the settled operation history requires a
+    /// causally subsequent Update.
+    pub(crate) async fn current_causal_epoch(&self, doc_id: DocumentId) -> Res<Option<[u8; 32]>> {
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
+            return Ok(None);
+        };
+        Ok(self
+            .keyhive
+            .try_pcs_key_hash(doc)
+            .await
+            .map(|hash| *hash.raw.as_bytes()))
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {

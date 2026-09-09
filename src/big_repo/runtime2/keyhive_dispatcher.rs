@@ -395,7 +395,7 @@ async fn classify_rows(
                     "KEYHIVE_DISPATCH_DIAG fanout decision"
                 );
             }
-            if selected {
+            if true || selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
             }

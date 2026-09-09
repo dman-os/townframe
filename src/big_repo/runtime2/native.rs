@@ -1058,6 +1058,25 @@ where
                     missing_ciphertexts.push(ancestor_ref.clone());
                 }
             }
+            // The store's walk also records transitive ancestors whose
+            // ciphertexts were absent at walk time (`state.next`). Those are
+            // not visible in the entrypoint's direct ancestor set, but they
+            // are just as blocking: without them the closure is incomplete
+            // and the doc would silently materialize with a partial key set
+            // and no retry trigger. Classify them the same way (re-check the
+            // store, since content may have arrived since the walk) so the
+            // doc worker records precise blockers and re-walks when the
+            // ciphertexts land.
+            for ancestor_ref in state.next.keys() {
+                if complete_refs.contains(ancestor_ref) {
+                    continue;
+                }
+                if ct_store.contains_content(ancestor_ref).await? {
+                    missing_keys.push(ancestor_ref.clone());
+                } else {
+                    missing_ciphertexts.push(ancestor_ref.clone());
+                }
+            }
             if !missing_ciphertexts.is_empty() || !missing_keys.is_empty() {
                 tracing::warn!(
                     content_ref = ?encrypted.content_ref,

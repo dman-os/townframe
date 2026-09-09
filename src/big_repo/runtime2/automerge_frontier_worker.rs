@@ -4,10 +4,11 @@
 //!
 //! - **Keyhive admission stream** ([`SqliteBigRepoStore::admission_events_after`]):
 //!   rows exist only after their effects are visible in the keyhive graph;
-//!   publication reattempts the live doc's materialization and waits for that
-//!   admission sequence before reading heads. Decode work is keyed by admission
-//!   sequence and publication is keyed by document, allowing independent documents to make
-//!   progress while the durable cursor still waits for its contiguous prefix.
+//!   publication awaits the doc bundle's BeeKEM epoch to catch up to the
+//!   keyhive's current epoch before reading heads. Decode work is keyed by
+//!   admission sequence and publication is keyed by document, allowing
+//!   independent documents to make progress while the durable cursor still
+//!   waits for its contiguous prefix.
 //! - **Source-part revisions** (a match-all local revision reader): every
 //!   part in the scope is read live, including parts created after boot — no
 //!   part enumeration is frozen into the walker. Added/Changed events carry a
@@ -240,28 +241,35 @@ enum FrontierKey {
 /// isn't materialized yet (its admission/part event will re-trigger later).
 ///
 /// Storage-ahead-of-bundle races converge without a separate commit
-/// watermark: a publish only runs after `apply_keyhive_to_doc` (which drives
-/// a full re-materialization to `Ready`) or once the bundle exists, and any
+/// watermark: a publish awaits the bundle's BeeKEM epoch to catch up to
+/// the keyhive's current epoch (the hub forwards every CGKA op to the doc
+/// worker, which re-materializes and updates the bundle epoch), and any
 /// later materialization completion re-triggers a keyed replacement publish
 /// that overwrites the frontier with the newer heads.
 async fn publish_heads(
     doc_id: crate::DocumentId,
     runtime: &crate::runtime2::Runtime2Handle<Sendable>,
+    keyhive: &crate::keyhive::BigKeyhiveHandle,
     big_sync_store: &Arc<dyn HostPartStore>,
     frontier_store: &Arc<dyn HostPartStore>,
     keyhive_watermark: Option<u64>,
     scope: &WorkerGroupScope,
 ) -> Res<PublishOutcome> {
-    let Ok(crate::runtime2::types::DocLookup::Ready(bundle)) = runtime.get_doc_handle(doc_id).await
+    let Ok(crate::runtime2::types::DocLookup::Ready(handle)) = runtime.get_doc_handle(doc_id).await
     else {
         return Ok(PublishOutcome::Deferred);
     };
-    if let Some(target_seq) = keyhive_watermark {
-        bundle.await_keyhive_watermark(target_seq).await?;
+    if keyhive_watermark.is_some() {
+        // The admission's CGKA op is epoch-changing; the hub forwards it to
+        // the doc worker, which re-materializes and updates the bundle
+        // epoch. Await the bundle to catch up to the keyhive's current
+        // epoch before advertising heads.
+        let target_epoch = keyhive.current_causal_epoch(doc_id).await?;
+        handle.bundle.await_beekem_epoch(target_epoch).await?;
     }
-    let causal_epoch = bundle.current_causal_epoch();
+    let causal_epoch = handle.bundle.current_causal_epoch();
     let heads = surelock::key::lock_scope(|key| {
-        let (doc, _key) = key.lock(&bundle.doc);
+        let (doc, _key) = key.lock(&handle.bundle.doc);
         doc.get_heads()
     });
     let heads_formatted = am_utils_rs::serialize_commit_heads(&heads);
@@ -822,12 +830,10 @@ async fn run_concurrent_frontier_task(
                 }
             }
             let keyhive_watermark = admission.map(|source| source.cursor);
-            if let Some(target_seq) = keyhive_watermark {
-                runtime.apply_keyhive_to_doc(doc_id, target_seq).await?;
-            }
             let outcome = publish_heads(
                 doc_id,
                 &runtime,
+                &keyhive,
                 &big_sync_store,
                 &frontier_store,
                 keyhive_watermark,

@@ -168,22 +168,16 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
-    pub latest_keyhive_seq: std::sync::atomic::AtomicU64,
-    #[educe(Debug(ignore))]
     causal_epoch: std::sync::RwLock<Option<[u8; 32]>>,
     #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
-    #[educe(Debug(ignore))]
-    _runtime2_lease: Option<crate::runtime2::DocLease>,
 }
 
 impl LiveDocBundle {
     pub(crate) fn new(
         doc_id: DocumentId,
         doc: automerge::Automerge,
-        lease: crate::runtime2::DocLease,
         partially_decrypted: bool,
-        latest_keyhive_seq: u64,
         causal_epoch: Option<[u8; 32]>,
     ) -> Self {
         Self {
@@ -192,10 +186,8 @@ impl LiveDocBundle {
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
-            latest_keyhive_seq: std::sync::atomic::AtomicU64::new(latest_keyhive_seq),
             causal_epoch: std::sync::RwLock::new(causal_epoch),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
-            _runtime2_lease: Some(lease),
         }
     }
 
@@ -243,30 +235,56 @@ impl LiveDocBundle {
             .causal_epoch
             .write()
             .expect("bundle epoch lock poisoned") = epoch;
-    }
-
-    pub fn update_keyhive_watermark(&self, seq: u64) {
-        self.latest_keyhive_seq
-            .fetch_max(seq, std::sync::atomic::Ordering::Release);
         self.barrier_notify.notify_waiters();
     }
 
-    pub async fn await_keyhive_watermark(&self, target_seq: u64) -> Res<()> {
+    /// Await the bundle's BeeKEM/PCS epoch to reach `target` (the epoch the
+    /// keyhive reports after the admission that triggered this publish). The
+    /// hub forwards every CGKA op to the doc worker, which re-materializes
+    /// and updates the bundle epoch; this resolves once the bundle has caught
+    /// up to the keyhive's current epoch.
+    pub async fn await_beekem_epoch(&self, target: Option<[u8; 32]>) -> Res<()> {
         loop {
             let notified = self.barrier_notify.notified();
             tokio::pin!(notified);
-            if self
-                .latest_keyhive_seq
-                .load(std::sync::atomic::Ordering::Acquire)
-                >= target_seq
-            {
+            if self.current_causal_epoch() == target {
                 return Ok(());
             }
             if self.is_broken() {
-                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
+                return Err(ferr!("doc bundle marked broken while awaiting epoch"));
             }
             notified.await;
         }
+    }
+}
+
+// ─── LiveDocHandle ────────────────────────────────────────────────────────────
+
+/// A live document bundle paired with the caller's eviction lease.
+///
+/// The doc-worker retains the bundle strongly (so repeated acquisitions do
+/// not re-materialize), but the lease is owned by the caller: when the last
+/// caller drops its handle, `local_handles` reaches zero and the worker
+/// becomes evictable after the idle TTL. Cloning shares the lease, so the
+/// worker stays alive while any clone is held.
+#[derive(Clone)]
+pub struct LiveDocHandle {
+    pub(crate) bundle: Arc<LiveDocBundle>,
+    _lease: Arc<crate::runtime2::DocLease>,
+    presence: Arc<()>,
+}
+
+impl LiveDocHandle {
+    pub(crate) fn new(bundle: Arc<LiveDocBundle>, lease: crate::runtime2::DocLease) -> Self {
+        Self {
+            bundle,
+            _lease: Arc::new(lease),
+            presence: Arc::new(()),
+        }
+    }
+
+    pub(crate) fn presence(&self) -> std::sync::Weak<()> {
+        Arc::downgrade(&self.presence)
     }
 }
 

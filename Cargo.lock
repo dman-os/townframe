@@ -1073,6 +1073,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
+source = "git+https://github.com/dman-os/keyhive?rev=7f33393b8b804eeaf13286bb2c8dcb90609852db#7f33393b8b804eeaf13286bb2c8dcb90609852db"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -6241,6 +6242,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
+source = "git+https://github.com/dman-os/keyhive?rev=7f33393b8b804eeaf13286bb2c8dcb90609852db#7f33393b8b804eeaf13286bb2c8dcb90609852db"
 dependencies = [
  "beekem",
  "bincode",
@@ -6266,6 +6268,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
+source = "git+https://github.com/dman-os/keyhive?rev=7f33393b8b804eeaf13286bb2c8dcb90609852db#7f33393b8b804eeaf13286bb2c8dcb90609852db"
 dependencies = [
  "bincode",
  "blake3",
@@ -10639,7 +10642,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-lock",
  "bijoux",
@@ -11622,7 +11625,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.17.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11643,7 +11646,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -11657,7 +11660,7 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11675,7 +11678,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11694,7 +11697,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11724,7 +11727,7 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "future_form",
  "futures",
@@ -11740,7 +11743,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/subduction?rev=152848df15a4fbff9e0a3c1ca722a2ad3bc55c65#152848df15a4fbff9e0a3c1ca722a2ad3bc55c65"
+source = "git+https://github.com/dman-os/subduction?rev=6d642cef45c99bc462a3e443a22e2a0a1e207904#6d642cef45c99bc462a3e443a22e2a0a1e207904"
 dependencies = [
  "async-channel",
  "async-lock",
