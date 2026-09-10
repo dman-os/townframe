@@ -63,7 +63,7 @@ fn new_suite() -> TestCases {
     // The CLI reports success via tracing logs on stderr (compact format
     // with uptime timestamps). Suppress them suite-wide so snapshots
     // assert real output; clap/eyre errors still surface on stderr.
-    suite.env("RUST_LOG", "error");
+    suite.env("RUST_LOG", "error,wflow::kvstore=off");
     // tracing logs render ANSI when piped; disable so only the color-eyre
     // report (which ignores NO_COLOR in this project) carries ANSI.
     suite.env("NO_COLOR", "1");

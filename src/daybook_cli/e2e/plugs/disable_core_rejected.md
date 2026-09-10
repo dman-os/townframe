@@ -11,7 +11,7 @@ Error:
    0: @daybook/core cannot be disabled
 
 Location:
-   src/daybook_core/plugs/mutations.rs:261
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.
