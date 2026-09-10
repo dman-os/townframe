@@ -326,7 +326,7 @@ impl BigRepo {
                 let keyhive_root = path.join(KEYHIVE_SUBDIR);
                 // Key material goes through the OS keyring where available;
                 // fsync'd files remain the fallback of record.
-                BigRepoKeyhiveStorage::fs_with_secret_repo(keyhive_events.clone(), keyhive_root)
+                BigRepoKeyhiveStorage::fs_with_secret_store(keyhive_events.clone(), keyhive_root)
                     .await
                     .wrap_err("failed booting keyhive storage")?
             }

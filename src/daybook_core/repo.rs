@@ -124,7 +124,7 @@ pub struct RepoCtx {
 
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
-    pub secret_repo: crate::secrets::SecretRepo,
+    pub secret_store: secrets_rs::SecretStore,
 }
 
 pub(crate) struct RepoCtxParts {
@@ -150,7 +150,7 @@ pub(crate) struct RepoCtxParts {
     pub repo_name: String,
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
-    pub secret_repo: crate::secrets::SecretRepo,
+    pub secret_store: secrets_rs::SecretStore,
 }
 
 /// Opens the standalone, policy-free part store backing the blob partitions.
@@ -174,7 +174,7 @@ impl RepoCtx {
         docs_inventory_doc_id: DocumentId,
     ) -> Arc<Self> {
         Arc::new(Self {
-            secret_repo: parts.secret_repo,
+            secret_store: parts.secret_store,
             local_peer_key: parts.local_peer_key,
             repo_name: parts.repo_name,
             layout: parts.layout,
@@ -209,7 +209,7 @@ impl RepoCtx {
                 let RepoCtx {
                     doc_app,
                     doc_drawer,
-                    secret_repo,
+                    secret_store,
                     big_repo_stop,
                     sqlite_local_state_stop,
                     ..
@@ -217,7 +217,7 @@ impl RepoCtx {
 
                 drop(doc_app);
                 drop(doc_drawer);
-                secret_repo.stop().await?;
+                secret_store.stop().await?;
 
                 let stop = big_repo_stop
                     .lock()
@@ -327,7 +327,7 @@ impl RepoCtx {
             "repo open_inner: sqlite ready"
         );
 
-        let secret_repo = crate::secrets::SecretRepo::boot().await?;
+        let secret_store = secrets_rs::SecretStore::boot().await?;
         let repo_id = if initialize_repo {
             format!("repo-{}", Uuid::new_v4().simple())
         } else {
@@ -376,10 +376,9 @@ impl RepoCtx {
 
         let identity = if initialize_repo {
             let secret = iroh::SecretKey::generate();
-            secret_repo.set_identity(&checkout_id, secret).await?
+            crate::secrets::set_identity(&secret_store, &checkout_id, secret).await?
         } else {
-            secret_repo
-                .load_identity(&checkout_id)
+            crate::secrets::load_identity(&secret_store, &checkout_id)
                 .await?
                 .ok_or_eyre("missing secret from keyring")?
         };
@@ -483,7 +482,7 @@ impl RepoCtx {
             repo_name,
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
-            secret_repo,
+            secret_store,
         };
         Ok(RepoCtx::from_parts(
             parts,
@@ -982,20 +981,7 @@ pub(crate) async fn ensure_blob_partitions(
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
     let repo_root = std::path::absolute(repo_root)
         .wrap_err_with(|| format!("error absolutizing repo root {}", repo_root.display()))?;
-    // Reuse the legacy BigRepo store when upgrading a repository created
-    // before the storage directory was renamed from `samod`. New repos
-    // continue to use `big_repo`; no data is moved or deleted implicitly.
     let big_repo_root = repo_root.join("big_repo");
-    let big_repo_root = if !big_repo_root.exists() {
-        let legacy_root = repo_root.join("samod");
-        if legacy_root.is_dir() {
-            legacy_root
-        } else {
-            big_repo_root
-        }
-    } else {
-        big_repo_root
-    };
     Ok(RepoLayout {
         repo_root: repo_root.clone(),
         big_repo_root,

@@ -1,25 +1,11 @@
-//! DEK (data-encryption-key) storage backed by OS keyrings.
+//! Generic secret storage backed by operating-system keyrings.
 //!
-//! Owns the [`SecretRepo`] abstraction: repo identities for checkout
-//! provisioning, plus per-material-type data encryption keys (DEKs) used to
-//! encrypt secret blobs at rest in sqlite.
-//!
-//! DEKs are 32-byte random keys addressable by a string `dek_id` and an
-//! integer `version`. Versions make rotation incremental: a new version of a
-//! DEK id can be created without re-encrypting every blob at once — blobs
-//! record the version that encrypted them and old versions stay readable
-//! until the last referencing blob is migrated.
-//!
-//! The keyring is a *key source*, not a blob store: it holds raw DEKs (and
-//! identities). Secret material itself lives encrypted in the sqlite layer
-//! via [`encrypt_blob`]/[`decrypt_blob`] (ChaCha20-Poly1305, random 12-byte
-//! nonce per blob, no AAD).
-//!
-//! Keyring entries are base58-multibase encoded so every backend sees
-//! printable text, mirroring how identities are persisted. Keyring calls are
-//! synchronous/blocking; async surfaces delegate to
-//! `tokio::task::spawn_blocking`, and store teardown happens off any Tokio
-//! runtime thread (the zbus backend must not drop on a runtime thread).
+//! [`SecretStore`] provides a small standalone API for opaque byte secrets.
+//! Consumers choose their own service and entry names; this crate does not
+//! attach meaning to either value. Keyring calls are synchronous/blocking, so
+//! async operations delegate to `spawn_blocking`. Store teardown happens off
+//! any Tokio runtime thread because some keyring backends own runtime-bound
+//! resources.
 
 use std::sync::Arc;
 
@@ -28,80 +14,59 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use rand::RngCore;
 use utils_rs::expect_tags::{ERROR_IMPOSSIBLE, ERROR_TOKIO};
 use utils_rs::hash::{decode_base58_multibase, encode_base58_multibase};
-use utils_rs::prelude::WrapErr;
 use utils_rs::prelude::eyre;
 
 pub type Res<T> = eyre::Result<T>;
 
-/// Service under which all DEK entries are stored (distinct from the
-/// `"daybook"` identity service so the two namespaces never collide).
-const MATERIAL_SERVICE: &str = "daybook.material.v1";
-
-/// Errors surfaced by the DEK / AEAD API.
+/// Errors surfaced by the keyring and optional local encryption helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
-    /// `dek_id` contained characters keyring usernames must not.
+    /// A service or entry name contains characters unsupported by the keyring.
     #[error("invalid secret storage name: {0}")]
     InvalidName(String),
     /// The backing keyring store rejected the operation.
     #[error("keyring error: {0}")]
     Keyring(#[from] keyring_core::Error),
-    /// A stored DEK or version index could not be decoded.
-    #[error("stored material is corrupt: {0}")]
+    /// A stored secret could not be decoded.
+    #[error("stored secret is corrupt: {0}")]
     Corrupt(String),
-    /// The requested DEK is not present in the configured secret store.
-    #[error("stored material is missing: {0}")]
+    /// A requested secret is not present in the configured store.
+    #[error("stored secret is missing: {0}")]
     Missing(String),
-    /// DEK version index serialization failed.
-    #[error("material index encoding failed: {0}")]
-    Encoding(#[from] bincode::Error),
     /// AEAD encrypt/decrypt failed.
     #[error("crypto error: {0}")]
     Crypto(String),
 }
 
-/// Identity for a provisioned repository checkout.
-#[derive(Debug, Clone)]
-pub struct RepoIdentity {
-    pub iroh_secret_key: iroh::SecretKey,
-    pub iroh_public_key: iroh::PublicKey,
-}
-
-pub struct SecretRepo {
+/// Standalone storage for opaque byte secrets in an operating-system keyring.
+pub struct SecretStore {
     store: Option<Arc<keyring_core::CredentialStore>>,
 }
 
-impl SecretRepo {
-    const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
-
+impl SecretStore {
     fn spawn_drop_thread<T: Send + 'static>(value: T) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || drop(value))
     }
 
     fn drop_off_runtime<T: Send + 'static>(value: T) {
-        // The Linux keyring backend can tear down zbus state in `Drop`, and that
-        // must happen off any Tokio runtime thread.
         Self::spawn_drop_thread(value)
             .join()
             .expect(ERROR_IMPOSSIBLE);
     }
 
+    /// Open the platform keyring backend.
     pub async fn boot() -> Res<Self> {
         Ok(Self {
             store: Some(Self::resolve_store().await?),
         })
     }
 
-    /// Test/bootstrap constructor that bypasses the platform selection while
-    /// reusing the exact store-resolution logic of [`Self::boot`].
+    /// Test/bootstrap constructor using an explicitly selected keyring store.
     pub async fn boot_with_store(store: Arc<keyring_core::CredentialStore>) -> Res<Self> {
         Ok(Self { store: Some(store) })
     }
 
     async fn resolve_store() -> Res<Arc<keyring_core::CredentialStore>> {
-        // `cfg(test)` is only set for this crate's own unit tests. Integration/e2e
-        // tests build `secrets_rs` as a normal dependency, so we also honor CI
-        // and the `test-support` feature here.
         let store: Arc<keyring_core::CredentialStore> =
             if cfg!(test) || cfg!(feature = "test-support") {
                 tracing::warn!("using in-memory keyring store");
@@ -127,8 +92,7 @@ impl SecretRepo {
             Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
             Err(_) => {
                 tracing::warn!(
-                    "secret-service keyring unavailable, \
-                        falling back to kernel keyring"
+                    "secret-service keyring unavailable, falling back to kernel keyring"
                 );
                 linux_keyutils_keyring_store::Store::new()
                     .map(|sec| sec as Arc<keyring_core::CredentialStore>)
@@ -173,90 +137,21 @@ impl SecretRepo {
         Arc::clone(self.store.as_ref().expect(ERROR_IMPOSSIBLE))
     }
 
-    pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {
-        let store = self.store();
-        let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
-        tokio::task::spawn_blocking(move || {
-            let entry = store
-                .build("daybook", &user, None)
-                .wrap_err("failed to create keyring entry")?;
-            let secret = match entry.get_password() {
-                Err(keyring_core::Error::NoEntry) => return Ok(None),
-                Err(err) => {
-                    return Err(eyre::eyre!(err))
-                        .wrap_err("failed reading iroh secret key from keyring");
-                }
-                Ok(secret) => {
-                    let secret =
-                        decode_base58_multibase(&secret).wrap_err("error decode bs58 secret")?;
-                    if secret.len() != 32 {
-                        eyre::bail!("secret corruption, bad length");
-                    }
-                    let mut bytes = [0_u8; 32];
-                    bytes.copy_from_slice(&secret);
-                    iroh::SecretKey::from_bytes(&bytes)
-                }
-            };
-            let public = secret.public();
-            Ok(Some(RepoIdentity {
-                iroh_secret_key: secret,
-                iroh_public_key: public,
-            }))
-        })
-        .await
-        .expect(ERROR_TOKIO)
-    }
-
-    pub async fn set_identity(
+    /// Read an opaque secret. Missing entries are returned as `None`.
+    pub async fn get_secret(
         &self,
-        checkout_id: &str,
-        secret: iroh::SecretKey,
-    ) -> Res<RepoIdentity> {
+        service: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, SecretsError> {
+        validate_name(service)?;
+        validate_name(name)?;
+        let service = service.to_string();
+        let name = name.to_string();
         let store = self.store();
-        let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
-            let entry = store
-                .build("daybook", &user, None)
-                .wrap_err("failed to create keyring entry")?;
-            entry
-                .set_password(&encode_base58_multibase(secret.to_bytes()))
-                .wrap_err("failed setting keyring secret from provisioned clone identity")?;
-            let public = secret.public();
-            Ok(RepoIdentity {
-                iroh_secret_key: secret,
-                iroh_public_key: public,
-            })
-        })
-        .await
-        .expect(ERROR_TOKIO)
-    }
-
-    pub async fn stop(mut self) -> Res<()> {
-        let store = self.store.take().expect(ERROR_IMPOSSIBLE);
-        tokio::task::spawn_blocking(move || Self::drop_off_runtime(store))
-            .await
-            .expect(ERROR_TOKIO);
-        Ok(())
-    }
-
-    // ---- DEK API ----
-
-    /// Read a DEK without creating it. Missing entries are returned as `None`.
-    pub async fn get_dek(
-        &self,
-        dek_id: &str,
-        version: u64,
-    ) -> Result<Option<[u8; 32]>, SecretsError> {
-        validate_name(dek_id)?;
-        let dek_id = dek_id.to_string();
-        let store = self.store();
-        let username = dek_username(&dek_id, version);
-        tokio::task::spawn_blocking(move || {
-            let entry = store
-                .build(MATERIAL_SERVICE, &username, None)
-                .map_err(SecretsError::from)?;
+            let entry = store.build(&service, &name, None)?;
             match entry.get_password() {
-                Ok(secret) => decode_dek(&secret, &dek_id, version).map(Some),
+                Ok(secret) => decode_secret(&secret, &service, &name).map(Some),
                 Err(keyring_core::Error::NoEntry) => Ok(None),
                 Err(err) => Err(SecretsError::from(err)),
             }
@@ -265,157 +160,62 @@ impl SecretRepo {
         .expect(ERROR_TOKIO)
     }
 
-    /// The DEK for `(dek_id, version)`, generating and persisting it in the
-    /// keyring on first use.
-    ///
-    /// Deterministic: the same `(dek_id, version)` always yields the same 32
-    /// bytes. A fresh version starts a rotation — callers write new blobs
-    /// with it while old blobs stay readable via their recorded version.
-    pub async fn get_or_create_dek(
+    /// Persist an opaque secret, replacing an existing value for the entry.
+    pub async fn set_secret(
         &self,
-        dek_id: &str,
-        version: u64,
-    ) -> Result<[u8; 32], SecretsError> {
-        validate_name(dek_id)?;
-        let dek_id = dek_id.to_string();
+        service: &str,
+        name: &str,
+        secret: &[u8],
+    ) -> Result<(), SecretsError> {
+        validate_name(service)?;
+        validate_name(name)?;
+        let service = service.to_string();
+        let name = name.to_string();
+        let encoded = encode_base58_multibase(secret);
         let store = self.store();
-        let username = dek_username(&dek_id, version);
-        let dek = tokio::task::spawn_blocking(move || {
-            let entry = store
-                .build(MATERIAL_SERVICE, &username, None)
-                .map_err(SecretsError::from)?;
-            match entry.get_password() {
-                Ok(secret) => decode_dek(&secret, &dek_id, version),
-                Err(keyring_core::Error::NoEntry) => {
-                    let mut dek = [0u8; 32];
-                    rand::rng().fill_bytes(&mut dek);
-                    entry
-                        .set_password(&encode_base58_multibase(dek))
-                        .map_err(SecretsError::from)?;
-                    let mut versions = load_dek_version_list(&*store, &dek_id)?;
-                    if !versions.contains(&version) {
-                        versions.push(version);
-                        versions.sort_unstable();
-                        save_dek_version_list(&*store, &dek_id, &versions)?;
-                    }
-                    Ok(dek)
-                }
-                Err(err) => Err(SecretsError::from(err)),
-            }
+        tokio::task::spawn_blocking(move || {
+            let entry = store.build(&service, &name, None)?;
+            entry.set_password(&encoded).map_err(SecretsError::from)
         })
         .await
-        .expect(ERROR_TOKIO)?;
-        Ok(dek)
+        .expect(ERROR_TOKIO)
     }
 
-    /// Start a rotation of `dek_id`: create the next version (max existing
-    /// version + 1, or 0 for a fresh id) and return `(version, dek)`.
-    pub async fn create_next_dek_version(
+    /// Return an existing opaque secret or create a random secret of `len`
+    /// bytes when the entry is absent.
+    pub async fn get_or_create_secret(
         &self,
-        dek_id: &str,
-    ) -> Result<(u64, [u8; 32]), SecretsError> {
-        validate_name(dek_id)?;
-        let dek_id = dek_id.to_string();
-        let store = self.store();
-        let dek_id_next = dek_id.clone();
-        let next = tokio::task::spawn_blocking(move || {
-            let versions = load_dek_version_list(&*store, &dek_id_next)?;
-            Ok::<u64, SecretsError>(versions.iter().max().map_or(0, |version| version + 1))
-        })
-        .await
-        .expect(ERROR_TOKIO)?;
-        let dek = self.get_or_create_dek(&dek_id, next).await?;
-        Ok((next, dek))
-    }
-
-    /// All versions of `dek_id` that exist in the keyring, ascending.
-    pub async fn list_dek_versions(&self, dek_id: &str) -> Result<Vec<u64>, SecretsError> {
-        validate_name(dek_id)?;
-        let dek_id = dek_id.to_string();
-        let store = self.store();
-        tokio::task::spawn_blocking(move || load_dek_version_list(&*store, &dek_id))
-            .await
-            .expect(ERROR_TOKIO)
-    }
-}
-
-/// Keyring username for a DEK version entry: `{dek_id}.v{version}`.
-fn dek_username(dek_id: &str, version: u64) -> String {
-    format!("{dek_id}.v{version}")
-}
-
-/// Keyring username holding the version list for `dek_id`.
-fn version_index_username(dek_id: &str) -> String {
-    format!("{dek_id}.__versions__")
-}
-
-fn decode_dek(secret: &str, dek_id: &str, version: u64) -> Result<[u8; 32], SecretsError> {
-    let decoded = decode_base58_multibase(secret)
-        .map_err(|err| SecretsError::Corrupt(format!("dek {dek_id} v{version}: {err}")))?;
-    if decoded.len() != 32 {
-        return Err(SecretsError::Corrupt(format!(
-            "dek {dek_id} v{version}: bad length {}",
-            decoded.len()
-        )));
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&decoded);
-    Ok(bytes)
-}
-
-fn load_dek_version_list(
-    store: &keyring_core::CredentialStore,
-    dek_id: &str,
-) -> Result<Vec<u64>, SecretsError> {
-    let entry = store.build(MATERIAL_SERVICE, &version_index_username(dek_id), None)?;
-    match entry.get_password() {
-        Err(keyring_core::Error::NoEntry) => Ok(Vec::new()),
-        Err(err) => Err(SecretsError::from(err)),
-        Ok(secret) => {
-            let decoded = decode_base58_multibase(&secret).map_err(|err| {
-                SecretsError::Corrupt(format!("dek version index {dek_id}: {err}"))
-            })?;
-            bincode::deserialize(&decoded).map_err(SecretsError::from)
+        service: &str,
+        name: &str,
+        len: usize,
+    ) -> Result<Vec<u8>, SecretsError> {
+        if len == 0 {
+            return Err(SecretsError::Corrupt(
+                "secret length must not be zero".into(),
+            ));
         }
+        if let Some(secret) = self.get_secret(service, name).await? {
+            return Ok(secret);
+        }
+        let mut secret = vec![0; len];
+        rand::rng().fill_bytes(&mut secret);
+        self.set_secret(service, name, &secret).await?;
+        Ok(secret)
+    }
+
+    /// Stop the keyring store away from the Tokio runtime.
+    pub async fn stop(mut self) -> Res<()> {
+        let store = self.store.take().expect(ERROR_IMPOSSIBLE);
+        tokio::task::spawn_blocking(move || Self::drop_off_runtime(store))
+            .await
+            .expect(ERROR_TOKIO);
+        Ok(())
     }
 }
 
-fn save_dek_version_list(
-    store: &keyring_core::CredentialStore,
-    dek_id: &str,
-    versions: &[u64],
-) -> Result<(), SecretsError> {
-    let encoded = bincode::serialize(versions)?;
-    let entry = store.build(MATERIAL_SERVICE, &version_index_username(dek_id), None)?;
-    entry
-        .set_password(&encode_base58_multibase(&encoded))
-        .map_err(SecretsError::from)
-}
-
-/// Encrypt `plaintext` under `dek` (ChaCha20-Poly1305, random 12-byte nonce,
-/// no AAD). Returns `(ciphertext, nonce)` for the caller to persist alongside
-/// the DEK id/version.
-pub fn encrypt_blob(dek: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12]), SecretsError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(dek));
-    let mut nonce = [0u8; 12];
-    rand::rng().fill_bytes(&mut nonce);
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .map_err(|err| SecretsError::Crypto(err.to_string()))?;
-    Ok((ciphertext, nonce))
-}
-
-/// Decrypt `ciphertext` produced by [`encrypt_blob`] under the same `dek` and
-/// `nonce`.
-pub fn decrypt_blob(
-    dek: &[u8; 32],
-    ciphertext: &[u8],
-    nonce: &[u8; 12],
-) -> Result<Vec<u8>, SecretsError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(dek));
-    cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|err| SecretsError::Crypto(err.to_string()))
+fn decode_secret(secret: &str, service: &str, name: &str) -> Result<Vec<u8>, SecretsError> {
+    decode_base58_multibase(secret)
+        .map_err(|err| SecretsError::Corrupt(format!("{service}/{name}: {err}")))
 }
 
 fn validate_name(part: &str) -> Result<(), SecretsError> {
@@ -431,7 +231,51 @@ fn validate_name(part: &str) -> Result<(), SecretsError> {
     }
 }
 
-impl Drop for SecretRepo {
+/// Encrypt `plaintext` under a 32-byte key using ChaCha20-Poly1305 and a
+/// random 12-byte nonce. `aad` authenticates the caller's metadata without
+/// including it in the returned ciphertext. Returns `(ciphertext, nonce)` for
+/// the caller to persist alongside its own key metadata.
+pub fn encrypt_blob(
+    key: &[u8; 32],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<(Vec<u8>, [u8; 12]), SecretsError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let mut nonce = [0u8; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|err| SecretsError::Crypto(err.to_string()))?;
+    Ok((ciphertext, nonce))
+}
+
+/// Decrypt `ciphertext` produced by [`encrypt_blob`] with the same key, AAD,
+/// and nonce.
+pub fn decrypt_blob(
+    key: &[u8; 32],
+    aad: &[u8],
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, SecretsError> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|err| SecretsError::Crypto(err.to_string()))
+}
+
+impl Drop for SecretStore {
     fn drop(&mut self) {
         if let Some(store) = self.store.take() {
             Self::spawn_drop_thread(store);
@@ -458,87 +302,86 @@ mod tests {
     fn drop_helper_runs_off_runtime() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(async {
-            SecretRepo::drop_off_runtime(AssertDroppedOffRuntime);
+            SecretStore::drop_off_runtime(AssertDroppedOffRuntime);
         });
     }
 
-    async fn test_repo() -> SecretRepo {
-        SecretRepo::boot().await.expect("mock boot")
+    async fn test_store() -> SecretStore {
+        SecretStore::boot().await.expect("mock boot")
     }
 
     #[tokio::test]
-    async fn dek_is_deterministic_per_id_and_version() -> Res<()> {
-        let repo = test_repo().await;
-        let v0_first = repo.get_or_create_dek("local-secret", 0).await?;
-        let v0_second = repo.get_or_create_dek("local-secret", 0).await?;
-        assert_eq!(v0_first, v0_second);
-        let v1 = repo.get_or_create_dek("local-secret", 1).await?;
-        assert_ne!(v0_first, v1);
+    async fn secret_is_deterministic_per_entry() -> Res<()> {
+        let store = test_store().await;
+        let first = store
+            .get_or_create_secret("tests", "deterministic", 32)
+            .await?;
+        let second = store
+            .get_or_create_secret("tests", "deterministic", 32)
+            .await?;
+        assert_eq!(first, second);
         Ok(())
     }
 
     #[tokio::test]
-    async fn reading_missing_dek_does_not_create_one() -> Res<()> {
-        let repo = test_repo().await;
-        assert!(repo.get_dek("read-only", 0).await?.is_none());
-        assert!(repo.list_dek_versions("read-only").await?.is_empty());
-
-        let expected = repo.get_or_create_dek("read-only", 0).await?;
-        assert_eq!(repo.get_dek("read-only", 0).await?, Some(expected));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn next_version_starts_at_zero_and_increments() -> Res<()> {
-        let repo = test_repo().await;
-        let (v0, dek0) = repo.create_next_dek_version("reservation").await?;
-        assert_eq!(v0, 0);
-        let (v1, dek1) = repo.create_next_dek_version("reservation").await?;
-        assert_eq!(v1, 1);
-        assert_ne!(dek0, dek1);
-        assert_eq!(repo.list_dek_versions("reservation").await?, vec![0, 1]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn version_list_tracks_explicit_versions() -> Res<()> {
-        let repo = test_repo().await;
-        assert!(repo.list_dek_versions("prekey-sidecar").await?.is_empty());
-        repo.get_or_create_dek("prekey-sidecar", 2).await?;
-        repo.get_or_create_dek("prekey-sidecar", 5).await?;
-        assert_eq!(repo.list_dek_versions("prekey-sidecar").await?, vec![2, 5]);
+    async fn reading_missing_secret_does_not_create_one() -> Res<()> {
+        let store = test_store().await;
+        assert!(store.get_secret("tests", "read-only").await?.is_none());
+        let expected = store.get_or_create_secret("tests", "read-only", 32).await?;
+        assert_eq!(
+            store.get_secret("tests", "read-only").await?,
+            Some(expected)
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn encrypt_decrypt_round_trips() -> Res<()> {
-        let repo = test_repo().await;
-        let dek = repo.get_or_create_dek("local-secret", 0).await?;
+        let store = test_store().await;
+        let key: [u8; 32] = store
+            .get_or_create_secret("tests", "encryption", 32)
+            .await?
+            .try_into()
+            .expect("requested key length");
         let plaintext = b"secret material".to_vec();
-        let (ciphertext, nonce) = encrypt_blob(&dek, &plaintext)?;
+        let aad = b"tests/encryption";
+        let (ciphertext, nonce) = encrypt_blob(&key, aad, &plaintext)?;
         assert_ne!(ciphertext, plaintext);
-        assert_eq!(decrypt_blob(&dek, &ciphertext, &nonce)?, plaintext);
+        assert_eq!(decrypt_blob(&key, aad, &ciphertext, &nonce)?, plaintext);
         Ok(())
     }
 
     #[tokio::test]
     async fn decrypt_with_wrong_key_or_tampering_fails() -> Res<()> {
-        let repo = test_repo().await;
-        let dek = repo.get_or_create_dek("local-secret", 0).await?;
-        let other = repo.get_or_create_dek("local-secret", 1).await?;
-        let (ciphertext, nonce) = encrypt_blob(&dek, b"secret material")?;
-        assert!(decrypt_blob(&other, &ciphertext, &nonce).is_err());
+        let store = test_store().await;
+        let key: [u8; 32] = store
+            .get_or_create_secret("tests", "key-a", 32)
+            .await?
+            .try_into()
+            .expect("requested key length");
+        let other: [u8; 32] = store
+            .get_or_create_secret("tests", "key-b", 32)
+            .await?
+            .try_into()
+            .expect("requested key length");
+        let aad = b"tests/tamper";
+        let (ciphertext, nonce) = encrypt_blob(&key, aad, b"secret material")?;
+        assert!(decrypt_blob(&other, aad, &ciphertext, &nonce).is_err());
 
         let mut tampered = ciphertext.clone();
         tampered[0] ^= 0xff;
-        assert!(decrypt_blob(&dek, &tampered, &nonce).is_err());
+        assert!(decrypt_blob(&key, aad, &tampered, &nonce).is_err());
+        assert!(decrypt_blob(&key, b"wrong-aad", &ciphertext, &nonce).is_err());
         Ok(())
     }
 
     #[tokio::test]
     async fn invalid_names_are_rejected() {
-        let repo = test_repo().await;
-        let error = repo.get_or_create_dek("bad/name", 0).await.unwrap_err();
+        let store = test_store().await;
+        let error = store
+            .get_or_create_secret("bad/name", "key", 32)
+            .await
+            .unwrap_err();
         assert!(matches!(error, SecretsError::InvalidName(_)));
     }
 }

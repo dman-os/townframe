@@ -513,7 +513,7 @@ pub async fn clone_repo_init_from_url(
     let lock_guard = crate::repo::RepoLockGuard::acquire(staging.join("repo.lock")).await?;
 
     let cloned = async {
-        let secret_repo = crate::secrets::SecretRepo::boot().await?;
+        let secret_store = secrets_rs::SecretStore::boot().await?;
 
         // Generate identity locally — secret keys never leave the device.
         let local_secret = iroh::SecretKey::generate();
@@ -527,9 +527,8 @@ pub async fn clone_repo_init_from_url(
             let id = utils_rs::hash::encode_base58_multibase(id);
             format!("dcheckout_{id}")
         };
-        let identity = secret_repo
-            .set_identity(&checkout_id, local_secret.clone())
-            .await?;
+        let identity =
+            crate::secrets::set_identity(&secret_store, &checkout_id, local_secret.clone()).await?;
         let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
             node_identity_seed: identity.iroh_secret_key.to_bytes(),
             storage: big_repo::StorageConfig::Disk {
@@ -658,7 +657,7 @@ pub async fn clone_repo_init_from_url(
             repo_name: bootstrap.repo_name.clone(),
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
-            secret_repo,
+            secret_store,
         })
         .await?;
         crate::repo::mark_repo_initialized(&staging).await?;

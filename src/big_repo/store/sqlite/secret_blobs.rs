@@ -122,39 +122,6 @@ impl SqliteBigRepoStore {
         }))
     }
 
-    /// All present versions of one `dek_id`, ascending.
-    pub(crate) async fn list_dek_versions(&self, dek_id: &str) -> Res<Vec<u64>> {
-        let rows: Vec<i64> = sqlx::query_scalar!(
-            "SELECT dek_version AS \"dek_version: i64\"
-               FROM big_repo_deks
-              WHERE scope_id = ?1 AND dek_id = ?2
-              ORDER BY dek_version",
-            self.scope().id(),
-            dek_id,
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        Ok(rows.into_iter().map(Self::u64_from_db).collect())
-    }
-
-    /// All distinct `dek_id`s present in this scope, ascending.
-    ///
-    /// Write-only today (see `DekRow`): consumed by the future rotation-GC and
-    /// KMS-recovery paths.
-    #[allow(dead_code)]
-    pub(crate) async fn list_dek_ids(&self) -> Res<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar!(
-            "SELECT DISTINCT dek_id AS \"dek_id: String\"
-               FROM big_repo_deks
-              WHERE scope_id = ?1
-              ORDER BY dek_id",
-            self.scope().id(),
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        Ok(rows)
-    }
-
     /// Upsert one encrypted secret blob under its DEK.
     pub(crate) async fn save_secret_blob(
         &self,

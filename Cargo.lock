@@ -10602,9 +10602,7 @@ version = "0.1.0"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
- "bincode",
  "chacha20poly1305",
- "iroh",
  "keyring-core",
  "linux-keyutils-keyring-store",
  "rand 0.9.5",

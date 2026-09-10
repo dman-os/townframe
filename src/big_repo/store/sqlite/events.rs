@@ -255,30 +255,6 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    /// Durable admission cursor for the prekey janitor worker. Like the
-    /// causal-checkpoint cursor, this is at-least-once: the tail may re-read a
-    /// row after a crash, and the janitor's published-set precheck makes the
-    /// reprocessing of a consumed prekey a no-op.
-    ///
-    /// A raw (unchecked) query: adding a new `query!` macro would require a
-    /// `cargo sqlx prepare` cache regeneration for one small reader lookup.
-    pub(crate) async fn prekey_janitor_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT seq FROM big_repo_keyhive_admission_readers
-              WHERE scope_id = ?1 AND reader = ?2",
-        )
-        .bind(self.scope().id())
-        .bind(KEYHIVE_ADMISSION_READER_PREKEY_JANITOR)
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn advance_prekey_janitor_cursor(&self, cursor: u64) -> Res<()> {
-        self.register_keyhive_admission_reader(KEYHIVE_ADMISSION_READER_PREKEY_JANITOR, cursor)
-            .await
-    }
-
     #[cfg(test)]
     pub(crate) async fn advance_keyhive_admission_reader(
         &self,

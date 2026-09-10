@@ -16,19 +16,19 @@
 //!   `CgkaOperation::Add` naming an already-rotated prekey fails the
 //!   published-set precheck (the rotate tombstoned it out of `prekeys()`),
 //!   so reprocessing an old row is a no-op.
-//! - **Baseline, not rebuild.** Unlike the causal worker (whose cursor of 0
-//!   triggers a full rebuild of every document), a janitor cursor of 0
-//!   baselines *at the current admission head*: the archive restore already
-//!   left the prekey state consistent at boot, so historical Add ops naming
-//!   our prekeys predate the janitor and must not be re-rotated.
+//! - **Replay from durable progress.** A new janitor starts at revision zero and
+//!   replays the admission log through the same serial walker used by other
+//!   durable consumers. Replaying an already-handled Add is safe because the
+//!   published-set guard makes it a no-op.
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
+use crate::runtime2::keyhive_admission;
 use crate::store::sqlite::SqliteBigRepoStore;
+use big_sync::SqliteDeltaWalkerStateRepo;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
+use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use keyhive_core::event::static_event::StaticEvent;
-use std::time::Duration;
-
-const EVENT_BATCH_SIZE: u32 = 64;
-const IDLE_POLL: Duration = Duration::from_millis(25);
 
 pub struct PrekeyJanitorWorkerStopToken {
     pub(crate) abort: futures::future::AbortHandle,
@@ -97,45 +97,52 @@ async fn run_prekey_janitor_tail(
     keyhive: BigKeyhiveHandle,
     timer: std::sync::Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
 ) -> Res<()> {
-    let durable = store.prekey_janitor_cursor().await?;
-    let cursor = if durable == 0 {
-        // First boot for this reader: baseline at the current admission
-        // head (see module docs — the janitor must not replay history; the
-        // checkpoint worker's cursor=0 full-build rule does not apply
-        // here).
-        let head = store.admission_head().await?;
-        store.advance_prekey_janitor_cursor(head).await?;
-        head
-    } else {
-        durable
+    let state = SqliteDeltaWalkerStateRepo::new(
+        store.sql.read_pool.clone(),
+        store.sql.write_pool.clone(),
+        "big_repo.prekey_janitor",
+        "admission",
+    )
+    .await?;
+    let source = keyhive_admission::Store {
+        store: store.clone(),
+        timer,
     };
+    let durable = state.progress().await?.upstream_revision;
+    // Keep the admission-log retention floor aware of this walker. The
+    // generic walker state is authoritative for replay, while this reader row
+    // protects unprocessed events from maintenance pruning.
     store
         .register_keyhive_admission_reader(
             crate::store::sqlite::KEYHIVE_ADMISSION_READER_PREKEY_JANITOR,
-            cursor,
+            durable,
         )
         .await?;
+    let reader = source.open((), durable).await?;
+    let mut walker: SerialDeltaWalker<'_, keyhive_admission::Store, SqliteDeltaWalkerStateRepo> =
+        SerialDeltaWalker::open(reader, &state).await?;
+    tracing::info!(cursor = durable, "prekey janitor: tail starting");
 
-    let mut cursor = cursor;
-    tracing::info!(cursor, "prekey janitor: tail starting");
     loop {
-        let rows: Vec<(u64, Vec<u8>)> = store
-            .admission_events_after(cursor, EVENT_BATCH_SIZE)
-            .await?
-            .into_iter()
-            .map(|row| (row.seq, row.bytes))
-            .collect();
-        if rows.is_empty() {
-            timer.sleep(IDLE_POLL).await;
-            continue;
-        }
-        match process_admissions(&keyhive, rows).await? {
-            Some(handled_through) => {
-                cursor = cursor.max(handled_through);
-                tracing::debug!(cursor, "prekey janitor: advanced admission cursor");
-                store.advance_prekey_janitor_cursor(cursor).await?;
+        match walker.next().await? {
+            RevisionRead::ReplayComplete { through } => {
+                tracing::debug!(through, "prekey janitor: admission replay complete");
             }
-            None => timer.sleep(IDLE_POLL).await,
+            RevisionRead::Entries { revision, entries } => {
+                let rows: Vec<(u64, Vec<u8>)> = entries
+                    .into_iter()
+                    .map(|row: keyhive_admission::AdmittedRow| (row.seq, row.bytes.to_vec()))
+                    .collect();
+                process_admissions(&keyhive, rows).await?;
+                walker.settle(revision).await?;
+                store
+                    .register_keyhive_admission_reader(
+                        crate::store::sqlite::KEYHIVE_ADMISSION_READER_PREKEY_JANITOR,
+                        revision,
+                    )
+                    .await?;
+                tracing::debug!(revision, "prekey janitor: advanced admission cursor");
+            }
         }
     }
 }

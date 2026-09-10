@@ -2535,7 +2535,7 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-secret-blobs", BuckId::MAX_LEVEL).await?;
 
-    // DEK rows: absent, upsert, re-wrap same version, version list.
+    // DEK rows: absent, upsert, and re-wrap the same version.
     assert!(store.load_dek("local-secret", 0).await?.is_none());
     store
         .save_dek("local-secret", 0, vec![1, 2, 3], 1, "chacha20poly1305")
@@ -2553,14 +2553,23 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
     assert_eq!(rewrap.wrapped_dek, vec![4, 5, 6]);
     assert_eq!(rewrap.kek_version, 2);
 
-    // Rotation adds versions without touching older ones.
+    // Blob CRUD. Each blob version must reference an existing DEK row.
+    assert!(
+        store
+            .save_secret_blob(
+                SecretBlobKind::LocalSecret,
+                &[8; 32],
+                "missing-dek",
+                0,
+                vec![1],
+                vec![2; 12],
+            )
+            .await
+            .is_err()
+    );
     store
         .save_dek("local-secret", 1, vec![7, 8], 2, "chacha20poly1305")
         .await?;
-    assert_eq!(store.list_dek_versions("local-secret").await?, vec![0, 1]);
-    assert_eq!(store.list_dek_ids().await?, vec!["local-secret"]);
-
-    // Blob CRUD.
     assert!(
         store
             .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])

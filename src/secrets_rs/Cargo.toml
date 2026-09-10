@@ -10,7 +10,6 @@ workspace = true
 #
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
-iroh.workspace = true
 
 #
 # os
@@ -19,7 +18,6 @@ keyring-core = { version = "1.0", default-features = false }
 #
 # ds
 thiserror = "2"
-bincode = "1.3"
 
 #
 # crypto

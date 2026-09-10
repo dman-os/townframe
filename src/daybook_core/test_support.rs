@@ -304,7 +304,7 @@ pub async fn test_cx_with_options(
         lock_path: repo_root.join("repo.lock"),
     };
     let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
-    let secret_repo = crate::secrets::SecretRepo::boot().await?;
+    let secret_store = secrets_rs::SecretStore::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
     let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
@@ -401,7 +401,7 @@ pub async fn test_cx_with_options(
             repo_name: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
             iroh_public_key: peer_id.to_string(),
             iroh_secret_key,
-            secret_repo,
+            secret_store,
         },
         big_repo
             .get_doc(&app_doc_id)
