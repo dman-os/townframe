@@ -2567,16 +2567,18 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
             .await?
             .is_none()
     );
-    store
-        .save_secret_blob(
-            SecretBlobKind::LocalSecret,
-            &[9; 32],
-            "local-secret",
-            1,
-            vec![10, 11],
-            vec![12; 12],
-        )
-        .await?;
+    assert!(
+        store
+            .save_secret_blob(
+                SecretBlobKind::LocalSecret,
+                &[9; 32],
+                "local-secret",
+                1,
+                vec![10, 11],
+                vec![12; 12],
+            )
+            .await?
+    );
     let blob = store
         .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
         .await?
@@ -2595,15 +2597,20 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
 
     // Upsert replaces ciphertext under a new DEK version.
     store
-        .save_secret_blob(
-            SecretBlobKind::LocalSecret,
-            &[9; 32],
-            "local-secret",
-            2,
-            vec![20, 21],
-            vec![22; 12],
-        )
+        .save_dek("local-secret", 2, Vec::new(), 0, "chacha20poly1305")
         .await?;
+    assert!(
+        !store
+            .save_secret_blob(
+                SecretBlobKind::LocalSecret,
+                &[9; 32],
+                "local-secret",
+                2,
+                vec![20, 21],
+                vec![22; 12],
+            )
+            .await?
+    );
     let migrated = store
         .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
         .await?
@@ -2611,26 +2618,37 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
     assert_eq!(migrated.dek_version, 2);
     assert_eq!(migrated.ciphertext, vec![20, 21]);
 
+    // Kinds are independent namespaces and may coexist for the same blob id.
     store
-        .delete_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
+        .save_dek("reservation", 0, Vec::new(), 0, "chacha20poly1305")
         .await?;
+    assert!(
+        store
+            .save_secret_blob(
+                SecretBlobKind::Reservation,
+                &[9; 32],
+                "reservation",
+                0,
+                vec![1],
+                vec![2; 12],
+            )
+            .await?
+    );
     assert!(
         store
             .load_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
             .await?
-            .is_none()
+            .is_some()
+    );
+    assert!(
+        store
+            .load_secret_blob(SecretBlobKind::Reservation, &[9; 32])
+            .await?
+            .is_some()
     );
 
-    // Kinds are independent namespaces.
     store
-        .save_secret_blob(
-            SecretBlobKind::Reservation,
-            &[9; 32],
-            "reservation",
-            0,
-            vec![1],
-            vec![2; 12],
-        )
+        .delete_secret_blob(SecretBlobKind::LocalSecret, &[9; 32])
         .await?;
     assert!(
         store
@@ -2644,11 +2662,15 @@ async fn secret_blob_and_dek_crud() -> Res<()> {
             .await?
             .is_some()
     );
-    assert_eq!(
+
+    store
+        .delete_secret_blob(SecretBlobKind::Reservation, &[9; 32])
+        .await?;
+    assert!(
         store
-            .list_secret_blob_ids(SecretBlobKind::Reservation)
-            .await?,
-        vec![vec![9; 32]]
+            .load_secret_blob(SecretBlobKind::Reservation, &[9; 32])
+            .await?
+            .is_none()
     );
     Ok(())
 }

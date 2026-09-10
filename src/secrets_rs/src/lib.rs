@@ -49,6 +49,9 @@ pub enum SecretsError {
     /// A stored DEK or version index could not be decoded.
     #[error("stored material is corrupt: {0}")]
     Corrupt(String),
+    /// The requested DEK is not present in the configured secret store.
+    #[error("stored material is missing: {0}")]
+    Missing(String),
     /// DEK version index serialization failed.
     #[error("material index encoding failed: {0}")]
     Encoding(#[from] bincode::Error),
@@ -101,6 +104,7 @@ impl SecretRepo {
         // and the `test-support` feature here.
         let store: Arc<keyring_core::CredentialStore> =
             if cfg!(test) || cfg!(feature = "test-support") {
+                tracing::warn!("using in-memory keyring store");
                 static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
                     tokio::sync::OnceCell::const_new();
                 Arc::clone(
@@ -236,6 +240,30 @@ impl SecretRepo {
     }
 
     // ---- DEK API ----
+
+    /// Read a DEK without creating it. Missing entries are returned as `None`.
+    pub async fn get_dek(
+        &self,
+        dek_id: &str,
+        version: u64,
+    ) -> Result<Option<[u8; 32]>, SecretsError> {
+        validate_name(dek_id)?;
+        let dek_id = dek_id.to_string();
+        let store = self.store();
+        let username = dek_username(&dek_id, version);
+        tokio::task::spawn_blocking(move || {
+            let entry = store
+                .build(MATERIAL_SERVICE, &username, None)
+                .map_err(SecretsError::from)?;
+            match entry.get_password() {
+                Ok(secret) => decode_dek(&secret, &dek_id, version).map(Some),
+                Err(keyring_core::Error::NoEntry) => Ok(None),
+                Err(err) => Err(SecretsError::from(err)),
+            }
+        })
+        .await
+        .expect(ERROR_TOKIO)
+    }
 
     /// The DEK for `(dek_id, version)`, generating and persisting it in the
     /// keyring on first use.
@@ -446,6 +474,17 @@ mod tests {
         assert_eq!(v0_first, v0_second);
         let v1 = repo.get_or_create_dek("local-secret", 1).await?;
         assert_ne!(v0_first, v1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reading_missing_dek_does_not_create_one() -> Res<()> {
+        let repo = test_repo().await;
+        assert!(repo.get_dek("read-only", 0).await?.is_none());
+        assert!(repo.list_dek_versions("read-only").await?.is_empty());
+
+        let expected = repo.get_or_create_dek("read-only", 0).await?;
+        assert_eq!(repo.get_dek("read-only", 0).await?, Some(expected));
         Ok(())
     }
 

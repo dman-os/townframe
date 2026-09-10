@@ -23,25 +23,32 @@
 
 use trycmd::TestCases;
 
-/// Absolute path to the built `daybook_cli` binary.
+/// Path to the built `daybook_cli` binary.
 ///
 /// trycmd resolves `$ daybook_cli ...` through cargo metadata by default,
 /// which does not work from in-crate tests — unresolved bin names are
 /// silently skipped. Registering the bin explicitly sidesteps that.
-const DAYBOOK_CLI: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/debug/daybook_cli"
-);
+fn daybook_cli_path() -> std::path::PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    target_dir.join("debug/daybook_cli")
+}
 
-fn assert_bin_exists() {
+fn assert_bin_exists(path: &std::path::Path) {
     assert!(
-        std::path::Path::new(DAYBOOK_CLI).exists(),
-        "e2e tests need the built binary at {DAYBOOK_CLI}; run `cargo build -p daybook_cli` first"
+        path.exists(),
+        "e2e tests need the built binary at {}; run `cargo build -p daybook_cli` first",
+        path.display()
     );
 }
 
 fn new_suite() -> TestCases {
-    assert_bin_exists();
+    let daybook_cli = daybook_cli_path();
+    assert_bin_exists(&daybook_cli);
+    let daybook_cli_env = daybook_cli.to_string_lossy().into_owned();
     let suite = TestCases::new();
     // The CLI resolves the repo from DAYB_REPO_PATH (cwd is ignored): point
     // every case at a `repo` subdir of its own sandbox so tests are fully
@@ -52,7 +59,7 @@ fn new_suite() -> TestCases {
     // command through PATH, where no entry exists. Expose the absolute binary
     // path as an env var for sh steps that capture output:
     // `$ sh -c 'ID=$($DAYBOOK_CLI touch); ...'`.
-    suite.env("DAYBOOK_CLI", DAYBOOK_CLI);
+    suite.env("DAYBOOK_CLI", daybook_cli_env.clone());
     // The CLI reports success via tracing logs on stderr (compact format
     // with uptime timestamps). Suppress them suite-wide so snapshots
     // assert real output; clap/eyre errors still surface on stderr.
@@ -60,10 +67,7 @@ fn new_suite() -> TestCases {
     // tracing logs render ANSI when piped; disable so only the color-eyre
     // report (which ignores NO_COLOR in this project) carries ANSI.
     suite.env("NO_COLOR", "1");
-    suite.register_bin(
-        "daybook_cli",
-        trycmd::schema::Bin::Path(std::path::PathBuf::from(DAYBOOK_CLI)),
-    );
+    suite.register_bin("daybook_cli", trycmd::schema::Bin::Path(daybook_cli));
     // The test plug OCI artifact lives outside the sandbox (built by
     // `xtask build-plug-oci` into target/oci). Register `sh` so cases can
     // copy it in with `$ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'`, keeping the

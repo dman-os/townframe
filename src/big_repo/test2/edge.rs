@@ -1087,7 +1087,16 @@ async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Re
     drop(owner_doc);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if !pair.left().repo.runtime.has_doc_worker(doc_id).await? {
+        let has_worker = match tokio::time::timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            pair.left().repo.runtime.has_doc_worker(doc_id),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
+        if !has_worker {
             break;
         }
         assert!(

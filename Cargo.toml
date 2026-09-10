@@ -249,8 +249,6 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 # #
 
-# LOCAL DEV (uncommitted ../keyhive changes: prekey-state delta + janitor APIs).
-# Remove once the upstream repo is pushed and the rev pins are updated.
 # [patch."https://github.com/dman-os/keyhive"]
 # keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
 # keyhive_core = { path = "../keyhive/keyhive_core" }

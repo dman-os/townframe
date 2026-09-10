@@ -480,6 +480,8 @@ impl<F: FutureForm> DocWorker2<F> {
         );
         self.register_bundle_lease().await?;
         let handle = LiveDocHandle::new(bundle, lease);
+        self.caller_handles
+            .retain(|presence| presence.strong_count() > 0);
         self.caller_handles.push(handle.presence());
         Ok(handle)
     }
@@ -583,7 +585,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let commits: Vec<_> = tree.loose_commits().collect();
         let checkpoint_count = commits
             .iter()
-            .filter(|c| is_causal_checkpoint_id(c.head()))
+            .filter(|com| is_causal_checkpoint_id(com.head()))
             .count();
         tracing::debug!(
             doc_id = %self.doc_id,

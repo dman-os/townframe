@@ -164,28 +164,57 @@ impl SqliteBigRepoStore {
         dek_version: u64,
         ciphertext: Vec<u8>,
         nonce: Vec<u8>,
-    ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_secret_blobs(
-                scope_id, kind, blob_id, dek_id, dek_version, ciphertext, nonce
-             )
+    ) -> Res<bool> {
+        let mut tx = self.sql.write_pool.begin().await?;
+        let dek_version = i64::try_from(dek_version).expect(ERROR_IMPOSSIBLE);
+        let inserted = sqlx::query(
+            "INSERT INTO big_repo_secret_blobs
+                 (scope_id
+                , kind
+                , blob_id
+                , dek_id
+                , dek_version
+                , ciphertext
+                , nonce
+                 )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(scope_id, kind, blob_id) DO UPDATE SET
-                 dek_id = excluded.dek_id,
-                 dek_version = excluded.dek_version,
-                 ciphertext = excluded.ciphertext,
-                 nonce = excluded.nonce",
-            self.scope().id(),
-            kind.as_i64(),
-            blob_id,
-            dek_id,
-            i64::try_from(dek_version).expect(ERROR_IMPOSSIBLE),
-            &ciphertext,
-            &nonce,
+             ON CONFLICT(scope_id, kind, blob_id) DO NOTHING",
         )
-        .execute(&self.sql.write_pool)
-        .await?;
-        Ok(())
+        .bind(self.scope().id())
+        .bind(kind.as_i64())
+        .bind(blob_id)
+        .bind(dek_id)
+        .bind(dek_version)
+        .bind(&ciphertext)
+        .bind(&nonce)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+
+        if !inserted {
+            sqlx::query(
+                "UPDATE big_repo_secret_blobs
+                    SET dek_id = ?1
+                      , dek_version = ?2
+                      , ciphertext = ?3
+                      , nonce = ?4
+                  WHERE scope_id = ?5
+                    AND kind = ?6
+                    AND blob_id = ?7",
+            )
+            .bind(dek_id)
+            .bind(dek_version)
+            .bind(&ciphertext)
+            .bind(&nonce)
+            .bind(self.scope().id())
+            .bind(kind.as_i64())
+            .bind(blob_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     /// Load one encrypted secret blob, if present.

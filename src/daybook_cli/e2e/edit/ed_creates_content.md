@@ -15,8 +15,7 @@ Updated document: [..]
 
 $ sh -c 'ID=$(cat .id); "$DAYBOOK_CLI" cat "$ID" | grep -q "Edited via ed"'
 
-$ sh -c 'ID=$(cat .id); "$DAYBOOK_CLI" cat "$ID" | grep "Untitled"'
-? 1
+$ sh -c 'ID=$(cat .id); OUT=$("$DAYBOOK_CLI" cat "$ID") && ! printf "%s\n" "$OUT" | grep -q "Untitled"'
 
 $ sh -c 'ID=$(cat .id); EDITOR=./editor.sh "$DAYBOOK_CLI" ed "$ID"'
 No changes detected.

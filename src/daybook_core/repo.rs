@@ -982,9 +982,23 @@ pub(crate) async fn ensure_blob_partitions(
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
     let repo_root = std::path::absolute(repo_root)
         .wrap_err_with(|| format!("error absolutizing repo root {}", repo_root.display()))?;
+    // Reuse the legacy BigRepo store when upgrading a repository created
+    // before the storage directory was renamed from `samod`. New repos
+    // continue to use `big_repo`; no data is moved or deleted implicitly.
+    let big_repo_root = repo_root.join("big_repo");
+    let big_repo_root = if !big_repo_root.exists() {
+        let legacy_root = repo_root.join("samod");
+        if legacy_root.is_dir() {
+            legacy_root
+        } else {
+            big_repo_root
+        }
+    } else {
+        big_repo_root
+    };
     Ok(RepoLayout {
         repo_root: repo_root.clone(),
-        big_repo_root: repo_root.join("big_repo"),
+        big_repo_root,
         sqlite_path: repo_root.join("sqlite.db"),
         blobs_root: repo_root.join("blobs"),
         marker_path: repo_root.join(REPO_MARKER_FILE),
