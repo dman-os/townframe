@@ -822,16 +822,17 @@ async fn run_concurrent_frontier_task(
             part_cursor,
             ..
         } => {
-            // A scoped worker only processes documents whose live keyhive
-            // group membership intersects its scope. Eligibility is checked
-            // here so part events for documents that joined/left the scope
-            // are handled by the same path as admission events.
+            // The match-all part stream also carries non-document objects. Only
+            // valid Keyhive document ids can be materialized; scoped workers then
+            // additionally filter live group membership below.
+            if !crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id) {
+                tracing::debug!(%doc_id, "ignoring non-Keyhive object in frontier source");
+                return Ok(ConcurrentTaskOutput::OutOfScope);
+            }
             if scope.groups().is_some() {
-                // The match-all part stream also carries non-document
-                // part-store objects; `group_ids_containing_document` maps
-                // their invalid ids to an empty group set (never in scope),
-                // while real keyhive errors propagate and crash the worker
-                // per the house error policy.
+                // Eligibility is checked against live Keyhive membership so part
+                // events for documents that joined or left the scope are handled
+                // by the same path as admission events.
                 let doc_groups = keyhive.group_ids_containing_document(doc_id).await?;
                 if !scope.admits_doc_groups(&doc_groups) {
                     // The document left the worker's scope: tear down its

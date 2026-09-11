@@ -547,8 +547,14 @@ impl BigKeyhiveHandle {
             .collect())
     }
 
+    pub(crate) fn is_valid_keyhive_document_id(doc_id: DocumentId) -> bool {
+        keyhive_doc_id(doc_id).is_ok()
+    }
+
     pub(crate) async fn current_cgka_ops_count(&self, doc_id: DocumentId) -> Res<usize> {
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let Ok(kh_doc_id) = keyhive_doc_id(doc_id) else {
+            return Ok(0);
+        };
         let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
             return Ok(0);
         };
