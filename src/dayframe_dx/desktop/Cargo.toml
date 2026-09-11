@@ -1,0 +1,18 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { workspace = true, features = ["router"] }
+ui = { workspace = true }
+
+dioxus-native = { version = "0.8.0-alpha.1", features = ["scrollbars"] }
+anyrender = { version = "0.13.0" }
+anyrender_vello = { version = "0.14.0" }
+anyrender_vello_cpu = { version = "0.17.0" }
+anyrender_vello_hybrid = { version = "0.10.0" }
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
