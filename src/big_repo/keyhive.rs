@@ -210,31 +210,34 @@ impl BigKeyhiveHandle {
         }))
     }
 
-    pub(crate) async fn import_prekey_secrets(
+    /// Restore the full prekey state (membership ops + secret halves) from the
+    /// incremental sidecar. Restores published membership as well as secrets, so
+    /// restarts do not require a compaction to keep the pool intact.
+    pub(crate) async fn import_prekey_state(
         &self,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         let Some(bytes) = storage
             .load_prekey_secrets()
             .await
-            .map_err(|err| ferr!("error loading keyhive prekey secrets: {err}"))?
+            .map_err(|err| ferr!("error loading keyhive prekey state: {err}"))?
         else {
             return Ok(());
         };
         self.keyhive
-            .import_prekey_secrets(&bytes)
+            .import_prekey_state(&bytes)
             .await
-            .map_err(|err| ferr!("failed importing keyhive prekey secrets: {err}"))?;
+            .map_err(|err| ferr!("failed importing keyhive prekey state: {err}"))?;
         Ok(())
     }
 
-    pub(crate) async fn save_prekey_secrets(
+    pub(crate) async fn save_prekey_state(
         &self,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         let bytes = self
             .keyhive
-            .export_prekey_secrets()
+            .export_prekey_state()
             .await
             .map_err(|err| ferr!("error exporting keyhive prekey secrets: {err}"))?;
         storage
@@ -246,6 +249,109 @@ impl BigKeyhiveHandle {
 
     pub(crate) fn clone_keyhive(&self) -> Arc<BigKeyhiveKeyhive> {
         Arc::clone(&self.keyhive)
+    }
+
+    /// The local individual's currently published prekeys.
+    ///
+    /// Rebuilt from the individual's prekey ops (Add publishes, Rotate
+    /// retires and replaces), mirroring `PrekeyState::build` upstream —
+    /// the fields themselves are `pub(crate)`.
+    ///
+    /// NOTE: the tombstones must be collected and applied in a *second*
+    /// pass, exactly like upstream `PrekeyState::build`: applying Rotate
+    /// removals inline while iterating the ops map is order-dependent and
+    /// resurrects rotated-out keys when the original Add happens to iterate
+    /// after its Rotate.
+    pub(crate) async fn prekeys(
+        &self,
+    ) -> std::collections::HashSet<keyhive_crypto::share_key::ShareKey> {
+        use keyhive_core::principal::individual::op::KeyOp;
+        let individual = self.keyhive.individual().await;
+        let locked = individual.lock().await;
+        let mut set = std::collections::HashSet::new();
+        let mut tombstones = Vec::new();
+        for op in locked.prekey_ops().values() {
+            let op: &KeyOp = op.as_ref();
+            match op {
+                KeyOp::Add(add) => {
+                    set.insert(add.payload().share_key);
+                }
+                KeyOp::Rotate(rot) => {
+                    tombstones.push(rot.payload().old);
+                    set.insert(rot.payload().new);
+                }
+            }
+        }
+        for tombstone in tombstones {
+            // Mirror `PrekeyState::build` upstream: the published set must
+            // never become empty (a stale rotation cycle would otherwise
+            // tombstone every key). Skip a removal that would empty it.
+            if set.len() > 1 || !set.contains(&tombstone) {
+                set.remove(&tombstone);
+            }
+        }
+        set
+    }
+
+    /// The local individual id of the active keyhive agent.
+    pub(crate) async fn local_individual_id(
+        &self,
+    ) -> keyhive_core::principal::individual::id::IndividualId {
+        self.keyhive.individual().await.lock().await.id()
+    }
+
+    /// Replace a published prekey with a fresh one.
+    pub(crate) async fn rotate_prekey(
+        &self,
+        prekey: keyhive_crypto::share_key::ShareKey,
+    ) -> Res<
+        Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::individual::op::rotate_key::RotateKeyOp,
+            >,
+        >,
+    > {
+        self.keyhive
+            .rotate_prekey(prekey)
+            .await
+            .map_err(|err| ferr!("prekey rotation failed: {err}"))
+    }
+
+    /// Publish an additional prekey, growing the available pool.
+    pub(crate) async fn expand_prekeys(
+        &self,
+    ) -> Res<
+        Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::individual::op::add_key::AddKeyOp,
+            >,
+        >,
+    > {
+        self.keyhive
+            .expand_prekeys()
+            .await
+            .map_err(|err| ferr!("prekey expansion failed: {err}"))
+    }
+
+    /// Number of `RotateKeyOp`s in the local prekey op set whose `old` key is
+    /// `prekey`. Test-only: the published-set precheck makes the janitor
+    /// idempotent, and this counts the rotations to prove it.
+    #[cfg(test)]
+    pub(crate) async fn rotate_op_count_for(
+        &self,
+        old: keyhive_crypto::share_key::ShareKey,
+    ) -> usize {
+        use keyhive_core::principal::individual::op::KeyOp;
+        let individual = self.keyhive.individual().await;
+        let locked = individual.lock().await;
+        locked
+            .prekey_ops()
+            .values()
+            .filter(|op| match op.as_ref() {
+                KeyOp::Rotate(rot) => rot.payload().old == old,
+                KeyOp::Add(_) => false,
+            })
+            .count()
     }
 
     pub async fn get_group(
@@ -439,6 +545,14 @@ impl BigKeyhiveHandle {
                     .then_some(group_id.to_bytes())
             })
             .collect())
+    }
+
+    pub(crate) async fn current_cgka_ops_count(&self, doc_id: DocumentId) -> Res<usize> {
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
+            return Ok(0);
+        };
+        Ok(doc.lock().await.cgka().map_or(0, |cgka| cgka.ops_count()))
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {

@@ -4,6 +4,7 @@ use sqlx::{QueryBuilder, Row};
 pub(crate) const KEYHIVE_ADMISSION_READER_GROUP_PART: &str = "group_part";
 pub(crate) const KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT: &str = "causal_checkpoint";
 pub(crate) const KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER: &str = "automerge_frontier";
+pub(crate) const KEYHIVE_ADMISSION_READER_PREKEY_JANITOR: &str = "prekey_janitor";
 
 impl SqliteBigRepoStore {
     /// All part IDs currently present in this store's scope.

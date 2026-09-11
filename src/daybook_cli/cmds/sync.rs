@@ -38,7 +38,7 @@ pub async fn run(sync_urls: Vec<String>, exit_when_synced: bool) -> Res<ExitCode
         .collect();
 
     if exit_when_synced {
-        if peer_ids.is_empty() {
+        if sync_urls.is_empty() {
             error!("--exit-when-synced requires at least one sync URL");
             return Ok(ExitCode::FAILURE);
         }

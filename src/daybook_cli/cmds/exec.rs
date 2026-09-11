@@ -152,7 +152,7 @@ Routine impl: {routine_impl:?}
                         };
                         let branch_path = match branch {
                             Some(val) => {
-                                if branches.branches.contains_key(val) {
+                                if !branches.branches.contains_key(val) {
                                     eyre::bail!("branch not found for doc: {doc_id} - {val}");
                                 }
                                 daybook_types::doc::BranchPathBuf::from(val.as_str())

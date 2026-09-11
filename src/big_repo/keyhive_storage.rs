@@ -1,5 +1,10 @@
 //! Keyhive filesystem storage for BigRepo.
 //!
+//! Archives live on disk under the storage root; keyhive events live in
+//! sqlite; secret material (CGKA secrets, prekey sidecar, doc reservations)
+//! lives in sqlite as well, AEAD-encrypted under per-kind DEKs sourced from
+//! the OS keyring (or a file fallback).
+//!
 //! Adapted from `subduction_cli/src/keyhive.rs`.
 //! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
 
@@ -8,23 +13,26 @@
 
 use crate::interlude::*;
 
-use crate::store::sqlite::SqliteBigRepoStore;
-use std::collections::HashMap;
+use crate::store::sqlite::{SecretBlobKind, SqliteBigRepoStore, SqliteBigRepoStoreError};
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::lock::Mutex;
 
 use futures::{FutureExt, future::BoxFuture};
+use rand::RngCore;
+use secrets_rs::{SecretStore, decrypt_blob, encrypt_blob};
 use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
+use utils_rs::prelude::eyre;
 
 /// Subdirectory of the repo data dir holding keyhive state.
 pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
 
 const ARCHIVES_SUBDIR: &str = "archives";
-const OPS_SUBDIR: &str = "ops";
 const LOCAL_SECRETS_SUBDIR: &str = "local-secrets";
 const PREKEY_SECRETS_FILE: &str = "prekey-secrets.bin";
 const RESERVATIONS_SUBDIR: &str = "reservations";
@@ -39,7 +47,7 @@ pub(crate) const DOC_RESERVATION_MAGIC: [u8; 4] = *b"DRSV";
 ///
 /// Stored in Keyhive's local-secret storage (never synchronized); it is the
 /// crash-recovery record between ID allocation and Keyhive document creation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DocReservation {
     pub magic: [u8; 4],
     pub doc_id: [u8; 32],
@@ -53,13 +61,41 @@ pub(crate) struct DocReservation {
     pub initial_content: Option<Vec<u8>>,
 }
 
+/// Reserved blob id under which the prekey-secrets sidecar is stored.
+const PREKEY_SECRETS_BLOB_ID: &str = "prekey-secrets.v1";
+/// Subdirectory holding file-fallback key material (`<dek_id>.v<version>.bin`, 0o600).
+const DEKS_SUBDIR: &str = "deks";
+/// Stable DEK identifiers for the kinds of secret material stored in sqlite.
+/// Each identifier is recorded per blob and in `big_repo_deks`.
+const DEK_ID_LOCAL_SECRET: &str = "local-secret";
+const DEK_ID_PREKEY_SIDECAR: &str = "prekey-sidecar";
+const DEK_ID_RESERVATION: &str = "reservation";
+const DEK_SERVICE: &str = "daybook.material.v1";
+/// `big_repo_deks.algorithm` labels for the desktop DEK sources.
+const DEK_ALGORITHM_KEYRING: &str = "keyring";
+const DEK_ALGORITHM_FILE: &str = "file";
 /// Monotonic per-process counter for temp filenames.
 static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Filesystem-backed [`KeyhiveStorage`] for BigRepo.
-#[derive(Debug, Clone)]
-pub(crate) struct FsKeyhiveStorage {
-    root: PathBuf,
+/// Where the DEK lives for a filesystem-backed storage. Secret material
+/// itself always persists to sqlite (encrypted under the DEK); this only
+/// sources the key bytes.
+#[derive(Clone)]
+enum SecretKeySource {
+    /// File-backed key fallback (`deks/<dek_id>.v<version>.bin`, 0o600) for
+    /// headless systems without an OS keyring.
+    FileDek,
+    /// OS key material via the shared `secrets_rs` store.
+    Keyring { store: Arc<SecretStore> },
+}
+
+impl std::fmt::Debug for SecretKeySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileDek => write!(formatter, "FileDek"),
+            Self::Keyring { .. } => write!(formatter, "Keyring"),
+        }
+    }
 }
 
 /// Error type returned by [`FsKeyhiveStorage`] operations.
@@ -68,13 +104,74 @@ pub(crate) enum FsKeyhiveStorageError {
     /// Underlying filesystem I/O failed.
     #[error("keyhive fs storage io error: {0}")]
     Io(#[from] io::Error),
+    #[error("keyhive secret store error: {0}")]
+    Secrets(#[from] secrets_rs::SecretsError),
+    #[error("keyhive sqlite secret storage error: {0}")]
+    Sqlite(#[from] crate::store::sqlite::SqliteBigRepoStoreError),
+    #[error("corrupt keyhive secret record: {0}")]
+    Corrupt(String),
+}
+
+/// Filesystem-backed [`KeyhiveStorage`] for BigRepo.
+///
+/// Archives live on disk; secret material (CGKA secrets, prekey sidecar,
+/// reservations) lives in sqlite, encrypted under per-kind DEKs sourced from
+/// [`SecretKeySource`].
+#[derive(Clone)]
+pub(crate) struct FsKeyhiveStorage {
+    root: PathBuf,
+    store: SqliteBigRepoStore,
+    secret_key_source: SecretKeySource,
+}
+
+impl std::fmt::Debug for FsKeyhiveStorage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FsKeyhiveStorage")
+            .field("root", &self.root)
+            .field("secret_key_source", &self.secret_key_source)
+            .finish()
+    }
 }
 
 impl FsKeyhiveStorage {
-    /// Create the storage root, its `archives/` and `ops/` subdirs.
-    pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
+    /// Create the storage root and its subdirs. Secret material persists to
+    /// sqlite encrypted under a file-fallback DEK (no OS keyring required).
+    pub(crate) fn new(root: PathBuf, store: SqliteBigRepoStore) -> io::Result<Self> {
+        Self::new_with_secret_key_source(root, store, SecretKeySource::FileDek)
+    }
+
+    /// Same layout as [`FsKeyhiveStorage::new`], but key material is sourced
+    /// from the OS keyring via the shared `SecretStore`. Secret blobs still
+    /// persist to sqlite (encrypted); the keyring never holds blobs.
+    pub(crate) fn with_secret_store(
+        root: PathBuf,
+        store: SqliteBigRepoStore,
+        secret_store: Arc<SecretStore>,
+    ) -> io::Result<Self> {
+        Self::new_with_secret_key_source(
+            root,
+            store,
+            SecretKeySource::Keyring {
+                store: secret_store,
+            },
+        )
+    }
+
+    /// Whether key material is sourced from the OS keyring.
+    fn uses_keyring_secrets(&self) -> bool {
+        matches!(self.secret_key_source, SecretKeySource::Keyring { .. })
+    }
+
+    fn new_with_secret_key_source(
+        root: PathBuf,
+        store: SqliteBigRepoStore,
+        secret_key_source: SecretKeySource,
+    ) -> io::Result<Self> {
         std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
-        std::fs::create_dir_all(root.join(OPS_SUBDIR))?;
+        // The legacy filesystem layout is still created so the one-time
+        // import (import_legacy_secrets_if_empty) can read it; new writes
+        // never touch these dirs.
         let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
         std::fs::create_dir_all(&secrets_dir)?;
         #[cfg(unix)]
@@ -90,15 +187,30 @@ impl FsKeyhiveStorage {
             std::fs::set_permissions(&reservations_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
-        Ok(Self { root })
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                root.join(TMP_SUBDIR),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+        }
+        Ok(Self {
+            root,
+            store,
+            secret_key_source,
+        })
     }
 
     fn archive_dir(&self) -> PathBuf {
         self.root.join(ARCHIVES_SUBDIR)
     }
 
+    /// Legacy `ops/` dir: the keyhive event log lives in sqlite today, so
+    /// this directory is never created or written. Kept only because the
+    /// [`KeyhiveStorage`] trait still requires the event methods.
     fn event_dir(&self) -> PathBuf {
-        self.root.join(OPS_SUBDIR)
+        self.root.join("ops")
     }
 
     fn local_secret_dir(&self) -> PathBuf {
@@ -110,106 +222,62 @@ impl FsKeyhiveStorage {
     }
 
     async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
-        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
-        let tmp = self.tmp_dir().join(format!(
-            "{PREKEY_SECRETS_FILE}.{}.{tmp_id}.tmp",
-            std::process::id()
-        ));
-        let dest = self.root.join(PREKEY_SECRETS_FILE);
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(&bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        match tokio::fs::rename(&tmp, &dest).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                drop(tokio::fs::remove_file(&tmp).await);
-                Err(err)
-            }
-        }
+        self.write_secret_blob(
+            SecretBlobKind::PrekeySidecar,
+            PREKEY_SECRETS_BLOB_ID.as_bytes(),
+            &bytes,
+        )
+        .await
+        .map_err(|err| io::Error::other(format!("prekey secret persist failed: {err}")))?;
+        Ok(())
     }
 
     async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
-        let path = self.root.join(PREKEY_SECRETS_FILE);
-        match tokio::fs::read(path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn reservation_path(&self, doc_id: [u8; 32]) -> PathBuf {
-        let mut hex = String::with_capacity(64);
-        for byte in doc_id {
-            use std::fmt::Write;
-            write!(hex, "{byte:02x}").expect("writing hex to String cannot fail");
-        }
-        self.root
-            .join(RESERVATIONS_SUBDIR)
-            .join(format!("{hex}.bin"))
+        self.read_secret_blob(
+            SecretBlobKind::PrekeySidecar,
+            PREKEY_SECRETS_BLOB_ID.as_bytes(),
+        )
+        .await
+        .map_err(|err| io::Error::other(format!("prekey secret load failed: {err}")))
     }
 
     async fn save_doc_reservation(&self, doc_id: [u8; 32], bytes: Vec<u8>) -> io::Result<()> {
-        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .tmp_dir()
-            .join(format!("reservation.{}.{tmp_id}.tmp", std::process::id()));
-        let dest = self.reservation_path(doc_id);
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(&bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        match tokio::fs::rename(&tmp, &dest).await {
-            Ok(()) => {
-                let parent = dest.parent().expect("reservation parent").to_owned();
-                tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
-                    .await
-                    .map_err(io::Error::other)??;
-                Ok(())
-            }
-            Err(err) => {
-                drop(tokio::fs::remove_file(&tmp).await);
-                Err(err)
-            }
-        }
+        self.write_secret_blob(SecretBlobKind::Reservation, &doc_id, &bytes)
+            .await
+            .map_err(|err| io::Error::other(format!("doc reservation persist failed: {err}")))?;
+        Ok(())
     }
 
     async fn load_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<Option<Vec<u8>>> {
-        match tokio::fs::read(self.reservation_path(doc_id)).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
+        self.read_secret_blob(SecretBlobKind::Reservation, &doc_id)
+            .await
+            .map_err(|err| io::Error::other(format!("doc reservation load failed: {err}")))
     }
 
     async fn list_doc_reservations(&self) -> io::Result<Vec<Vec<u8>>> {
-        let dir = self.root.join(RESERVATIONS_SUBDIR);
         let mut out = Vec::new();
-        let mut rd = tokio::fs::read_dir(&dir).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
-                continue;
+        for blob_id in self
+            .store
+            .list_secret_blob_ids(SecretBlobKind::Reservation)
+            .await
+            .map_err(io::Error::other)?
+        {
+            if let Some(bytes) = self
+                .read_secret_blob(SecretBlobKind::Reservation, &blob_id)
+                .await
+                .map_err(|err| io::Error::other(format!("doc reservation load failed: {err}")))?
+            {
+                out.push(bytes);
             }
-            out.push(tokio::fs::read(&path).await?);
         }
         Ok(out)
     }
 
     async fn delete_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<()> {
-        match tokio::fs::remove_file(self.reservation_path(doc_id)).await {
-            Ok(()) => {
-                let parent = self.root.join(RESERVATIONS_SUBDIR);
-                tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
-                    .await
-                    .map_err(io::Error::other)??;
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
-        }
+        self.store
+            .delete_secret_blob(SecretBlobKind::Reservation, &doc_id)
+            .await
+            .map_err(io::Error::other)
     }
 
     async fn save_file(
@@ -234,14 +302,23 @@ impl FsKeyhiveStorage {
         file.sync_all().await?;
         drop(file);
         match tokio::fs::rename(&tmp, &dest).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                drop(tokio::fs::remove_file(&tmp).await);
-                if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err(err)
+            Ok(()) => {
+                if let Err(err) = Self::sync_dir(&parent_dir) {
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after rename");
                 }
+                Ok(())
+            }
+            Err(err) => {
+                match tokio::fs::remove_file(&tmp).await {
+                    Ok(()) => {}
+                    Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+                    Err(cleanup) => {
+                        return Err(io::Error::other(format!(
+                            "rename failed: {err}; temporary-file cleanup failed: {cleanup}"
+                        )));
+                    }
+                }
+                Err(err)
             }
         }
     }
@@ -259,7 +336,11 @@ impl FsKeyhiveStorage {
             hash.to_hex(),
             std::process::id()
         ));
-        tokio::fs::write(&tmp, data).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
         #[cfg(unix)]
         {
             if parent_dir.ends_with(LOCAL_SECRETS_SUBDIR) || parent_dir == self.local_secret_dir() {
@@ -271,12 +352,35 @@ impl FsKeyhiveStorage {
             }
         }
         let result = match tokio::fs::hard_link(&tmp, &dest).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let Err(err) = Self::sync_dir(&parent_dir) {
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after hard link");
+                }
+                Ok(true)
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
             Err(error) => Err(error),
         };
         drop(tokio::fs::remove_file(&tmp).await);
         result
+    }
+
+    /// Flush a directory's entries to disk. On platforms where directory
+    /// fsync is unsupported this is a no-op; failures are reported to the
+    /// caller, which decides whether they are fatal for the write.
+    #[cfg(not(windows))]
+    fn sync_dir(path: &Path) -> io::Result<()> {
+        let file = std::fs::File::open(path)?;
+        match file.sync_all() {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(windows)]
+    fn sync_dir(_path: &Path) -> io::Result<()> {
+        Ok(())
     }
 
     async fn load_dir(dir: PathBuf) -> io::Result<Vec<(StorageHash, Vec<u8>)>> {
@@ -304,6 +408,326 @@ impl FsKeyhiveStorage {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         }
+    }
+
+    /// Stable DEK identifier for a material kind.
+    fn dek_id_for(kind: SecretBlobKind) -> &'static str {
+        match kind {
+            SecretBlobKind::LocalSecret => DEK_ID_LOCAL_SECRET,
+            SecretBlobKind::PrekeySidecar => DEK_ID_PREKEY_SIDECAR,
+            SecretBlobKind::Reservation => DEK_ID_RESERVATION,
+        }
+    }
+
+    /// Map a sqlite store error (eyre) into the fs storage error, preserving
+    /// the chain via `SqliteBigRepoStoreError::Other`.
+    fn sqlite_err(error: eyre::Report) -> FsKeyhiveStorageError {
+        FsKeyhiveStorageError::Sqlite(SqliteBigRepoStoreError::Other(error))
+    }
+
+    /// Read the key for a blob's recorded version. Read paths never create
+    /// keyring entries or file keys.
+    async fn dek(&self, dek_id: &str, version: u64) -> Result<[u8; 32], FsKeyhiveStorageError> {
+        let key = match &self.secret_key_source {
+            SecretKeySource::Keyring { store } => store
+                .get_secret(DEK_SERVICE, &Self::dek_name(dek_id, version))
+                .await
+                .map_err(FsKeyhiveStorageError::Secrets)?,
+            SecretKeySource::FileDek => self
+                .read_file_dek(dek_id, version)
+                .await
+                .map_err(FsKeyhiveStorageError::Io)?
+                .map(Vec::from),
+        };
+        let key = key.ok_or_else(|| {
+            FsKeyhiveStorageError::Secrets(secrets_rs::SecretsError::Missing(format!(
+                "key {dek_id} version {version}"
+            )))
+        })?;
+        key.try_into().map_err(|_| {
+            FsKeyhiveStorageError::Corrupt(format!("key {dek_id} version {version} has bad length"))
+        })
+    }
+
+    async fn dek_for_write(
+        &self,
+        dek_id: &str,
+        version: u64,
+    ) -> Result<[u8; 32], FsKeyhiveStorageError> {
+        match &self.secret_key_source {
+            SecretKeySource::Keyring { store } => {
+                let key = store
+                    .get_or_create_secret(DEK_SERVICE, &Self::dek_name(dek_id, version), 32)
+                    .await
+                    .map_err(FsKeyhiveStorageError::Secrets)?;
+                key.try_into().map_err(|_| {
+                    FsKeyhiveStorageError::Corrupt(format!(
+                        "key {dek_id} version {version} has bad length"
+                    ))
+                })
+            }
+            SecretKeySource::FileDek => self
+                .create_file_dek(dek_id, version)
+                .await
+                .map_err(FsKeyhiveStorageError::Io),
+        }
+    }
+
+    fn dek_name(dek_id: &str, version: u64) -> String {
+        format!("{dek_id}.v{version}")
+    }
+
+    /// Authenticate the blob identity and key metadata alongside its payload.
+    /// This prevents moving ciphertext between rows or changing the recorded
+    /// key version without detection.
+    fn blob_aad(kind: SecretBlobKind, blob_id: &[u8], dek_id: &str, version: u64) -> Vec<u8> {
+        let mut aad = b"townframe/secret-blob/v1".to_vec();
+        aad.extend_from_slice(&kind.as_i64().to_le_bytes());
+        aad.extend_from_slice(&(blob_id.len() as u64).to_le_bytes());
+        aad.extend_from_slice(blob_id);
+        aad.extend_from_slice(&(dek_id.len() as u64).to_le_bytes());
+        aad.extend_from_slice(dek_id.as_bytes());
+        aad.extend_from_slice(&version.to_le_bytes());
+        aad
+    }
+
+    /// Algorithm label recorded in the `big_repo_deks` envelope row.
+    fn dek_algorithm(&self) -> &'static str {
+        match self.secret_key_source {
+            SecretKeySource::Keyring { .. } => DEK_ALGORITHM_KEYRING,
+            SecretKeySource::FileDek => DEK_ALGORITHM_FILE,
+        }
+    }
+
+    async fn read_file_dek(&self, dek_id: &str, version: u64) -> io::Result<Option<[u8; 32]>> {
+        let path = self
+            .root
+            .join(DEKS_SUBDIR)
+            .join(format!("{dek_id}.v{version}.bin"));
+        match tokio::fs::read(path).await {
+            Ok(bytes) => bytes
+                .try_into()
+                .map(Some)
+                .map_err(|_| io::Error::other("corrupt file DEK: bad length")),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// File-fallback key source (`deks/<dek_id>.v<version>.bin`, 0o600): one
+    /// file per key entry. The key lives outside sqlite; the envelope row
+    /// records its identifier and version.
+    async fn create_file_dek(&self, dek_id: &str, version: u64) -> io::Result<[u8; 32]> {
+        let dir = self.root.join(DEKS_SUBDIR);
+        let path = dir.join(format!("{dek_id}.v{version}.bin"));
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes
+                .try_into()
+                .map_err(|_| io::Error::other("corrupt file DEK: bad length")),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                tokio::fs::create_dir_all(&dir).await?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+                }
+                let mut dek = [0u8; 32];
+                rand::rng().fill_bytes(&mut dek);
+                let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+                let tmp = self
+                    .tmp_dir()
+                    .join(format!("dek.{}.{tmp_id}.tmp", std::process::id()));
+                use tokio::io::AsyncWriteExt;
+                let mut file = {
+                    #[cfg(unix)]
+                    {
+                        tokio::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o600)
+                            .open(&tmp)
+                            .await?
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tokio::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&tmp)
+                            .await?
+                    }
+                };
+                file.write_all(&dek).await?;
+                file.sync_all().await?;
+                drop(file);
+                let result = match tokio::fs::hard_link(&tmp, &path).await {
+                    Ok(()) => {
+                        if let Err(err) = Self::sync_dir(&dir) {
+                            tracing::warn!(?dir, error = %err, "failed to fsync DEK directory after hard link");
+                        }
+                        Ok(dek)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let bytes = tokio::fs::read(&path).await?;
+                        bytes
+                            .try_into()
+                            .map_err(|_| io::Error::other("corrupt file DEK: bad length"))
+                    }
+                    Err(error) => Err(error),
+                };
+                drop(tokio::fs::remove_file(&tmp).await);
+                result
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Encrypt `plaintext` under the fixed initial key version for `kind` and
+    /// persist the blob plus its DEK envelope row. Key rotation is deferred,
+    /// so new writes currently always use version 0.
+    ///
+    /// `wrapped_dek` in the envelope row is left empty: on desktop the DEK
+    /// source itself (OS keyring entry or the `deks/` file) is the protection,
+    /// and the raw key must never be written into sqlite (a backup would then
+    /// hold ciphertext and key together). The column is reserved for the
+    /// KMS-wrapped DEK on cloud, where the read path will unwrap from it.
+    async fn write_secret_blob(
+        &self,
+        kind: SecretBlobKind,
+        blob_id: &[u8],
+        plaintext: &[u8],
+    ) -> Result<bool, FsKeyhiveStorageError> {
+        let dek_id = Self::dek_id_for(kind);
+        // Payload rotation is intentionally deferred; all writes currently use
+        // the initial key version.
+        let version = 0;
+        let dek = self.dek_for_write(dek_id, version).await?;
+        self.store
+            .save_dek(dek_id, version, Vec::new(), 0, self.dek_algorithm())
+            .await
+            .map_err(Self::sqlite_err)?;
+        let aad = Self::blob_aad(kind, blob_id, dek_id, version);
+        let (ciphertext, nonce) = encrypt_blob(&dek, &aad, plaintext)?;
+        let inserted = self
+            .store
+            .save_secret_blob(kind, blob_id, dek_id, version, ciphertext, nonce.to_vec())
+            .await
+            .map_err(Self::sqlite_err)?;
+        Ok(inserted)
+    }
+
+    /// Load and decrypt one secret blob, if present. The blob records which
+    /// `(dek_id, version)` encrypted it, so persisted records remain readable
+    /// when their key version differs from the current write version.
+    async fn read_secret_blob(
+        &self,
+        kind: SecretBlobKind,
+        blob_id: &[u8],
+    ) -> Result<Option<Vec<u8>>, FsKeyhiveStorageError> {
+        let Some(row) = self
+            .store
+            .load_secret_blob(kind, blob_id)
+            .await
+            .map_err(Self::sqlite_err)?
+        else {
+            return Ok(None);
+        };
+        let nonce: [u8; 12] = row
+            .nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| FsKeyhiveStorageError::Corrupt("bad nonce length".into()))?;
+        let dek = self.dek(&row.dek_id, row.dek_version).await?;
+        let aad = Self::blob_aad(kind, blob_id, &row.dek_id, row.dek_version);
+        let plaintext = decrypt_blob(&dek, &aad, &row.ciphertext, &nonce)?;
+        Ok(Some(plaintext))
+    }
+
+    /// One-time migration from the pre-sqlite filesystem layout. Each legacy
+    /// blob is imported only when its own id is absent from sqlite, so partial
+    /// imports are resumed on the next boot; legacy files remain in place.
+    pub(crate) async fn import_legacy_secrets_if_empty(&self) -> Res<()> {
+        use tokio::fs;
+
+        let existing_local = self
+            .store
+            .list_secret_blob_ids(SecretBlobKind::LocalSecret)
+            .await?
+            .into_iter()
+            .filter_map(|blob_id| <[u8; 32]>::try_from(blob_id).ok())
+            .collect::<HashSet<_>>();
+        let dir = self.local_secret_dir();
+        if fs::try_exists(&dir).await? {
+            let mut rd = fs::read_dir(&dir).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                let Some(hash) = StorageHash::from_hex(stem) else {
+                    continue;
+                };
+                if existing_local.contains(hash.as_bytes()) {
+                    continue;
+                }
+                let bytes = fs::read(&path).await?;
+                self.write_secret_blob(SecretBlobKind::LocalSecret, hash.as_bytes(), &bytes)
+                    .await?;
+            }
+        }
+
+        if self
+            .store
+            .load_secret_blob(
+                SecretBlobKind::PrekeySidecar,
+                PREKEY_SECRETS_BLOB_ID.as_bytes(),
+            )
+            .await?
+            .is_none()
+        {
+            let path = self.root.join(PREKEY_SECRETS_FILE);
+            if fs::try_exists(&path).await? {
+                let bytes = fs::read(&path).await?;
+                self.write_secret_blob(
+                    SecretBlobKind::PrekeySidecar,
+                    PREKEY_SECRETS_BLOB_ID.as_bytes(),
+                    &bytes,
+                )
+                .await?;
+            }
+        }
+
+        let existing_reservations = self
+            .store
+            .list_secret_blob_ids(SecretBlobKind::Reservation)
+            .await?
+            .into_iter()
+            .filter_map(|blob_id| <[u8; 32]>::try_from(blob_id).ok())
+            .collect::<HashSet<_>>();
+        let dir = self.root.join(RESERVATIONS_SUBDIR);
+        if fs::try_exists(&dir).await? {
+            let mut rd = fs::read_dir(&dir).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
+                    continue;
+                }
+                // Legacy reservation files are named by doc_id hex.
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                let Some(hash) = StorageHash::from_hex(stem) else {
+                    continue;
+                };
+                if existing_reservations.contains(hash.as_bytes()) {
+                    continue;
+                }
+                let bytes = fs::read(&path).await?;
+                self.write_secret_blob(SecretBlobKind::Reservation, hash.as_bytes(), &bytes)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -387,11 +811,11 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         hash: StorageHash,
         data: Vec<u8>,
     ) -> BoxFuture<'_, Result<bool, Self::Error>> {
-        let parent_dir = self.local_secret_dir();
         async move {
-            self.save_file_if_absent(parent_dir, hash, data)
-                .await
-                .map_err(Into::into)
+            let inserted = self
+                .write_secret_blob(SecretBlobKind::LocalSecret, hash.as_bytes(), &data)
+                .await?;
+            Ok(inserted)
         }
         .boxed()
     }
@@ -399,13 +823,39 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
     fn load_local_secrets(
         &self,
     ) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
-        let dir = self.local_secret_dir();
-        async move { Self::load_dir(dir).await.map_err(Into::into) }.boxed()
+        async move {
+            let mut out = Vec::new();
+            for blob_id in self
+                .store
+                .list_secret_blob_ids(SecretBlobKind::LocalSecret)
+                .await
+                .map_err(Self::sqlite_err)?
+            {
+                let hash_bytes: [u8; 32] = blob_id.as_slice().try_into().map_err(|_| {
+                    FsKeyhiveStorageError::Corrupt("local secret blob id length".into())
+                })?;
+                let hash = StorageHash::new(hash_bytes);
+                if let Some(bytes) = self
+                    .read_secret_blob(SecretBlobKind::LocalSecret, &blob_id)
+                    .await?
+                {
+                    out.push((hash, bytes));
+                }
+            }
+            Ok(out)
+        }
+        .boxed()
     }
 
     fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
-        let dir = self.local_secret_dir();
-        async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
+        async move {
+            self.store
+                .delete_secret_blob(SecretBlobKind::LocalSecret, hash.as_bytes())
+                .await
+                .map_err(Self::sqlite_err)?;
+            Ok(())
+        }
+        .boxed()
     }
 }
 
@@ -471,14 +921,59 @@ impl BigRepoKeyhiveStorage {
         })
     }
 
-    pub(crate) fn fs(events: SqliteBigRepoStore, root: PathBuf) -> io::Result<Self> {
-        FsKeyhiveStorage::new(root)
-            .map(|archives| Self::new(BigRepoKeyhiveStorageInner::Fs { events, archives }))
+    pub(crate) async fn fs(events: SqliteBigRepoStore, root: PathBuf) -> eyre::Result<Self> {
+        let archives = FsKeyhiveStorage::new(root, events.clone())?;
+        archives.import_legacy_secrets_if_empty().await?;
+        Ok(Self::new(BigRepoKeyhiveStorageInner::Fs {
+            events,
+            archives,
+        }))
+    }
+
+    /// [`fs`] variant sourcing the DEK from the OS keyring; same on-disk
+    /// layout for archives. Falls back to `fs` if the keyring cannot be
+    /// initialised (headless systems).
+    pub(crate) async fn fs_with_secret_store(
+        events: SqliteBigRepoStore,
+        root: PathBuf,
+    ) -> eyre::Result<Self> {
+        match SecretStore::boot().await {
+            Ok(secret_store) => {
+                let archives = FsKeyhiveStorage::with_secret_store(
+                    root,
+                    events.clone(),
+                    Arc::new(secret_store),
+                )?;
+                tracing::debug!(
+                    flavor = "keyring",
+                    uses_keyring_secrets = archives.uses_keyring_secrets(),
+                    "keyhive secret material stored in OS keyring"
+                );
+                archives.import_legacy_secrets_if_empty().await?;
+                Ok(Self::new(BigRepoKeyhiveStorageInner::Fs {
+                    events,
+                    archives,
+                }))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "keyring-backed secret storage unavailable; \
+                     falling back to file-based keyhive secret persistence"
+                );
+                Self::fs(events, root).await.map_err(|err| {
+                    eyre::eyre!("file-based keyhive storage fallback failed: {err:#}")
+                })
+            }
+        }
     }
 
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
         match &self.inner {
             BigRepoKeyhiveStorageInner::Memory(_) | BigRepoKeyhiveStorageInner::Sqlite { .. } => {
+                // StorageConfig::Memory is ephemeral by design — all keyhive
+                // state including key material is process-local; sidecar
+                // persistence is intentionally skipped.
                 Ok(())
             }
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
@@ -490,6 +985,7 @@ impl BigRepoKeyhiveStorage {
     pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
         match &self.inner {
             BigRepoKeyhiveStorageInner::Memory(_) | BigRepoKeyhiveStorageInner::Sqlite { .. } => {
+                // See save_prekey_secrets: Memory mode is ephemeral by design.
                 Ok(None)
             }
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => archives.load_prekey_secrets().await,
@@ -924,5 +1420,439 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
 
     fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         self.inner.delete_local_secret(hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use big_sync_core::BuckId;
+    use sqlx_utils_rs::SqlCtx;
+
+    #[tokio::test]
+    async fn save_file_if_absent_writes_exact_bytes_and_is_idempotent() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        let store =
+            SqliteBigRepoStore::new(SqlCtx::memory().await?, "file-if-absent", BuckId::MAX_LEVEL)
+                .await?;
+        let storage = FsKeyhiveStorage::new(root.clone(), store)?;
+        let parent_dir = root.join(LOCAL_SECRETS_SUBDIR);
+        let hash = StorageHash::new([42u8; 32]);
+        let data = b"secret material".to_vec();
+
+        assert!(
+            storage
+                .save_file_if_absent(parent_dir.clone(), hash, data.clone())
+                .await?
+        );
+
+        let written = tokio::fs::read(
+            root.join(LOCAL_SECRETS_SUBDIR)
+                .join(format!("{}.bin", hash.to_hex())),
+        )
+        .await?;
+        assert_eq!(written, data);
+
+        // Same hash with different data must be refused and must not clobber.
+        assert!(
+            !storage
+                .save_file_if_absent(parent_dir.clone(), hash, b"clobber".to_vec())
+                .await?
+        );
+        let unchanged = tokio::fs::read(
+            root.join(LOCAL_SECRETS_SUBDIR)
+                .join(format!("{}.bin", hash.to_hex())),
+        )
+        .await?;
+        assert_eq!(unchanged, data);
+
+        // A different hash still writes.
+        let other = StorageHash::new([43u8; 32]);
+        assert!(
+            storage
+                .save_file_if_absent(parent_dir.clone(), other, b"other".to_vec())
+                .await?
+        );
+
+        Ok(())
+    }
+
+    async fn keyring_test_storage(label: &str) -> Res<(FsKeyhiveStorage, tempfile::TempDir)> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            format!("keyhive-storage-test-{label}"),
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let secret_store = SecretStore::boot().await.expect("mock keyring boot");
+        let storage =
+            FsKeyhiveStorage::with_secret_store(root.clone(), store, Arc::new(secret_store))?;
+        Ok((storage, temp_dir))
+    }
+
+    #[tokio::test]
+    async fn keyring_mode_round_trips_local_secrets() -> Res<()> {
+        let (storage, _temp_dir) = keyring_test_storage("roundtrip").await?;
+        assert!(storage.uses_keyring_secrets());
+
+        let hash = StorageHash::new([7u8; 32]);
+        let data = b"keyring secret".to_vec();
+
+        assert!(storage.save_local_secret(hash, data.clone()).await?);
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded, vec![(hash, data.clone())]);
+
+        assert!(
+            !storage
+                .save_local_secret(hash, b"updated secret".to_vec())
+                .await?
+        );
+        assert_eq!(
+            storage.load_local_secrets().await?,
+            vec![(hash, b"updated secret".to_vec())]
+        );
+
+        // A second secret survives alongside the first.
+        let other = StorageHash::new([8u8; 32]);
+        storage.save_local_secret(other, b"more".to_vec()).await?;
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded.len(), 2);
+
+        // Deleting removes the blob and the envelope stays valid.
+        storage.delete_local_secret(hash).await?;
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded, vec![(other, b"more".to_vec())]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keyring_mode_round_trips_prekey_secrets() -> Res<()> {
+        let (storage, _temp_dir) = keyring_test_storage("prekey").await?;
+
+        assert!(storage.load_prekey_secrets().await?.is_none());
+        storage.save_prekey_secrets(b"prekey blob".to_vec()).await?;
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"prekey blob".to_vec())
+        );
+        // Second write overwrites; last write wins.
+        storage.save_prekey_secrets(b"updated".to_vec()).await?;
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"updated".to_vec())
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_mode_round_trips_prekey_secrets_via_sqlite() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        let store =
+            SqliteBigRepoStore::new(SqlCtx::memory().await?, "prekey-file", BuckId::MAX_LEVEL)
+                .await?;
+        let storage = FsKeyhiveStorage::new(root.clone(), store)?;
+        assert!(!storage.uses_keyring_secrets());
+
+        // File mode now persists to sqlite encrypted under a file-fallback
+        // DEK; nothing is written to the legacy prekey file on disk.
+        storage.save_prekey_secrets(b"file blob".to_vec()).await?;
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"file blob".to_vec())
+        );
+        let dek_path = root
+            .join(DEKS_SUBDIR)
+            .join(format!("{DEK_ID_PREKEY_SIDECAR}.v0.bin"));
+        assert!(tokio::fs::try_exists(&dek_path).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_files_are_imported_into_sqlite_on_first_boot() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        // Simulate the pre-sqlite layout.
+        let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
+        tokio::fs::create_dir_all(&secrets_dir).await?;
+        let hash = StorageHash::new([9u8; 32]);
+        tokio::fs::write(
+            secrets_dir.join(format!("{}.bin", hash.to_hex())),
+            b"legacy secret",
+        )
+        .await?;
+        tokio::fs::write(root.join(PREKEY_SECRETS_FILE), b"legacy prekey").await?;
+        let reservations_dir = root.join(RESERVATIONS_SUBDIR);
+        tokio::fs::create_dir_all(&reservations_dir).await?;
+        let doc_id = [11u8; 32];
+        let expected_reservation = DocReservation {
+            magic: DOC_RESERVATION_MAGIC,
+            doc_id,
+            signing_key: [12u8; 32],
+            parents: Vec::new(),
+            initial_keys: Vec::new(),
+            initial_content: None,
+        };
+        tokio::fs::write(
+            reservations_dir.join(format!("{}.bin", StorageHash::new(doc_id).to_hex())),
+            bincode::serialize(&expected_reservation)?,
+        )
+        .await?;
+
+        let store =
+            SqliteBigRepoStore::new(SqlCtx::memory().await?, "legacy-import", BuckId::MAX_LEVEL)
+                .await?;
+        let storage = BigRepoKeyhiveStorage::fs(store.clone(), root.clone()).await?;
+
+        // Local secrets round-trip through the sqlite blob store.
+        let loaded = storage.load_local_secrets().await?;
+        assert_eq!(loaded, vec![(hash, b"legacy secret".to_vec())]);
+        assert_eq!(
+            storage.load_prekey_secrets().await?,
+            Some(b"legacy prekey".to_vec())
+        );
+        let reservations = storage.list_doc_reservations().await?;
+        assert_eq!(reservations, vec![expected_reservation.clone()]);
+        assert_eq!(
+            storage.load_doc_reservation(doc_id).await?,
+            Some(expected_reservation)
+        );
+
+        // A partial first import must resume for an id not yet in sqlite.
+        let second_hash = StorageHash::new([10u8; 32]);
+        tokio::fs::write(
+            secrets_dir.join(format!("{}.bin", second_hash.to_hex())),
+            b"second legacy secret",
+        )
+        .await?;
+        // Idempotent: a second boot does not duplicate blobs.
+        let storage2 = BigRepoKeyhiveStorage::fs(store, root).await?;
+        assert_eq!(
+            storage2.load_prekey_secrets().await?,
+            Some(b"legacy prekey".to_vec())
+        );
+        let loaded2 = storage2.load_local_secrets().await?;
+        assert_eq!(loaded2.len(), 2);
+        assert!(loaded2.contains(&(second_hash, b"second legacy secret".to_vec())));
+        assert_eq!(storage2.list_doc_reservations().await?.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_reopens_store_and_decrypts_written_blobs() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        tokio::fs::create_dir_all(&root).await?;
+        let db_path = root.join("sqlite.db");
+
+        // First "boot": file-backed sqlite, file-fallback DEKs.
+        let sql1 = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let store1 = SqliteBigRepoStore::new(sql1, "restart", BuckId::MAX_LEVEL).await?;
+        let storage1 = FsKeyhiveStorage::new(root.clone(), store1)?;
+        let hash = StorageHash::new([31u8; 32]);
+        storage1
+            .save_local_secret(hash, b"persisted secret".to_vec())
+            .await?;
+        storage1
+            .save_prekey_secrets(b"persisted prekey".to_vec())
+            .await?;
+        drop(storage1);
+
+        // Second "boot": reopen the same sqlite file with a fresh store; the
+        // blobs must decrypt under the DEKs read back from the deks/ files.
+        let sql2 = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let store2 = SqliteBigRepoStore::new(sql2, "restart", BuckId::MAX_LEVEL).await?;
+        let storage2 = FsKeyhiveStorage::new(root.clone(), store2)?;
+        assert_eq!(
+            storage2.load_local_secrets().await?,
+            vec![(hash, b"persisted secret".to_vec())]
+        );
+        assert_eq!(
+            storage2.load_prekey_secrets().await?,
+            Some(b"persisted prekey".to_vec())
+        );
+
+        // The key files are reused across boots; no higher-version key appears
+        // out of nowhere while key rotation is deferred.
+        let dek_dir = root.join(DEKS_SUBDIR);
+        assert!(
+            tokio::fs::try_exists(dek_dir.join(format!("{DEK_ID_PREKEY_SIDECAR}.v0.bin"))).await?
+        );
+        let mut entries = tokio::fs::read_dir(&dek_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.contains(".v1."),
+                "unexpected higher-version key file: {name}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn envelope_row_records_metadata_not_the_dek() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        let store =
+            SqliteBigRepoStore::new(SqlCtx::memory().await?, "envelope", BuckId::MAX_LEVEL).await?;
+        let secret_store = SecretStore::boot().await.expect("mock keyring boot");
+        let storage =
+            FsKeyhiveStorage::with_secret_store(root, store.clone(), Arc::new(secret_store))?;
+
+        storage.save_prekey_secrets(b"sidecar".to_vec()).await?;
+
+        // The envelope row records metadata only. The raw DEK must never land
+        // in sqlite: a backup would otherwise hold ciphertext and key
+        // together. The DEK source (keyring entry) is the protection on
+        // desktop; wrapped_dek is reserved for the future KMS-wrapped form.
+        let dek = store
+            .load_dek(DEK_ID_PREKEY_SIDECAR, 0)
+            .await?
+            .expect("envelope row");
+        assert!(dek.wrapped_dek.is_empty());
+        assert_eq!(dek.kek_version, 0);
+        assert_eq!(dek.algorithm, DEK_ALGORITHM_KEYRING);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reservation_round_trips_through_live_path() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "reservation-live",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let storage = BigRepoKeyhiveStorage::fs_with_secret_store(store, root.clone()).await?;
+
+        let doc_id = [51u8; 32];
+        let reservation = DocReservation {
+            magic: DOC_RESERVATION_MAGIC,
+            doc_id,
+            signing_key: [52u8; 32],
+            parents: vec![[53u8; 32]],
+            initial_keys: vec![(vec![1, 2], [54u8; 32])],
+            initial_content: Some(vec![1, 2, 3]),
+        };
+
+        storage.save_doc_reservation(&reservation).await?;
+        assert_eq!(
+            storage.load_doc_reservation(doc_id).await?,
+            Some(reservation.clone())
+        );
+        assert_eq!(
+            storage.list_doc_reservations().await?,
+            vec![reservation.clone()]
+        );
+        storage.delete_doc_reservation(doc_id).await?;
+        assert_eq!(storage.load_doc_reservation(doc_id).await?, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_records_fail_loudly() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path().to_path_buf();
+        tokio::fs::create_dir_all(&root).await?;
+        let db_path = root.join("sqlite.db");
+        let sql = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let store = SqliteBigRepoStore::new(sql, "corrupt", BuckId::MAX_LEVEL).await?;
+        let storage = FsKeyhiveStorage::new(root.clone(), store.clone())?;
+
+        // (a) A blob row with a non-12-byte nonce must fail with Corrupt.
+        let bad_nonce_hash = StorageHash::new([41u8; 32]);
+        store
+            .save_dek(DEK_ID_LOCAL_SECRET, 0, Vec::new(), 0, "chacha20poly1305")
+            .await?;
+        store
+            .save_secret_blob(
+                SecretBlobKind::LocalSecret,
+                bad_nonce_hash.as_bytes(),
+                DEK_ID_LOCAL_SECRET,
+                0,
+                b"ct".to_vec(),
+                vec![1, 2, 3, 4, 5],
+            )
+            .await?;
+        let err = storage.load_local_secrets().await.unwrap_err();
+        assert!(matches!(err, FsKeyhiveStorageError::Corrupt(_)));
+        store
+            .delete_secret_blob(SecretBlobKind::LocalSecret, bad_nonce_hash.as_bytes())
+            .await?;
+
+        // (b) Tampered ciphertext (authenticated encryption) must fail.
+        let hash = StorageHash::new([42u8; 32]);
+        storage
+            .save_local_secret(hash, b"original".to_vec())
+            .await?;
+        let row = store
+            .load_secret_blob(SecretBlobKind::LocalSecret, hash.as_bytes())
+            .await?
+            .expect("tampered row");
+        let moved_hash = StorageHash::new([43u8; 32]);
+        assert!(
+            store
+                .save_secret_blob(
+                    SecretBlobKind::LocalSecret,
+                    moved_hash.as_bytes(),
+                    &row.dek_id,
+                    row.dek_version,
+                    row.ciphertext.clone(),
+                    row.nonce.clone(),
+                )
+                .await?
+        );
+        let err = storage
+            .read_secret_blob(SecretBlobKind::LocalSecret, moved_hash.as_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FsKeyhiveStorageError::Secrets(_)));
+        store
+            .delete_secret_blob(SecretBlobKind::LocalSecret, moved_hash.as_bytes())
+            .await?;
+
+        let mut ciphertext = row.ciphertext.clone();
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 0xFF;
+        store
+            .save_secret_blob(
+                SecretBlobKind::LocalSecret,
+                hash.as_bytes(),
+                &row.dek_id,
+                row.dek_version,
+                ciphertext,
+                row.nonce.clone(),
+            )
+            .await?;
+        let err = storage.load_local_secrets().await.unwrap_err();
+        assert!(matches!(err, FsKeyhiveStorageError::Secrets(_)));
+
+        // (c) A corrupt DEK file (wrong length) must fail, not silently
+        // regenerate a key that would brick every existing blob.
+        let dek_path = root
+            .join(DEKS_SUBDIR)
+            .join(format!("{DEK_ID_PREKEY_SIDECAR}.v0.bin"));
+        tokio::fs::create_dir_all(root.join(DEKS_SUBDIR)).await?;
+        tokio::fs::write(&dek_path, b"1234567").await?;
+        let err = storage
+            .save_prekey_secrets(b"x".to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind(), io::ErrorKind::Other));
+
+        Ok(())
     }
 }

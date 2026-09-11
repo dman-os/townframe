@@ -178,7 +178,7 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+            eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -189,7 +189,7 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+            eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -234,7 +234,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+            eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
@@ -264,7 +264,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 runtime_io
                     .finalize_document_authority(doc_id, content_heads.clone())
                     .await?;
-                let bundle = if runtime_io.contains_sedimentree(sed_id).await? {
+                let handle = if runtime_io.contains_sedimentree(sed_id).await? {
                     let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
                     cmd_tx
                         .send(Runtime2Cmd::GetDocHandle {
@@ -274,8 +274,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .await
                         .map_err(|_| ferr!(ERROR_ACTOR))?;
                     let lookup = handle_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??;
-                    let bundle = match lookup {
-                        crate::runtime2::types::DocLookup::Ready(bundle) => bundle,
+                    let handle = match lookup {
+                        crate::runtime2::types::DocLookup::Ready(handle) => handle,
                         crate::runtime2::types::DocLookup::Missing => {
                             return Err(ferr!(
                                 "persisted document has no materialized handle: {doc_id}"
@@ -288,7 +288,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         }
                     };
                     let (persisted_heads, persisted_content) = surelock::key::lock_scope(|key| {
-                        let (doc, _key) = key.lock(&bundle.doc);
+                        let (doc, _key) = key.lock(&handle.bundle.doc);
                         (
                             doc.get_heads()
                                 .into_iter()
@@ -308,7 +308,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                             "persisted document initial content mismatch: {doc_id}"
                         ));
                     }
-                    bundle
+                    handle
                 } else {
                     let (put_resp, put_rx) = futures::channel::oneshot::channel();
                     cmd_tx
@@ -325,7 +325,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 runtime_io
                     .complete_document_authority(doc_id, pending_group, content_heads)
                     .await?;
-                eyre::Ok(bundle)
+                eyre::Ok(handle)
             }
             .await;
             resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
@@ -340,7 +340,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+            eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
@@ -666,21 +666,6 @@ where
                     .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
                     .wrap_err(ERROR_CHANNEL)?;
             }
-            Runtime2Cmd::ApplyKeyhiveToDoc {
-                doc_id,
-                admission_seq,
-                resp,
-            } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::ReattemptMaterialization {
-                        origin: crate::changes::BigRepoChangeOrigin::Keyhive,
-                        keyhive_seq: Some(admission_seq),
-                        resp,
-                        _lease,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
-            }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
                 if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
                 {
@@ -952,6 +937,7 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>>;
+
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -965,6 +951,12 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         doc_id: DocumentId,
         reply: futures::channel::oneshot::Receiver<()>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+    /// Persist a durable prekey-state snapshot (published membership ops +
+    /// secret halves) via the shared runtime IO facade. Best-effort; failures
+    /// are logged by the implementation.
+    fn persist_prekey_state_snapshot(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
     ) -> F::Future<'static, eyre::Result<()>>;
     /// Wrap a finite background future so a `TrackedWorkDone` event is emitted
     /// after its own emissions (keeps channel order for the in-flight counter).
@@ -1201,6 +1193,19 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
+        })
+    }
+    fn persist_prekey_state_snapshot(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            runtime_io
+                .persist_prekey_state()
+                .await
+                .inspect_err(|err| {
+                    warn_loc!("persisting prekey state snapshot failed: {err:#}");
+                })
+                .map(|_| ())
         })
     }
     fn track_work(
@@ -1782,8 +1787,16 @@ where
             // --- Keyhive event listener handlers ---
             // Translate raw Keyhive events into domain-level notifications.
             Runtime2Evt::PrekeyExpanded { .. } | Runtime2Evt::PrekeyRotated { .. } => {
-                // Individual prekey operations are internal key management
-                // and do not correspond to a BigRepo domain event.
+                // Individual prekey operations are internal key management and do
+                // not correspond to a BigRepo domain event, but every state change
+                // must reach the durable prekey-state sidecar so restarts restore
+                // published membership without requiring compaction. Best-effort:
+                // a missed snapshot narrows to the ops since the last persisted
+                // one, never breaks decryptability.
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::PrekeyStatePersist,
+                    F::persist_prekey_state_snapshot(std::sync::Arc::clone(&self.runtime_io)),
+                )?;
             }
             // FIXME: this doesn't seem correct, I believe a key rotation can correspond
             // to multiple CGKA ops
@@ -2157,17 +2170,9 @@ where
             self.reattempt_pending_materialization()?;
             return Ok(());
         }
-        let round_id = round.round_id;
-        self.complete_keyhive_sync_round(peer_id, round_id)
-    }
 
-    fn complete_keyhive_sync_round(&mut self, peer_id: PeerId, round_id: u64) -> eyre::Result<()> {
-        let round = self
-            .active_keyhive_syncs
-            .remove(&peer_id)
-            .expect("active keyhive sync disappeared before protocol completion");
-        assert_eq!(round.round_id, round_id);
-        let admitted_ids = round.admitted_ids;
+        let admitted_ids = std::mem::take(&mut round.admitted_ids);
+        let round_id = round.round_id;
 
         // Split waiters: those this round admitted resolve; those that arrived
         // during/after cascade into a new round.
@@ -2205,6 +2210,11 @@ where
             has_remaining,
             "completing Keyhive sync round"
         );
+        // The round is finished: retire it before any follow-up round can
+        // start, so a latched change notification no longer sees this peer
+        // as mid-sync (the original complete_keyhive_sync_round removed it
+        // before resolving waiters).
+        self.active_keyhive_syncs.remove(&peer_id);
         let mut notification_pending = self.keyhive_notif_pending.remove(&peer_id);
         let was_notification_pending = notification_pending;
         if coalesce_keyhive_demand(has_remaining, &mut notification_pending) {
@@ -2283,7 +2293,6 @@ where
         let (resp, result) = futures::channel::oneshot::channel();
         if let Err(error) = worker.send(DocWorkerMsg::ReattemptMaterialization {
             origin: crate::changes::BigRepoChangeOrigin::Keyhive,
-            keyhive_seq: None,
             resp,
             _lease: lease,
         }) {
@@ -2571,6 +2580,7 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub group_part_stop: Option<crate::runtime2::GroupPartWorkerStopToken>,
     pub causal_checkpoint_stop: Option<crate::runtime2::CausalCheckpointWorkerStopToken>,
     pub automerge_frontier_stop: Option<crate::runtime2::AutomergeFrontierWorkerStopToken>,
+    pub prekey_janitor_stop: Option<crate::runtime2::PrekeyJanitorWorkerStopToken>,
     pub(crate) keyhive_dispatcher_stop:
         Option<crate::runtime2::keyhive_dispatcher::KeyhiveDispatcherStopToken>,
 }
@@ -2596,6 +2606,9 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
             stop.cancel();
         }
         if let Some(stop) = self.causal_checkpoint_stop.take() {
+            stop.cancel();
+        }
+        if let Some(stop) = self.prekey_janitor_stop.take() {
             stop.cancel();
         }
         if let Some(stop) = self.group_part_stop.take() {
@@ -2654,6 +2667,8 @@ impl<
             async move {
                 let result = futures::future::Abortable::new(
                     async move {
+                        let janitor_interval = std::time::Duration::from_millis(500);
+                        let mut next_janitor = hub.clock.instant() + janitor_interval;
                         loop {
                             if hub.cmd_closed && hub.tracked_in_flight == 0 {
                                 // Drain complete: the commands channel closed
@@ -2690,13 +2705,24 @@ impl<
                                 }
                                 continue;
                             }
+                            // Preserve the janitor deadline across busy loop iterations.
+                            // Recreating a full-interval sleep after every command/event can
+                            // postpone eviction forever; scanning every worker per event is
+                            // equally undesirable. The cheap deadline check runs per turn,
+                            // while the O(workers) scan remains bounded to twice per second.
+                            let now = hub.clock.instant();
+                            if now >= next_janitor {
+                                hub.janitor_tick();
+                                next_janitor = now + janitor_interval;
+                            }
                             // Commands are polled before events: a command (e.g.
                             // a lease release or an unfreeze) can cancel the
                             // very work whose events would otherwise keep the
                             // loop busy, so it must not be starved by an event
                             // flood.
-                            let mut sleep =
-                                Box::pin(timer.sleep(std::time::Duration::from_millis(500)).fuse());
+                            let sleep_for =
+                                next_janitor.saturating_duration_since(hub.clock.instant());
+                            let mut sleep = Box::pin(timer.sleep(sleep_for).fuse());
                             let mut evt = Box::pin(evt_rx.recv().fuse());
                             if hub.cmd_closed {
                                 // Draining: only events (and the janitor) can
@@ -2708,7 +2734,7 @@ impl<
                                 // Once the channel is closed it is never polled
                                 // again.
                                 futures::select_biased! {
-                                    _ = sleep.as_mut() => hub.janitor_tick(),
+                                    _ = sleep.as_mut() => {}
                                     evt = evt.as_mut() => match evt {
                                         Ok(evt) => hub.handle_evt(evt)?,
                                         Err(_) => break,
@@ -2717,7 +2743,7 @@ impl<
                             } else {
                                 let mut cmd = Box::pin(cmd_rx.recv().fuse());
                                 futures::select_biased! {
-                                    _ = sleep.as_mut() => hub.janitor_tick(),
+                                    _ = sleep.as_mut() => {}
                                     cmd_res = cmd.as_mut() => match cmd_res {
                                         Ok(cmd) => hub.handle_cmd(cmd)?,
                                         Err(_) => {
@@ -2873,6 +2899,7 @@ where
             group_part_stop: None,
             causal_checkpoint_stop: None,
             automerge_frontier_stop: None,
+            prekey_janitor_stop: None,
             keyhive_dispatcher_stop: None,
         },
     ))

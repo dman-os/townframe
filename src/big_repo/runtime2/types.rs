@@ -153,6 +153,12 @@ impl<T> DocLookup<T> {
 /// worker.
 static NEXT_BUNDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+#[derive(Clone, Copy)]
+struct CausalEpochState {
+    epoch: Option<[u8; 32]>,
+    cgka_ops_count: usize,
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct LiveDocBundle {
@@ -168,23 +174,18 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
-    pub latest_keyhive_seq: std::sync::atomic::AtomicU64,
-    #[educe(Debug(ignore))]
-    causal_epoch: std::sync::RwLock<Option<[u8; 32]>>,
+    causal_state: std::sync::RwLock<CausalEpochState>,
     #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
-    #[educe(Debug(ignore))]
-    _runtime2_lease: Option<crate::runtime2::DocLease>,
 }
 
 impl LiveDocBundle {
     pub(crate) fn new(
         doc_id: DocumentId,
         doc: automerge::Automerge,
-        lease: crate::runtime2::DocLease,
         partially_decrypted: bool,
-        latest_keyhive_seq: u64,
         causal_epoch: Option<[u8; 32]>,
+        cgka_ops_count: usize,
     ) -> Self {
         Self {
             id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -192,10 +193,11 @@ impl LiveDocBundle {
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
-            latest_keyhive_seq: std::sync::atomic::AtomicU64::new(latest_keyhive_seq),
-            causal_epoch: std::sync::RwLock::new(causal_epoch),
+            causal_state: std::sync::RwLock::new(CausalEpochState {
+                epoch: causal_epoch,
+                cgka_ops_count,
+            }),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
-            _runtime2_lease: Some(lease),
         }
     }
 
@@ -232,41 +234,84 @@ impl LiveDocBundle {
 
     /// The current BeeKEM/PCS epoch observed while materializing this document.
     pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
-        *self
-            .causal_epoch
+        self.causal_state
             .read()
-            .expect("bundle epoch lock poisoned")
+            .expect("bundle causal state lock poisoned")
+            .epoch
     }
 
-    pub(crate) fn update_causal_epoch(&self, epoch: Option<[u8; 32]>) {
-        *self
-            .causal_epoch
-            .write()
-            .expect("bundle epoch lock poisoned") = epoch;
+    /// The number of CGKA operations in the keyhive state used for this document.
+    pub fn materialized_cgka_ops_count(&self) -> usize {
+        self.causal_state
+            .read()
+            .expect("bundle causal state lock poisoned")
+            .cgka_ops_count
     }
 
-    pub fn update_keyhive_watermark(&self, seq: u64) {
-        self.latest_keyhive_seq
-            .fetch_max(seq, std::sync::atomic::Ordering::Release);
-        self.barrier_notify.notify_waiters();
+    pub(crate) fn update_causal_state(&self, epoch: Option<[u8; 32]>, cgka_ops_count: usize) {
+        let changed = {
+            let mut state = self
+                .causal_state
+                .write()
+                .expect("bundle causal state lock poisoned");
+            if state.epoch == epoch && state.cgka_ops_count == cgka_ops_count {
+                false
+            } else {
+                state.epoch = epoch;
+                state.cgka_ops_count = cgka_ops_count;
+                true
+            }
+        };
+        if changed {
+            self.barrier_notify.notify_waiters();
+        }
     }
 
-    pub async fn await_keyhive_watermark(&self, target_seq: u64) -> Res<()> {
+    /// Await materialization against at least `target` CGKA operations.
+    /// The count is per-document and monotonic for a shared Keyhive state, so
+    /// it provides ordering without interpreting opaque KEM fingerprints.
+    pub async fn await_cgka_ops_count(&self, target: usize) -> Res<()> {
         loop {
             let notified = self.barrier_notify.notified();
             tokio::pin!(notified);
-            if self
-                .latest_keyhive_seq
-                .load(std::sync::atomic::Ordering::Acquire)
-                >= target_seq
-            {
-                return Ok(());
-            }
             if self.is_broken() {
-                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
+                return Err(ferr!("doc bundle marked broken while awaiting CGKA state"));
+            }
+            if self.materialized_cgka_ops_count() >= target {
+                return Ok(());
             }
             notified.await;
         }
+    }
+}
+
+// ─── LiveDocHandle ────────────────────────────────────────────────────────────
+
+/// A live document bundle paired with the caller's eviction lease.
+///
+/// The doc-worker retains the bundle strongly (so repeated acquisitions do
+/// not re-materialize), but the lease is owned by the caller: when the last
+/// caller drops its handle, `local_handles` reaches zero and the worker
+/// becomes evictable after the idle TTL. Cloning shares the lease, so the
+/// worker stays alive while any clone is held.
+#[derive(Clone)]
+pub struct LiveDocHandle {
+    pub(crate) bundle: Arc<LiveDocBundle>,
+    _lease: Arc<crate::runtime2::DocLease>,
+    presence: Arc<()>,
+}
+
+impl LiveDocHandle {
+    pub(crate) fn new(bundle: Arc<LiveDocBundle>, lease: crate::runtime2::DocLease) -> Self {
+        Self {
+            bundle,
+            _lease: Arc::new(lease),
+            presence: Arc::new(()),
+        }
+    }
+
+    pub(crate) fn presence(&self) -> std::sync::Weak<()> {
+        Arc::downgrade(&self.presence)
     }
 }
 
@@ -480,5 +525,29 @@ mod tests {
             .into_ready(doc_id)
             .expect("ready doc should succeed");
         assert_eq!(ok, 42);
+    }
+
+    #[tokio::test]
+    async fn await_cgka_ops_count_accepts_equal_or_advanced_state() {
+        let bundle = std::sync::Arc::new(LiveDocBundle::new(
+            DocumentId::new([7; 32]),
+            automerge::Automerge::new(),
+            false,
+            Some([1; 32]),
+            1,
+        ));
+        bundle
+            .await_cgka_ops_count(1)
+            .await
+            .expect("equal count should complete immediately");
+
+        let waiting_bundle = std::sync::Arc::clone(&bundle);
+        let waiter = tokio::spawn(async move { waiting_bundle.await_cgka_ops_count(2).await });
+        tokio::task::yield_now().await;
+        bundle.update_causal_state(Some([1; 32]), 3);
+        waiter
+            .await
+            .expect("count waiter task should not panic")
+            .expect("advanced count should release the waiter");
     }
 }

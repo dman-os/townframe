@@ -6,6 +6,6 @@ path (timestamped, volatile — elided with `...`) and exits failure (code 1).
 ```console
 $ daybook_cli init
 $ daybook_cli cat doesnotexist123
-? failed
+? 1
 ...
 ```

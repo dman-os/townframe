@@ -60,8 +60,8 @@
 
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
-            # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "clang";
-            # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold-wrapped}/bin/mold";
           };
 
           ghjkDevEnv = {
@@ -317,6 +317,7 @@
             ++ kotliLintTools
             ++ devOnlyInputs
             ++ desktopRuntimeLibPackages
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ]
             ++ [ rustFull ];
 
           ciRustShell = pkgs.mkShell ({
@@ -330,9 +331,13 @@
                 pkgs.llvmPackages.clang
                 pkgs.llvmPackages.libclang
                 pkgs.stdenv.cc.cc.lib
-              ];
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
             shellHook = ''
               export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+              ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
+              ''}
               export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${
                 pkgs.lib.makeLibraryPath [
                   (pkgs.lib.getLib pkgs.llvmPackages.libclang)
@@ -376,6 +381,9 @@
 
               shellHook = ''
                 export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:$XDG_DATA_DIRS
+                ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
+                ''}
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (

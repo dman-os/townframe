@@ -122,6 +122,8 @@ impl DecidePeerStrategyTask {
                 .part_store
                 .get_peer_part_cursor(self.peer_id, part_id)
                 .await;
+            // FIXME: the real issue with bucket is not a deadlock,
+            // it just doens't deal with filtered sets well enough
             // ─────────────────────────────────────────────────────────────
             // ⚠️ BUCKET-STRAT DISABLED FOR UNCONFIGURED EMBEDDERS ⚠️
             //

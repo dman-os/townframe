@@ -274,6 +274,14 @@ impl BigRepo {
         self.sqlite_store.clone()
     }
 
+    /// The keyhive sidecar storage (archives, WAL events, local secret
+    /// material). Test-only: lets tier tests trigger compaction and inspect
+    /// durable keyhive state exactly as a production shutdown would leave it.
+    #[cfg(test)]
+    pub(crate) fn keyhive_storage(&self) -> BigRepoKeyhiveStorage {
+        self.keyhive_storage.clone()
+    }
+
     async fn boot_inner(
         config: Config,
         store: SqliteBigRepoStore,
@@ -315,7 +323,11 @@ impl BigRepo {
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
             StorageConfig::Disk { path } => {
-                BigRepoKeyhiveStorage::fs(keyhive_events.clone(), path.join(KEYHIVE_SUBDIR))
+                let keyhive_root = path.join(KEYHIVE_SUBDIR);
+                // Key material goes through the OS keyring where available;
+                // fsync'd files remain the fallback of record.
+                BigRepoKeyhiveStorage::fs_with_secret_store(keyhive_events.clone(), keyhive_root)
+                    .await
                     .wrap_err("failed booting keyhive storage")?
             }
         };
@@ -339,8 +351,8 @@ impl BigRepo {
         } else {
             BigKeyhiveHandle::new(node_identity_seed, listener).await?
         };
-        keyhive.import_prekey_secrets(&keyhive_storage).await?;
-        keyhive.save_prekey_secrets(&keyhive_storage).await?;
+        keyhive.import_prekey_state(&keyhive_storage).await?;
+        keyhive.save_prekey_state(&keyhive_storage).await?;
         let policy_keyhive = keyhive.clone_keyhive();
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,
@@ -548,9 +560,9 @@ impl BigRepo {
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
         let out = self.runtime.get_doc_handle(*document_id).await?;
-        Ok(out.map_ready(|bundle| BigDocHandle {
+        Ok(out.map_ready(|handle| BigDocHandle {
             repo: Arc::clone(self),
-            bundle,
+            handle,
         }))
     }
 
@@ -708,13 +720,13 @@ impl BigRepo {
         pending_group: BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self
+        let handle = self
             .runtime
             .finalize_allocated_doc(doc_id, initial_content, pending_group, initial_keys)
             .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
-            bundle,
+            handle,
         })
     }
 
@@ -722,10 +734,10 @@ impl BigRepo {
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self.runtime.create_doc(initial_content, Vec::new()).await?;
+        let handle = self.runtime.create_doc(initial_content, Vec::new()).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
-            bundle,
+            handle,
         })
     }
 
@@ -734,10 +746,10 @@ impl BigRepo {
         initial_content: automerge::Automerge,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self.runtime.create_doc(initial_content, parents).await?;
+        let handle = self.runtime.create_doc(initial_content, parents).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
-            bundle,
+            handle,
         })
     }
 
@@ -1111,7 +1123,7 @@ impl BigRepoStopToken {
 #[derive(Clone)]
 pub struct BigDocHandle {
     repo: Arc<BigRepo>,
-    bundle: Arc<runtime2::types::LiveDocBundle>,
+    handle: runtime2::types::LiveDocHandle,
 }
 
 impl std::fmt::Debug for BigDocHandle {
@@ -1141,7 +1153,7 @@ impl BigRepo {
 
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
-        self.bundle.doc_id
+        self.handle.bundle.doc_id
     }
 
     pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
@@ -1153,12 +1165,12 @@ impl BigDocHandle {
 
     /// Whether this live handle is missing one or more decryption keys.
     pub fn is_partially_decrypted(&self) -> bool {
-        self.bundle.is_partially_decrypted()
+        self.handle.bundle.is_partially_decrypted()
     }
 
     /// The current BeeKEM/PCS epoch observed by this document handle.
     pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
-        self.bundle.current_causal_epoch()
+        self.handle.bundle.current_causal_epoch()
     }
 
     pub async fn with_document_read<F, R>(&self, operation: F) -> R
@@ -1166,7 +1178,7 @@ impl BigDocHandle {
         F: FnOnce(&automerge::Automerge) -> R,
     {
         surelock::key::lock_scope(|key| {
-            let (doc, _key) = key.lock(&self.bundle.doc);
+            let (doc, _key) = key.lock(&self.handle.bundle.doc);
             operation(&doc)
         })
     }
@@ -1194,7 +1206,7 @@ impl BigDocHandle {
         // Fast-fail on an invalidated handle before doing any work. The
         // authoritative rejection happens at the worker commit path; this
         // check only avoids running the mutation against a known-dead bundle.
-        if self.bundle.is_broken() {
+        if self.handle.bundle.is_broken() {
             return Err(ferr!(
                 "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
             ));
@@ -1203,7 +1215,7 @@ impl BigDocHandle {
         // All automerge work happens under a short sync lock; nothing is held
         // across an await (the commit goes out only after the lock scope ends).
         let (out, commit) = surelock::key::lock_scope(|key| {
-            let (mut doc, _key) = key.lock(&self.bundle.doc);
+            let (mut doc, _key) = key.lock(&self.handle.bundle.doc);
             let before_heads = doc.get_heads();
             let out = operation(&mut doc);
             let after_heads = doc.get_heads();
@@ -1253,7 +1265,7 @@ impl BigDocHandle {
             .runtime
             .commit_delta(
                 self.document_id(),
-                self.bundle.id(),
+                self.handle.bundle.id(),
                 changes,
                 after_heads,
                 patches,

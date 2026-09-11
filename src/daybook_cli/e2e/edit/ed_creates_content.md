@@ -9,14 +9,13 @@ the same editor again exercises the no-change path.
 $ daybook_cli init
 $ sh -c 'ID=$("$DAYBOOK_CLI" touch); echo "$ID" > .id'
 
-$ sh -c 'printf '"'"'#!/bin/sh\nsed -i "s/\\\"Untitled\\\"/\\\"Edited via ed\\\"/" "$1"\n'"'"' > editor.sh && chmod +x editor.sh'
+$ sh -c 'printf '"'"'#!/bin/sh\nsed -i "s/Untitled/Edited via ed/" "$1"\n'"'"' > editor.sh && chmod +x editor.sh'
 $ sh -c 'ID=$(cat .id); EDITOR=./editor.sh "$DAYBOOK_CLI" ed "$ID"'
 Updated document: [..]
 
 $ sh -c 'ID=$(cat .id); "$DAYBOOK_CLI" cat "$ID" | grep -q "Edited via ed"'
 
-$ sh -c 'ID=$(cat .id); "$DAYBOOK_CLI" cat "$ID" | grep "Untitled"'
-? 1
+$ sh -c 'ID=$(cat .id); OUT=$("$DAYBOOK_CLI" cat "$ID") && ! printf "%s\n" "$OUT" | grep -q "Untitled"'
 
 $ sh -c 'ID=$(cat .id); EDITOR=./editor.sh "$DAYBOOK_CLI" ed "$ID"'
 No changes detected.

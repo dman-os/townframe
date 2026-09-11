@@ -53,10 +53,11 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         Sendable::from_future(async move {
+            let op = keyhive_core::principal::individual::op::KeyOp::Add(Arc::clone(new_prekey));
             if let Some(local_secret) = local_secret {
-                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                self.save_prekey_change_durable(&op, local_secret)
                     .await
-                    .expect("local prekey secret must be durable before its public operation");
+                    .expect("combined prekey change must be durable before its public operation");
             }
             self.send_evt(crate::runtime2::Runtime2Evt::PrekeyExpanded {
                 new_prekey: Arc::clone(new_prekey),
@@ -70,15 +71,35 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         local_secret: Option<&'a keyhive_core::principal::active::LocalPrekeySecret>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         Sendable::from_future(async move {
+            let op = keyhive_core::principal::individual::op::KeyOp::Rotate(Arc::clone(rotate_key));
             if let Some(local_secret) = local_secret {
-                subduction_keyhive::save_local_prekey_secret(&self.storage, local_secret)
+                self.save_prekey_change_durable(&op, local_secret)
                     .await
-                    .expect("local prekey secret must be durable before its public operation");
+                    .expect("combined prekey change must be durable before its public operation");
             }
             self.send_evt(crate::runtime2::Runtime2Evt::PrekeyRotated {
                 rotate_key: Arc::clone(rotate_key),
             });
         })
+    }
+}
+
+impl BigRepoKeyhiveListener {
+    /// Persist the combined prekey-state record (signed membership op + secret
+    /// half) as ONE durable, content-addressed write. Synchronously awaited so
+    /// a crash can never separate the op from its key material.
+    async fn save_prekey_change_durable(
+        &self,
+        op: &keyhive_core::principal::individual::op::KeyOp,
+        local_secret: &keyhive_core::principal::active::LocalPrekeySecret,
+    ) -> eyre::Result<()> {
+        subduction_keyhive::save_local_prekey_change(
+            &self.storage,
+            op,
+            &local_secret.share_secret_key(),
+        )
+        .await?;
+        Ok(())
     }
 }
 

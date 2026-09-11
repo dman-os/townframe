@@ -164,7 +164,7 @@ pub fn setup_tracing() -> Res<()> {
     let filter: Option<String> = None;
 
     let filter = filter.unwrap_or_else(||
-        "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn".into()
+        "info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn".into()
     );
 
     use tracing_subscriber::prelude::*;

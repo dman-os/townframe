@@ -23,9 +23,17 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
 
     let add_op = owner.clone_keyhive().expand_prekeys().await?;
     let persisted =
-        subduction_keyhive::load_local_prekey_secrets::<_, future_form::Sendable>(&storage).await?;
+        subduction_keyhive::load_local_prekey_changes::<_, future_form::Sendable>(&storage).await?;
     assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].1.share_key(), add_op.payload.share_key);
+    // The combined record carries the signed membership op AND the secret.
+    match &persisted[0].1 {
+        keyhive_core::principal::individual::op::KeyOp::Add(add) => {
+            assert_eq!(add.payload.share_key, add_op.payload.share_key);
+        }
+        keyhive_core::principal::individual::op::KeyOp::Rotate(_) => {
+            panic!("an expansion must be recorded as an Add op");
+        }
+    }
     assert!(
         matches!(
             evt_rx.try_recv(),
@@ -42,7 +50,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
         bincode::deserialize(&restored.clone_keyhive().export_prekey_secrets().await?)?;
     assert_eq!(
         restored_pairs.get(&add_op.payload.share_key),
-        Some(&persisted[0].1.share_secret_key())
+        Some(&persisted[0].2)
     );
 
     subduction_keyhive::compact(owner.clone_keyhive().as_ref(), &storage, storage_id).await?;
@@ -59,7 +67,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
         bincode::deserialize(&compacted.clone_keyhive().export_prekey_secrets().await?)?;
     assert_eq!(
         compacted_pairs.get(&add_op.payload.share_key),
-        Some(&persisted[0].1.share_secret_key())
+        Some(&persisted[0].2)
     );
 
     Ok(())
@@ -158,7 +166,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     };
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
-    owner.save_prekey_secrets(&storage).await?;
+    owner.save_prekey_state(&storage).await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
         owner.clone_keyhive(),
         storage.clone(),
@@ -276,7 +284,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     let restored = BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener)
         .await?
         .ok_or_eyre("owner archive is missing")?;
-    restored.import_prekey_secrets(&storage).await?;
+    restored.import_prekey_state(&storage).await?;
     subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_keyhive = restored.clone_keyhive();
     let restored_doc = restored_keyhive

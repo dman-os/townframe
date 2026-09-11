@@ -54,6 +54,56 @@ jobs:
       - name: pre-commit hooks
         run: |
           nix develop .#ci-desktop --command prek --color=always run --all-files
+  e2e-cli:
+    name: E2E (CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Setup tmate session
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
+
+      - name: build test plug OCI artifact
+        run: nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
+
+      - name: build daybook_cli
+        run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
+
+      - name: CLI E2E tests
+        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile ci -p daybook_cli
+        env:
+          UTILS_RS_TIMEOUT_MULTIPLIER: 3
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: cli-nextest-results
+          path: '**/nextest/ci/results.xml'
+          retention-days: 14
+
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -109,14 +159,16 @@ jobs:
 
       - name: rust tests
         run: |
-          nix develop .#ci-rust --command cargo llvm-cov --no-report nextest --color=always --workspace --all-targets --profile ci
+          # Plug crates are excluded while automatic triage is broken.
+          nix develop .#ci-rust --command cargo llvm-cov --no-report nextest \
+            --color=always --workspace --all-targets --profile ci \
+            --exclude daybook_cli --exclude plug_test --exclude plug_dayledger --exclude plug_plabels
           nix develop .#ci-rust --command cargo llvm-cov --no-report --doc
           nix develop .#ci-rust --command cargo llvm-cov --doctests --lcov --output-path lcov.info
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
-          OLLAMA_MODEL: gemma3
 
       - uses: actions/upload-artifact@v6
         if: always()

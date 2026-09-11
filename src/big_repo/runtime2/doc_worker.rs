@@ -9,7 +9,7 @@ use crate::runtime2::support::{
     BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, causal_checkpoint_id,
     is_causal_checkpoint_id, stage_automerge_ingest,
 };
-use crate::runtime2::types::{DocLookup, LiveDocBundle};
+use crate::runtime2::types::{DocLookup, LiveDocBundle, LiveDocHandle};
 use crate::runtime2::{
     DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
     MaterializationStatus, messages::DocWorkerMsg,
@@ -44,9 +44,11 @@ where
         sed_id,
         generation,
         state: DocState::Unloaded,
+        caller_handles: Vec::new(),
         partially_decrypted: false,
-        latest_keyhive_seq: 0,
         causal_epoch: None,
+        cgka_ops_count: 0,
+        recovered_keys: std::sync::Mutex::new(HashMap::new()),
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
         io,
@@ -145,12 +147,24 @@ struct DocWorker2<F: FutureForm> {
     generation: u64,
 
     state: DocState,
+    /// Weak sentinels for caller-visible handles. The worker keeps the bundle
+    /// cached strongly, so caller presence must be tracked independently.
+    // FIXME: this is not pruned well
+    caller_handles: Vec<std::sync::Weak<()>>,
     partially_decrypted: bool,
-    /// Latest durable Keyhive admission incorporated into this worker's
-    /// materialized document state.
-    latest_keyhive_seq: u64,
     /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
     causal_epoch: Option<[u8; 32]>,
+    /// Number of CGKA operations represented by the worker's materialized state.
+    cgka_ops_count: usize,
+    /// Per-document recovered-key cache (ARK-style `#blobKeys`): content ref
+    /// (commit id) → application secret recovered during earlier
+    /// materialization walks. Consulted before every CGKA round-trip; an
+    /// entry whose key fails AEAD is invalidated on sight (never trusted) and
+    /// the blob falls back to the authoritative Keyhive derivation. The cache
+    /// lives and dies with this worker instance, so a regenerated worker
+    /// starts cold.
+    recovered_keys:
+        std::sync::Mutex<HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>>,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -188,9 +202,10 @@ enum DocState {
     /// The worker can upgrade to `Live` when a handle is acquired, or be
     /// evicted when idle.
     Transient(Box<automerge::Automerge>),
-    /// Doc shared via a live handle. The worker holds only a [`Weak`] reference,
-    /// so the bundle can be reclaimed when all client references drop.
-    Live(std::sync::Weak<LiveDocBundle>),
+    /// Doc shared via a live handle. The worker retains the bundle strongly
+    /// so repeated acquisitions do not re-materialize; the caller-facing
+    /// [`LiveDocHandle`] carries the eviction lease instead.
+    Live(Arc<LiveDocBundle>),
     /// Sedimentree content exists, but its keys, ciphertext closure, or
     /// Automerge dependency closure is not yet available.
     PendingMaterialization,
@@ -300,9 +315,7 @@ impl LoadedDocSnapshot {
 
 impl<F: FutureForm> Drop for DocWorker2<F> {
     fn drop(&mut self) {
-        if let DocState::Live(ref weak_bundle) = self.state
-            && let Some(bundle) = weak_bundle.upgrade()
-        {
+        if let DocState::Live(bundle) = &self.state {
             bundle.mark_broken();
         }
     }
@@ -358,7 +371,6 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             DocWorkerMsg::ReattemptMaterialization {
                 origin,
-                keyhive_seq,
                 resp,
                 _lease: _,
             } => {
@@ -369,14 +381,6 @@ impl<F: FutureForm> DocWorker2<F> {
                 );
                 match self.retry_materialization(origin).await {
                     Ok(status) => {
-                        if let Some(seq) = keyhive_seq {
-                            self.latest_keyhive_seq = self.latest_keyhive_seq.max(seq);
-                            if let DocState::Live(bundle) = &self.state
-                                && let Some(bundle) = bundle.upgrade()
-                            {
-                                bundle.update_keyhive_watermark(seq);
-                            }
-                        }
                         debug!(%self.doc_id, ?status, "document materialization retry completed");
                         resp.send(Ok(status))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -417,7 +421,7 @@ impl<F: FutureForm> DocWorker2<F> {
         &mut self,
         initial_content: Box<automerge::Automerge>,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<LiveDocHandle>>,
     ) -> eyre::Result<()> {
         if !matches!(self.state, DocState::Unloaded)
             || !self
@@ -439,22 +443,18 @@ impl<F: FutureForm> DocWorker2<F> {
             .await?;
 
         self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
+        self.cgka_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             *initial_content,
-            crate::runtime2::DocLease::new(
-                self.runtime_cmd_tx.clone(),
-                self.doc_id,
-                self.generation,
-            ),
             false,
-            self.latest_keyhive_seq,
             self.causal_epoch,
+            self.cgka_ops_count,
         ));
 
-        self.state = DocState::Live(Arc::downgrade(&bundle));
+        self.state = DocState::Live(Arc::clone(&bundle));
 
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -463,12 +463,39 @@ impl<F: FutureForm> DocWorker2<F> {
         self.change_manager
             .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
 
-        self.register_bundle_lease().await?;
+        let handle = self.wrap_live_handle(bundle).await?;
 
-        resp.send(Ok(bundle))
+        resp.send(Ok(handle))
             .inspect_err(|_| warn_loc!(ERROR_CALLER))
             .ok();
         Ok(())
+    }
+
+    /// Wrap a freshly materialized bundle in a caller-facing handle: create
+    /// the caller's eviction lease and register it with the hub before the
+    /// handle is handed out, so the worker cannot be evicted between
+    /// materialization and the caller receiving the handle.
+    async fn wrap_live_handle(
+        &mut self,
+        bundle: Arc<LiveDocBundle>,
+    ) -> eyre::Result<LiveDocHandle> {
+        let lease = crate::runtime2::DocLease::new(
+            self.runtime_cmd_tx.clone(),
+            self.doc_id,
+            self.generation,
+        );
+        self.register_bundle_lease().await?;
+        let handle = LiveDocHandle::new(bundle, lease);
+        self.caller_handles
+            .retain(|presence| presence.strong_count() > 0);
+        self.caller_handles.push(handle.presence());
+        Ok(handle)
+    }
+
+    fn has_live_callers(&mut self) -> bool {
+        self.caller_handles
+            .retain(|presence| presence.strong_count() > 0);
+        !self.caller_handles.is_empty()
     }
 }
 
@@ -476,25 +503,19 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Acquire a live handle to the document.
     async fn acquire_handle(
         &mut self,
-        resp: futures::channel::oneshot::Sender<eyre::Result<DocLookup<Arc<LiveDocBundle>>>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<DocLookup<LiveDocHandle>>>,
     ) -> eyre::Result<()> {
         let result = match &self.state {
-            // - `Live(bundle)` and bundle still alive → upgrade the `Weak`, return
-            //   `Ready(upgraded)`. A broken bundle (an earlier commit from it
-            //   was rejected) reloads the last persisted state into a fresh
-            //   bundle instead.
+            // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
+            //   broken bundle (an earlier commit from it was rejected) reloads
+            //   the last persisted state into a fresh bundle instead.
             DocState::Live(bundle) => {
-                if let Some(bundle) = bundle.upgrade() {
-                    if bundle.is_broken() {
-                        self.state = DocState::Unloaded;
-                        self.take_or_load_transient_doc().await?
-                    } else {
-                        DocLookup::Ready(bundle)
-                    }
-                } else {
-                    // Weak reference expired — fall through to re-load below.
+                if bundle.is_broken() {
                     self.state = DocState::Unloaded;
                     self.take_or_load_transient_doc().await?
+                } else {
+                    let bundle = Arc::clone(bundle);
+                    DocLookup::Ready(self.wrap_live_handle(bundle).await?)
                 }
             }
             // - `Transient(doc)` → build a new `LiveDocBundle`, transition
@@ -510,18 +531,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(
-                        self.runtime_cmd_tx.clone(),
-                        self.doc_id,
-                        self.generation,
-                    ),
                     self.partially_decrypted,
-                    self.latest_keyhive_seq,
                     self.causal_epoch,
+                    self.cgka_ops_count,
                 ));
-                self.state = DocState::Live(Arc::downgrade(&bundle));
-                self.register_bundle_lease().await?;
-                DocLookup::Ready(bundle)
+                self.state = DocState::Live(Arc::clone(&bundle));
+                let handle = self.wrap_live_handle(bundle).await?;
+                DocLookup::Ready(handle)
             }
             // - `Unloaded` / `PendingMaterialization` → attempt to load + decrypt
             //   the sedimentree via `load_doc_snapshot` (hydrate + decrypt walk).
@@ -574,6 +590,19 @@ impl<F: FutureForm> DocWorker2<F> {
             .map_err(|error| ferr!("failed ordering document blobs: {error}"))?;
         let fragments: Vec<_> = tree.fragments().collect();
         let commits: Vec<_> = tree.loose_commits().collect();
+        let checkpoint_count = commits
+            .iter()
+            .filter(|com| is_causal_checkpoint_id(com.head()))
+            .count();
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            order_len = order.len(),
+            fragment_count = fragments.len(),
+            loose_commit_count = commits.len(),
+            checkpoint_count,
+            "load_doc_snapshot: tree composition"
+        );
+        let doc_id_snapshot = self.doc_id;
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -587,7 +616,69 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             };
             let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, head);
+
+            // ARK-style recovered-key fast path: a cached application secret
+            // for this content ref opens the blob with zero CGKA work. A
+            // cached key that fails AEAD is treated as a miss — the entry is
+            // discarded on sight and the walk falls back to the authoritative
+            // Keyhive derivation; stale keys are never trusted.
+            //
+            // Causal-checkpoint items are excluded from the fast path
+            // unconditionally. The walk returns the entrypoint's own key in
+            // `result.keys` even when the ancestor closure is incomplete, so a
+            // partial walk caches the checkpoint key; fast-pathing the
+            // checkpoint would then skip the causal walk — the only mechanism
+            // that recovers a newly-arrived ancestor ciphertext (a key-only
+            // checkpoint delivered ahead of the pre-grant content it covers
+            // strands the doc in PendingMaterialization). Checkpoints are rare
+            // (one per grant), so always take the full walk for them.
+            let is_checkpoint =
+                kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head);
+            let cached_key = if is_checkpoint {
+                None
+            } else {
+                self.recovered_keys
+                    .lock()
+                    .expect("recovered-key cache lock poisoned")
+                    .get(&head)
+                    .copied()
+            };
+            if let Some(key) = cached_key {
+                match self
+                    .io
+                    .decrypt_with_cached_key(self.sed_id, locator, key)
+                    .await?
+                {
+                    Some(plaintext) => {
+                        plaintexts.insert(head.as_bytes().to_vec(), plaintext);
+                        continue;
+                    }
+                    None => {
+                        tracing::debug!(
+                            %doc_id_snapshot,
+                            ?head,
+                            "cached decryption key failed AEAD; invalidating entry"
+                        );
+                        self.recovered_keys
+                            .lock()
+                            .expect("recovered-key cache lock poisoned")
+                            .remove(&head);
+                    }
+                }
+            }
+
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            {
+                let mut cache = self
+                    .recovered_keys
+                    .lock()
+                    .expect("recovered-key cache lock poisoned");
+                for (content_ref, key) in &result.keys {
+                    if let Ok(array) = <[u8; 32]>::try_from(content_ref.as_slice()) {
+                        cache.insert(CommitId::new(array), *key);
+                    }
+                }
+            }
             plaintexts.extend(result.complete);
             blockers.extend(result.blockers);
         }
@@ -636,6 +727,14 @@ impl<F: FutureForm> DocWorker2<F> {
             let commit = CommitId::new(array);
             Some((BigRepoCiphertextKind::LooseCommit, commit, plaintext))
         }));
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            decrypted_count = pending.len(),
+            blocker_count = blockers.len(),
+            blocked_ref_count = blocked_refs.len(),
+            partially_decrypted,
+            "load_doc_snapshot: walk outcome"
+        );
         LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
@@ -645,7 +744,7 @@ impl<F: FutureForm> DocWorker2<F> {
         )
     }
 
-    async fn take_or_load_transient_doc(&mut self) -> eyre::Result<DocLookup<Arc<LiveDocBundle>>> {
+    async fn take_or_load_transient_doc(&mut self) -> eyre::Result<DocLookup<LiveDocHandle>> {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
@@ -654,20 +753,17 @@ impl<F: FutureForm> DocWorker2<F> {
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
-                    crate::runtime2::DocLease::new(
-                        self.runtime_cmd_tx.clone(),
-                        self.doc_id,
-                        self.generation,
-                    ),
                     self.partially_decrypted,
-                    self.latest_keyhive_seq,
                     self.causal_epoch,
+                    self.cgka_ops_count,
                 ));
-                self.state = DocState::Live(Arc::downgrade(&bundle));
-                self.register_bundle_lease().await?;
-                DocLookup::Ready(bundle)
+                self.state = DocState::Live(Arc::clone(&bundle));
+                let handle = self.wrap_live_handle(bundle).await?;
+                DocLookup::Ready(handle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
+                let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
+                self.cgka_ops_count = materialization_ops_count;
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -685,18 +781,13 @@ impl<F: FutureForm> DocWorker2<F> {
                         let bundle = Arc::new(LiveDocBundle::new(
                             self.doc_id,
                             doc,
-                            crate::runtime2::DocLease::new(
-                                self.runtime_cmd_tx.clone(),
-                                self.doc_id,
-                                self.generation,
-                            ),
                             partially_decrypted,
-                            self.latest_keyhive_seq,
                             self.causal_epoch,
+                            self.cgka_ops_count,
                         ));
-                        self.state = DocState::Live(Arc::downgrade(&bundle));
-                        self.register_bundle_lease().await?;
-                        DocLookup::Ready(bundle)
+                        self.state = DocState::Live(Arc::clone(&bundle));
+                        let handle = self.wrap_live_handle(bundle).await?;
+                        DocLookup::Ready(handle)
                     }
                     LoadedDocSnapshot::Unavailable {
                         blockers,
@@ -723,9 +814,7 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         self.partially_decrypted = partial;
-        if let DocState::Live(bundle) = &self.state
-            && let Some(bundle) = bundle.upgrade()
-        {
+        if let DocState::Live(bundle) = &self.state {
             bundle.set_partially_decrypted(partial);
         }
         let event = if partial {
@@ -771,7 +860,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // atomically with the first rejection, instead of persisting a chain
         // whose parent — the rejected commit's ghost — was never stored.
         let current = match &self.state {
-            DocState::Live(bundle) => bundle.upgrade(),
+            DocState::Live(bundle) => Some(Arc::clone(bundle)),
             _ => None,
         };
         let served_bundle_id = current.as_ref().map(|bundle| bundle.id());
@@ -930,9 +1019,6 @@ impl<F: FutureForm> DocWorker2<F> {
         let DocState::Live(bundle) = &self.state else {
             return Ok(());
         };
-        let bundle = bundle
-            .upgrade()
-            .ok_or_else(|| ferr!("live document expired while storing fragment"))?;
         let requests = std::mem::take(&mut self.pending_fragment_requests);
         for request in requests {
             let (boundary, checkpoints, raw_blob) = {
@@ -1028,23 +1114,18 @@ impl<F: FutureForm> DocWorker2<F> {
         let sedimentree_heads: Arc<[automerge::ChangeHash]> = sedimentree_heads.into();
         let (materialized_heads, state) = match &self.state {
             DocState::Live(bundle) => {
-                if let Some(bundle) = bundle.upgrade() {
-                    let heads: Arc<[automerge::ChangeHash]> = surelock::key::lock_scope(|key| {
-                        let (doc, _key) = key.lock(&bundle.doc);
-                        Arc::from(doc.get_heads())
-                    });
-                    (
-                        Some(heads),
-                        if self.partially_decrypted {
-                            crate::runtime2::MaterializationState::PartiallyMaterialized
-                        } else {
-                            crate::runtime2::MaterializationState::Materialized
-                        },
-                    )
-                } else {
-                    // Weak reference expired — treat as Unloaded.
-                    (None, crate::runtime2::MaterializationState::Missing)
-                }
+                let heads: Arc<[automerge::ChangeHash]> = surelock::key::lock_scope(|key| {
+                    let (doc, _key) = key.lock(&bundle.doc);
+                    Arc::from(doc.get_heads())
+                });
+                (
+                    Some(heads),
+                    if self.partially_decrypted {
+                        crate::runtime2::MaterializationState::PartiallyMaterialized
+                    } else {
+                        crate::runtime2::MaterializationState::Materialized
+                    },
+                )
             }
             DocState::Transient(doc) => {
                 let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
@@ -1122,20 +1203,15 @@ impl<F: FutureForm> DocWorker2<F> {
         >,
     ) -> eyre::Result<()> {
         let received = !commit_ids.is_empty() || !fragment_ids.is_empty();
-        let has_live = matches!(
-            &self.state,
-            DocState::Live(bundle) if bundle.strong_count() > 0
-        );
+        let has_live = self.has_live_callers();
         if received {
             // Incremental apply of the received content into the live
             // document. Content for documents without live handles never
             // reaches the live path; it is persisted by Subduction and
             // hydrated by the next acquisition (or by the walk below when
             // the doc is pending).
-            if let Some(bundle) = match &self.state {
-                DocState::Live(bundle) => bundle.upgrade(),
-                _ => None,
-            } {
+            if let DocState::Live(bundle) = &self.state {
+                let bundle = Arc::clone(bundle);
                 let received_refs: HashSet<&[u8]> = commit_ids
                     .iter()
                     .chain(&fragment_ids)
@@ -1172,7 +1248,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.apply_blobs_to_live(&bundle, resolved, &origin).await?;
                 self.blocked_refs.extend(missing_deps);
                 self.sync_partial_state().await?;
-                if changed {
+                if changed && has_live {
                     self.notify_heads_advanced(after_heads, patches, &origin)?;
                 }
 
@@ -1218,7 +1294,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let needs_reload = matches!(
             self.state,
             DocState::Unloaded | DocState::PendingMaterialization
-        ) || matches!(&self.state, DocState::Live(bundle) if bundle.upgrade().is_none());
+        );
         if needs_reload {
             self.state = DocState::Unloaded;
             self.retry_materialization(BigRepoChangeOrigin::Local)
@@ -1230,16 +1306,10 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         let materialized_heads: Vec<automerge::ChangeHash> = match &self.state {
             DocState::Transient(doc) => doc.get_heads(),
-            DocState::Live(bundle) => {
-                let Some(bundle) = bundle.upgrade() else {
-                    debug!(%self.doc_id, "causal coverage deferred: live bundle expired");
-                    return Ok(false);
-                };
-                surelock::key::lock_scope(|key| {
-                    let (doc, _key) = key.lock(&bundle.doc);
-                    doc.get_heads()
-                })
-            }
+            DocState::Live(bundle) => surelock::key::lock_scope(|key| {
+                let (doc, _key) = key.lock(&bundle.doc);
+                doc.get_heads()
+            }),
             DocState::Unloaded | DocState::PendingMaterialization => {
                 debug!(%self.doc_id, "causal coverage deferred: document did not materialize");
                 return Ok(false);
@@ -1436,6 +1506,7 @@ impl<F: FutureForm> DocWorker2<F> {
         if self.blocked_refs.is_empty() {
             return Ok(false);
         }
+        let has_live = self.has_live_callers();
         let mut remaining: HashSet<(BigRepoCiphertextKind, CommitId)> =
             std::mem::take(&mut self.blocked_refs);
         remaining.retain(|(kind, id)| {
@@ -1469,7 +1540,9 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             if changed {
                 applied_any = true;
-                self.notify_heads_advanced(after_heads, patches, origin)?;
+                if has_live {
+                    self.notify_heads_advanced(after_heads, patches, origin)?;
+                }
             }
             still_blocked.extend(missing_deps);
             remaining = still_blocked;
@@ -1505,6 +1578,19 @@ impl<F: FutureForm> DocWorker2<F> {
         // the received content incrementally and retried the held blocked
         // refs precisely, so the receipt is honest without a coarse rewalk.
         let walk = pending;
+        let state_desc = match &self.state {
+            DocState::Unloaded => "Unloaded",
+            DocState::Transient(_) => "Transient",
+            DocState::Live(_) => "Live",
+            DocState::PendingMaterialization => "PendingMaterialization",
+        };
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            state = state_desc,
+            has_live,
+            walk,
+            "report_sync_outcome: walk decision"
+        );
         let result = if walk {
             match self
                 .retry_materialization(BigRepoChangeOrigin::Remote { peer_id })
@@ -1756,26 +1842,42 @@ impl<F: FutureForm> DocWorker2<F> {
         origin: BigRepoChangeOrigin,
     ) -> eyre::Result<MaterializationStatus> {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
+        let state_desc = match &self.state {
+            DocState::Unloaded => "Unloaded",
+            DocState::Transient(_) => "Transient",
+            DocState::Live(_) => "Live",
+            DocState::PendingMaterialization => "PendingMaterialization",
+        };
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            state = state_desc,
+            was_pending,
+            origin = ?origin,
+            "retry_materialization: entry"
+        );
         let live_bundle = match &self.state {
-            DocState::Live(weak) => weak.upgrade(),
+            DocState::Live(bundle) => Some(Arc::clone(bundle)),
             _ => None,
         };
         // A live doc never needs a coarse rewalk: precisely retry the held
         // blocked refs — a keyhive round or an earlier session may have
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
+            let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
             let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");
             }
             self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
-            bundle.update_causal_epoch(self.causal_epoch);
+            self.cgka_ops_count = materialization_ops_count;
+            bundle.update_causal_state(self.causal_epoch, self.cgka_ops_count);
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,
             });
         }
 
+        self.cgka_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,
@@ -1852,6 +1954,7 @@ impl<F: FutureForm> DocWorker2<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime2::CausalDecryptResult;
 
     #[test]
     fn zero_applied_ops_with_heads_is_a_materialized_snapshot() {
@@ -2054,5 +2157,478 @@ mod tests {
                 .to_i64(),
             Some(1)
         );
+    }
+
+    // ── recovered-key fast path regression ─────────────────────────────
+    //
+    // A key-only checkpoint can arrive ahead of the pre-grant content it
+    // covers (the sync delivers them as separate pushes). The checkpoint's
+    // materialization walk then caches the checkpoint application key while
+    // the ancestor ciphertext is still missing, leaving the doc pending. Once
+    // the ciphertext arrives, the recovered-key fast path must not skip the
+    // checkpoint's causal walk — the envelope is the only source of the
+    // pre-grant key, so skipping it strands the doc in PendingMaterialization
+    // forever (missing keys).
+
+    struct FakeRecoveryDocIo {
+        sed_id: sedimentree_core::id::SedimentreeId,
+        content_ref: CommitId,
+        checkpoint_ref: CommitId,
+        checkpoint_plaintext: Vec<u8>,
+        content_plaintext: Vec<u8>,
+        checkpoint_key: keyhive_crypto::symmetric_key::SymmetricKey,
+        content_key: keyhive_crypto::symmetric_key::SymmetricKey,
+        /// False until the content ciphertext has been delivered (phase 2).
+        delivered: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeRecoveryDocIo {
+        fn tree(&self) -> sedimentree_core::sedimentree::minimized::MinimizedSedimentree {
+            use sedimentree_core::{
+                blob::{Blob, BlobMeta},
+                loose_commit::LooseCommit,
+                sedimentree::Sedimentree,
+            };
+            let mut tree = Sedimentree::new(Vec::new(), Vec::new());
+            let blob_meta = BlobMeta::new(&Blob::new(Vec::new()));
+            tree.add_commit(LooseCommit::new(
+                self.sed_id,
+                self.checkpoint_ref,
+                BTreeSet::new(),
+                blob_meta,
+            ));
+            if self.delivered.load(std::sync::atomic::Ordering::Relaxed) {
+                tree.add_commit(LooseCommit::new(
+                    self.sed_id,
+                    self.content_ref,
+                    BTreeSet::new(),
+                    blob_meta,
+                ));
+            }
+            sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(tree)
+        }
+    }
+
+    impl crate::runtime2::DocIo<Sendable> for FakeRecoveryDocIo {
+        fn hydrate_tree(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<
+            '_,
+            eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>,
+        > {
+            let tree = self.tree();
+            Sendable::from_future(async move { Ok(Some(tree)) })
+        }
+
+        fn try_causal_decrypt(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            locator: BigRepoCiphertextLocator,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<CausalDecryptResult>> {
+            let (content_ref, checkpoint_ref) = (self.content_ref, self.checkpoint_ref);
+            let checkpoint_plaintext = self.checkpoint_plaintext.clone();
+            let content_plaintext = self.content_plaintext.clone();
+            let checkpoint_key = self.checkpoint_key;
+            let content_key = self.content_key;
+            let delivered = self.delivered.load(std::sync::atomic::Ordering::Relaxed);
+            Sendable::from_future(async move {
+                if locator.commit_id == content_ref {
+                    // The pre-grant content key is not derivable from this
+                    // node's CGKA state; it only exists in the checkpoint
+                    // envelope.
+                    return Ok(CausalDecryptResult {
+                        complete: Vec::new(),
+                        blockers: vec![MaterializationBlocker::MissingDocumentKeys {
+                            content_refs: vec![content_ref.as_bytes().to_vec()],
+                        }],
+                        keys: Vec::new(),
+                    });
+                }
+                if delivered {
+                    Ok(CausalDecryptResult {
+                        complete: vec![
+                            (checkpoint_ref.as_bytes().to_vec(), checkpoint_plaintext),
+                            (content_ref.as_bytes().to_vec(), content_plaintext),
+                        ],
+                        blockers: Vec::new(),
+                        keys: vec![
+                            (checkpoint_ref.as_bytes().to_vec(), checkpoint_key),
+                            (content_ref.as_bytes().to_vec(), content_key),
+                        ],
+                    })
+                } else {
+                    Ok(CausalDecryptResult {
+                        complete: vec![(checkpoint_ref.as_bytes().to_vec(), checkpoint_plaintext)],
+                        blockers: vec![MaterializationBlocker::MissingCiphertexts {
+                            content_refs: vec![content_ref.as_bytes().to_vec()],
+                        }],
+                        keys: vec![(checkpoint_ref.as_bytes().to_vec(), checkpoint_key)],
+                    })
+                }
+            })
+        }
+
+        fn decrypt_with_cached_key(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            locator: BigRepoCiphertextLocator,
+            _key: keyhive_crypto::symmetric_key::SymmetricKey,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+            // The cached key opens the blob it was recovered for; a content
+            // item fast-pathed with a key cached by the checkpoint's walk in
+            // the same pass must get the content plaintext, not the
+            // checkpoint's.
+            let plaintext = if locator.commit_id == self.checkpoint_ref {
+                self.checkpoint_plaintext.clone()
+            } else {
+                self.content_plaintext.clone()
+            };
+            Sendable::from_future(async move { Ok(Some(plaintext)) })
+        }
+
+        fn sedimentree_heads(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<
+            '_,
+            eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>,
+        > {
+            unreachable!("not exercised by this test")
+        }
+        fn durable_sedimentree_heads(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<
+            '_,
+            eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>,
+        > {
+            unreachable!("not exercised by this test")
+        }
+
+        fn persist_initial_document(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _staged: crate::runtime2::support::StagedAutomergeIngest,
+            _initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+            unreachable!("not exercised by this test")
+        }
+        fn persist_local_commits(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _commits: Vec<(
+                sedimentree_core::loose_commit::id::CommitId,
+                BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+                Vec<u8>,
+            )>,
+        ) -> <Sendable as FutureForm>::Future<
+            '_,
+            eyre::Result<BTreeSet<subduction_core::subduction::request::FragmentRequested>>,
+        > {
+            unreachable!("not exercised by this test")
+        }
+        fn current_causal_epoch(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+            Sendable::from_future(async move { Ok(None) })
+        }
+        fn current_cgka_ops_count(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<usize>> {
+            Sendable::from_future(async move { Ok(0) })
+        }
+
+        fn ciphertext_epoch(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _head: sedimentree_core::loose_commit::id::CommitId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+            unreachable!("not exercised by this test")
+        }
+        fn persist_causal_checkpoint(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _covered_frontier: BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+        ) -> <Sendable as FutureForm>::Future<
+            '_,
+            eyre::Result<
+                Option<(
+                    sedimentree_core::loose_commit::id::CommitId,
+                    crate::runtime2::support::CausalCheckpoint,
+                    Vec<sedimentree_core::loose_commit::id::CommitId>,
+                )>,
+            >,
+        > {
+            unreachable!("not exercised by this test")
+        }
+        fn has_doc_write_access(
+            &self,
+            _doc_id: crate::DocumentId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+            unreachable!("not exercised by this test")
+        }
+        fn has_doc_fetch_access(
+            &self,
+            _doc_id: crate::DocumentId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+            unreachable!("not exercised by this test")
+        }
+        fn store_fragment(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _head: sedimentree_core::loose_commit::id::CommitId,
+            _boundary: BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+            _checkpoints: Vec<sedimentree_core::loose_commit::id::CommitId>,
+            _raw_blob: Vec<u8>,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+            unreachable!("not exercised by this test")
+        }
+        fn try_decrypt_content_keyed(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+            _locator: BigRepoCiphertextLocator,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn late_content_ciphertext_is_recovered_through_checkpoint_envelope() -> Res<()> {
+        use crate::changes::ChangeListenerManager;
+        use automerge::ReadDoc;
+        use automerge::transaction::Transactable;
+        use keyhive_crypto::symmetric_key::SymmetricKey;
+
+        let mut source = automerge::AutoCommit::new();
+        source
+            .put(automerge::ROOT, "title", "seed")
+            .expect("failed seeding doc");
+        let content_plaintext = source.save();
+
+        let doc_id = DocumentId::new([0x5a; 32]);
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+        let content_ref = CommitId::new([0x11; 32]);
+        let checkpoint = CausalCheckpoint::new([0x77; 32], BTreeSet::from([content_ref]));
+        let checkpoint_ref = causal_checkpoint_id(&checkpoint);
+        let checkpoint_plaintext = checkpoint.encode()?;
+
+        let io = Arc::new(FakeRecoveryDocIo {
+            sed_id,
+            content_ref,
+            checkpoint_ref,
+            checkpoint_plaintext,
+            content_plaintext,
+            checkpoint_key: SymmetricKey::from([0x42; 32]),
+            content_key: SymmetricKey::from([0x43; 32]),
+            delivered: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let (evt_tx, _evt_rx) = async_channel::unbounded::<Runtime2Evt>();
+        let (runtime_cmd_tx, _runtime_cmd_rx) =
+            async_channel::unbounded::<crate::runtime2::Runtime2Cmd>();
+        let (change_manager, _stop) = ChangeListenerManager::boot();
+
+        let mut worker = DocWorker2 {
+            doc_id,
+            sed_id,
+            generation: 0,
+            state: DocState::Unloaded,
+            caller_handles: Vec::new(),
+            partially_decrypted: false,
+            causal_epoch: None,
+            cgka_ops_count: 0,
+            recovered_keys: std::sync::Mutex::new(HashMap::new()),
+            blocked_refs: HashSet::new(),
+            causal_checkpoints: HashMap::new(),
+            io: std::sync::Arc::<FakeRecoveryDocIo>::clone(&io),
+            change_manager,
+            runtime_cmd_tx,
+            evt_tx,
+            pending_fragment_requests: BTreeSet::new(),
+            quiescence_waiters: Vec::new(),
+        };
+
+        // Phase 1: the checkpoint is applied but the covered content
+        // ciphertext has not arrived. The walk caches the checkpoint key and
+        // the doc goes pending.
+        let status = worker
+            .retry_materialization(BigRepoChangeOrigin::Local)
+            .await?;
+        assert!(matches!(status, MaterializationStatus::Pending(_)));
+        assert!(matches!(worker.state, DocState::PendingMaterialization));
+        assert!(
+            worker
+                .recovered_keys
+                .lock()
+                .expect("recovered-key cache lock poisoned")
+                .contains_key(&checkpoint_ref),
+            "the partial walk must cache the checkpoint's recovered key"
+        );
+
+        // Phase 2: the content ciphertext arrives. The retry must re-run the
+        // checkpoint's causal walk (not the cached-key fast path) so the
+        // envelope can recover the pre-grant content.
+        io.delivered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let status = worker
+            .retry_materialization(BigRepoChangeOrigin::Local)
+            .await?;
+        assert!(
+            matches!(
+                status,
+                MaterializationStatus::Ready {
+                    partially_decrypted: false
+                }
+            ),
+            "late-arriving content must materialize through the checkpoint envelope: {status:?}"
+        );
+        assert!(worker.blocked_refs.is_empty());
+        let DocState::Transient(doc) = &worker.state else {
+            panic!("doc must be materialized after recovery");
+        };
+        assert_eq!(
+            doc.get(automerge::ROOT, "title")
+                .expect("title read")
+                .expect("title present")
+                .0
+                .to_str()
+                .expect("title is text"),
+            "seed"
+        );
+        Ok(())
+    }
+
+    /// A fake hub that acks `RegisterDocLease` so the worker's lease
+    /// registration resolves without a real hub.
+    fn spawn_fake_hub_ack(
+        runtime_cmd_rx: async_channel::Receiver<crate::runtime2::Runtime2Cmd>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok(cmd) = runtime_cmd_rx.recv().await {
+                if let crate::runtime2::Runtime2Cmd::RegisterDocLease { registered, .. } = cmd {
+                    registered.send(()).ok();
+                }
+            }
+        })
+    }
+
+    /// A worker over a fully-delivered recovery doc (materializes `Ready` on
+    /// the first acquisition) with a fake hub acking lease registrations.
+    fn ready_recovery_worker() -> (DocWorker2<Sendable>, tokio::task::JoinHandle<()>) {
+        use crate::changes::ChangeListenerManager;
+        use automerge::transaction::Transactable;
+        use keyhive_crypto::symmetric_key::SymmetricKey;
+
+        let mut source = automerge::AutoCommit::new();
+        source
+            .put(automerge::ROOT, "title", "seed")
+            .expect("failed seeding doc");
+        let content_plaintext = source.save();
+
+        let doc_id = DocumentId::new([0x5b; 32]);
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+        let content_ref = CommitId::new([0x21; 32]);
+        let checkpoint = CausalCheckpoint::new([0x87; 32], BTreeSet::from([content_ref]));
+        let checkpoint_ref = causal_checkpoint_id(&checkpoint);
+        let checkpoint_plaintext = checkpoint.encode().expect("checkpoint encodes");
+
+        let io = Arc::new(FakeRecoveryDocIo {
+            sed_id,
+            content_ref,
+            checkpoint_ref,
+            checkpoint_plaintext,
+            content_plaintext,
+            checkpoint_key: SymmetricKey::from([0x52; 32]),
+            content_key: SymmetricKey::from([0x53; 32]),
+            delivered: std::sync::atomic::AtomicBool::new(true),
+        });
+
+        let (runtime_cmd_tx, runtime_cmd_rx) =
+            async_channel::unbounded::<crate::runtime2::Runtime2Cmd>();
+        let hub_ack = spawn_fake_hub_ack(runtime_cmd_rx);
+        let (evt_tx, _evt_rx) = async_channel::unbounded::<Runtime2Evt>();
+        let (change_manager, _stop) = ChangeListenerManager::boot();
+
+        let worker = DocWorker2 {
+            doc_id,
+            sed_id,
+            generation: 0,
+            state: DocState::Unloaded,
+            caller_handles: Vec::new(),
+            partially_decrypted: false,
+            causal_epoch: None,
+            cgka_ops_count: 0,
+            recovered_keys: std::sync::Mutex::new(HashMap::new()),
+            blocked_refs: HashSet::new(),
+            causal_checkpoints: HashMap::new(),
+            io: std::sync::Arc::<FakeRecoveryDocIo>::clone(&io),
+            change_manager,
+            runtime_cmd_tx,
+            evt_tx,
+            pending_fragment_requests: BTreeSet::new(),
+            quiescence_waiters: Vec::new(),
+        };
+        (worker, hub_ack)
+    }
+
+    async fn acquire_ready(
+        worker: &mut DocWorker2<Sendable>,
+    ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        worker.acquire_handle(resp).await?;
+        rx.await
+            .map_err(|_| ferr!(ERROR_CHANNEL))??
+            .into_ready(worker.doc_id)
+            .map_err(|err| ferr!("{err:?}"))
+    }
+
+    #[tokio::test]
+    async fn live_bundle_is_reused_after_caller_drop() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        // First acquisition materializes and hands out a live handle.
+        let first = acquire_ready(&mut worker).await?;
+        let first_bundle_id = first.bundle.id();
+        drop(first);
+
+        // The worker retains the bundle strongly: a second acquisition after
+        // the caller dropped must return the SAME bundle instance, not
+        // re-materialize (the pre-fix weak-ref design re-walked every time).
+        let second = acquire_ready(&mut worker).await?;
+        assert_eq!(
+            second.bundle.id(),
+            first_bundle_id,
+            "re-acquisition after caller drop must reuse the retained bundle"
+        );
+        assert!(matches!(worker.state, DocState::Live(_)));
+        drop(second);
+        hub_ack.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn broken_bundle_is_reloaded_on_reacquire() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        let first = acquire_ready(&mut worker).await?;
+        let first_bundle_id = first.bundle.id();
+        first.bundle.mark_broken();
+        drop(first);
+
+        // A broken bundle must be reloaded into a fresh instance on the next
+        // acquisition, so a rejected commit cannot poison later handles.
+        let second = acquire_ready(&mut worker).await?;
+        assert_ne!(
+            second.bundle.id(),
+            first_bundle_id,
+            "re-acquisition after a broken bundle must reload a fresh bundle"
+        );
+        assert!(!second.bundle.is_broken());
+        drop(second);
+        hub_ack.abort();
+        Ok(())
     }
 }
