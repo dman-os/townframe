@@ -1418,14 +1418,17 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
 
     let repo_bg = Arc::clone(&blobs_repo);
     let payload_bg = payload.clone();
-    tokio::spawn(async move {
+    let put_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        repo_bg.put(&payload_bg).await.expect("put should succeed");
+        repo_bg.put(&payload_bg).await
     });
 
     let got =
         wait_for_blob_bytes(&blobs_repo, expected_hash, Some(Duration::from_secs(10))).await?;
     assert_eq!(got, payload);
+    put_task
+        .await
+        .expect("delayed blob put task should complete")?;
 
     blobs_repo.shutdown().await?;
     Ok(())

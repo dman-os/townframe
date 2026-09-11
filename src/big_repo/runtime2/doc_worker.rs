@@ -32,6 +32,7 @@ pub fn spawn_doc_worker<F>(
     runtime_cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
     generation: u64,
+    parent_span: tracing::Span,
 ) -> SpawnedDocWorker<F>
 where
     F: FutureForm + DocWorkerLoop<F> + 'static,
@@ -60,7 +61,14 @@ where
     };
 
     let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();
-    let run = F::mailbox_loop(worker, msg_rx, stop_registration, runtime_evt_tx, doc_id);
+    let run = F::mailbox_loop(
+        worker,
+        msg_rx,
+        stop_registration,
+        runtime_evt_tx,
+        doc_id,
+        parent_span,
+    );
 
     SpawnedDocWorker {
         handle: DocWorkerHandle { msg_tx },
@@ -86,6 +94,7 @@ pub trait DocWorkerLoop<F: FutureForm> {
         stop_registration: AbortRegistration,
         runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
         doc_id: DocumentId,
+        parent_span: tracing::Span,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -98,6 +107,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
         stop_registration: AbortRegistration,
         runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
         doc_id: DocumentId,
+        parent_span: tracing::Span,
     ) -> F::Future<'static, eyre::Result<()>> {
         let cancellation = stop_registration.handle();
         F::from_future(
@@ -136,7 +146,18 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     Ok(())
                 }
             }
-            .instrument(tracing::info_span!("doc_worker mailbox loop", %doc_id)),
+            // The worker is spawned from inside a hub command (typically the
+            // command that first needed this doc). Without an explicit parent
+            // the mailbox-loop span inherits that command's span for the whole
+            // life of the worker, so every later message — including a rejected
+            // commit — reads as if the spawn-time command caused it. Parent the
+            // loop to the hub span instead, which is what the worker really
+            // belongs to.
+            .instrument(tracing::info_span!(
+                parent: &parent_span,
+                "doc_worker mailbox loop",
+                %doc_id
+            )),
         )
     }
 }
@@ -147,9 +168,11 @@ struct DocWorker2<F: FutureForm> {
     generation: u64,
 
     state: DocState,
-    /// Weak sentinels for caller-visible handles. The worker keeps the bundle
-    /// cached strongly, so caller presence must be tracked independently.
-    // FIXME: this is not pruned well
+    /// Weak sentinels for *caller* handles (excluding internal workers such
+    /// as the Automerge frontier publisher). Only a caller makes a document
+    /// live: received content is applied for the caller's benefit, every
+    /// user-visible notification is gated on this, and the sync outcome
+    /// reports `Ready` only for a document a caller holds.
     caller_handles: Vec<std::sync::Weak<()>>,
     partially_decrypted: bool,
     /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
@@ -337,7 +360,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 resp,
                 _lease: _,
             } => self.put_doc(initial_content, initial_keys, resp).await,
-            DocWorkerMsg::AcquireHandle { resp, _lease: _ } => self.acquire_handle(resp).await,
+            DocWorkerMsg::AcquireHandle {
+                lease,
+                resp,
+                _lease: _,
+            } => self.acquire_handle(resp, lease).await,
             DocWorkerMsg::CommitDelta {
                 bundle_id,
                 commits,
@@ -463,7 +490,9 @@ impl<F: FutureForm> DocWorker2<F> {
         self.change_manager
             .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
 
-        let handle = self.wrap_live_handle(bundle).await?;
+        let handle = self
+            .wrap_live_handle(bundle, crate::runtime2::DocLeaseKind::Caller)
+            .await?;
 
         resp.send(Ok(handle))
             .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -478,6 +507,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn wrap_live_handle(
         &mut self,
         bundle: Arc<LiveDocBundle>,
+        lease_kind: crate::runtime2::DocLeaseKind,
     ) -> eyre::Result<LiveDocHandle> {
         let lease = crate::runtime2::DocLease::new(
             self.runtime_cmd_tx.clone(),
@@ -486,13 +516,23 @@ impl<F: FutureForm> DocWorker2<F> {
         );
         self.register_bundle_lease().await?;
         let handle = LiveDocHandle::new(bundle, lease);
-        self.caller_handles
-            .retain(|presence| presence.strong_count() > 0);
-        self.caller_handles.push(handle.presence());
+        // Only caller leases make the document live: an internal acquisition
+        // (background workers such as the Automerge frontier publisher) must
+        // not mark a document nobody holds as live, or received content would
+        // be applied into the bundle and emit user-visible change
+        // notifications for it.
+        if lease_kind == crate::runtime2::DocLeaseKind::Caller {
+            self.caller_handles
+                .retain(|presence| presence.strong_count() > 0);
+            self.caller_handles.push(handle.presence());
+        }
         Ok(handle)
     }
 
-    fn has_live_callers(&mut self) -> bool {
+    /// Whether a caller handle still holds this bundle. User-visible change
+    /// notifications are gated on this, so background workers that merely need
+    /// the bundle cannot make a document nobody holds notify.
+    fn has_caller_handle(&mut self) -> bool {
         self.caller_handles
             .retain(|presence| presence.strong_count() > 0);
         !self.caller_handles.is_empty()
@@ -504,6 +544,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn acquire_handle(
         &mut self,
         resp: futures::channel::oneshot::Sender<eyre::Result<DocLookup<LiveDocHandle>>>,
+        lease_kind: crate::runtime2::DocLeaseKind,
     ) -> eyre::Result<()> {
         let result = match &self.state {
             // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
@@ -512,10 +553,10 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Live(bundle) => {
                 if bundle.is_broken() {
                     self.state = DocState::Unloaded;
-                    self.take_or_load_transient_doc().await?
+                    self.take_or_load_transient_doc(lease_kind).await?
                 } else {
                     let bundle = Arc::clone(bundle);
-                    DocLookup::Ready(self.wrap_live_handle(bundle).await?)
+                    DocLookup::Ready(self.wrap_live_handle(bundle, lease_kind).await?)
                 }
             }
             // - `Transient(doc)` → build a new `LiveDocBundle`, transition
@@ -536,7 +577,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.cgka_ops_count,
                 ));
                 self.state = DocState::Live(Arc::clone(&bundle));
-                let handle = self.wrap_live_handle(bundle).await?;
+                let handle = self.wrap_live_handle(bundle, lease_kind).await?;
                 DocLookup::Ready(handle)
             }
             // - `Unloaded` / `PendingMaterialization` → attempt to load + decrypt
@@ -545,7 +586,7 @@ impl<F: FutureForm> DocWorker2<F> {
             //   - Partially decryptable → `PendingMaterialization` +
             //     `mark_materialization_pending`.
             DocState::Unloaded | DocState::PendingMaterialization => {
-                self.take_or_load_transient_doc().await?
+                self.take_or_load_transient_doc(lease_kind).await?
             }
         };
         resp.send(Ok(result))
@@ -744,7 +785,10 @@ impl<F: FutureForm> DocWorker2<F> {
         )
     }
 
-    async fn take_or_load_transient_doc(&mut self) -> eyre::Result<DocLookup<LiveDocHandle>> {
+    async fn take_or_load_transient_doc(
+        &mut self,
+        lease_kind: crate::runtime2::DocLeaseKind,
+    ) -> eyre::Result<DocLookup<LiveDocHandle>> {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
@@ -758,7 +802,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.cgka_ops_count,
                 ));
                 self.state = DocState::Live(Arc::clone(&bundle));
-                let handle = self.wrap_live_handle(bundle).await?;
+                let handle = self.wrap_live_handle(bundle, lease_kind).await?;
                 DocLookup::Ready(handle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
@@ -786,7 +830,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             self.cgka_ops_count,
                         ));
                         self.state = DocState::Live(Arc::clone(&bundle));
-                        let handle = self.wrap_live_handle(bundle).await?;
+                        let handle = self.wrap_live_handle(bundle, lease_kind).await?;
                         DocLookup::Ready(handle)
                     }
                     LoadedDocSnapshot::Unavailable {
@@ -1203,7 +1247,12 @@ impl<F: FutureForm> DocWorker2<F> {
         >,
     ) -> eyre::Result<()> {
         let received = !commit_ids.is_empty() || !fragment_ids.is_empty();
-        let has_live = self.has_live_callers();
+        // "Live" for sync reporting means a *caller* holds the document:
+        // `DocLeaseKind` makes the lease kind the condition for received
+        // content becoming an observable materialized view. An internal lease
+        // (publication, causal-coverage healing) must not make a document
+        // nobody holds report as live.
+        let has_caller = self.has_caller_handle();
         if received {
             // Incremental apply of the received content into the live
             // document. Content for documents without live handles never
@@ -1235,7 +1284,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.sync_partial_state().await?;
                 if resolved.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
-                    return self.report_sync_outcome(peer_id, has_live, reply).await;
+                    return self.report_sync_outcome(peer_id, has_caller, reply).await;
                 }
                 if !self.blocked_refs.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
@@ -1244,11 +1293,27 @@ impl<F: FutureForm> DocWorker2<F> {
                 let origin = BigRepoChangeOrigin::Remote { peer_id };
                 // Apply the session's decrypted content incrementally; refs
                 // whose Automerge dependencies are still missing stay blocked.
+                let applied = resolved.len();
                 let (missing_deps, changed, after_heads, patches) =
                     self.apply_blobs_to_live(&bundle, resolved, &origin).await?;
                 self.blocked_refs.extend(missing_deps);
                 self.sync_partial_state().await?;
-                if changed && has_live {
+                // Report both notions explicitly: a failed propagation report
+                // must be able to distinguish "content was not applied" from
+                // "applied, but intentionally not notified" (no caller).
+                debug!(
+                    doc_id = %self.doc_id,
+                    peer_id = %peer_id,
+                    applied,
+                    changed,
+                    has_caller,
+                    notify = changed && has_caller,
+                    blocked = self.blocked_refs.len(),
+                    heads = after_heads.len(),
+                    patches = patches.len(),
+                    "doc worker applied received sync content into live bundle"
+                );
+                if changed && has_caller {
                     self.notify_heads_advanced(after_heads, patches, &origin)?;
                 }
 
@@ -1279,7 +1344,7 @@ impl<F: FutureForm> DocWorker2<F> {
             );
         }
 
-        self.report_sync_outcome(peer_id, has_live, reply).await
+        self.report_sync_outcome(peer_id, has_caller, reply).await
     }
 
     /// Attempt to reconcile the current BeeKEM epoch with the materialized
@@ -1506,7 +1571,7 @@ impl<F: FutureForm> DocWorker2<F> {
         if self.blocked_refs.is_empty() {
             return Ok(false);
         }
-        let has_live = self.has_live_callers();
+        let has_caller = self.has_caller_handle();
         let mut remaining: HashSet<(BigRepoCiphertextKind, CommitId)> =
             std::mem::take(&mut self.blocked_refs);
         remaining.retain(|(kind, id)| {
@@ -1540,7 +1605,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             if changed {
                 applied_any = true;
-                if has_live {
+                if has_caller {
                     self.notify_heads_advanced(after_heads, patches, origin)?;
                 }
             }
@@ -1562,7 +1627,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn report_sync_outcome(
         &mut self,
         peer_id: PeerId,
-        has_live: bool,
+        has_caller: bool,
         reply: Option<
             futures::channel::oneshot::Sender<
                 Result<
@@ -1587,7 +1652,7 @@ impl<F: FutureForm> DocWorker2<F> {
         tracing::debug!(
             doc_id = %self.doc_id,
             state = state_desc,
-            has_live,
+            has_caller,
             walk,
             "report_sync_outcome: walk decision"
         );
@@ -1616,7 +1681,10 @@ impl<F: FutureForm> DocWorker2<F> {
                     return self.finish_sync_outcome(reply, report, Err(error));
                 }
             }
-        } else if has_live {
+        } else if has_caller {
+            // A caller holds the document, so the session path already
+            // emitted the precise heads/patch notifications above; the receipt
+            // is honest without a coarse rewalk.
             Ok(crate::runtime2::types::SyncDocReceipt {
                 outcome: crate::runtime2::types::SyncDocOutcome::Ready,
             })
@@ -1855,6 +1923,12 @@ impl<F: FutureForm> DocWorker2<F> {
             origin = ?origin,
             "retry_materialization: entry"
         );
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            worker_ops_count = self.cgka_ops_count,
+            blocked_ref_count = self.blocked_refs.len(),
+            "retry_materialization: worker state snapshot"
+        );
         let live_bundle = match &self.state {
             DocState::Live(bundle) => Some(Arc::clone(bundle)),
             _ => None,
@@ -1863,6 +1937,13 @@ impl<F: FutureForm> DocWorker2<F> {
         // blocked refs — a keyhive round or an earlier session may have
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
+            tracing::debug!(
+                doc_id = %self.doc_id,
+                bundle_id = bundle.id(),
+                bundle_ops_count = bundle.materialized_cgka_ops_count(),
+                blocked_ref_count = self.blocked_refs.len(),
+                "retry_materialization: live bundle retry starting"
+            );
             let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
             let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
             if advanced {
@@ -1871,13 +1952,31 @@ impl<F: FutureForm> DocWorker2<F> {
             self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
             self.cgka_ops_count = materialization_ops_count;
             bundle.update_causal_state(self.causal_epoch, self.cgka_ops_count);
+            tracing::debug!(
+                doc_id = %self.doc_id,
+                bundle_id = bundle.id(),
+                materialization_ops_count,
+                bundle_ops_count = bundle.materialized_cgka_ops_count(),
+                blocked_ref_count = self.blocked_refs.len(),
+                "retry_materialization: live bundle retry completed"
+            );
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,
             });
         }
 
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            worker_ops_count = self.cgka_ops_count,
+            "retry_materialization: non-live load starting"
+        );
         self.cgka_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
+        tracing::debug!(
+            doc_id = %self.doc_id,
+            pre_load_ops_count = self.cgka_ops_count,
+            "retry_materialization: loading snapshot"
+        );
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,
@@ -1885,10 +1984,19 @@ impl<F: FutureForm> DocWorker2<F> {
                 blocked_refs,
                 causal_checkpoints,
             } => {
+                tracing::debug!(
+                    doc_id = %self.doc_id,
+                    pre_load_ops_count = self.cgka_ops_count,
+                    partially_decrypted,
+                    blocked_ref_count = blocked_refs.len(),
+                    causal_checkpoint_count = causal_checkpoints.len(),
+                    "retry_materialization: snapshot ready"
+                );
                 self.blocked_refs = blocked_refs.into_iter().collect();
                 self.causal_checkpoints.extend(causal_checkpoints);
                 self.sync_partial_state().await?;
                 let after_heads = doc.get_heads();
+                let head_count = after_heads.len();
                 self.transition_to_ready(was_pending, Arc::from(after_heads.clone()))
                     .await?;
                 if was_pending {
@@ -1908,6 +2016,12 @@ impl<F: FutureForm> DocWorker2<F> {
                         )?;
                     }
                 }
+                tracing::debug!(
+                    doc_id = %self.doc_id,
+                    head_count,
+                    blocked_ref_count = self.blocked_refs.len(),
+                    "retry_materialization: snapshot stored as transient"
+                );
                 self.state = DocState::Transient(Box::new(doc));
                 Ok(MaterializationStatus::Ready {
                     partially_decrypted,
@@ -1917,12 +2031,19 @@ impl<F: FutureForm> DocWorker2<F> {
                 blockers,
                 blocked_refs,
             } => {
+                tracing::debug!(
+                    doc_id = %self.doc_id,
+                    blocker_count = blockers.len(),
+                    blocked_ref_count = blocked_refs.len(),
+                    "retry_materialization: snapshot unavailable"
+                );
                 self.blocked_refs = blocked_refs.into_iter().collect();
                 let status = MaterializationStatus::Pending(blockers.clone());
                 self.transition_to_pending(was_pending, blockers).await?;
                 Ok(status)
             }
             LoadedDocSnapshot::Missing => {
+                tracing::debug!(%self.doc_id, "retry_materialization: snapshot missing");
                 self.blocked_refs.clear();
                 self.sync_partial_state().await?;
                 Ok(MaterializationStatus::Missing)
@@ -2578,7 +2699,9 @@ mod tests {
         worker: &mut DocWorker2<Sendable>,
     ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
         let (resp, rx) = futures::channel::oneshot::channel();
-        worker.acquire_handle(resp).await?;
+        worker
+            .acquire_handle(resp, crate::runtime2::DocLeaseKind::Caller)
+            .await?;
         rx.await
             .map_err(|_| ferr!(ERROR_CHANNEL))??
             .into_ready(worker.doc_id)

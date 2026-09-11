@@ -152,7 +152,35 @@ impl<F: FutureForm> Runtime2Handle<F> {
     {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
+            .send(Runtime2Cmd::GetDocHandle {
+                doc_id,
+                lease: crate::runtime2::DocLeaseKind::Caller,
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Acquire a live handle for background work that must not count as a
+    /// live caller.
+    ///
+    /// Identical to [`Self::get_doc_handle`] except that the document is not
+    /// marked as having a live caller: received content stays out of the
+    /// materialized bundle and no user-visible change notification is emitted
+    /// for a document nobody holds. Used by the Automerge frontier publisher.
+    pub async fn acquire_internal_doc_handle(
+        &self,
+        doc_id: DocumentId,
+    ) -> eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>
+    {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::GetDocHandle {
+                doc_id,
+                lease: crate::runtime2::DocLeaseKind::Internal,
+                resp,
+            })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?

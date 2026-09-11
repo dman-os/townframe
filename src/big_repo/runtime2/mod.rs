@@ -43,7 +43,7 @@ pub use lease::{
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
-pub use types::{GroupScopeHandle, WorkerGroupScope};
+pub use types::{DocLeaseKind, GroupScopeHandle, WorkerGroupScope};
 
 mod doc_worker;
 mod handle;

@@ -303,7 +303,24 @@ impl<'a> Worker<'a> {
             (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::Covered))
             | (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::OutOfScope)) => {
                 if std::env::var_os("DAYB_REST_DIAG").is_some() {
-                    tracing::warn!(?doc_id, ?source, "CAUSAL coverage done");
+                    // Report the Keyhive's own CGKA op count for the document
+                    // alongside the coverage acknowledgement: a peer whose
+                    // materialization reports `MissingDocumentKeys` while this
+                    // count is ahead of its bundle's count means the keys exist
+                    // but never reached the bundle, and the reverse means the
+                    // Keyhive itself never received them.
+                    let cgka_ops = self
+                        .keyhive
+                        .current_cgka_ops_count(doc_id)
+                        .await
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|error| format!("error: {error:?}"));
+                    tracing::warn!(
+                        ?doc_id,
+                        ?source,
+                        cgka_ops = %cgka_ops,
+                        "CAUSAL coverage done"
+                    );
                 }
                 self.acknowledge_source(source).await?;
                 if self.pending_admission.get(&doc_id).is_some_and(|pending| {

@@ -7,7 +7,7 @@
 
 use super::log_nickname;
 use super::topo::{Node, Pair};
-use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, Res};
+use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, PeerId, Res};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use subduction_keyhive::KeyhivePeerId;
@@ -28,6 +28,31 @@ pub async fn agent_of(repo: &crate::BigRepo, peer: &Node) -> Res<BigKeyhiveAgent
                 log_nickname::nickname(&repo.local_peer_id()),
             )
         })
+}
+
+/// Bounded wait for `peer_id`'s agent to reach `repo`'s keyhive.
+///
+/// A transport connection only *triggers* the keyhive handshake: the
+/// contact-card exchange completes asynchronously, so the agent is not
+/// necessarily present the moment a connection is accepted. Callers that need
+/// the agent right after dialing must wait for it instead of assuming the
+/// exchange already ran. Bounded, so a genuine delivery failure still fails.
+pub async fn wait_for_agent(repo: &crate::BigRepo, peer_id: PeerId) -> Res<BigKeyhiveAgent> {
+    let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(agent) = repo.keyhive().get_agent_by_peer_id(&kh_peer_id).await? {
+            return Ok(agent);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(crate::ferr!(
+                "agent for {} never reached {}'s keyhive: contact-card exchange did not complete",
+                log_nickname::nickname(&peer_id),
+                log_nickname::nickname(&repo.local_peer_id()),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// Construct the well-known public agent in the concrete BigRepo Keyhive type.
@@ -115,6 +140,40 @@ pub async fn grant_group_and_propagate(
     Ok(())
 }
 
+/// Whether `repo`'s agent observes access on `doc_id` within `timeout`.
+///
+/// A short, quiet probe for diagnostics that try several recovery legs: each leg
+/// must not pay the full assertion deadline, and the caller decides what the
+/// outcome means.
+pub(crate) async fn reader_has_access_within(
+    repo: &crate::BigRepo,
+    doc_id: DocumentId,
+    timeout: std::time::Duration,
+) -> Res<bool> {
+    let peer = repo.local_peer_id();
+    let agent_key = ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
+        .map_err(|_| crate::ferr!("peer id is not a verifying key"))?;
+    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        .map_err(|_| crate::ferr!("document id is not a verifying key"))?;
+    let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
+    let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if repo
+            .keyhive()
+            .agent_access_on(&agent, document)
+            .await
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// Assert the reader's keyhive reflects access on `doc_id` — single lookup.
 pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId) -> Res<()> {
     let peer = repo.local_peer_id();
@@ -124,10 +183,43 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
         .expect("document id must be a verifying key");
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
+    // Bounded: a grant that never propagates must name the node and the
+    // Keyhive state it is stuck in, not hang the test into its 120s timeout.
+    let deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
+    let mut next_report = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let access = repo.keyhive().agent_access_on(&agent, document).await;
         if access.is_some() {
             return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        let (_, known) = describe_keyhive_state(repo, doc_id).await;
+        if now >= next_report {
+            next_report = now + std::time::Duration::from_secs(5);
+            tracing::warn!(
+                %doc_id,
+                keyhive_knows_doc = known,
+                nickname = %log_nickname::nickname(&peer),
+                "waiting for reader to observe granted access"
+            );
+        }
+        if now >= deadline {
+            // Name the missing link in the grant chain: whether the agent is a
+            // member of any group, and what access the Keyhive reports per
+            // document. "Knows the doc but no access" and "not a member of the
+            // granting group" are different defects.
+            let docs_for_agent = repo.keyhive().docs_for_agent(&agent).await;
+            let doc_access = docs_for_agent.get(&doc_id).copied();
+            let membered = repo.keyhive().membered_for_agent(&agent).await.len();
+            let ledger = super::keyhive::describe_ledger(repo).await?;
+            return Err(crate::ferr!(
+                "reader never observed granted access: keyhive_knows_doc={known} \
+                 doc_access_for_agent={doc_access:?} docs_for_agent={} membered={membered} \
+                 keyhive_ledger={ledger} node={}",
+                docs_for_agent.len(),
+                log_nickname::nickname(&peer)
+            ));
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -145,13 +237,46 @@ pub async fn sync_doc_expect_ready(
 ) -> Res<crate::BigDocHandle> {
     let receipt = conn.sync_doc_with_peer_receipt(doc_id).await?;
     tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
+    // Bounded, and the receipt outcome is carried into the failure: `Stored`
+    // with a `None` access means the grant never reached this node, while
+    // `Pending` means the content is here but its keys are not.
+    let deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
+    let mut last_state;
+    let mut next_report = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match repo.get_doc(&doc_id).await? {
             crate::DocLookup::Ready(handle) => return Ok(handle),
-            crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
+            crate::DocLookup::PendingMaterialization => last_state = "pending",
+            crate::DocLookup::Missing => last_state = "missing",
         }
+        let now = tokio::time::Instant::now();
+        if now >= next_report {
+            next_report = now + std::time::Duration::from_secs(5);
+            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let ledger = super::keyhive::describe_ledger(repo).await?;
+            tracing::warn!(
+                %doc_id,
+                state = last_state,
+                receipt = ?receipt.outcome,
+                local_access = ?access,
+                keyhive_knows_doc = known,
+                keyhive_ledger = %ledger,
+                nickname = %log_nickname::nickname(&repo.local_peer_id()),
+                "waiting for synced document to become ready"
+            );
+        }
+        if now >= deadline {
+            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let ledger = super::keyhive::describe_ledger(repo).await?;
+            return Err(crate::ferr!(
+                "synced document never became ready: state={last_state} receipt={:?} \
+                 local_access={access:?} keyhive_knows_doc={known} keyhive_ledger={ledger} node={}",
+                receipt.outcome,
+                log_nickname::nickname(&repo.local_peer_id())
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 // ─── Bidirectional document sync ─────────────────────────────────────────────
@@ -184,14 +309,70 @@ pub async fn expect_ready(
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
+    // An unbounded wait here turns every "document never materializes" defect
+    // into an opaque nextest timeout with no signal about which node, which
+    // state, or whether the node even holds access. Bound it and report those.
+    let deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
+    let mut last_state;
+    let mut next_report = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match repo.get_doc(&doc_id).await? {
             crate::DocLookup::Ready(h) => return Ok(h),
-            _ => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            crate::DocLookup::PendingMaterialization => last_state = "pending",
+            crate::DocLookup::Missing => last_state = "missing",
         }
+        let now = tokio::time::Instant::now();
+        if now >= next_report {
+            next_report = now + std::time::Duration::from_secs(5);
+            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let ledger = super::keyhive::describe_ledger(repo).await?;
+            tracing::warn!(
+                %doc_id,
+                state = last_state,
+                local_access = ?access,
+                keyhive_knows_doc = known,
+                keyhive_ledger = %ledger,
+                nickname = %log_nickname::nickname(&repo.local_peer_id()),
+                "waiting for document to materialize"
+            );
+        }
+        if now >= deadline {
+            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let ledger = super::keyhive::describe_ledger(repo).await?;
+            return Err(crate::ferr!(
+                "document did not become ready within the deadline: \
+                 state={last_state} local_access={access:?} keyhive_knows_doc={known} \
+                 keyhive_ledger={ledger} node={}",
+                log_nickname::nickname(&repo.local_peer_id())
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+/// The node's own Keyhive view of `doc_id`: its agent's access, and whether the
+/// document is known at all. Distinguishes "never received the document" from
+/// "received the document but not the delegation that grants access".
+pub(crate) async fn describe_keyhive_state(
+    repo: &crate::BigRepo,
+    doc_id: DocumentId,
+) -> (Option<Access>, bool) {
+    let Ok(local) = ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes()) else {
+        return (None, false);
+    };
+    let local = keyhive_core::principal::identifier::Identifier::from(local);
+    let Ok(doc) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes()) else {
+        return (None, false);
+    };
+    let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc);
+    let keyhive = repo.keyhive();
+    let access = keyhive.agent_access_on(&local, doc_ident).await;
+    let known = keyhive
+        .document_ids()
+        .await
+        .contains(&big_sync_core::ObjId::new(doc_id.into_bytes()));
+    (access, known)
 }
 
 /// Reach the fixed point of every currently configured BigSync route and all
@@ -200,18 +381,26 @@ pub async fn expect_ready(
 /// fence is not sufficient.
 pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
     for node in nodes {
+        // A cursor that never reaches the head parks this fence until the
+        // test's hard timeout. Report the stall (first after 5s, then every
+        // 5s) so the log says which node and which cursor stalled.
+        let mut stall: Option<(std::time::Instant, std::time::Instant)> = None;
         loop {
             let event_tail = node.store.admission_head().await?;
             let group_cursor = node.store.keyhive_group_part_cursor().await?;
             if group_cursor >= event_tail {
                 break;
             }
-            if std::env::var_os("DAYB_REST_DIAG").is_some() {
+            let now = std::time::Instant::now();
+            let (started, last_report) = *stall.get_or_insert((now, now));
+            if now.duration_since(last_report) >= std::time::Duration::from_secs(5) {
+                stall = Some((started, now));
                 tracing::warn!(
                     node = %node.repo.local_peer_id(),
                     admission_head = event_tail,
                     group_part_cursor = group_cursor,
-                    "network-rest: group-part cursor behind admission head"
+                    stalled_secs = now.duration_since(started).as_secs(),
+                    "network-rest fence stalled: group-part cursor behind admission head"
                 );
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -238,19 +427,26 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
     }
     big_sync::test_support::wait_for_network_rest(&targets, || async {
         for node in nodes {
+            let mut stall: Option<(std::time::Instant, std::time::Instant)> = None;
             while {
                 let event_tail = node.store.admission_head().await?;
                 let group_cursor = node.store.keyhive_group_part_cursor().await?;
                 let causal_cursor = node.store.causal_checkpoint_cursor().await?;
                 let behind = group_cursor < event_tail || causal_cursor < event_tail;
-                if behind && std::env::var_os("DAYB_REST_DIAG").is_some() {
-                    tracing::warn!(
-                        node = %node.repo.local_peer_id(),
-                        admission_head = event_tail,
-                        group_part_cursor = group_cursor,
-                        causal_checkpoint_cursor = causal_cursor,
-                        "network-rest: worker cursors behind admission head"
-                    );
+                if behind {
+                    let now = std::time::Instant::now();
+                    let (started, last_report) = *stall.get_or_insert((now, now));
+                    if now.duration_since(last_report) >= std::time::Duration::from_secs(5) {
+                        stall = Some((started, now));
+                        tracing::warn!(
+                            node = %node.repo.local_peer_id(),
+                            admission_head = event_tail,
+                            group_part_cursor = group_cursor,
+                            causal_checkpoint_cursor = causal_cursor,
+                            stalled_secs = now.duration_since(started).as_secs(),
+                            "network-rest fence stalled: worker cursors behind admission head"
+                        );
+                    }
                 }
                 behind
             } {

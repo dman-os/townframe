@@ -72,6 +72,56 @@ impl SqliteBigRepoStore {
         Ok(inserted)
     }
 
+    /// This node's Keyhive ingestion ledger: how many events reached the raw
+    /// log, how many Keyhive applied, and which peers the unapplied remainder
+    /// came from.
+    ///
+    /// The unapplied remainder is the question that separates the failure modes
+    /// during a divergence: a node with nothing unapplied has applied
+    /// everything it received, so an event it is missing never arrived, while a
+    /// non-empty remainder points at an apply-side or ordering defect.
+    pub(crate) async fn keyhive_event_ledger(&self) -> Res<KeyhiveEventLedger> {
+        let scope = self.scope().id();
+        let counts = sqlx::query(
+            "SELECT
+                 (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS logged,
+                 (SELECT COUNT(*) FROM big_repo_keyhive_admissions WHERE scope_id = ?1) AS admitted,
+                 (SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admissions WHERE scope_id = ?1) AS head",
+        )
+        .bind(scope)
+        .fetch_one(&self.sql.read_pool)
+        .await?;
+        let mut ledger = KeyhiveEventLedger {
+            logged: counts.try_get::<i64, _>("logged")?.max(0) as u64,
+            admitted: counts.try_get::<i64, _>("admitted")?.max(0) as u64,
+            admission_head: counts.try_get::<i64, _>("head")?.max(0) as u64,
+            unapplied_by_source: BTreeMap::new(),
+        };
+        let rows = sqlx::query(
+            "SELECT e.source_id AS source_id, COUNT(*) AS count
+               FROM big_repo_keyhive_event_log e
+              WHERE e.scope_id = ?1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM big_repo_keyhive_admissions a
+                     WHERE a.scope_id = e.scope_id
+                       AND a.event_hash = e.event_hash
+                )
+              GROUP BY e.source_id",
+        )
+        .bind(scope)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        for row in rows {
+            let source: Option<Vec<u8>> = row.try_get("source_id")?;
+            let count: i64 = row.try_get("count")?;
+            ledger
+                .unapplied_by_source
+                .insert(source, count.max(0) as u64);
+        }
+        Ok(ledger)
+    }
+
     pub(crate) async fn append_admitted_events(
         &self,
         mut hashes: Vec<subduction_keyhive::storage::StorageHash>,

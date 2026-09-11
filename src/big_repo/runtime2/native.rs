@@ -542,6 +542,35 @@ where
             // ingesting remote ops). In that case the encryption performs its
             // own rotation; persist it like any other local CGKA update
             // instead of treating it as an invariant violation.
+            // TEMPORARY DIAGNOSTIC: the checkpoint blob names the PCS update op
+            // it was encrypted under. Record that op alongside every local CGKA
+            // op hash so a peer reporting `update_op_known=false` can be traced
+            // back to whether the serving node ever held the op at all.
+            {
+                let local_ops: Vec<String> = {
+                    let locked = kh_doc.lock().await;
+                    match locked.cgka_ops() {
+                        Ok(epochs) => epochs
+                            .iter()
+                            .flat_map(|epoch| epoch.iter())
+                            .map(|op| {
+                                format!("{:?}", keyhive_crypto::digest::Digest::hash(op.as_ref()))
+                            })
+                            .collect(),
+                        Err(error) => vec![format!("cgka_ops-error: {error}")],
+                    }
+                };
+                let blob_op = decode_encrypted_blob(encrypted_blob.as_slice())
+                    .map(|blob| format!("{:?}", blob.pcs_update_op_hash))
+                    .unwrap_or_else(|error| format!("decode-error: {error}"));
+                tracing::warn!(
+                    ?sed_id,
+                    ?covered_frontier,
+                    checkpoint_pcs_update_op_hash = %blob_op,
+                    local_cgka_op_hashes = ?local_ops,
+                    "CHECKPOINTEPOCH"
+                );
+            }
             if update_op.is_some() || local_secret.is_some() {
                 debug!(
                     ?sed_id,
@@ -1004,6 +1033,8 @@ where
                     Err(DecryptError::KeyNotFound) => {
                         tracing::warn!(
                             content_ref = ?encrypted.content_ref,
+                            pcs_key_hash = ?encrypted.pcs_key_hash,
+                            pcs_update_op_hash = ?encrypted.pcs_update_op_hash,
                             "missing entry encryption key while materializing"
                         );
                         return Ok(CausalDecryptResult {
@@ -2262,7 +2293,7 @@ where
         group_part_group_scope,
     );
     stop_token.group_part_stop = Some(spawned_group_part.stop);
-    stop_token.child_tasks.spawn(spawned_group_part.run)?;
+    stop_token.worker_tasks.spawn(spawned_group_part.run)?;
 
     let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
         group_part_store.clone(),
@@ -2274,7 +2305,7 @@ where
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
     stop_token
-        .child_tasks
+        .worker_tasks
         .spawn(spawned_causal_checkpoint.run)?;
 
     // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
@@ -2286,7 +2317,7 @@ where
         Arc::clone(&timer),
     );
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
-    stop_token.child_tasks.spawn(spawned_prekey_janitor.run)?;
+    stop_token.worker_tasks.spawn(spawned_prekey_janitor.run)?;
 
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),
@@ -2300,7 +2331,7 @@ where
     );
     stop_token.automerge_frontier_stop = Some(spawned_automerge_frontier.stop);
     stop_token
-        .child_tasks
+        .worker_tasks
         .spawn(spawned_automerge_frontier.run)?;
 
     stop_token.child_tasks.spawn({
@@ -2366,13 +2397,14 @@ where
         })?;
     }
 
-    // Keyhive change dispatcher: spawned last on child_tasks so reverse-order
-    // shutdown stops it first (its stop token is cancelled before the task set
-    // is aborted). The task set's spawn unwraps the dispatcher's result, so an
-    // unexpected error or panic brings down the process.
+    // Keyhive change dispatcher: spawned last on worker_tasks so reverse-order
+    // shutdown stops it first (its stop token is cancelled, then the worker set
+    // is joined before the hub's commands channel closes). The task set's spawn
+    // unwraps the dispatcher's result, so an unexpected error or panic brings
+    // down the process.
     stop_token.keyhive_dispatcher_stop = Some(spawned_keyhive_dispatcher.stop);
     stop_token
-        .child_tasks
+        .worker_tasks
         .spawn(spawned_keyhive_dispatcher.run)?;
 
     // BigEphemeral remains available for application-level transient topics.

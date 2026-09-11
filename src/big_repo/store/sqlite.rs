@@ -87,6 +87,13 @@ struct BigRepoSubscriptions {
     pending: HashSet<Uuid>,
     live: HashSet<Uuid>,
     subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
+    /// Object/principal pairs whose fetch access was just revoked. The next
+    /// event for such a pair is delivered payload-free instead of dropped, so
+    /// the peer can discover the revocation: it attempts a sync, the serving
+    /// side rejects it at the wire with `Unauthorized`, and the peer settles
+    /// its cursor. Content delivery stays gated by fetch access — the notice
+    /// never carries an object payload.
+    revoked_fetch: HashSet<(ObjId, PeerId)>,
 }
 
 impl BigRepoSubscriptions {
@@ -109,6 +116,20 @@ impl BigRepoSubscriptions {
             }
         }
     }
+}
+
+/// One node's Keyhive ingestion ledger.
+///
+/// `logged` counts events that reached the raw event log, `admitted` those
+/// Keyhive applied into the graph. `unapplied_by_source` keys the
+/// logged-but-unapplied remainder by the peer that delivered it (`None` for
+/// locally authored events).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct KeyhiveEventLedger {
+    pub(crate) logged: u64,
+    pub(crate) admitted: u64,
+    pub(crate) admission_head: u64,
+    pub(crate) unapplied_by_source: std::collections::BTreeMap<Option<Vec<u8>>, u64>,
 }
 
 #[derive(Clone)]
@@ -462,6 +483,65 @@ impl SqliteBigRepoStore {
         }
     }
 
+    fn event_kind(event: &SubEvent) -> &'static str {
+        match event {
+            SubEvent::Changed(_) => "changed",
+            SubEvent::Added(_) => "added",
+            SubEvent::Removed(_) => "removed",
+            SubEvent::ReplayComplete => "replay_complete",
+        }
+    }
+
+    /// Payload-free description of an event, for diagnostics that must not
+    /// spill object content into logs.
+    fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartId>) {
+        match event {
+            SubEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
+            SubEvent::Added(inner) => (inner.cursor, vec![inner.part_id]),
+            SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id]),
+            SubEvent::ReplayComplete => (CursorIndex::default(), Vec::new()),
+        }
+    }
+
+    /// Strip object content from an event while keeping its identity and
+    /// cursor, so a peer that lost fetch access can act on the advance without
+    /// receiving payload bytes.
+    fn without_payload(event: SubEvent) -> SubEvent {
+        match event {
+            SubEvent::Changed(mut inner) => {
+                inner.payload = serde_json::Value::Null;
+                SubEvent::Changed(inner)
+            }
+            SubEvent::Added(mut inner) => {
+                inner.payload = serde_json::Value::Null;
+                SubEvent::Added(inner)
+            }
+            other => other,
+        }
+    }
+
+    /// Arm a single payload-free revocation notice for each principal that
+    /// just lost fetch access to `obj_id`.
+    pub(crate) fn arm_revocation_notices(
+        &self,
+        obj_id: ObjId,
+        principals: impl IntoIterator<Item = PeerId>,
+    ) {
+        let mut bus = self.bus.write().expect(ERROR_MUTEX);
+        for principal in principals {
+            bus.revoked_fetch.insert((obj_id, principal));
+        }
+    }
+
+    /// Consume a pending revocation notice for `(obj_id, principal)`.
+    fn take_revocation_notice(&self, obj_id: ObjId, principal: Option<PeerId>) -> bool {
+        let Some(principal) = principal else {
+            return false;
+        };
+        let mut bus = self.bus.write().expect(ERROR_MUTEX);
+        bus.revoked_fetch.remove(&(obj_id, principal))
+    }
+
     async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
         let mut promote = Vec::new();
         let mut dispatch = Vec::new();
@@ -491,6 +571,15 @@ impl SqliteBigRepoStore {
         {
             let bus = self.bus.read().expect(ERROR_MUTEX);
             for event in events {
+                if !matches!(event, SubEvent::ReplayComplete) {
+                    let (cursor, part_ids) = Self::event_diagnostic(&event);
+                    tracing::debug!(
+                        ?cursor,
+                        ?part_ids,
+                        event_kind = Self::event_kind(&event),
+                        "part-store published event",
+                    );
+                }
                 let obj_id = match &event {
                     SubEvent::Changed(inner) => inner.obj_id,
                     SubEvent::Added(inner) => inner.obj_id,
@@ -586,7 +675,34 @@ impl SqliteBigRepoStore {
                 || self
                     .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
                     .await?;
-            if permitted && sender.try_send(event).is_err() {
+            let event = if permitted {
+                event
+            } else if self.take_revocation_notice(obj_id, principal) {
+                let (cursor, part_ids) = Self::event_diagnostic(&event);
+                tracing::debug!(
+                    ?sub_id,
+                    ?obj_id,
+                    ?principal,
+                    ?cursor,
+                    ?part_ids,
+                    event_kind = Self::event_kind(&event),
+                    "part-store delivered payload-free revocation notice",
+                );
+                Self::without_payload(event)
+            } else {
+                let (cursor, part_ids) = Self::event_diagnostic(&event);
+                tracing::debug!(
+                    ?sub_id,
+                    ?obj_id,
+                    ?principal,
+                    ?cursor,
+                    ?part_ids,
+                    event_kind = Self::event_kind(&event),
+                    "part-store dropped live subscription event: subscriber lacks fetch access",
+                );
+                continue;
+            };
+            if sender.try_send(event).is_err() {
                 drop_subs.insert(sub_id);
             }
         }
@@ -596,6 +712,33 @@ impl SqliteBigRepoStore {
                 || self
                     .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
                     .await?;
+            let event = if permitted {
+                Some(event)
+            } else if self.take_revocation_notice(obj_id, principal) {
+                let (cursor, part_ids) = Self::event_diagnostic(&event);
+                tracing::debug!(
+                    ?sub_id,
+                    ?obj_id,
+                    ?principal,
+                    ?cursor,
+                    ?part_ids,
+                    event_kind = Self::event_kind(&event),
+                    "part-store delivered payload-free revocation notice",
+                );
+                Some(Self::without_payload(event))
+            } else {
+                let (cursor, part_ids) = Self::event_diagnostic(&event);
+                tracing::debug!(
+                    ?sub_id,
+                    ?obj_id,
+                    ?principal,
+                    ?cursor,
+                    ?part_ids,
+                    event_kind = Self::event_kind(&event),
+                    "part-store dropped promoted subscription event: subscriber lacks fetch access",
+                );
+                None
+            };
             let mut bus = self.bus.write().expect(ERROR_MUTEX);
             let Some(sub) = bus.subs.get(&sub_id).cloned() else {
                 continue;
@@ -607,7 +750,15 @@ impl SqliteBigRepoStore {
                 }
                 bus.live.insert(sub_id);
             }
-            if permitted && sender.try_send(event).is_err() {
+            if let Some(event) = event
+                && sender.try_send(event).is_err()
+            {
+                tracing::debug!(
+                    ?sub_id,
+                    ?obj_id,
+                    ?principal,
+                    "part-store removed subscription after promote send failure",
+                );
                 bus.remove(sub_id);
             }
         }
@@ -615,6 +766,10 @@ impl SqliteBigRepoStore {
         if !drop_subs.is_empty() {
             let mut bus = self.bus.write().expect(ERROR_MUTEX);
             for sub_id in drop_subs {
+                tracing::debug!(
+                    ?sub_id,
+                    "part-store removed subscription after dispatch send failure",
+                );
                 bus.remove(sub_id);
             }
         }

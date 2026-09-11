@@ -473,6 +473,7 @@ impl SqliteBigRepoStore {
         let mut transitions = Vec::new();
         let mut transition_event_payloads = HashMap::new();
         let mut reconciled_docs = HashMap::new();
+        let mut revoked_notices: HashMap<ObjId, Vec<PeerId>> = HashMap::new();
 
         for mutation in mutations {
             let obj_ref = self.core.ensure_obj_ref(&mut tx, mutation.doc).await?;
@@ -526,6 +527,24 @@ impl SqliteBigRepoStore {
                 .await?;
             }
             reconciled_docs.insert(mutation.doc, mutation.agents.clone());
+            // A principal that just lost fetch access must still learn that the
+            // object moved, or a revoke could be discovered only by accident:
+            // every later event for the object is filtered out of its
+            // subscription. Arm one payload-free notice so it attempts a sync,
+            // is rejected at the wire with `Unauthorized`, and settles its
+            // cursor. Object content stays gated by fetch access.
+            let revoked_principals: Vec<PeerId> = prior_agent_ids
+                .iter()
+                .cloned()
+                .map(SqliteCore::peer_from_blob)
+                .filter(|principal| !mutation.agents.contains_key(principal))
+                .collect();
+            if !revoked_principals.is_empty() {
+                revoked_notices
+                    .entry(mutation.doc)
+                    .or_default()
+                    .extend(revoked_principals);
+            }
 
             let current_rows: Vec<Vec<u8>> = sqlx::query_scalar!(
                 "SELECT p.part_id AS 'part_id: Vec<u8>' FROM big_sync_members m
@@ -768,6 +787,12 @@ impl SqliteBigRepoStore {
 
         if !events.is_empty() {
             self.publish(events).await?;
+        }
+        // Armed after this batch's own publication so the notice rides the
+        // next advance for the object, which is the one that carries a fresh
+        // cursor the peer's cursor machine can accept.
+        for (obj_id, principals) in revoked_notices {
+            self.arm_revocation_notices(obj_id, principals);
         }
         Ok(())
     }

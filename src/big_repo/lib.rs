@@ -269,7 +269,6 @@ impl BigRepo {
         .len();
         Ok(snapshot)
     }
-    #[cfg(test)]
     pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
         self.sqlite_store.clone()
     }
@@ -625,9 +624,22 @@ impl BigRepo {
 
     /// Wait until finite runtime work currently admitted to this repository
     /// has drained. Pending materialization due to unavailable keys is allowed.
+    ///
+    /// Notification dispatch is part of the wait: notification delivery lives
+    /// in the change switchboard, a task outside the hub, so it is fenced
+    /// separately. When this returns, every notification admitted before the
+    /// call has been fanned out and a listener registered right after cannot
+    /// observe a batch that predates it.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
-        self.runtime.wait_for_quiescence(timeout).await
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        self.runtime.wait_for_quiescence(timeout).await?;
+        self.change_manager
+            .fence_notifications(
+                deadline
+                    .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now())),
+            )
+            .await
     }
 
     /// Like [`BigRepo::wait_for_quiescence`], but freezes the hub once
@@ -638,7 +650,16 @@ impl BigRepo {
         &self,
         timeout: Option<std::time::Duration>,
     ) -> Res<()> {
-        self.runtime.wait_for_quiescence_freeze(timeout, true).await
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        self.runtime
+            .wait_for_quiescence_freeze(timeout, true)
+            .await?;
+        self.change_manager
+            .fence_notifications(
+                deadline
+                    .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now())),
+            )
+            .await
     }
 
     /// Resume event/command processing after a frozen quiescence wait.

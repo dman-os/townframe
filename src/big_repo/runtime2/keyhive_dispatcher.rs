@@ -395,6 +395,10 @@ async fn classify_rows(
                     "KEYHIVE_DISPATCH_DIAG fanout decision"
                 );
             }
+            // Peers the visibility projection cannot attribute are already
+            // folded into `targets.peers` by the classifier, so a peer that is
+            // neither selected nor covered by the unattributed fallback is a
+            // peer the cache proved is not a recipient.
             if selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());

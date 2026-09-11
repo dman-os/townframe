@@ -1492,30 +1492,36 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
         .await
         .ok_or_else(|| crate::ferr!("joiner document missing"))?;
     let mut saw_undecryptable_prejoin = 0usize;
+    for raw in &prejoin_blobs {
+        let Ok(encrypted_blob) = crate::encrypted_blob::decode_encrypted_blob(raw) else {
+            continue;
+        };
+        let ok = {
+            let mut doc = kh_doc.lock().await;
+            doc.try_decrypt_content(&encrypted_blob).is_ok()
+        };
+        assert!(
+            !ok,
+            "pre-join blob must be undecryptable directly by the joiner"
+        );
+        saw_undecryptable_prejoin += 1;
+    }
+
     let mut saw_decryptable_postjoin = 0usize;
     for raw in &postjoin_blobs {
+        if prejoin_ids.contains(raw) {
+            continue;
+        }
         let Ok(encrypted_blob) = crate::encrypted_blob::decode_encrypted_blob(raw) else {
             // Checkpoint/key-only nodes: no content envelope to decrypt.
             continue;
         };
-        if prejoin_ids.contains(raw) {
-            let ok = {
-                let mut doc = kh_doc.lock().await;
-                doc.try_decrypt_content(&encrypted_blob).is_ok()
-            };
-            assert!(
-                !ok,
-                "pre-join blob must be undecryptable directly by the joiner"
-            );
-            saw_undecryptable_prejoin += 1;
-        } else {
-            let ok = {
-                let mut doc = kh_doc.lock().await;
-                doc.try_decrypt_content(&encrypted_blob).is_ok()
-            };
-            if ok {
-                saw_decryptable_postjoin += 1;
-            }
+        let ok = {
+            let mut doc = kh_doc.lock().await;
+            doc.try_decrypt_content(&encrypted_blob).is_ok()
+        };
+        if ok {
+            saw_decryptable_postjoin += 1;
         }
     }
     assert!(

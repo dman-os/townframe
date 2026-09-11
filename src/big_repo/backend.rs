@@ -11,6 +11,68 @@ impl BigRepoSyncBackend {
     }
 }
 
+/// The local view that made the policy reject a document sync.
+///
+/// This is the split that decides which side of the pipeline failed: a node
+/// whose Keyhive has ingested nothing unapplied has applied every event it ever
+/// received, so a missing document definition means the defining event never
+/// arrived. A non-empty unapplied remainder names the delivering peer whose
+/// events were received but never applied, which is an apply-side defect
+/// instead. Without this, both look identical in a rejection message.
+async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::DocumentId) -> String {
+    let Ok(local_key) = ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes())
+    else {
+        return "local peer id is not a verifying key".to_owned();
+    };
+    let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes()) else {
+        return "document id is not a verifying key".to_owned();
+    };
+    let local = keyhive_core::principal::identifier::Identifier::from(local_key);
+    let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
+    let kh_document = keyhive_core::principal::document::id::DocumentId::from(document);
+    let doc_known = repo
+        .keyhive()
+        .clone_keyhive()
+        .get_document(kh_document)
+        .await
+        .is_some();
+    let local_access = repo.keyhive().agent_access_on(&local, document).await;
+    let ledger = match repo.sqlite_store().keyhive_event_ledger().await {
+        Ok(ledger) => {
+            let unapplied = ledger.logged.saturating_sub(ledger.admitted);
+            if unapplied == 0 {
+                format!(
+                    "ledger=logged={} admitted={} head={} unapplied=0",
+                    ledger.logged, ledger.admitted, ledger.admission_head
+                )
+            } else {
+                let sources = ledger
+                    .unapplied_by_source
+                    .iter()
+                    .map(|(source, count)| match source {
+                        Some(bytes) if bytes.len() == 32 => format!(
+                            "{}:{count}",
+                            bytes
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        ),
+                        Some(bytes) => format!("{}bytes:{count}", bytes.len()),
+                        None => format!("local:{count}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "ledger=logged={} admitted={} head={} unapplied={unapplied} from=[{sources}]",
+                    ledger.logged, ledger.admitted, ledger.admission_head
+                )
+            }
+        }
+        Err(error) => format!("ledger unavailable: {error}"),
+    };
+    format!("doc_known={doc_known} local_access={local_access:?} {ledger}")
+}
+
 #[async_trait::async_trait]
 impl big_sync::SyncBackend for BigRepoSyncBackend {
     /// Part membership is exclusively owned by runtime2 reconciliation workers.
@@ -85,6 +147,11 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 eyre::bail!("remote doc was not found");
             }
             Ok(Err(crate::SyncDocError::Unauthorized)) => {
+                tracing::warn!(
+                    %peer_id,
+                    %doc_id,
+                    "BigSync backend received remote Unauthorized"
+                );
                 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
                 enum LocalAuthorization {
                     Unknown,
@@ -182,8 +249,17 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 ));
             }
             Ok(Err(crate::SyncDocError::Policy(error))) => {
+                let local_state = describe_local_policy_state(&repo, doc_id).await;
+                tracing::warn!(
+                    %peer_id,
+                    %doc_id,
+                    error = ?error,
+                    local_state = %local_state,
+                    "BigSync backend local policy rejected document sync"
+                );
                 eyre::bail!(
-                    "doc sync with peer {peer_id} was rejected by the local policy: {error}"
+                    "doc sync with peer {peer_id} was rejected by the local policy: {error} \
+                     [{local_state}]"
                 );
             }
             Err(_) => {

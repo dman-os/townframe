@@ -708,9 +708,30 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
     }
 
     // Path 1: A→B→C→D.
-    b_a.sync_doc_with_peer(doc_id).await?;
-    c_b.sync_doc_with_peer(doc_id).await?;
-    d_c.sync_doc_with_peer(doc_id).await?;
+    // These first fetches happen immediately after the public grant and one
+    // keyhive round, and a refusal here means the serving side's view of that
+    // grant had not caught up yet. When that happens, bisect which recovery leg
+    // repairs it instead of leaving a bare `Unauthorized`.
+    for (fetch_conn, sync_conn, reader_idx, label) in [
+        (&b_a, &a_b, 1usize, "b->a"),
+        (&c_b, &b_c, 2usize, "c->b"),
+        (&d_c, &c_d, 3usize, "d->c"),
+    ] {
+        if let Err(err) = fetch_conn.sync_doc_with_peer(doc_id).await {
+            let repaired_by = bisect_doc_fetch(
+                doc_id,
+                fetch_conn,
+                sync_conn,
+                guard.node(0),
+                guard.node(reader_idx),
+            )
+            .await?;
+            return Err(crate::ferr!(
+                "initial fetch {label} was refused before the partition: {err};                  repaired_by={repaired_by:?} {}",
+                kh_snap::describe_ledger(&guard.node(0).repo).await?
+            ));
+        }
+    }
     guard.node(3).repo.wait_for_quiescence(None).await?;
 
     // Path 2: A→D (direct).  This sends the same doc again.  D must
@@ -1188,6 +1209,213 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     drop(b_a2);
     drop(c_d2);
     drop(d_c2);
+    drop(guard);
+    Ok(())
+}
+
+/// Try each recovery leg in turn and report the first that repairs delivery.
+///
+/// The legs isolate whose bookkeeping withheld the event: an owner-initiated
+/// round, a reader-initiated round, or a fresh connection that rebuilds both
+/// sides' session state. `None` means nothing repaired it.
+async fn bisect_grant_delivery(
+    reader_repo: &crate::BigRepo,
+    doc_id: crate::DocumentId,
+    owner_conn: &crate::BigRepoConnection,
+    reader_conn: &crate::BigRepoConnection,
+    owner: &Node,
+    reader: &Node,
+) -> crate::Res<Option<&'static str>> {
+    let probe = std::time::Duration::from_secs(5);
+    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+        return Ok(Some("ordinary heal alone"));
+    }
+    owner_conn.sync_keyhive_with_peer().await?;
+    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+        return Ok(Some("owner-initiated round"));
+    }
+    reader_conn.sync_keyhive_with_peer().await?;
+    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+        return Ok(Some("reader-initiated round"));
+    }
+    let owner_again = owner.connect(reader).await?;
+    // Bound so the fresh connection lives for the probe.
+    let _reader_again = reader.accepted_connection().await;
+    owner_again.sync_keyhive_with_peer().await?;
+    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+        return Ok(Some("fresh connection"));
+    }
+    Ok(None)
+}
+
+/// Partition, publish, grant, heal: the reader must learn the grant.
+///
+/// When it does not, the recovery legs in [`bisect_grant_delivery`] name which
+/// piece of state withheld it, and an empty ledger on the reader at that point
+/// proves the event never arrived rather than failing to apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_late_peer_learns_grant_after_partition_heal() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let owner = Node::boot(61, "Owner").await?;
+    let reader = Node::boot(62, "LateReader").await?;
+    let guard = ShutdownGuard::from(vec![owner, reader]);
+
+    let o_r = guard.node(0).connect(guard.node(1)).await?;
+    let r_o = guard.node(1).accepted_connection().await;
+    o_r.sync_keyhive_with_peer().await?;
+
+    let reader_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(1)).await?;
+
+    guard
+        .node(0)
+        .worker
+        .remove_peer(guard.node(1).peer_id())
+        .await?;
+    guard
+        .node(1)
+        .worker
+        .remove_peer(guard.node(0).peer_id())
+        .await?;
+    drop(o_r);
+    drop(r_o);
+
+    let mut seed = automerge::Automerge::new();
+    seed.transact(|tx| tx.put(automerge::ROOT, "title", "late-learn"))
+        .map_err(|err| crate::ferr!("failed creating seed doc: {err:?}"))?;
+    let owner_doc = guard.node(0).repo.create_doc(seed).await?;
+    let doc_id = owner_doc.document_id();
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+
+    let o_r2 = guard.node(0).connect(guard.node(1)).await?;
+    let r_o2 = guard.node(1).accepted_connection().await;
+    o_r2.sync_keyhive_with_peer().await?;
+    r_o2.sync_keyhive_with_peer().await?;
+
+    let reader_repo = &guard.node(1).repo;
+    let repaired_by = bisect_grant_delivery(
+        reader_repo,
+        doc_id,
+        &o_r2,
+        &r_o2,
+        guard.node(0),
+        guard.node(1),
+    )
+    .await?;
+    match repaired_by {
+        Some(leg) => {
+            tracing::warn!(leg, "late peer learned the grant only after a recovery leg");
+        }
+        None => {
+            return Err(crate::ferr!(
+                "late peer never learned the grant after partition heal: {}",
+                kh_snap::describe_ledger(reader_repo).await?
+            ));
+        }
+    }
+
+    let reader_doc = fixtures::sync_doc_expect_ready(&r_o2, reader_repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "title").await.as_deref(),
+        Some("late-learn"),
+        "late peer materialised without the post-partition content"
+    );
+
+    drop(owner_doc);
+    drop(reader_doc);
+    drop(guard);
+    Ok(())
+}
+
+/// Retry a refused document fetch after each recovery leg.
+///
+/// A fetch refused with `insufficient access to fetch` on the serving side may be
+/// repaired by an owner-initiated round, a reader-initiated round, or a fresh
+/// connection. The leg that repairs it names whose view was stale; `None` means
+/// the fetch stays refused through every leg.
+async fn bisect_doc_fetch(
+    doc_id: crate::DocumentId,
+    fetch_conn: &crate::BigRepoConnection,
+    owner_sync_conn: &crate::BigRepoConnection,
+    owner: &Node,
+    reader: &Node,
+) -> crate::Res<Option<&'static str>> {
+    owner_sync_conn.sync_keyhive_with_peer().await?;
+    if fetch_conn.sync_doc_with_peer(doc_id).await.is_ok() {
+        return Ok(Some("owner-initiated round"));
+    }
+    fetch_conn.sync_keyhive_with_peer().await?;
+    if fetch_conn.sync_doc_with_peer(doc_id).await.is_ok() {
+        return Ok(Some("reader-initiated round"));
+    }
+    let owner_again = owner.connect(reader).await?;
+    // Bound so the fresh connection lives across the retry.
+    let _reader_again = reader.accepted_connection().await;
+    owner_again.sync_keyhive_with_peer().await?;
+    if fetch_conn.sync_doc_with_peer(doc_id).await.is_ok() {
+        return Ok(Some("fresh connection"));
+    }
+    Ok(None)
+}
+
+/// The same partition-heal shape with the only claim being a *public* grant.
+///
+/// A public grant gives no access to the reader's own agent, so the invariant
+/// that matters is the product one: the late peer must be able to fetch and
+/// materialise the document through that grant. The serving side refuses with
+/// `insufficient access to fetch` when its view of the grant is missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_late_peer_learns_public_grant_after_partition_heal() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let owner = Node::boot(63, "Owner").await?;
+    let reader = Node::boot(64, "PublicReader").await?;
+    let guard = ShutdownGuard::from(vec![owner, reader]);
+
+    let o_r = guard.node(0).connect(guard.node(1)).await?;
+    let r_o = guard.node(1).accepted_connection().await;
+    o_r.sync_keyhive_with_peer().await?;
+
+    guard
+        .node(0)
+        .worker
+        .remove_peer(guard.node(1).peer_id())
+        .await?;
+    guard
+        .node(1)
+        .worker
+        .remove_peer(guard.node(0).peer_id())
+        .await?;
+    drop(o_r);
+    drop(r_o);
+
+    let mut seed = automerge::Automerge::new();
+    seed.transact(|tx| tx.put(automerge::ROOT, "title", "public-late"))
+        .map_err(|err| crate::ferr!("failed creating seed doc: {err:?}"))?;
+    let owner_doc = guard.node(0).repo.create_doc(seed).await?;
+    let doc_id = owner_doc.document_id();
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Edit)
+        .await?;
+
+    let o_r2 = guard.node(0).connect(guard.node(1)).await?;
+    let r_o2 = guard.node(1).accepted_connection().await;
+    o_r2.sync_keyhive_with_peer().await?;
+    r_o2.sync_keyhive_with_peer().await?;
+
+    let reader_doc = fixtures::sync_doc_expect_ready(&r_o2, &guard.node(1).repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "title").await.as_deref(),
+        Some("public-late"),
+        "public-grant peer materialised without the post-partition content"
+    );
+
+    drop(owner_doc);
+    drop(reader_doc);
     drop(guard);
     Ok(())
 }

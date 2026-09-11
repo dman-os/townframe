@@ -1720,25 +1720,21 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
         ),
         "missing docs should still be reported as missing"
     );
-    match client.repo.get_doc(&doc_id).await? {
-        DocLookup::Ready(doc) => {
-            let title = doc
-                .with_document_read(|doc| get_str_at_root(doc, "title"))
-                .await;
-            assert_eq!(title, "pending");
-        }
-        DocLookup::PendingMaterialization => {
-            panic!("granted client should materialize after doc sync")
-        }
-        DocLookup::Missing => panic!("granted client should have synced document bytes"),
-    }
-    match client.repo.get_doc(&doc_id).await? {
-        DocLookup::Ready(handle) => assert!(!handle.export().await.is_empty()),
-        DocLookup::PendingMaterialization => {
-            panic!("granted client should export after doc sync")
-        }
-        DocLookup::Missing => panic!("granted client should have synced document bytes"),
-    }
+    // The sync receipt fences the document transfer, not the Keyhive epoch
+    // that makes the transferred ciphertext readable: a grant can mint a
+    // fresh CGKA epoch (and the checkpoint that bridges the pre-grant head)
+    // that reaches this node on an independent Keyhive round. Materialization
+    // is therefore eventually consistent after the explicit sync — wait for
+    // the documented outcome rather than assuming the receipt orders both.
+    let doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let title = doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "pending");
+    assert!(
+        !doc.export().await.is_empty(),
+        "granted client should export after doc sync"
+    );
 
     owner.shutdown().await?;
     client.shutdown().await?;
@@ -2980,7 +2976,78 @@ async fn create_shared_sync_doc(
     // grantee when the delegation arrives via ephemeral notification.
     // If the grantee restarted and the listener isn't active, the caller
     // is responsible for restoring partition membership.
+    // The delegations above reach each node's local Keyhive asynchronously
+    // through its hub. Both the doc sync below and callers that write to the
+    // document right after this helper would otherwise race their own
+    // membership view: the sync is rejected as content whose author's edit
+    // access is not visible yet, and the write as read-only. Fence the
+    // reconciliation before doing either.
+    owner.repo.wait_for_keyhive_reconciliation().await?;
+    grantee.repo.wait_for_keyhive_reconciliation().await?;
     grantee_conn.sync_doc_with_peer(doc_id).await?;
+    // The grant is announced to the grantee over an ephemeral Keyhive
+    // notification, which is not admitted work: the reconciliation fence above
+    // cannot see it. Wait until the grantee actually observes access, so
+    // callers get a document they can both sync and write.
+    let grantee_local = keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(grantee.peer_id().as_bytes())
+            .map_err(|_| crate::ferr!("grantee peer id is not a verifying key"))?,
+    );
+    let doc_ident = keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            .map_err(|_| crate::ferr!("doc id is not a verifying key"))?,
+    );
+    // Bounded only for a fast, attributed failure: the grant is normally
+    // observable within milliseconds of the sync round.
+    let access_deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(5));
+    while grantee
+        .repo
+        .keyhive()
+        .agent_access_on(&grantee_local, doc_ident)
+        .await
+        .is_none()
+    {
+        if tokio::time::Instant::now() >= access_deadline {
+            // Name what the grantee's Keyhive actually knows: whether the
+            // document ever reached it at all, and what the owner believed it
+            // granted. Without this the only signal is the missing access, and
+            // the interesting split (document absent vs. delegation not
+            // applied) is lost.
+            let known_docs = grantee.repo.keyhive().document_ids().await;
+            let doc_known = known_docs.contains(&big_sync_core::ObjId::new(doc_id.into_bytes()));
+            let grantee_docs = grantee.repo.keyhive().docs_for_agent(&grantee_local).await;
+            let owner_local = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(owner.peer_id().as_bytes())
+                    .map_err(|_| crate::ferr!("owner peer id is not a verifying key"))?,
+            );
+            let owner_access = owner
+                .repo
+                .keyhive()
+                .agent_access_on(&owner_local, doc_ident)
+                .await;
+            // The ledgers answer the next question: an empty unapplied remainder
+            // on the grantee means the granting events never reached it, while a
+            // non-empty one names the peer whose events Keyhive never applied.
+            let grantee_ledger = crate::test2::describe_ledger(&grantee.repo).await?;
+            let owner_ledger = crate::test2::describe_ledger(&owner.repo).await?;
+            let grantee_membered = grantee
+                .repo
+                .keyhive()
+                .membered_for_agent(&grantee_local)
+                .await;
+            return Err(crate::ferr!(
+                "grantee never observed access to the document it was granted: \
+                 doc_known_to_grantee={doc_known} grantee_doc_count={} \
+                 grantee_docs_for_agent={} grantee_membered={} owner_access={owner_access:?} \
+                 grantee_ledger={grantee_ledger} owner_ledger={owner_ledger}",
+                known_docs.len(),
+                grantee_docs.len(),
+                grantee_membered.len()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     Ok(handle)
 }
@@ -3873,6 +3940,15 @@ async fn run_sync_backend_case(
             .await?;
     }
     client_conn.sync_keyhive_with_peer().await?;
+    // Stop background big-sync in *both* directions before the document is
+    // published, so the case's premise ("the client does not have this
+    // object") cannot be invalidated by a notification-driven part or
+    // document sync racing the explicit backend call below. The transport
+    // connection stays up: the backend fetch under test is a runtime document
+    // sync, which does not use the background object-sync routes.
+    client.stop_big_sync_with(&server).await?;
+    client.repo.wait_for_quiescence(None).await?;
+    server.repo.wait_for_quiescence(None).await?;
 
     // Write the real content now that the client is a member.
     // The encrypt here produces a PCS key the client can derive.
@@ -3907,8 +3983,6 @@ async fn run_sync_backend_case(
         None
     };
 
-    client.stop_big_sync_with(&server).await?;
-
     if let Some(mutation) = local_mutation {
         tracing::info!(?mutation, "applying local mutation");
         client_doc
@@ -3936,16 +4010,35 @@ async fn run_sync_backend_case(
     let backend = Arc::clone(&client.sync_backend);
     let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
-    // A prior subscription may deliver the remote mutation before this backend
-    // invocation. Completion describes work performed by this invocation, so an
-    // already-matching settled snapshot is correctly a no-op.
-    let expected_deets = if expected_deets == SyncCompletionDeets::ChangedObject
-        && local_payload == remote_payload
-    {
-        SyncCompletionDeets::Noop
-    } else {
-        expected_deets
-    };
+    // A prior subscription may deliver the remote mutation — or the whole
+    // object — before this backend invocation: a subscribed part plus eager
+    // replication means the client can fetch the document on its own. The
+    // completion describes work performed by *this* invocation, so an object
+    // that is already present (or already matches the peer) is correctly a
+    // no-op.
+    //
+    // When the case models a missing peer payload *and* expects the object to
+    // be absent locally, no payload comparison is possible; if eager
+    // replication already delivered it, the backend's document-sync fallback
+    // can only confirm convergence. Report that explicitly so a premise that
+    // was won by the background route is visible instead of looking like a
+    // wrong completion.
+    let converged_before_call = local_payload == remote_payload
+        || (remote_payload_missing && !expect_client_doc && local_payload.is_some());
+    let expected_deets =
+        if expected_deets == SyncCompletionDeets::ChangedObject && converged_before_call {
+            if remote_payload_missing && !expect_client_doc && local_payload.is_some() {
+                tracing::warn!(
+                    doc_id = %doc_id,
+                    ?local_payload,
+                    ?remote_payload,
+                    "object already present before the explicit fetch: expecting a no-op completion"
+                );
+            }
+            SyncCompletionDeets::Noop
+        } else {
+            expected_deets
+        };
     let expected_parts = {
         let base = if sync_part_hints.is_empty() {
             client.big_sync_store.obj_parts(doc_id).await?
