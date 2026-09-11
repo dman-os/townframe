@@ -587,6 +587,17 @@ where
         })
     }
 
+    fn current_cgka_ops_count(
+        &self,
+        sed_id: SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<usize>> {
+        Sendable::from_future(async move {
+            self.keyhive
+                .current_cgka_ops_count(DocumentId::new(*sed_id.as_bytes()))
+                .await
+        })
+    }
+
     fn ciphertext_epoch(
         &self,
         sed_id: SedimentreeId,

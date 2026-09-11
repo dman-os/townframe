@@ -4,8 +4,8 @@
 //!
 //! - **Keyhive admission stream** ([`SqliteBigRepoStore::admission_events_after`]):
 //!   rows exist only after their effects are visible in the keyhive graph;
-//!   publication awaits the doc bundle's BeeKEM epoch to catch up to the
-//!   keyhive's current epoch before reading heads. Decode work is keyed by
+//!   publication awaits the doc bundle's per-document CGKA operation count to
+//!   catch up to Keyhive's current count before reading heads. Decode work is keyed
 //!   admission sequence and publication is keyed by document, allowing
 //!   independent documents to make progress while the durable cursor still
 //!   waits for its contiguous prefix.
@@ -48,6 +48,8 @@ enum PublishOutcome {
     Published,
     Deferred,
 }
+
+const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The frontier payload object id for a document.
 ///
@@ -241,9 +243,9 @@ enum FrontierKey {
 /// isn't materialized yet (its admission/part event will re-trigger later).
 ///
 /// Storage-ahead-of-bundle races converge without a separate commit
-/// watermark: a publish awaits the bundle's BeeKEM epoch to catch up to
-/// the keyhive's current epoch (the hub forwards every CGKA op to the doc
-/// worker, which re-materializes and updates the bundle epoch), and any
+/// watermark: a publish awaits the bundle's per-document CGKA operation count
+/// to catch up to Keyhive's current count (the hub forwards every CGKA op to
+/// the doc worker, which re-materializes and updates the bundle state), and any
 /// later materialization completion re-triggers a keyed replacement publish
 /// that overwrites the frontier with the newer heads.
 async fn publish_heads(
@@ -260,12 +262,26 @@ async fn publish_heads(
         return Ok(PublishOutcome::Deferred);
     };
     if keyhive_watermark.is_some() {
-        // The admission's CGKA op is epoch-changing; the hub forwards it to
-        // the doc worker, which re-materializes and updates the bundle
-        // epoch. Await the bundle to catch up to the keyhive's current
-        // epoch before advertising heads.
-        let target_epoch = keyhive.current_causal_epoch(doc_id).await?;
-        handle.bundle.await_beekem_epoch(target_epoch).await?;
+        // The admission's CGKA op advances the per-document operation count; the
+        // hub forwards it to the doc worker, which re-materializes and updates
+        // the bundle. Await the bundle to catch up before advertising heads.
+        let target_ops_count = keyhive.current_cgka_ops_count(doc_id).await?;
+        match tokio::time::timeout(
+            MATERIALIZATION_WAIT_TIMEOUT,
+            handle.bundle.await_cgka_ops_count(target_ops_count),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::warn!(
+                    %doc_id,
+                    target_ops_count,
+                    "timed out waiting for document materialization before publishing frontier"
+                );
+                return Ok(PublishOutcome::Deferred);
+            }
+        }
     }
     let causal_epoch = handle.bundle.current_causal_epoch();
     let heads = surelock::key::lock_scope(|key| {

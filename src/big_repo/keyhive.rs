@@ -547,19 +547,12 @@ impl BigKeyhiveHandle {
             .collect())
     }
 
-    /// Current BeeKEM/PCS epoch fingerprint for a document, or `None` when
-    /// the document is unknown or the settled operation history requires a
-    /// causally subsequent Update.
-    pub(crate) async fn current_causal_epoch(&self, doc_id: DocumentId) -> Res<Option<[u8; 32]>> {
+    pub(crate) async fn current_cgka_ops_count(&self, doc_id: DocumentId) -> Res<usize> {
         let kh_doc_id = keyhive_doc_id(doc_id)?;
         let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
-            return Ok(None);
+            return Ok(0);
         };
-        Ok(self
-            .keyhive
-            .try_pcs_key_hash(doc)
-            .await
-            .map(|hash| *hash.raw.as_bytes()))
+        Ok(doc.lock().await.cgka().map_or(0, |cgka| cgka.ops_count()))
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {

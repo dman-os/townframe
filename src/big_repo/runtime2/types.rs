@@ -153,6 +153,12 @@ impl<T> DocLookup<T> {
 /// worker.
 static NEXT_BUNDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+#[derive(Clone, Copy)]
+struct CausalEpochState {
+    epoch: Option<[u8; 32]>,
+    cgka_ops_count: usize,
+}
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct LiveDocBundle {
@@ -168,7 +174,7 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
-    causal_epoch: std::sync::RwLock<Option<[u8; 32]>>,
+    causal_state: std::sync::RwLock<CausalEpochState>,
     #[educe(Debug(ignore))]
     pub barrier_notify: Arc<tokio::sync::Notify>,
 }
@@ -179,6 +185,7 @@ impl LiveDocBundle {
         doc: automerge::Automerge,
         partially_decrypted: bool,
         causal_epoch: Option<[u8; 32]>,
+        cgka_ops_count: usize,
     ) -> Self {
         Self {
             id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -186,7 +193,10 @@ impl LiveDocBundle {
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
-            causal_epoch: std::sync::RwLock::new(causal_epoch),
+            causal_state: std::sync::RwLock::new(CausalEpochState {
+                epoch: causal_epoch,
+                cgka_ops_count,
+            }),
             barrier_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -224,34 +234,51 @@ impl LiveDocBundle {
 
     /// The current BeeKEM/PCS epoch observed while materializing this document.
     pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
-        *self
-            .causal_epoch
+        self.causal_state
             .read()
-            .expect("bundle epoch lock poisoned")
+            .expect("bundle causal state lock poisoned")
+            .epoch
     }
 
-    pub(crate) fn update_causal_epoch(&self, epoch: Option<[u8; 32]>) {
-        *self
-            .causal_epoch
-            .write()
-            .expect("bundle epoch lock poisoned") = epoch;
-        self.barrier_notify.notify_waiters();
+    /// The number of CGKA operations in the keyhive state used for this document.
+    pub fn materialized_cgka_ops_count(&self) -> usize {
+        self.causal_state
+            .read()
+            .expect("bundle causal state lock poisoned")
+            .cgka_ops_count
     }
 
-    /// Await the bundle's BeeKEM/PCS epoch to reach `target` (the epoch the
-    /// keyhive reports after the admission that triggered this publish). The
-    /// hub forwards every CGKA op to the doc worker, which re-materializes
-    /// and updates the bundle epoch; this resolves once the bundle has caught
-    /// up to the keyhive's current epoch.
-    pub async fn await_beekem_epoch(&self, target: Option<[u8; 32]>) -> Res<()> {
+    pub(crate) fn update_causal_state(&self, epoch: Option<[u8; 32]>, cgka_ops_count: usize) {
+        let changed = {
+            let mut state = self
+                .causal_state
+                .write()
+                .expect("bundle causal state lock poisoned");
+            if state.epoch == epoch && state.cgka_ops_count == cgka_ops_count {
+                false
+            } else {
+                state.epoch = epoch;
+                state.cgka_ops_count = cgka_ops_count;
+                true
+            }
+        };
+        if changed {
+            self.barrier_notify.notify_waiters();
+        }
+    }
+
+    /// Await materialization against at least `target` CGKA operations.
+    /// The count is per-document and monotonic for a shared Keyhive state, so
+    /// it provides ordering without interpreting opaque KEM fingerprints.
+    pub async fn await_cgka_ops_count(&self, target: usize) -> Res<()> {
         loop {
             let notified = self.barrier_notify.notified();
             tokio::pin!(notified);
-            if self.current_causal_epoch() == target {
-                return Ok(());
-            }
             if self.is_broken() {
-                return Err(ferr!("doc bundle marked broken while awaiting epoch"));
+                return Err(ferr!("doc bundle marked broken while awaiting CGKA state"));
+            }
+            if self.materialized_cgka_ops_count() >= target {
+                return Ok(());
             }
             notified.await;
         }
@@ -498,5 +525,29 @@ mod tests {
             .into_ready(doc_id)
             .expect("ready doc should succeed");
         assert_eq!(ok, 42);
+    }
+
+    #[tokio::test]
+    async fn await_cgka_ops_count_accepts_equal_or_advanced_state() {
+        let bundle = std::sync::Arc::new(LiveDocBundle::new(
+            DocumentId::new([7; 32]),
+            automerge::Automerge::new(),
+            false,
+            Some([1; 32]),
+            1,
+        ));
+        bundle
+            .await_cgka_ops_count(1)
+            .await
+            .expect("equal count should complete immediately");
+
+        let waiting_bundle = std::sync::Arc::clone(&bundle);
+        let waiter = tokio::spawn(async move { waiting_bundle.await_cgka_ops_count(2).await });
+        tokio::task::yield_now().await;
+        bundle.update_causal_state(Some([1; 32]), 3);
+        waiter
+            .await
+            .expect("count waiter task should not panic")
+            .expect("advanced count should release the waiter");
     }
 }

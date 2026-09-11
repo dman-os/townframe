@@ -9,7 +9,7 @@ the same editor again exercises the no-change path.
 $ daybook_cli init
 $ sh -c 'ID=$("$DAYBOOK_CLI" touch); echo "$ID" > .id'
 
-$ sh -c 'printf '"'"'#!/bin/sh\nsed -i "s/\\\"Untitled\\\"/\\\"Edited via ed\\\"/" "$1"\n'"'"' > editor.sh && chmod +x editor.sh'
+$ sh -c 'printf '"'"'#!/bin/sh\nsed -i "s/Untitled/Edited via ed/" "$1"\n'"'"' > editor.sh && chmod +x editor.sh'
 $ sh -c 'ID=$(cat .id); EDITOR=./editor.sh "$DAYBOOK_CLI" ed "$ID"'
 Updated document: [..]
 

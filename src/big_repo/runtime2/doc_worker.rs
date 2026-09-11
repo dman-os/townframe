@@ -47,6 +47,7 @@ where
         caller_handles: Vec::new(),
         partially_decrypted: false,
         causal_epoch: None,
+        cgka_ops_count: 0,
         recovered_keys: std::sync::Mutex::new(HashMap::new()),
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
@@ -148,10 +149,13 @@ struct DocWorker2<F: FutureForm> {
     state: DocState,
     /// Weak sentinels for caller-visible handles. The worker keeps the bundle
     /// cached strongly, so caller presence must be tracked independently.
+    // FIXME: this is not pruned well
     caller_handles: Vec<std::sync::Weak<()>>,
     partially_decrypted: bool,
     /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
     causal_epoch: Option<[u8; 32]>,
+    /// Number of CGKA operations represented by the worker's materialized state.
+    cgka_ops_count: usize,
     /// Per-document recovered-key cache (ARK-style `#blobKeys`): content ref
     /// (commit id) → application secret recovered during earlier
     /// materialization walks. Consulted before every CGKA round-trip; an
@@ -439,6 +443,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .await?;
 
         self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
+        self.cgka_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
@@ -446,6 +451,7 @@ impl<F: FutureForm> DocWorker2<F> {
             *initial_content,
             false,
             self.causal_epoch,
+            self.cgka_ops_count,
         ));
 
         self.state = DocState::Live(Arc::clone(&bundle));
@@ -527,6 +533,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
+                    self.cgka_ops_count,
                 ));
                 self.state = DocState::Live(Arc::clone(&bundle));
                 let handle = self.wrap_live_handle(bundle).await?;
@@ -748,12 +755,15 @@ impl<F: FutureForm> DocWorker2<F> {
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
+                    self.cgka_ops_count,
                 ));
                 self.state = DocState::Live(Arc::clone(&bundle));
                 let handle = self.wrap_live_handle(bundle).await?;
                 DocLookup::Ready(handle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
+                let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
+                self.cgka_ops_count = materialization_ops_count;
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -773,6 +783,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             doc,
                             partially_decrypted,
                             self.causal_epoch,
+                            self.cgka_ops_count,
                         ));
                         self.state = DocState::Live(Arc::clone(&bundle));
                         let handle = self.wrap_live_handle(bundle).await?;
@@ -1852,18 +1863,21 @@ impl<F: FutureForm> DocWorker2<F> {
         // blocked refs — a keyhive round or an earlier session may have
         // unlocked some (A7). The doc stays live; partial is a valid state.
         if let Some(bundle) = live_bundle {
+            let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
             let advanced = self.retry_blocked_refs(&bundle, &origin).await?;
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");
             }
             self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
-            bundle.update_causal_epoch(self.causal_epoch);
+            self.cgka_ops_count = materialization_ops_count;
+            bundle.update_causal_state(self.causal_epoch, self.cgka_ops_count);
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,
             });
         }
 
+        self.cgka_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,
@@ -2320,6 +2334,13 @@ mod tests {
         ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
             Sendable::from_future(async move { Ok(None) })
         }
+        fn current_cgka_ops_count(
+            &self,
+            _sed_id: sedimentree_core::id::SedimentreeId,
+        ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<usize>> {
+            Sendable::from_future(async move { Ok(0) })
+        }
+
         fn ciphertext_epoch(
             &self,
             _sed_id: sedimentree_core::id::SedimentreeId,
@@ -2418,6 +2439,7 @@ mod tests {
             caller_handles: Vec::new(),
             partially_decrypted: false,
             causal_epoch: None,
+            cgka_ops_count: 0,
             recovered_keys: std::sync::Mutex::new(HashMap::new()),
             blocked_refs: HashSet::new(),
             causal_checkpoints: HashMap::new(),
@@ -2538,6 +2560,7 @@ mod tests {
             caller_handles: Vec::new(),
             partially_decrypted: false,
             causal_epoch: None,
+            cgka_ops_count: 0,
             recovered_keys: std::sync::Mutex::new(HashMap::new()),
             blocked_refs: HashSet::new(),
             causal_checkpoints: HashMap::new(),

@@ -159,6 +159,12 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         sed_id: sedimentree_core::id::SedimentreeId,
     ) -> F::Future<'_, eyre::Result<Option<[u8; 32]>>>;
 
+    /// Number of CGKA operations in the current Keyhive state for this document.
+    fn current_cgka_ops_count(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'_, eyre::Result<usize>>;
+
     /// Epoch fingerprint recorded in a persisted frontier ciphertext.
     fn ciphertext_epoch(
         &self,
