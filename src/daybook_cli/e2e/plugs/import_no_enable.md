@@ -13,7 +13,7 @@ imported @daybook/test v0.0.1 (doc: [..]) [known only]
 $ daybook_cli plugs list
  ID             Version  Status    Config Doc[..]
  @daybook/core  0.0.1    enabled   [..]
- @daybook/test  0.0.1    disabled  -                                            
+ @daybook/test  0.0.1    disabled  -[..]
 
 $ daybook_cli plugs pending
 no pending plugs
