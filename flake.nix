@@ -316,6 +316,7 @@
             ++ devTools
             ++ kotliLintTools
             ++ devOnlyInputs
+            ++ desktopRuntimeLibPackages
             ++ [ rustFull ];
 
           ciRustShell = pkgs.mkShell ({

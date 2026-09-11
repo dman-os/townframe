@@ -134,6 +134,23 @@ pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 pub use cheapstr::CHeapStr;
 
 // FIXME: why this take 7ms on debug builds?
+/// Build the color-eyre hook with color disabled when stderr is not a terminal
+/// or `NO_COLOR` is set.
+///
+/// color-eyre 0.6 applies its owo-colors styles unconditionally, ignoring
+/// both `NO_COLOR` and TTY detection, so ANSI leaks into piped output (e.g.
+/// the CLI e2e snapshots). A blank theme renders plain text instead.
+pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
+    let builder = color_eyre::config::HookBuilder::default();
+    if std::env::var_os("NO_COLOR").is_some()
+        || !std::io::IsTerminal::is_terminal(&std::io::stderr())
+    {
+        builder.theme(color_eyre::config::Theme::new())
+    } else {
+        builder
+    }
+}
+
 pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
@@ -168,8 +185,7 @@ pub fn setup_tracing() -> Res<()> {
     registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
-    let (eyre_panic_hook, eyre_hook) =
-        color_eyre::config::HookBuilder::default().try_into_hooks()?;
+    let (eyre_panic_hook, eyre_hook) = eyre_hook_builder().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         println!("{report}");
