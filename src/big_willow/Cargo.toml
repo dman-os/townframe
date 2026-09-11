@@ -1,0 +1,48 @@
+[package]
+name = "big_willow"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+test-support = []
+# The SQLite backend. Off by default so the store contract and the in-memory reference
+# implementation stay free of a database dependency.
+sqlite = ["dep:sqlx", "dep:sqlx_utils_rs"]
+# Conformance against the upstream Willow test vectors. Off by default: the vectors are fetched
+# rather than vendored (`./x/willow-vectors.ts`), so enabling this needs a corpus on disk, and
+# the checks fail loudly without one.
+conformance = []
+
+[dependencies]
+#
+# internal
+utils_rs.workspace = true
+
+#
+# willow
+willow25.workspace = true
+bab_rs.workspace = true
+ufotofu.workspace = true
+
+#
+# db
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
+sqlx_utils_rs = { workspace = true, optional = true }
+
+#
+# error
+thiserror.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+rand.workspace = true
+# `willow25`'s namespace generators are bounded on `rand_core` 0.6's `CryptoRngCore`, which
+# `rand` 0.9 does not implement.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

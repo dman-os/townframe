@@ -52,3 +52,8 @@ generated/**
 *.tgz
 
 **/wit/deps/
+
+# Upstream Willow test vectors, fetched by ./x/willow-vectors.ts. Not tracked: this
+# repo is jj-managed and jj has no submodule support, so the vectors live in a
+# gitignored directory pinned to an exact revision instead.
+src/big_willow/testdata/willow_test_vectors/
