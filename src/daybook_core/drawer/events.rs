@@ -178,7 +178,7 @@ impl DrawerRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
         live_origin: Option<&BigRepoChangeOrigin>,
-        _exclude_peer_id: Option<&PeerId>,
+        _exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Prefix: docs.map
         if !big_repo::big_repo_path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {

@@ -473,13 +473,13 @@ impl BigKeyhiveHandle {
         caps
     }
 
-    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjId> {
+    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjKey> {
         self.keyhive
             .documents()
             .lock()
             .await
             .keys()
-            .map(|id| big_sync_core::ObjId::new(id.to_bytes()))
+            .map(|id| big_sync_core::ObjKey::new(id.to_bytes()))
             .collect()
     }
 

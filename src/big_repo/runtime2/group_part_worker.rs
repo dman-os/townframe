@@ -43,7 +43,7 @@ pub struct SpawnedGroupPartWorker<F: FutureForm> {
 pub fn spawn_group_part_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
@@ -60,7 +60,7 @@ pub fn spawn_group_part_worker(
                 .await?;
 
             if cursor == 0 {
-                let initial_group_parts: HashSet<PartId> = match scope.groups() {
+                let initial_group_parts: HashSet<PartKey> = match scope.groups() {
                     None => store.list_parts().await?,
                     Some(groups) => groups.iter().copied().collect(),
                 };
@@ -68,11 +68,13 @@ pub fn spawn_group_part_worker(
                     store.ensure_part(*part_id).await?;
                 }
                 let initial_group_parts = Arc::new(initial_group_parts);
+                let group_agents = Arc::new(GroupAgentsMemo::default());
                 let docs = keyhive.document_ids().await;
                 let futs = docs.into_iter().map(|doc| {
                     let store = store.clone();
                     let keyhive = keyhive.clone();
                     let initial_group_parts = Arc::clone(&initial_group_parts);
+                    let group_agents = Arc::clone(&group_agents);
                     let scope = scope.clone();
                     async move {
                         let doc_id = crate::DocumentId::new(doc.into_bytes());
@@ -89,6 +91,7 @@ pub fn spawn_group_part_worker(
                             &initial_group_parts,
                             &scope,
                             local_peer_id,
+                            &group_agents,
                         )
                         .await?;
                         store
@@ -167,8 +170,8 @@ enum Cmd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum GroupPartKey {
     Decode(u64),
-    Document(ObjId),
-    Group(PartId),
+    Document(ObjKey),
+    Group(PartKey),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,12 +187,12 @@ enum Task {
         source: SourceCursor,
     },
     ReconcileDocument {
-        doc: ObjId,
-        affected_group_parts: HashSet<PartId>,
+        doc: ObjKey,
+        affected_group_parts: HashSet<PartKey>,
         sources: Vec<SourceCursor>,
     },
     EnsurePart {
-        part: PartId,
+        part: PartKey,
         sources: Vec<SourceCursor>,
     },
 }
@@ -210,7 +213,7 @@ struct PendingSource {
 #[derive(Debug, Default)]
 struct PendingDocument {
     sources: Vec<SourceCursor>,
-    affected_group_parts: HashSet<PartId>,
+    affected_group_parts: HashSet<PartKey>,
     scheduled: bool,
 }
 
@@ -223,15 +226,15 @@ struct PendingGroupPart {
 struct Worker<'a> {
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
     admission: ConcurrentDeltaWalker<'a, keyhive_admission::Store, SqliteDeltaWalkerStateRepo, u64>,
     tasks:
         big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<GroupPartKey, Task, TaskOutput>,
     pending_sources: HashMap<u64, PendingSource>,
-    pending_documents: HashMap<ObjId, PendingDocument>,
-    pending_group_parts: HashMap<PartId, PendingGroupPart>,
+    pending_documents: HashMap<ObjKey, PendingDocument>,
+    pending_group_parts: HashMap<PartKey, PendingGroupPart>,
     outbox: Outbox<Cmd, ()>,
 }
 
@@ -336,7 +339,7 @@ impl<'a> Worker<'a> {
     /// unscheduled so `pump_tasks` schedules the follow-up. Dropping the
     /// entry wholesale would strand those arrivals: their walker keys would
     /// never settle and the contiguous admission cursor would freeze.
-    async fn finish_document_task(&mut self, doc: ObjId, snapshot: Vec<SourceCursor>) -> Res<()> {
+    async fn finish_document_task(&mut self, doc: ObjKey, snapshot: Vec<SourceCursor>) -> Res<()> {
         let pending = self
             .pending_documents
             .get_mut(&doc)
@@ -352,7 +355,7 @@ impl<'a> Worker<'a> {
 
     async fn finish_group_part_task(
         &mut self,
-        part: PartId,
+        part: PartKey,
         snapshot: Vec<SourceCursor>,
     ) -> Res<()> {
         let pending = self
@@ -446,7 +449,7 @@ impl<'a> Worker<'a> {
         Ok(())
     }
 
-    fn schedule_document(&mut self, doc: ObjId) -> Res<()> {
+    fn schedule_document(&mut self, doc: ObjKey) -> Res<()> {
         let key = GroupPartKey::Document(doc);
         let Some(pending) = self.pending_documents.get(&doc) else {
             return Ok(());
@@ -467,7 +470,7 @@ impl<'a> Worker<'a> {
         Ok(())
     }
 
-    fn schedule_group_part(&mut self, part: PartId) -> Res<()> {
+    fn schedule_group_part(&mut self, part: PartKey) -> Res<()> {
         let key = GroupPartKey::Group(part);
         let Some(pending) = self.pending_group_parts.get(&part) else {
             return Ok(());
@@ -566,7 +569,7 @@ async fn run_task(
     task: Task,
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     scope: WorkerGroupScope,
 ) -> Res<TaskOutput> {
     match task {
@@ -581,8 +584,15 @@ async fn run_task(
             for part in &affected_group_parts {
                 store.ensure_part(*part).await?;
             }
-            let reconciliation =
-                reconcile_doc(&keyhive, doc, &affected_group_parts, &scope, local_peer_id).await?;
+            let reconciliation = reconcile_doc(
+                &keyhive,
+                doc,
+                &affected_group_parts,
+                &scope,
+                local_peer_id,
+                &GroupAgentsMemo::default(),
+            )
+            .await?;
             store
                 .reconcile_group_part_batch(&[reconciliation], 0, false)
                 .await?;
@@ -609,37 +619,48 @@ async fn drive_buffered<T: Send, F: Future<Output = Res<T>> + Send>(
 
 async fn reconcile_doc(
     keyhive: &BigKeyhiveHandle,
-    doc: ObjId,
-    affected_group_parts: &HashSet<PartId>,
+    doc: ObjKey,
+    affected_group_parts: &HashSet<PartKey>,
     scope: &WorkerGroupScope,
-    local_principal: PeerId,
+    local_principal: PeerKey,
+    group_agents: &GroupAgentsMemo,
 ) -> Res<GroupPartReconciliation> {
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.into_bytes())
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
         .document_has_content(crate::DocumentId::new(doc.into_bytes()))
         .await?;
-    let (agents, candidate_group_parts) = if has_content {
+    let (agents, part_agents, candidate_group_parts) = if has_content {
         let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);
         let agents = keyhive
             .agents_for_membered(identifier)
             .await
             .into_iter()
-            .map(|(principal, access)| (PeerId::new(principal), access))
+            .map(|(principal, access)| (PeerKey::new(principal), access))
             .collect::<HashMap<_, _>>();
-        let candidate_group_parts = keyhive
+        // Access is granted per part, and a part is a one-way digest of a group id, so
+        // the group id has to be retained here to ask Keyhive which principals may read
+        // that part. Writing this doc-level union onto every containing part instead
+        // would hand a principal of one group pull access to every other group holding
+        // the doc.
+        let mut part_agents = HashMap::new();
+        let mut candidate_group_parts = HashSet::new();
+        for group_id in keyhive
             .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
             .await?
-            .into_iter()
-            .map(group_part_id)
-            .filter(|part| match scope.groups() {
-                None => true,
-                Some(groups) => groups.contains(part),
-            })
-            .collect();
-        (agents, candidate_group_parts)
+        {
+            let part = group_part_id(group_id);
+            if let Some(groups) = scope.groups()
+                && !groups.contains(&part)
+            {
+                continue;
+            }
+            candidate_group_parts.insert(part);
+            part_agents.insert(part, group_agents.agents_for(keyhive, group_id).await?);
+        }
+        (agents, part_agents, candidate_group_parts)
     } else {
-        (HashMap::new(), HashSet::new())
+        (HashMap::new(), HashMap::new(), HashSet::new())
     };
     let desired_group_parts = candidate_group_parts;
     let desired_global = agents
@@ -650,23 +671,68 @@ async fn reconcile_doc(
     Ok(GroupPartReconciliation {
         doc,
         agents,
+        part_agents,
         managed_group_parts: reconciled_group_parts,
         desired_group_parts,
         desired_global,
     })
 }
 
-pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
+/// Lazily-filled, shared cache of Keyhive agents per group id.
+///
+/// Per-part agent sets are derived per *containing group*, and docs are reconciled
+/// concurrently through `buffered_unordered`: without sharing this would cost
+/// O(containing groups) Keyhive calls per doc, where sharing makes it one call per
+/// distinct group for the whole batch.
+#[derive(Default)]
+struct GroupAgentsMemo {
+    agents: tokio::sync::Mutex<
+        HashMap<[u8; 32], Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
+    >,
+}
+
+impl GroupAgentsMemo {
+    async fn agents_for(
+        &self,
+        keyhive: &BigKeyhiveHandle,
+        group_id: [u8; 32],
+    ) -> Res<Arc<HashMap<PeerKey, keyhive_core::access::Access>>> {
+        let mut cached = self.agents.lock().await;
+        if let Some(agents) = cached.get(&group_id) {
+            return Ok(Arc::clone(agents));
+        }
+        // The lock is held across the query so each group resolves exactly once even
+        // when docs race. `agents_for_membered` does not re-enter this memo.
+        let agents = Arc::new(
+            keyhive
+                .agents_for_membered(group_identifier(group_id)?)
+                .await
+                .into_iter()
+                .map(|(principal, access)| (PeerKey::new(principal), access))
+                .collect::<HashMap<_, _>>(),
+        );
+        cached.insert(group_id, Arc::clone(&agents));
+        Ok(agents)
+    }
+}
+
+fn group_identifier(group_id: [u8; 32]) -> Res<keyhive_core::principal::identifier::Identifier> {
+    ed25519_dalek::VerifyingKey::from_bytes(&group_id)
+        .map(keyhive_core::principal::identifier::Identifier::from)
+        .map_err(|_| ferr!("group id is not a valid Ed25519 point"))
+}
+
+pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartKey {
     let mut bytes = b"townframe/big-repo/group-part/sedimentree/v1".to_vec();
     bytes.extend_from_slice(&group_id);
     let raw = keyhive_crypto::digest::Digest::<Vec<u8>>::hash(&bytes).raw;
-    PartId::new(raw.into())
+    PartKey::new(raw.into())
 }
 
 #[derive(Debug, Clone)]
 struct AffectedEvent {
-    docs: Vec<ObjId>,
-    group_parts: HashSet<PartId>,
+    docs: Vec<ObjKey>,
+    group_parts: HashSet<PartKey>,
 }
 
 async fn affected_event(
@@ -680,7 +746,7 @@ async fn affected_event(
     let mut group_parts = HashSet::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {
-            documents.push(ObjId::new(*operation.payload().doc_id().as_bytes()));
+            documents.push(ObjKey::new(*operation.payload().doc_id().as_bytes()));
         }
         StaticEvent::Delegated(delegation) => {
             group_parts.insert(group_part_id(delegation.issuer.to_bytes()));
@@ -689,7 +755,7 @@ async fn affected_event(
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjId::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.to_bytes())),
             );
             documents.extend(
                 keyhive
@@ -698,7 +764,7 @@ async fn affected_event(
                     )
                     .await
                     .into_iter()
-                    .map(|id| ObjId::new(id.into_bytes())),
+                    .map(|id| ObjKey::new(id.into_bytes())),
             );
         }
         StaticEvent::Revoked(revocation) => {
@@ -708,7 +774,7 @@ async fn affected_event(
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjId::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.to_bytes())),
             );
             documents.extend(
                 keyhive
@@ -717,7 +783,7 @@ async fn affected_event(
                     )
                     .await
                     .into_iter()
-                    .map(|id| ObjId::new(id.into_bytes())),
+                    .map(|id| ObjKey::new(id.into_bytes())),
             );
         }
         StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {}

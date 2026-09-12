@@ -9,7 +9,7 @@ use crate::runtime2::{
     TaskRuntime, TaskSet,
     messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
 };
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use future_form::{FutureForm, Local, Sendable};
 use std::collections::{HashMap, HashSet};
 use tracing::Instrument;
@@ -17,7 +17,7 @@ use tracing::Instrument;
 
 pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── identity / config ──────────────────────────────────────────────────
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
     /// When false, `ConnEstablished` skips the initial keyhive sync round
     /// (mirrors `BigRepoConfig::keyhive_change_notifs`; test-only).
@@ -55,19 +55,19 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     evt_tx: async_channel::Sender<Runtime2Evt>,
 
     // ── connection state ───────────────────────────────────────────────────
-    connected_peers: HashMap<PeerId, ConnDeets>,
+    connected_peers: HashMap<PeerKey, ConnDeets>,
 
     // ── keyhive sync bookkeeping ───────────────────────────────────────────
     /// Keyhive sync waiters per peer. Each round snapshots the waiter ids it
     /// owns (`KeyhiveSyncRound::admitted_ids`); waiters admitted during the
     /// round stay queued and cascade to the next round. `ids` mirrors the vec
     /// for O(1) cancellation (dead waiters never trigger a follow-up round).
-    keyhive_waiters: HashMap<PeerId, KeyhiveWaiters>,
-    active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
+    keyhive_waiters: HashMap<PeerKey, KeyhiveWaiters>,
+    active_keyhive_syncs: HashMap<PeerKey, KeyhiveSyncRound>,
     /// A `KeyhiveChangeNotif` that arrived while a round for the peer was
     /// already active. The in-flight exchange may have synced stale state;
     /// when the round completes, a follow-up round is started for the peer.
-    keyhive_notif_pending: HashSet<PeerId>,
+    keyhive_notif_pending: HashSet<PeerKey>,
     keyhive_round_ids: u64,
     keyhive_reconciliation_waiters: Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>,
     /// Highest admission-log seq the group-part projection has settled
@@ -222,7 +222,7 @@ fn coalesce_keyhive_demand(has_remaining_waiters: bool, notification_pending: &m
 
 struct PendingDocSyncWaiter {
     doc_id: DocumentId,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     resp: futures::channel::oneshot::Sender<
         Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
     >,
@@ -1024,7 +1024,7 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -1032,7 +1032,7 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         change_manager: Arc<crate::changes::ChangeListenerManager>,
         target: keyhive_core::principal::identifier::Identifier,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: crate::changes::BigRepoAccess,
         removed: bool,
         member_is_document: bool,
@@ -1082,13 +1082,13 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
     #[expect(clippy::type_complexity)]
     fn open_connection_and_watch(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
-                PeerId,
+                PeerKey,
                 std::sync::Arc<std::sync::atomic::AtomicBool>,
                 futures::channel::oneshot::Receiver<(
                     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1106,7 +1106,7 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
-                PeerId,
+                PeerKey,
                 std::sync::Arc<std::sync::atomic::AtomicBool>,
                 futures::channel::oneshot::Receiver<(
                     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1118,7 +1118,7 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
 
     fn close_connection_async(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -1127,7 +1127,7 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
     fn sync_doc_with_peer(
         request_id: subduction_core::connection::message::RequestId,
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         sed_id: sedimentree_core::id::SedimentreeId,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
     ) -> F::Future<'static, eyre::Result<()>>;
@@ -1138,7 +1138,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!(
@@ -1199,7 +1199,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         change_manager: Arc<crate::changes::ChangeListenerManager>,
         target: keyhive_core::principal::identifier::Identifier,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: crate::changes::BigRepoAccess,
         removed: bool,
         member_is_document: bool,
@@ -1333,13 +1333,13 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
 impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> for F {
     fn open_connection_and_watch(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
-                PeerId,
+                PeerKey,
                 std::sync::Arc<std::sync::atomic::AtomicBool>,
                 futures::channel::oneshot::Receiver<(
                     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1448,7 +1448,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
-                PeerId,
+                PeerKey,
                 std::sync::Arc<std::sync::atomic::AtomicBool>,
                 futures::channel::oneshot::Receiver<(
                     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1530,7 +1530,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
 
     fn close_connection_async(
         connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -1561,7 +1561,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
     fn sync_doc_with_peer(
         request_id: subduction_core::connection::message::RequestId,
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         sed_id: sedimentree_core::id::SedimentreeId,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
     ) -> F::Future<'static, eyre::Result<()>> {
@@ -1980,7 +1980,7 @@ where
                 self.retry_existing_doc_materialization(doc_id)?;
             }
             Runtime2Evt::DelegationReceived { target, data } => {
-                let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
+                let member_id = PeerKey::new(data.payload().delegate().id().to_bytes());
                 let member_is_document = matches!(
                     data.payload().delegate(),
                     keyhive_core::principal::agent::Agent::Document(..)
@@ -2003,7 +2003,7 @@ where
                 }
             }
             Runtime2Evt::RevocationReceived { target, data } => {
-                let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
+                let member_id = PeerKey::new(data.payload().revoked_id().as_bytes());
                 let member_is_document = matches!(
                     data.payload().revoked().payload().delegate(),
                     keyhive_core::principal::agent::Agent::Document(..)
@@ -2085,7 +2085,7 @@ where
             // the reconsider walk. Skipped as before B4.
             return Ok(());
         }
-        let peer_id = PeerId::new(*session.peer_id.as_bytes());
+        let peer_id = PeerKey::new(*session.peer_id.as_bytes());
 
         // Sessions are always routed fire-and-forget. Caller waiters are
         // resolved at round completion (`DocSyncRoundDone` /
@@ -2116,7 +2116,7 @@ where
     fn route_sync_session_apply(
         &mut self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         reply: Option<
@@ -2156,7 +2156,7 @@ where
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn handle_connection_established(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
         self.connected_peers.insert(
@@ -2186,7 +2186,7 @@ where
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn handle_connection_lost(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
         let Some(current) = self.connected_peers.get(&peer_id) else {
@@ -2206,7 +2206,7 @@ where
 
     /// Start a keyhive sync round with `peer_id` if not already active.
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
-    fn start_keyhive_sync(&mut self, peer_id: PeerId) -> eyre::Result<()> {
+    fn start_keyhive_sync(&mut self, peer_id: PeerKey) -> eyre::Result<()> {
         if self.active_keyhive_syncs.contains_key(&peer_id) {
             return Ok(());
         }
@@ -2261,7 +2261,7 @@ where
     /// could emit its normal completion event.
     fn fail_keyhive_sync(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
         error: String,
     ) -> eyre::Result<()> {
@@ -2308,7 +2308,7 @@ where
     /// runs when the current one completes (the in-flight exchange may have
     /// synced stale state); if the peer is not connected, the notification is
     /// stale and ignored.
-    fn handle_keyhive_change_notif(&mut self, peer_id: PeerId) -> eyre::Result<()> {
+    fn handle_keyhive_change_notif(&mut self, peer_id: PeerKey) -> eyre::Result<()> {
         if !self.connected_peers.contains_key(&peer_id) {
             debug!(
                 %peer_id,
@@ -2332,7 +2332,7 @@ where
     /// Complete a keyhive protocol round and resolve any eligible waiters.
     fn finish_keyhive_sync(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
@@ -2495,7 +2495,7 @@ where
     /// Cancel a pending keyhive sync waiter by id. The waiter is removed
     /// precisely (O(1) membership via the id set), so a timed-out caller's
     /// dead entry can never cascade a follow-up round.
-    fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerId, waiter_id: u64) -> bool {
+    fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerKey, waiter_id: u64) -> bool {
         let Some(waiters) = self.keyhive_waiters.get_mut(peer_id) else {
             return false;
         };
@@ -2510,7 +2510,7 @@ where
     }
 
     /// Cancel all pending keyhive syncs for a peer.
-    fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerId, reason: &'static str) {
+    fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerKey, reason: &'static str) {
         self.active_keyhive_syncs.remove(peer_id);
         // A latched change notification is stale once the connection is gone;
         // reconnecting runs its own initial sync round.

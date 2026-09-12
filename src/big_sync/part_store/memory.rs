@@ -4,17 +4,17 @@ use big_sync_core::keyed_frontier::{
     FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision, KeyedFrontierReader,
     KeyedFrontierResult,
 };
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
     GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjAddedToPart, ObjChanged, ObjRemovedFromPart, PartEvent,
-    PartPage, PartSummary, SubEvent, SubPartsRequest,
+    PartPage, PartSummary, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
+use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 
 use super::PartFrontierKey;
-use super::{HostPartStore, obj_id_bounds_for_bucket};
+use super::{HostPartStore, PartScope, obj_id_bounds_for_bucket};
 use crate::keyed_frontier::{
     MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
     MemoryKeyedFrontierView, open_memory_keyed_frontier,
@@ -37,12 +37,12 @@ structstruck::strike! {
                         counter: std::sync::atomic::AtomicU64,
                     },
                 parts: HashMap<
-                    PartId,
+                    PartKey,
                     struct PartState {
                         #![derive(Default)]
                         latest_cursor: CursorIndex,
                         members: BTreeMap<
-                            ObjId,
+                            ObjKey,
                             #[derive(Clone)]
                             struct PartMemberState {
                                 added_at: CursorIndex,
@@ -59,19 +59,29 @@ structstruck::strike! {
                     buf: Vec<PartEvent>
                 },
                 objs: HashMap<
-                    ObjId,
+                    ObjKey,
                     struct ObjDeets {
                         #![derive(Default)]
                         payload: Option<ObjPayload>,
-                        parts: HashSet<PartId>,
+                        parts: HashSet<PartKey>,
                     }
                 >,
-                tombstoned_objs: HashMap<ObjId, CursorIndex>,
-                peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
-                members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
+                tombstoned_objs: HashMap<ObjKey, CursorIndex>,
+                peer_part_cursors: HashMap<(PeerKey, PartKey), CursorIndex>,
+                members: HashMap<
+                    PartKey,
+                    HashMap<
+                        PeerKey,
+                        #[derive(Clone)]
+                        struct PartAccessState {
+                            access: keyhive_core::access::Access,
+                            changed_at: CursorIndex,
+                        }
+                    >
+                >,
             }
         >>,
-        hidden_parts: Arc<HashSet<PartId>>,
+        hidden_parts: Arc<HashSet<PartKey>>,
     }
 }
 
@@ -98,9 +108,9 @@ struct MemoryPartEventSelector {
     /// emitting revisions newer than `after` and ignoring the per-part and
     /// per-object bounds below.
     all: Option<CursorIndex>,
-    part_cursors: HashMap<PartId, CursorIndex>,
-    objects: HashSet<ObjId>,
-    object_bounds: HashMap<ObjId, CursorIndex>,
+    part_cursors: HashMap<PartKey, CursorIndex>,
+    objects: HashSet<ObjKey>,
+    object_bounds: HashMap<ObjKey, CursorIndex>,
 }
 
 impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
@@ -147,12 +157,71 @@ impl MemoryPartStore {
     }
 }
 
+impl MemoryPartStore {
+    /// See the sqlite store's counterpart: derive and materialize the single-object part for
+    /// each object a remote subscriber asked for, so that an explicit share on
+    /// `o:{object_key}` has a membership row to be reached through.
+    ///
+    /// Quiet: no revision is consumed and no event is emitted, because subscribing is not a sync
+    /// event. `peek` is the documented call for this: it exists for callers that only want to
+    /// observe the cursor, or to stamp state that allocates no revision of its own — which is
+    /// exactly a silent materialization — while `next` is reserved for write paths.
+    ///
+    /// Whether this store should instead emit an event for the materialized row, as the sqlite
+    /// store does by recording it as a keyed-frontier `Changed`, is the undecided
+    /// materialization-parity question. It is left open deliberately: an earlier attempt to
+    /// consume a revision here was justified by an A/B against a test that was flaky for reasons
+    /// unrelated to this code, so that measurement supported nothing.
+    fn materialize_object_parts(&self, obj_ids: Vec<ObjKey>) {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let guard = &mut *guard;
+            let cursor = guard.global_cursor.peek();
+            for obj_id in obj_ids {
+                let part_id = obj_id.object_part_key();
+                let payload = {
+                    let obj_state = guard.objs.entry(obj_id).or_default();
+                    obj_state.parts.insert(part_id);
+                    obj_state.payload.clone()
+                };
+                let Some(payload) = payload else {
+                    continue;
+                };
+                let part = guard.parts.entry(part_id).or_default();
+                let old_state = part.members.get(&obj_id).cloned();
+                let new_state = PartMemberState {
+                    added_at: cursor,
+                    changed_at: cursor,
+                    removed_at: None,
+                };
+                match old_state {
+                    Some(old) if old.removed_at.is_none() => continue,
+                    Some(_) => part.apply_bucket_transition(
+                        obj_id,
+                        cursor,
+                        BucketMemberKind::Dead,
+                        BucketMemberKind::Live(&payload),
+                    ),
+                    None => part.apply_bucket_transition(
+                        obj_id,
+                        cursor,
+                        BucketMemberKind::Absent,
+                        BucketMemberKind::Live(&payload),
+                    ),
+                }
+                part.members.insert(obj_id, new_state);
+                part.latest_cursor = cursor;
+            }
+        });
+    }
+}
+
 impl MemoryPartStoreScopeState {
     fn bucket_items_for_path(
         &self,
-        part_id: PartId,
+        part_id: PartKey,
         path: BuckId,
-    ) -> Vec<(ObjId, CursorIndex, bool)> {
+    ) -> Vec<(ObjKey, CursorIndex, bool)> {
         let Some(part) = self.parts.get(&part_id) else {
             return Vec::new();
         };
@@ -175,7 +244,7 @@ impl MemoryPartStoreScopeState {
         items
     }
 
-    fn bucket_summary(&self, part_id: PartId, path: BuckId) -> BucketSummary {
+    fn bucket_summary(&self, part_id: PartKey, path: BuckId) -> BucketSummary {
         self.parts
             .get(&part_id)
             .and_then(|part| part.bucket_stats.get(&path).cloned())
@@ -185,7 +254,7 @@ impl MemoryPartStoreScopeState {
 
     fn changed_bucket_summaries(
         &self,
-        part_id: PartId,
+        part_id: PartKey,
         offset: BuckId,
         since: CursorIndex,
         limit_hint: u32,
@@ -229,75 +298,68 @@ impl MemoryPartStoreScopeState {
 impl PartState {
     fn apply_bucket_transition(
         &mut self,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: BucketMemberKind<'_>,
         new: BucketMemberKind<'_>,
     ) {
         for level in 0..=BuckId::MAX_LEVEL {
-            let buck_id = BuckId::from_obj_id(level, &obj_id);
+            let buck_id = BuckId::from_obj_key(level, &obj_id);
             let agg = self.bucket_stats.entry(buck_id).or_default();
             agg.apply_transition(buck_id, obj_id, cursor, old, new);
         }
     }
 }
-fn is_permitted_members(
-    members: &HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
-    _part_id: Option<PartId>,
-    obj_id: ObjId,
-    principal: Option<PeerId>,
+/// Whether `part` grants `principal` fetch access.
+fn part_permits(
+    members: &HashMap<PartKey, HashMap<PeerKey, PartAccessState>>,
+    part_id: PartKey,
+    principal: PeerKey,
 ) -> bool {
-    let Some(principal) = principal else {
-        return true;
-    };
     members
-        .get(&obj_id)
+        .get(&part_id)
         .and_then(|member_map| member_map.get(&principal))
-        .map_or(!members.contains_key(&obj_id), |access| access.is_fetcher())
+        .is_some_and(|state| state.access.is_fetcher())
 }
 
 fn project_part_event(
     state: &MemoryPartStoreScopeState,
     event: PartEvent,
     selector: &MemoryPartEventSelector,
-    subscriber: PeerId,
+    subscriber: PeerKey,
 ) -> Option<SubEvent> {
     let obj_id = match &event {
         PartEvent::Changed(inner) => inner.obj_id,
         PartEvent::Added(inner) => inner.obj_id,
         PartEvent::Removed(inner) => inner.obj_id,
     };
-    let permitted_parts = match &event {
-        PartEvent::Changed(inner) => inner
-            .part_ids
-            .iter()
-            .copied()
-            .filter(|part_id| {
-                selector.part_cursors.contains_key(part_id)
-                    && state.is_event_permitted(Some(*part_id), obj_id, Some(subscriber))
-            })
-            .collect::<Vec<_>>(),
-        PartEvent::Added(inner) => (selector.part_cursors.contains_key(&inner.part_id)
-            && state.is_event_permitted(Some(inner.part_id), obj_id, Some(subscriber)))
-        .then_some(inner.part_id)
-        .into_iter()
-        .collect(),
-        PartEvent::Removed(inner) => selector
-            .part_cursors
-            .contains_key(&inner.part_id)
-            .then_some(inner.part_id)
-            .into_iter()
-            .collect(),
+    // Candidate parts: what the event names, else the object's membership.
+    let scope = match &event {
+        PartEvent::Changed(inner) if !inner.part_ids.is_empty() => {
+            PartScope::AnyOf(inner.part_ids.clone())
+        }
+        PartEvent::Changed(_) => PartScope::FromObject,
+        PartEvent::Added(inner) => PartScope::Part(inner.part_id),
+        PartEvent::Removed(inner) => PartScope::Part(inner.part_id),
     };
-    let object_permitted = selector.objects.contains(&obj_id)
-        && state.is_event_permitted(None, obj_id, Some(subscriber));
+    // A concrete subscriber always filters.
+    let Some(readable) = state.permitted_parts(scope, obj_id, Some(subscriber)) else {
+        unreachable!("{}", ERROR_IMPOSSIBLE)
+    };
+    if readable.is_empty() {
+        return None;
+    }
+    let selected = readable
+        .into_iter()
+        .filter(|part_id| selector.part_cursors.contains_key(part_id))
+        .collect::<Vec<_>>();
+    let object_selected = selector.objects.contains(&obj_id);
     match event {
-        PartEvent::Changed(mut inner) if !permitted_parts.is_empty() || object_permitted => {
-            inner.part_ids = permitted_parts;
+        PartEvent::Changed(mut inner) if !selected.is_empty() => {
+            inner.part_ids = selected;
             Some(SubEvent::Changed(inner))
         }
-        PartEvent::Added(inner) if !permitted_parts.is_empty() => Some(SubEvent::Added(inner)),
-        PartEvent::Added(inner) if object_permitted => {
+        PartEvent::Changed(inner) if object_selected => {
             Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor: inner.cursor,
                 part_ids: Vec::new(),
@@ -305,8 +367,17 @@ fn project_part_event(
                 payload: inner.payload,
             }))
         }
-        PartEvent::Removed(inner) if !permitted_parts.is_empty() => Some(SubEvent::Removed(inner)),
-        PartEvent::Removed(inner) if object_permitted => {
+        PartEvent::Added(inner) if !selected.is_empty() => Some(SubEvent::Added(inner)),
+        PartEvent::Added(inner) if object_selected => {
+            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor: inner.cursor,
+                part_ids: Vec::new(),
+                obj_id: inner.obj_id,
+                payload: inner.payload,
+            }))
+        }
+        PartEvent::Removed(inner) if !selected.is_empty() => Some(SubEvent::Removed(inner)),
+        PartEvent::Removed(inner) if object_selected => {
             Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor: inner.cursor,
                 part_ids: Vec::new(),
@@ -319,13 +390,34 @@ fn project_part_event(
 }
 
 impl MemoryPartStoreScopeState {
-    fn is_event_permitted(
+    /// The subset of `scope`'s candidate parts that `principal` may read; `None` when
+    /// unfiltered (local principal).
+    fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> bool {
-        is_permitted_members(&self.members, part_id, obj_id, principal)
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Option<Vec<PartKey>> {
+        let principal = principal?;
+        let candidates: Vec<PartKey> = match scope {
+            PartScope::Part(part_id) => vec![part_id],
+            PartScope::AnyOf(part_ids) => part_ids,
+            PartScope::FromObject => {
+                let mut resolved = self
+                    .objs
+                    .get(&obj_id)
+                    .map(|deets| deets.parts.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                resolved.sort_unstable();
+                resolved
+            }
+        };
+        Some(
+            candidates
+                .into_iter()
+                .filter(|part_id| part_permits(&self.members, *part_id, principal))
+                .collect(),
+        )
     }
 
     fn flush(&mut self) {
@@ -399,7 +491,15 @@ impl MemorySubsBus {
     }
 }
 impl GlobalCursor {
-    fn get(&self) -> CursorIndex {
+    /// The newest allocated revision. A read: it never allocates, so callers that only want
+    /// to *observe* the cursor — reporting it, or stamping state that allocates no revision
+    /// of its own — cannot advance the cursor space.
+    fn peek(&self) -> CursorIndex {
+        self.counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Allocate and return the next revision. Only write paths may call this.
+    fn next(&self) -> CursorIndex {
         self.counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1
@@ -411,14 +511,14 @@ impl HostPartStore for MemoryPartStore {
     async fn latest_revision(&self) -> Res<CursorIndex> {
         Ok(surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            guard.global_cursor.get()
+            guard.global_cursor.peek()
         }))
     }
 
     async fn summarize_parts(
         &self,
-        parts: HashSet<PartId>,
-    ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>> {
+        parts: HashSet<PartKey>,
+    ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>> {
         Ok(surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             let mut out = HashMap::new();
@@ -551,7 +651,7 @@ impl HostPartStore for MemoryPartStore {
         Ok(result)
     }
 
-    async fn member_count(&self, part_id: PartId) -> Res<u64> {
+    async fn member_count(&self, part_id: PartKey) -> Res<u64> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             Ok(guard
@@ -566,21 +666,61 @@ impl HostPartStore for MemoryPartStore {
                 .unwrap_or(0))
         })
     }
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>> {
+
+    async fn part_dirty_count(
+        &self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> Res<PartDirtyCount> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            // A member carries the cursor of its last transition, which for a removed
+            // member is the removal itself — the same value sqlite keeps in `txid`.
+            let member_changes = guard
+                .parts
+                .get(&part_id)
+                .map(|part| {
+                    part.members
+                        .values()
+                        .filter(|member| member.removed_at.unwrap_or(member.changed_at) > since)
+                        .count() as u64
+                })
+                .unwrap_or(0);
+            // One row per (part, principal), so 0 or 1 in practice. A revocation
+            // deletes that row, so a revocation does not count here. `None` is the
+            // local principal, which access rows do not gate, so it has no access
+            // half.
+            let access_changes = principal
+                .and_then(|principal| {
+                    guard
+                        .members
+                        .get(&part_id)
+                        .and_then(|member_map| member_map.get(&principal))
+                        .map(|state| u64::from(state.changed_at > since))
+                })
+                .unwrap_or(0);
+            Ok(PartDirtyCount {
+                member_changes,
+                access_changes,
+            })
+        })
+    }
+    async fn obj_payload(&self, obj_id: ObjKey) -> Res<Option<ObjPayload>> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             Ok(guard.objs.get(&obj_id).and_then(|obj| obj.payload.clone()))
         })
     }
 
-    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
+    async fn get_bucket_summary(&self, part_id: PartKey, id: BuckId) -> Res<BucketSummary> {
         Ok(surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             guard.bucket_summary(part_id, id)
         }))
     }
 
-    async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>> {
+    async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             Ok(guard
@@ -591,14 +731,14 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
-    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+    async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             Ok(guard.objs.contains_key(&obj_id) || guard.tombstoned_objs.contains_key(&obj_id))
         })
     }
 
-    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
+    async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
@@ -607,7 +747,7 @@ impl HostPartStore for MemoryPartStore {
             let old_payload = obj_state.payload.replace(payload.clone());
             let desired_parts = obj_state.parts.clone();
             if desired_parts.is_empty() {
-                let cursor = guard.global_cursor.get();
+                let cursor = guard.global_cursor.next();
                 guard
                     .bus
                     .queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
@@ -619,7 +759,7 @@ impl HostPartStore for MemoryPartStore {
                 guard.flush();
                 return Ok(());
             }
-            let cursor = guard.global_cursor.get();
+            let cursor = guard.global_cursor.next();
             if let Some(old_payload) = old_payload {
                 for &part_id in &desired_parts {
                     let part = guard.parts.get_mut(&part_id).expect(ERROR_IMPOSSIBLE);
@@ -673,7 +813,7 @@ impl HostPartStore for MemoryPartStore {
             Ok(())
         })
     }
-    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
+    async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
         tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store add obj to parts");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
@@ -686,7 +826,7 @@ impl HostPartStore for MemoryPartStore {
                 return Ok(());
             };
             obj_state.parts.extend(&parts);
-            let cursor = guard.global_cursor.get();
+            let cursor = guard.global_cursor.next();
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
                 let old_state = part.members.get(&obj_id).cloned();
@@ -735,7 +875,8 @@ impl HostPartStore for MemoryPartStore {
             Ok(())
         })
     }
-    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
+
+    async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
         tracing::debug!(obj_id = %obj_id, part_id = %part_id, "memory store remove obj from part");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
@@ -759,7 +900,7 @@ impl HostPartStore for MemoryPartStore {
             if old_state.removed_at.is_some() {
                 return Ok(());
             }
-            let cursor = guard.global_cursor.get();
+            let cursor = guard.global_cursor.next();
             let old_payload = obj_state
                 .payload
                 .as_ref()
@@ -794,7 +935,7 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
-    async fn get_peer_part_cursor(&self, peer_id: PeerId, part_id: PartId) -> Res<CursorIndex> {
+    async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
 
@@ -808,8 +949,8 @@ impl HostPartStore for MemoryPartStore {
 
     async fn set_peer_part_cursor(
         &self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
         cursor: CursorIndex,
     ) -> Res<()> {
         tracing::debug!(peer_id = %peer_id, part_id = %part_id, cursor, "memory store set peer part cursor");
@@ -828,14 +969,14 @@ impl HostPartStore for MemoryPartStore {
 
     async fn list_events(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
         let part_count = parts.len();
         let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            let mut out: HashMap<PartId, PartPage> = default();
+            let mut out: HashMap<PartKey, PartPage> = default();
             for part_id in parts {
                 let Some(part) = guard.parts.get(&part_id) else {
                     return Err(ListPartsError::UnkownParts {
@@ -919,11 +1060,11 @@ impl HostPartStore for MemoryPartStore {
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
-        subscriber: PeerId,
+        subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
 
-        let part_cursors: HashMap<PartId, CursorIndex> = reqs
+        let part_cursors: HashMap<PartKey, CursorIndex> = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -933,7 +1074,7 @@ impl HostPartStore for MemoryPartStore {
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect();
-        let objects: HashSet<ObjId> = reqs
+        let objects: HashSet<ObjKey> = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -941,6 +1082,9 @@ impl HostPartStore for MemoryPartStore {
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect();
+        if !objects.is_empty() {
+            self.materialize_object_parts(objects.iter().copied().collect());
+        }
         let unknown_parts = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             part_cursors
@@ -1118,7 +1262,7 @@ impl HostPartStore for MemoryPartStore {
         Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
-    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+    async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.parts.entry(part_id).or_default();
@@ -1126,74 +1270,116 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
-    async fn set_obj_members(
+    async fn set_part_members(
         &self,
-        obj: ObjId,
-        agents: HashMap<PeerId, keyhive_core::access::Access>,
+        part: PartKey,
+        agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            guard.members.insert(obj, agents);
+            // Stamped the same way the sqlite store does it: one cursor per rewrite,
+            // taken even when the rewrite clears the part, so both stores consume the
+            // cursor sequence identically.
+            let changed_at = guard.global_cursor.next();
+            if agents.is_empty() {
+                guard.members.remove(&part);
+            } else {
+                guard.members.insert(
+                    part,
+                    agents
+                        .into_iter()
+                        .map(|(principal, access)| {
+                            (principal, PartAccessState { access, changed_at })
+                        })
+                        .collect(),
+                );
+            }
         });
         Ok(())
     }
 
-    async fn add_obj_member(
+    async fn add_part_member(
         &self,
-        obj: ObjId,
-        member: PeerId,
+        part: PartKey,
+        member: PeerKey,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            guard.members.entry(obj).or_default().insert(member, access);
+            let changed_at = guard.global_cursor.next();
+            guard
+                .members
+                .entry(part)
+                .or_default()
+                .insert(member, PartAccessState { access, changed_at });
         });
         Ok(())
     }
 
-    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()> {
+    async fn remove_part_member(&self, part: PartKey, member: PeerKey) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            if let Some(member_map) = guard.members.get_mut(&obj) {
+            if let Some(member_map) = guard.members.get_mut(&part) {
                 member_map.remove(&member);
                 if member_map.is_empty() {
-                    guard.members.remove(&obj);
+                    guard.members.remove(&part);
                 }
             }
         });
         Ok(())
     }
 
-    async fn is_event_permitted(
+    async fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> Res<bool> {
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
         let permitted = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            guard.is_event_permitted(part_id, obj_id, principal)
+            guard.permitted_parts(scope, obj_id, principal)
         });
         Ok(permitted)
+    }
+
+    /// This store's subscriptions are filtered per recipient, so a page can be denied rather
+    /// than silently empty.
+    async fn page_denied(
+        &self,
+        target: &SubscriptionTarget,
+        subscriber: PeerKey,
+    ) -> Res<bool> {
+        let (scope, obj_id) = match target {
+            SubscriptionTarget::Part { part_id, .. } => {
+                // `permitted_parts` reads the object only for a `FromObject` scope,
+                // so a part is asked about directly.
+                (PartScope::Part(*part_id), ObjKey::new([0u8; 32]))
+            }
+            SubscriptionTarget::Object { obj_id } => (PartScope::FromObject, *obj_id),
+        };
+        Ok(self
+            .permitted_parts(scope, obj_id, Some(subscriber))
+            .await?
+            .is_some_and(|readable| readable.is_empty()))
     }
 }
 
 // impl MemoryPartStore {
-//     pub async fn is_tombstoned(&self, obj_id: ObjId) -> Res<bool> {
+//     pub async fn is_tombstoned(&self, obj_id: ObjKey) -> Res<bool> {
 //         surelock::key::lock_scope(|key| {
 //             let (guard, _key) = key.lock(&self.inner);
 //             Ok(guard.tombstoned_objs.contains_key(&obj_id))
 //         })
 //     }
 //
-//     pub async fn obj_sync_version(&self, obj_id: ObjId) -> Res<u64> {
+//     pub async fn obj_sync_version(&self, obj_id: ObjKey) -> Res<u64> {
 //         surelock::key::lock_scope(|key| {
 //             let (guard, _key) = key.lock(&self.inner);
 //             Ok(guard.obj_sync_version_locked(obj_id))
 //         })
 //     }
 //
-//     pub(crate) async fn obj_sync_stamp(&self, obj_id: ObjId) -> Res<ObjSyncStamp> {
+//     pub(crate) async fn obj_sync_stamp(&self, obj_id: ObjKey) -> Res<ObjSyncStamp> {
 //         surelock::key::lock_scope(|key| {
 //             let (guard, _key) = key.lock(&self.inner);
 //             Ok(guard.obj_sync_stamp_locked(obj_id))
@@ -1202,8 +1388,8 @@ impl HostPartStore for MemoryPartStore {
 //
 //     async fn get_peer_obj_payload(
 //         &self,
-//         peer_id: PeerId,
-//         obj_id: ObjId,
+//         peer_id: PeerKey,
+//         obj_id: ObjKey,
 //     ) -> Res<Option<Option<ObjPayload>>> {
 //         surelock::key::lock_scope(|key| {
 //             let (guard, _key) = key.lock(&self.inner);
@@ -1213,8 +1399,8 @@ impl HostPartStore for MemoryPartStore {
 //
 //     async fn set_peer_obj_payload(
 //         &self,
-//         peer_id: PeerId,
-//         obj_id: ObjId,
+//         peer_id: PeerKey,
+//         obj_id: ObjKey,
 //         payload: Option<ObjPayload>,
 //     ) -> Res<()> {
 //         surelock::key::lock_scope(|key| {
@@ -1230,9 +1416,9 @@ impl HostPartStore for MemoryPartStore {
 //     )]
 //     pub(crate) async fn sync_upsert_obj(
 //         &self,
-//         obj_id: ObjId,
+//         obj_id: ObjKey,
 //         payload: ObjPayload,
-//         parts: Vec<PartId>,
+//         parts: Vec<PartKey>,
 //         expected_stamp: ObjSyncStamp,
 //         sync_version: u64,
 //         sync_stamp: ObjSyncStamp,
@@ -1276,8 +1462,8 @@ impl HostPartStore for MemoryPartStore {
 // )]
 //     pub(crate) async fn sync_remove_obj_from_part(
 //         &self,
-//         obj_id: ObjId,
-//         part_id: PartId,
+//         obj_id: ObjKey,
+//         part_id: PartKey,
 //         expected_stamp: ObjSyncStamp,
 //         sync_version: u64,
 //         sync_stamp: ObjSyncStamp,
@@ -1343,7 +1529,7 @@ impl HostPartStore for MemoryPartStore {
 //     // )]
 //     // async fn sync_tombstone_obj(
 //     //     &self,
-//     //     obj_id: ObjId,
+//     //     obj_id: ObjKey,
 //     //     expected_stamp: ObjSyncStamp,
 //     //     sync_version: u64,
 //     //     sync_stamp: ObjSyncStamp,
@@ -1385,15 +1571,15 @@ impl HostPartStore for MemoryPartStore {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MemoryPartStoreSnapshot {
-    pub objs: BTreeMap<ObjId, MemoryObjSnapshot>,
-    pub peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
+    pub objs: BTreeMap<ObjKey, MemoryObjSnapshot>,
+    pub peer_part_cursors: BTreeMap<(PeerKey, PartKey), CursorIndex>,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MemoryObjSnapshot {
     pub payload: Option<ObjPayload>,
-    pub parts: BTreeSet<PartId>,
+    pub parts: BTreeSet<PartKey>,
 }
 
 #[cfg(test)]
@@ -1456,7 +1642,7 @@ impl ObservedStore for MemoryPartStore {
 mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
-    use big_sync_core::Byte32Id;
+    use big_sync_core::ByteKey;
     use std::{collections::HashSet, time::Duration};
 
     struct MemoryHostHarness {
@@ -1478,23 +1664,184 @@ mod tests {
         host_contract::assert_host_part_store_contract(&harness).await
     }
 
+    /// The memory store's counterpart to the sqlite direct-share test: an explicit row on the
+    /// derived object part is a direct share, and it resolves because subscribing materializes
+    /// the object's single membership row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_subscribe_object_part_direct_share_is_delivered_remotely() -> Res<()> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let store = MemoryPartStore::new();
+        let obj_id = ObjKey(ByteKey::new([65u8; 32]));
+        let peer = PeerKey::new([66u8; 32]);
+        let payload = serde_json::json!({"value": 1});
+        store.set_obj_payload(obj_id, payload.clone()).await?;
+        store
+            .set_part_members(
+                obj_id.object_part_key(),
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([SubscriptionTarget::Object { obj_id }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Changed(changed) => {
+                assert_eq!(changed.obj_id, obj_id);
+                assert_eq!(changed.payload, payload);
+            }
+            event => panic!("expected the directly shared object, got {event:?}"),
+        }
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+        Ok(())
+    }
+
+    /// This store filters subscriptions per recipient, so a page for a part the subscriber
+    /// cannot read is denied rather than answered empty: an empty page is indistinguishable
+    /// from being caught up, and the caller must not have to infer the difference.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_page_denied_for_unreadable_part() -> Res<()> {
+        use big_sync_core::rpc::{ReplayPageOutcome, SubscriptionTarget};
+
+        let store = MemoryPartStore::new();
+        let part = PartKey(ByteKey::new([67u8; 32]));
+        let obj_id = ObjKey(ByteKey::new([68u8; 32]));
+        let member = PeerKey::new([69u8; 32]);
+        let outsider = PeerKey::new([70u8; 32]);
+        store.ensure_part(part).await?;
+        store
+            .set_obj_payload(obj_id, serde_json::json!({"value": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_id, vec![part]).await?;
+        store
+            .set_part_members(
+                part,
+                HashMap::from([(member, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
+
+        let readable = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+                8,
+                member,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert!(
+            matches!(readable, ReplayPageOutcome::Events(_)),
+            "a granted member reads a page, got {readable:?}"
+        );
+
+        let denied = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+                8,
+                outsider,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert_eq!(
+            denied,
+            ReplayPageOutcome::Unauthorized,
+            "a subscriber with no access row is denied, not reported as caught up"
+        );
+        Ok(())
+    }
+
+    /// `latest_revision` reports the newest allocated revision; it does not allocate one of
+    /// its own, which the sqlite store's pure `SELECT` also states.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_latest_revision_is_idempotent() -> Res<()> {
+        let store = MemoryPartStore::new();
+        let first = store.latest_revision().await?;
+        let second = store.latest_revision().await?;
+        assert_eq!(
+            first, second,
+            "reading the latest revision must not allocate a revision"
+        );
+        Ok(())
+    }
+
+    /// Materializing an object part consumes no revision and emits no event: subscribing is not a
+    /// sync event, so the row can only be stamped with a revision the store already had. This
+    /// drives the object-target subscription that performs the materialization, so the coverage is
+    /// that such a subscription completes without advancing the cursor space.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_materializing_object_part_is_quiet() -> Res<()> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let store = MemoryPartStore::new();
+        let obj_id = ObjKey(ByteKey::new([71u8; 32]));
+        let peer = PeerKey::new([72u8; 32]);
+        store
+            .set_obj_payload(obj_id, serde_json::json!({"value": 1}))
+            .await?;
+        store
+            .set_part_members(
+                obj_id.object_part_key(),
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
+        let before = store.latest_revision().await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([SubscriptionTarget::Object { obj_id }]),
+                },
+                peer,
+            )
+            .await??;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await??;
+            if matches!(event, SubEvent::ReplayComplete) {
+                break;
+            }
+        }
+
+        let after = store.latest_revision().await?;
+        assert_eq!(
+            after, before,
+            "materialization is quiet: subscribing consumes no revision, so a subscriber asking\
+             for an object leaves the cursor space unchanged"
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn subscription_handoff_does_not_lose_immediate_mutation() -> Res<()> {
         let store = MemoryPartStore::new();
-        let part = PartId(Byte32Id::new([61u8; 32]));
-        let first = ObjId(Byte32Id::new([62u8; 32]));
-        let second = ObjId(Byte32Id::new([63u8; 32]));
-        let peer = PeerId::new([64u8; 32]);
+        let part = PartKey(ByteKey::new([61u8; 32]));
+        let first = ObjKey(ByteKey::new([62u8; 32]));
+        let second = ObjKey(ByteKey::new([63u8; 32]));
+        let peer = PeerKey::new([64u8; 32]);
 
         store.ensure_part(part).await?;
-        for obj in [first, second] {
-            store
-                .set_obj_members(
-                    obj,
-                    HashMap::from([(peer, keyhive_core::access::Access::Read)]),
-                )
-                .await?;
-        }
+        store
+            .set_part_members(
+                part,
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
         for (obj, value) in [(first, "first"), (second, "second")] {
             store.set_obj_payload(obj, serde_json::json!(value)).await?;
         }
@@ -1543,10 +1890,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_drops_non_readable_events() -> Res<()> {
         let store = MemoryPartStore::new();
-        let part = PartId(Byte32Id::new([1u8; 32]));
-        let obj = ObjId(Byte32Id::new([2u8; 32]));
-        let reader = PeerId::new([3u8; 32]);
-        let non_reader = PeerId::new([4u8; 32]);
+        let part = PartKey(ByteKey::new([1u8; 32]));
+        let obj = ObjKey(ByteKey::new([2u8; 32]));
+        let reader = PeerKey::new([3u8; 32]);
+        let non_reader = PeerKey::new([4u8; 32]);
 
         store.ensure_part(part).await?;
         store
@@ -1556,7 +1903,7 @@ mod tests {
         // Set doc members: only `reader` has Read access.
         let mut agents = HashMap::new();
         agents.insert(reader, keyhive_core::access::Access::Read);
-        store.set_obj_members(obj, agents.clone()).await?;
+        store.set_part_members(part, agents.clone()).await?;
 
         // Subscribe as reader — should receive the Added event.
         let rx = store
@@ -1608,8 +1955,8 @@ mod tests {
             }
         })
         .await??;
-        let second_obj = ObjId(Byte32Id::new([5u8; 32]));
-        store.set_obj_members(second_obj, agents).await?;
+        let second_obj = ObjKey(ByteKey::new([5u8; 32]));
+        store.set_part_members(part, agents).await?;
         store
             .set_obj_payload(second_obj, serde_json::json!("content2"))
             .await?;
@@ -1626,9 +1973,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_updates() -> Res<()> {
         let store = MemoryPartStore::new();
-        let part = PartId(Byte32Id::new([10u8; 32]));
-        let obj = ObjId(Byte32Id::new([20u8; 32]));
-        let peer = PeerId::new([30u8; 32]);
+        let part = PartKey(ByteKey::new([10u8; 32]));
+        let obj = ObjKey(ByteKey::new([20u8; 32]));
+        let peer = PeerKey::new([30u8; 32]);
 
         store.ensure_part(part).await?;
         store
@@ -1638,7 +1985,7 @@ mod tests {
         // Initially peer has Read access.
         let mut agents = HashMap::new();
         agents.insert(peer, keyhive_core::access::Access::Read);
-        store.set_obj_members(obj, agents).await?;
+        store.set_part_members(part, agents).await?;
 
         let rx = store
             .subscribe(
@@ -1685,7 +2032,7 @@ mod tests {
         .ok();
 
         // Now revoke access: set empty members.
-        store.set_obj_members(obj, HashMap::new()).await?;
+        store.set_part_members(part, HashMap::new()).await?;
         store
             .set_obj_payload(obj, serde_json::json!("updated"))
             .await?;
@@ -1695,6 +2042,124 @@ mod tests {
             Ok(Err(_)) => return Err(ferr!("revoked subscriber closed unexpectedly")),
         }
 
+        Ok(())
+    }
+
+    /// The primitive the dirty count rests on: local rows newer than a cursor are
+    /// counted, with member and access changes reported separately so a caller can
+    /// tell the two relevance sources apart. This semantics holds regardless of which
+    /// side of a sync evaluates it against a cursor from its own stream.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn part_dirty_count_separates_member_and_access_changes() -> Res<()> {
+        let store = MemoryPartStore::new();
+        let part = PartKey(ByteKey::new([40u8; 32]));
+        let other_part = PartKey(ByteKey::new([41u8; 32]));
+        let peer = PeerKey::new([42u8; 32]);
+        let other_peer = PeerKey::new([43u8; 32]);
+        let obj_a = ObjKey(ByteKey::new([44u8; 32]));
+        let obj_b = ObjKey(ByteKey::new([45u8; 32]));
+        let obj_c = ObjKey(ByteKey::new([46u8; 32]));
+
+        store.ensure_part(part).await?;
+        store.ensure_part(other_part).await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount::default(),
+            "a part with neither members nor grants has no relevance to count"
+        );
+
+        // A member write moves the member number only.
+        store
+            .set_obj_payload(obj_a, serde_json::json!({"a": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_a, vec![part]).await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 0,
+            }
+        );
+
+        // A grant on this part for this peer adds the access number alongside it.
+        store
+            .set_part_members(
+                part,
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 1,
+            }
+        );
+
+        // The local principal is never gated by access rows, so it has no access half;
+        // the member half does not depend on who is asking and still counts.
+        assert_eq!(
+            store.part_dirty_count(part, None, 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 0,
+            }
+        );
+
+        // A second member write moves only the member number.
+        store
+            .set_obj_payload(obj_b, serde_json::json!({"b": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_b, vec![part]).await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            }
+        );
+
+        // Another principal's grant on this part is not this principal's relevance.
+        store
+            .add_part_member(part, other_peer, keyhive_core::access::Access::Read)
+            .await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            },
+            "another principal's grant must not be counted for this one"
+        );
+
+        // Another part's member write and grant are not this part's relevance.
+        store
+            .set_obj_payload(obj_c, serde_json::json!({"c": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_c, vec![other_part]).await?;
+        store
+            .set_part_members(
+                other_part,
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            },
+            "another part's rows must not be counted here"
+        );
+
+        // The comparison is strictly newer-than, so nothing clears the store's own
+        // current revision.
+        let ceiling = store.latest_revision().await?;
+        assert_eq!(
+            store.part_dirty_count(part, Some(peer), ceiling).await?,
+            PartDirtyCount::default(),
+            "no row can be newer than the store's current revision"
+        );
         Ok(())
     }
 }

@@ -1048,7 +1048,7 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (end_tx, end_rx) = futures::channel::oneshot::channel();
     let (signal_tx, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
-    let peer_id = big_sync_core::PeerId::new([246u8; 32]);
+    let peer_id = big_sync_core::PeerKey::new([246u8; 32]);
 
     crate::watch_connection_end(
         peer_id,

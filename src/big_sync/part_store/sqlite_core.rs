@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary};
-use big_sync_core::{BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, ByteKey, Fingerprint, ObjKey, PartKey, PeerKey};
 
 use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
@@ -268,7 +268,7 @@ impl BucketSummaryRow {
     pub fn apply_transition(
         &mut self,
         buck_id: BuckId,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: &MemberState,
         new: &MemberState,
@@ -409,19 +409,19 @@ impl SqliteCore {
     // ID codecs (static helpers)
     // -----------------------------------------------------------------------
 
-    pub fn id_blob(id: Byte32Id) -> Vec<u8> {
+    pub fn id_blob(id: ByteKey) -> Vec<u8> {
         id.into_bytes().to_vec()
     }
 
-    pub fn part_blob(id: PartId) -> Vec<u8> {
+    pub fn part_blob(id: PartKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
-    pub fn obj_blob(id: ObjId) -> Vec<u8> {
+    pub fn obj_blob(id: ObjKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
-    pub fn peer_blob(id: PeerId) -> Vec<u8> {
+    pub fn peer_blob(id: PeerKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
@@ -441,16 +441,16 @@ impl SqliteCore {
         u64::from_ne_bytes(value.to_ne_bytes())
     }
 
-    pub fn part_from_blob(blob: Vec<u8>) -> PartId {
-        PartId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn part_from_blob(blob: Vec<u8>) -> PartKey {
+        PartKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
 
-    pub fn obj_from_blob(blob: Vec<u8>) -> ObjId {
-        ObjId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
+        ObjKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
 
-    pub fn peer_from_blob(blob: Vec<u8>) -> PeerId {
-        PeerId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn peer_from_blob(blob: Vec<u8>) -> PeerKey {
+        PeerKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
 
     // -----------------------------------------------------------------------
@@ -460,7 +460,7 @@ impl SqliteCore {
     pub async fn ensure_part_ref(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
+        part_id: PartKey,
     ) -> Res<i64> {
         let row = sqlx::query!(
             "INSERT INTO big_sync_parts(scope_id, part_id)
@@ -478,7 +478,7 @@ impl SqliteCore {
     pub async fn ensure_obj_ref(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        obj_id: ObjId,
+        obj_id: ObjKey,
     ) -> Res<i64> {
         let row = sqlx::query!(
             "INSERT INTO big_sync_objs(scope_id, obj_id)
@@ -493,7 +493,7 @@ impl SqliteCore {
         Ok(row.obj_ref)
     }
 
-    pub async fn find_part_ref(&self, part_id: PartId) -> Res<Option<i64>> {
+    pub async fn find_part_ref(&self, part_id: PartKey) -> Res<Option<i64>> {
         Ok(sqlx::query_scalar!(
             "SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2",
             self.scope_id,
@@ -503,7 +503,7 @@ impl SqliteCore {
         .await?)
     }
 
-    pub async fn find_obj_ref(&self, obj_id: ObjId) -> Res<Option<i64>> {
+    pub async fn find_obj_ref(&self, obj_id: ObjKey) -> Res<Option<i64>> {
         Ok(sqlx::query_scalar!(
             "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
             self.scope_id,
@@ -573,7 +573,7 @@ impl SqliteCore {
 
     pub async fn bucket_summary_for_path(
         &self,
-        part_id: PartId,
+        part_id: PartKey,
         path: BuckId,
     ) -> Res<BucketSummary> {
         let row = sqlx::query!(
@@ -624,8 +624,8 @@ impl SqliteCore {
     pub async fn load_member_state(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
+        part_id: PartKey,
+        obj_id: ObjKey,
     ) -> Res<MemberState> {
         let row = sqlx::query!(
             "SELECT members.event_type, objs.payload_json
@@ -670,15 +670,15 @@ impl SqliteCore {
     pub async fn apply_bucket_transition(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
+        part_id: PartKey,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: &MemberState,
         new: &MemberState,
     ) -> Res<()> {
         let part_ref = self.ensure_part_ref(tx, part_id).await?;
         let bucket_ids: Vec<_> = (0..=self.bucket_depth)
-            .map(|level| BuckId::from_obj_id(level, &obj_id))
+            .map(|level| BuckId::from_obj_key(level, &obj_id))
             .collect();
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT buck_id, changed_at, live_count, dead_count, live_fp, dead_fp

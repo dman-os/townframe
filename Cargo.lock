@@ -1173,6 +1173,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "autosurgeon",
+ "blake3",
  "bs58",
  "future_form",
  "futures",

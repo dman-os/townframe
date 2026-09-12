@@ -13,7 +13,7 @@ use crate::interlude::*;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime2::Timer;
 use crate::runtime2::messages::{Runtime2Cmd, fresh_waiter_id};
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use future_form::FutureForm;
 use std::sync::Arc;
 
@@ -275,10 +275,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// callers can tell which connection ended when ids are reused.
     pub async fn open_connection(
         &self,
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(
-        PeerId,
+        PeerKey,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(
             std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -307,7 +307,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         incoming: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(
-        PeerId,
+        PeerKey,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(
             std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -327,7 +327,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// down; closing a superseded connection leaves the replacement intact.
     pub async fn close_connection(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
@@ -348,7 +348,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<(), crate::runtime2::types::SyncDocError> {
         self.sync_doc_with_peer_receipt(doc_id, peer_id)
             .await
@@ -358,7 +358,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn sync_doc_with_peer_receipt(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
         debug!(
@@ -400,7 +400,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     /// Sync keyhive state with a peer.
-    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> eyre::Result<()> {
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerKey) -> eyre::Result<()> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
         let mut guard = KeyhiveSyncWaiterGuard {
             cmd_tx: self.cmd_tx.clone(),
@@ -555,7 +555,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 struct DocSyncWaiterGuard {
     cmd_tx: async_channel::Sender<Runtime2Cmd>,
     doc_id: DocumentId,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     waiter_id: u64,
     completed: bool,
 }
@@ -574,7 +574,7 @@ impl Drop for DocSyncWaiterGuard {
 
 struct KeyhiveSyncWaiterGuard {
     cmd_tx: async_channel::Sender<Runtime2Cmd>,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     waiter_id: u64,
     completed: bool,
 }

@@ -1096,39 +1096,51 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     let pair = Pair::boot(200, 201, "Owner", "Reader").await?;
     let _owner_peer = pair.left().repo.local_peer_id();
     let reader_peer = pair.right().repo.local_peer_id();
-    let unknown_peer = big_sync_core::PeerId::new([0x99; 32]);
+    let unknown_peer = big_sync_core::PeerKey::new([0x99; 32]);
 
     let mut seed = automerge::Automerge::new();
     seed.transact(|tx| tx.put(automerge::ROOT, "test", true))
         .ok();
     let doc = pair.left().repo.create_doc(seed).await?;
     let doc_id = doc.document_id();
-    let obj_id = big_sync_core::ObjId::new(*doc_id.as_bytes());
-    let unknown_obj_id = big_sync_core::ObjId::new([0x88; 32]);
+    let obj_id = big_sync_core::ObjKey::new(*doc_id.as_bytes());
+    let unknown_obj_id = big_sync_core::ObjKey::new([0x88; 32]);
 
     let store = &pair.left().repo.big_sync_store;
 
-    // 1. None-principal case: local subscriber bypass returns true
-    assert!(store.is_event_permitted(None, obj_id, None).await?);
-
-    // 2. Unknown object returns false (denial)
-    assert!(
-        !store
-            .is_event_permitted(None, unknown_obj_id, Some(reader_peer))
-            .await?
+    // 1. None-principal case: a trusted local subscriber is unfiltered
+    assert_eq!(
+        store
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id, None)
+            .await?,
+        None,
     );
 
-    // 3. Unknown peer on known object returns false (denial)
-    assert!(
-        !store
-            .is_event_permitted(None, obj_id, Some(unknown_peer))
-            .await?
+    // 2. Unknown object yields nothing readable (denial)
+    assert_eq!(
+        store
+            .permitted_parts(
+                big_sync::PartScope::FromObject,
+                unknown_obj_id,
+                Some(reader_peer)
+            )
+            .await?,
+        Some(Vec::new()),
     );
 
-    // 4. Grant reader access via keyhive, verify permitted, then revoke and assert denial.
-    //    The raw store tables are derived state: the group-part worker rebuilds
-    //    `big_sync_syncable` from keyhive membership, so grants must go through
-    //    the keyhive APIs (`grant_doc_access` waits for that rebuild).
+    // 3. Unknown peer on known object yields nothing readable (denial)
+    assert_eq!(
+        store
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id, Some(unknown_peer))
+            .await?,
+        Some(Vec::new()),
+    );
+
+    // 4. A document-level grant is NOT a part-level grant. Access is granted per part and
+    //    a part audience derives from that group's membership, while `grant_doc_access`
+    //    adds to `Membered::Document` (keyhive.rs) and so is invisible to every part.
+    //    Directly granted objects are the exact-object path's business, not collection
+    //    reconciliation (ADR 012); until that path lands this is fail-closed.
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
@@ -1138,19 +1150,23 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
             keyhive_core::access::Access::Read,
         )
         .await?;
-    assert!(
+    assert_eq!(
         store
-            .is_event_permitted(None, obj_id, Some(reader_peer))
-            .await?
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id, Some(reader_peer))
+            .await?,
+        Some(Vec::new()),
+        "a document-level grant must not authorize collection delivery",
     );
     pair.left()
         .repo
         .revoke_doc_access(doc_id, reader_agent)
         .await?;
-    assert!(
-        !store
-            .is_event_permitted(None, obj_id, Some(reader_peer))
-            .await?
+    assert_eq!(
+        store
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id, Some(reader_peer))
+            .await?,
+        Some(Vec::new()),
+        "a revoked reader must have nothing readable",
     );
 
     Ok(())

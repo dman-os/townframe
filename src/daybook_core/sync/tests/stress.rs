@@ -123,7 +123,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             .take()
             .ok_or_eyre("leaving node missing from cluster state")?;
         let leaving_peer_id =
-            PeerId::new(*leaving_node.sync_repo.router.endpoint().id().as_bytes());
+            PeerKey::new(*leaving_node.sync_repo.router.endpoint().id().as_bytes());
         leaving_node.stop().await?;
         for active in nodes.iter().flatten() {
             active
@@ -329,7 +329,7 @@ async fn open_cluster_nodes(paths: &[PathBuf]) -> Res<Vec<Option<SyncTestNode>>>
 async fn connect_topology(
     nodes: &[Option<SyncTestNode>],
     edges: &[(usize, usize)],
-) -> Res<Vec<HashSet<PeerId>>> {
+) -> Res<Vec<HashSet<PeerKey>>> {
     // Pre-provision all active nodes with each other's endpoint IDs
     // so that auth doesn't block connections in the mesh topology.
     let active_nodes: Vec<(usize, &SyncTestNode)> = nodes
@@ -350,7 +350,7 @@ async fn connect_topology(
         }
     }
 
-    let mut endpoint_sets = vec![HashSet::<PeerId>::new(); NODE_COUNT];
+    let mut endpoint_sets = vec![HashSet::<PeerKey>::new(); NODE_COUNT];
     for (a, b) in edges {
         let node_a = nodes[*a]
             .as_ref()
@@ -361,12 +361,12 @@ async fn connect_topology(
 
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
-        let peer_b_id = PeerId::new(*endpoint_addr_ab.id.as_bytes());
+        let peer_b_id = PeerKey::new(*endpoint_addr_ab.id.as_bytes());
         endpoint_sets[*a].insert(peer_b_id);
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
-        let peer_a_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
+        let peer_a_id = PeerKey::new(*endpoint_addr_ba.id.as_bytes());
         endpoint_sets[*b].insert(peer_a_id);
 
         node_a
@@ -393,7 +393,7 @@ struct DiagnosticReport {
 
 async fn settle_stress_phase(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     diagnostic_timeout: Option<Duration>,
     temp_root: &std::path::Path,
     phase: &'static str,
@@ -407,7 +407,7 @@ async fn settle_stress_phase(
 
 async fn bounded_phase_settlement(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     timeout: Duration,
     phase: &'static str,
     stage: &'static str,
@@ -609,7 +609,7 @@ async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId
 
 async fn diagnostic_phase_settlement(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     timeout: Duration,
     temp_root: &std::path::Path,
     phase: &'static str,
@@ -625,7 +625,7 @@ async fn diagnostic_phase_settlement(
         for (node_index, node) in active.iter().enumerate() {
             for (peer_index, peer) in active.iter().enumerate() {
                 if node_index != peer_index {
-                    let peer_id = PeerId::new(*peer.sync_repo.router.endpoint().id().as_bytes());
+                    let peer_id = PeerKey::new(*peer.sync_repo.router.endpoint().id().as_bytes());
                     node.sync_repo
                         .rcx
                         .big_repo
@@ -688,7 +688,7 @@ async fn diagnostic_phase_settlement(
                 warn!(%doc_id, "diagnostic content sync skipped: no known-good materializer");
                 continue;
             };
-            let source_peer = PeerId::new(
+            let source_peer = PeerKey::new(
                 *active[source_index]
                     .sync_repo
                     .router
@@ -739,7 +739,7 @@ async fn diagnostic_phase_settlement(
 
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
 ) -> Res<()> {
     info!(barrier = "network-rest", "stress barrier begin");
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {

@@ -34,7 +34,7 @@ pub async fn run(sync_urls: Vec<String>, exit_when_synced: bool) -> Res<ExitCode
     let devices = config_repo.list_known_sync_devices().await?;
     let peer_ids: Vec<_> = devices
         .into_iter()
-        .map(|dev| big_sync_core::PeerId::new(*dev.endpoint_id.as_bytes()))
+        .map(|dev| big_sync_core::PeerKey::new(*dev.endpoint_id.as_bytes()))
         .collect();
 
     if exit_when_synced {

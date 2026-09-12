@@ -12,8 +12,8 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct ListBucketsTask {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub offset: BuckId,
     pub since: CursorIndex,
     pub working_level: BuckLevel,
@@ -21,16 +21,16 @@ pub struct ListBucketsTask {
 
 #[derive(Debug)]
 pub struct ListBucketsResult {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub filtered_buckets: Vec<BucketSummary>,
 }
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub struct ListBucketsTaskError {
-        pub peer_id: PeerId,
-        pub part_id: PartId,
+        pub peer_id: PeerKey,
+        pub part_id: PartKey,
         pub _deets:
             pub enum ListBucketsTaskErrorDeets {
                 #![derive(thiserror::Error, displaydoc::Display)]

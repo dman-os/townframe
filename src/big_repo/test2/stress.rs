@@ -6,13 +6,13 @@
 
 use super::harness::fixtures::wait_for_agent;
 use super::harness::topo::Node;
-use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
+use crate::{BigKeyhiveGroup, DocumentId, PeerKey, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use big_sync::{
     HostPartStore,
     stress_support::{self, StressFixture},
 };
-use big_sync_core::{ObjId, PartId};
+use big_sync_core::{ObjKey, PartKey};
 use futures::future::try_join_all;
 use keyhive_core::access::Access;
 use rand::rngs::StdRng;
@@ -48,13 +48,13 @@ impl Default for BigRepoStressConfig {
 
 pub(crate) struct BigRepoStressFixture {
     config: BigRepoStressConfig,
-    shared_edit_groups: Arc<Mutex<HashMap<PeerId, BigKeyhiveGroup>>>,
+    shared_edit_groups: Arc<Mutex<HashMap<PeerKey, BigKeyhiveGroup>>>,
     shared_edit_group_id: Arc<Mutex<Option<keyhive_core::principal::group::id::GroupId>>>,
-    editor_peer_ids: Arc<Mutex<BTreeSet<PeerId>>>,
-    relay_peer_ids: Arc<Mutex<BTreeSet<PeerId>>>,
-    obj_doc_map: Arc<Mutex<HashMap<ObjId, DocumentId>>>,
+    editor_peer_ids: Arc<Mutex<BTreeSet<PeerKey>>>,
+    relay_peer_ids: Arc<Mutex<BTreeSet<PeerKey>>>,
+    obj_doc_map: Arc<Mutex<HashMap<ObjKey, DocumentId>>>,
     all_docs: Arc<Mutex<BTreeSet<DocumentId>>>,
-    node_paths: Arc<Mutex<HashMap<PeerId, PathBuf>>>,
+    node_paths: Arc<Mutex<HashMap<PeerKey, PathBuf>>>,
 }
 
 impl BigRepoStressFixture {
@@ -74,7 +74,7 @@ impl BigRepoStressFixture {
         node.label == "relay"
     }
 
-    async fn doc_id(&self, obj: &ObjId) -> Res<DocumentId> {
+    async fn doc_id(&self, obj: &ObjKey) -> Res<DocumentId> {
         self.obj_doc_map
             .lock()
             .await
@@ -99,7 +99,7 @@ impl BigRepoStressFixture {
         Ok(result)
     }
 
-    async fn collect_parts(&self, node: &Node) -> Res<BTreeMap<DocumentId, Vec<PartId>>> {
+    async fn collect_parts(&self, node: &Node) -> Res<BTreeMap<DocumentId, Vec<PartKey>>> {
         let mut result = BTreeMap::new();
         for doc_id in self.tracked_docs().await {
             let mut parts = node.store.obj_parts(doc_id).await?;
@@ -112,8 +112,8 @@ impl BigRepoStressFixture {
     async fn collect_peer_cursors(
         &self,
         node: &Node,
-        parts: &[PartId],
-    ) -> Res<BTreeMap<PeerId, BTreeMap<PartId, u64>>> {
+        parts: &[PartKey],
+    ) -> Res<BTreeMap<PeerKey, BTreeMap<PartKey, u64>>> {
         let mut result = BTreeMap::new();
         for peer_id in node.connected_peer_ids().await {
             let mut peer_cursors = BTreeMap::new();
@@ -131,7 +131,7 @@ impl BigRepoStressFixture {
     /// not know reported as `unknown` rather than failing — a lagging node
     /// lacking a group-part is precisely what this diagnostic is meant to
     /// reveal (previously it error-returned and hid the real mismatch).
-    async fn collect_local_cursors(&self, node: &Node, parts: &[PartId]) -> Res<String> {
+    async fn collect_local_cursors(&self, node: &Node, parts: &[PartKey]) -> Res<String> {
         match node
             .store
             .summarize_parts(parts.iter().copied().collect())
@@ -192,7 +192,7 @@ impl BigRepoStressFixture {
             .insert(node.peer_id(), group.clone());
         Ok(group)
     }
-    async fn sync_parts(&self) -> Vec<PartId> {
+    async fn sync_parts(&self) -> Vec<PartKey> {
         // The stress cluster is GLOBAL-free by design: the group part is the
         // sync primitive under test. Part selection is an explicit
         // code-level decision — everyone (editors and relay alike) listens on
@@ -203,7 +203,7 @@ impl BigRepoStressFixture {
         }
         parts.into_iter().collect()
     }
-    async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartId>> {
+    async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartKey>> {
         let _left_and_right = (left, right);
         Ok(self.sync_parts().await)
     }
@@ -212,14 +212,14 @@ impl BigRepoStressFixture {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BigRepoStressObservation {
     pub sedimentree_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
-    pub parts: BTreeMap<DocumentId, Vec<PartId>>,
+    pub parts: BTreeMap<DocumentId, Vec<PartKey>>,
 }
 
 #[async_trait::async_trait]
 impl StressFixture for BigRepoStressFixture {
     type World = ();
     type Node = Node;
-    type StressObj = ObjId;
+    type StressObj = ObjKey;
     type Observation = BigRepoStressObservation;
 
     fn label(&self) -> &'static str {
@@ -250,7 +250,7 @@ impl StressFixture for BigRepoStressFixture {
             // is the sync primitive under test, and hiding GLOBAL exercises
             // the production relay design (large sets never pay global-sub
             // cost) end to end.
-            HashSet::from([crate::GLOBAL_PART_ID]),
+            HashSet::from([crate::global_part_id()]),
         )
         .await?;
         self.node_paths.lock().await.insert(node.peer_id(), path);
@@ -381,7 +381,7 @@ impl StressFixture for BigRepoStressFixture {
         })
     }
 
-    fn peer_id(&self, node: &Self::Node) -> PeerId {
+    fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id()
     }
 
@@ -562,8 +562,8 @@ impl StressFixture for BigRepoStressFixture {
         // semantics.
         let tracked_docs = self.tracked_docs().await;
         let mut last_report = tokio::time::Instant::now();
-        let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
-            let observations: Vec<(PeerId, BigRepoStressObservation)> =
+        let observations: Vec<(PeerKey, BigRepoStressObservation)> = loop {
+            let observations: Vec<(PeerKey, BigRepoStressObservation)> =
                 try_join_all(nodes.iter().map(|node| async {
                     Ok::<_, crate::interlude::eyre::Report>((
                         node.peer_id(),

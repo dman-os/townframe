@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::app::*;
-use crate::sync::PeerKey;
+use crate::sync::PeerId;
 
 use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
@@ -116,7 +116,7 @@ pub struct RepoCtx {
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
 
-    pub local_peer_key: PeerKey,
+    pub local_peer_key: PeerId,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -145,7 +145,7 @@ pub(crate) struct RepoCtxParts {
     pub derived_part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
-    pub local_peer_key: PeerKey,
+    pub local_peer_key: PeerId,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -804,7 +804,7 @@ impl RepoCtx {
 }
 
 struct UserInfo {
-    local_peer_key: PeerKey,
+    local_peer_key: PeerId,
     local_user_path: UserPathBuf,
     local_actor_id: automerge::ActorId,
 }
@@ -1252,7 +1252,7 @@ pub mod globals {
     pub struct SyncDeviceEntry {
         pub endpoint_id: iroh::EndpointId,
         #[serde(default)]
-        pub agent_peer_id: Option<big_sync_core::PeerId>,
+        pub agent_peer_id: Option<big_sync_core::PeerKey>,
         pub name: String,
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,

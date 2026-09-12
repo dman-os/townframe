@@ -24,6 +24,7 @@ structstruck.workspace = true
 
 #
 # encoding
+blake3.workspace = true
 bs58.workspace = true
 serde.workspace = true
 siphasher = "1.0.3"

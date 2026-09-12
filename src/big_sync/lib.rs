@@ -29,6 +29,7 @@ pub use big_sync_core::delta_walker_state::{
     DeltaWalkerStateTransaction,
 };
 pub use big_sync_core::part_store::ObjPayload;
+pub use big_sync_core::SyncMode;
 pub use delta_walker_state::{SqliteDeltaWalkerStateRepo, SqliteDeltaWalkerStateTransaction};
 #[cfg(feature = "test-support")]
 pub use part_store::host_contract as host_part_store_contract;
@@ -39,7 +40,7 @@ pub use part_store::sqlite::{
     SqlitePartStore, open_sqlite_local_revision_reader, open_sqlite_local_revision_reader_all,
 };
 pub use part_store::sqlite_core;
-pub use part_store::{HostPartStore, HostPartStoreConfig, LocalPartRevisionReader};
+pub use part_store::{HostPartStore, HostPartStoreConfig, LocalPartRevisionReader, PartScope};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{

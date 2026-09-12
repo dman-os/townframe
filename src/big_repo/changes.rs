@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 pub enum BigRepoChangeOrigin {
     Local,
     Remote {
-        peer_id: PeerId,
+        peer_id: PeerKey,
     },
     /// Materialization advanced because local keyhive state changed (a
     /// processed CGKA operation, delegation, revocation, or keyhive sync
@@ -170,24 +170,24 @@ pub enum BigRepoDomainNotification {
     /// A member was added to a group.
     MemberAddedToGroup {
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     },
     /// A member was removed from a group.
     MemberRemovedFromGroup {
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
     },
     /// A document's access control entry changed.
     DocumentAccessChanged {
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     },
     /// A member's access to a document was revoked.
     DocumentAccessRevoked {
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
     },
     /// A document's encryption key was rotated.
     DocumentKeyRotated { doc_id: DocumentId },
@@ -615,7 +615,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_member_added_to_group(
         &self,
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     ) -> Res<()> {
         self.ensure_live()?;
@@ -632,7 +632,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_member_removed_from_group(
         &self,
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
     ) -> Res<()> {
         self.ensure_live()?;
         self.domain_tx
@@ -647,7 +647,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_document_access_changed(
         &self,
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     ) -> Res<()> {
         self.ensure_live()?;
@@ -664,7 +664,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_document_access_revoked(
         &self,
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
     ) -> Res<()> {
         self.ensure_live()?;
         self.domain_tx
@@ -1552,7 +1552,7 @@ mod tests {
             doc_id,
             heads,
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([42_u8; 32]),
+                peer_id: PeerKey::new([42_u8; 32]),
             },
         )?;
         let batch = recv_batch(&mut rx).await;
@@ -1591,7 +1591,7 @@ mod tests {
             Arc::clone(&patch),
             Arc::clone(&heads),
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([11_u8; 32]),
+                peer_id: PeerKey::new([11_u8; 32]),
             },
         )?;
         manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Bootstrap)?;
@@ -1628,7 +1628,7 @@ mod tests {
 
         let doc_id = DocumentId::random();
         let group_id = GroupId::new([1u8; 32]);
-        let member_id = PeerId::new([2u8; 32]);
+        let member_id = PeerKey::new([2u8; 32]);
 
         manager.notify_document_added_to_group(doc_id, group_id)?;
         let batch1 = recv_batch(&mut rx).await;

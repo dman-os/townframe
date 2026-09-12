@@ -11,23 +11,23 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct LeafBucketsTask {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub since: CursorIndex,
     pub buckets: Vec<LeafBucketRequest>,
 }
 
 #[derive(Debug)]
 pub struct LeafBucketsResult {
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     pub filtered_objs: Map<BuckId, BucketObjLeafPage>,
 }
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub struct LeafBucketsTaskError {
-        pub peer_id: PeerId,
-        pub part_id: PartId,
+        pub peer_id: PeerKey,
+        pub part_id: PartKey,
         pub _deets:
             pub enum LeafBucketsErrorDeets {
                 #![derive(thiserror::Error, displaydoc::Display)]

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 use big_sync_core::part_store::ObjPayload;
-use big_sync_core::{ObjId, PartId, PeerId};
+use big_sync_core::{ObjKey, PartKey, PeerKey};
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
@@ -9,16 +9,16 @@ pub trait SyncBackend: Send + Sync + 'static {
     /// domain semantics want it re-advertised to other peers, or ignore them.
     async fn sync_obj(
         &self,
-        peer_id: PeerId,
-        obj_id: ObjId,
-        parts: Vec<PartId>,
+        peer_id: PeerKey,
+        obj_id: ObjKey,
+        parts: Vec<PartKey>,
         remote_payload: Option<ObjPayload>,
     ) -> Res<crate::SyncTaskRunOutcome>;
 
     /// Backend-owned part-membership eviction. The machine replays removal
     /// requests (subscription `Removed` events, remote tombstones) into this;
     /// the backend decides what eviction means for its domain. Idempotent.
-    async fn remove_obj_from_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()>;
+    async fn remove_obj_from_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()>;
 }
 
 pub mod contract {
@@ -34,13 +34,13 @@ pub mod contract {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SyncBackendScenario {
         pub name: &'static str,
-        pub peer_id: PeerId,
-        pub obj_id: ObjId,
+        pub peer_id: PeerKey,
+        pub obj_id: ObjKey,
         pub initial_payload: Option<ObjPayload>,
-        pub initial_parts: Vec<PartId>,
+        pub initial_parts: Vec<PartKey>,
         pub remote_payload: Option<ObjPayload>,
         pub expected_outcome: SyncBackendOutcome,
-        pub expected_parts: Vec<PartId>,
+        pub expected_parts: Vec<PartKey>,
     }
 
     impl SyncBackendScenario {
@@ -51,10 +51,10 @@ pub mod contract {
 
         pub fn noop(
             name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
+            peer_id: PeerKey,
+            obj_id: ObjKey,
             payload: ObjPayload,
-            parts: Vec<PartId>,
+            parts: Vec<PartKey>,
         ) -> Self {
             Self {
                 name,
@@ -70,11 +70,11 @@ pub mod contract {
 
         pub fn changed_object(
             name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
+            peer_id: PeerKey,
+            obj_id: ObjKey,
             initial_payload: ObjPayload,
             remote_payload: ObjPayload,
-            parts: Vec<PartId>,
+            parts: Vec<PartKey>,
         ) -> Self {
             Self {
                 name,
@@ -92,10 +92,10 @@ pub mod contract {
 
         pub fn added_member(
             name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
+            peer_id: PeerKey,
+            obj_id: ObjKey,
             remote_payload: ObjPayload,
-            parts: Vec<PartId>,
+            parts: Vec<PartKey>,
         ) -> Self {
             Self {
                 name,

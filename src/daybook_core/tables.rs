@@ -333,7 +333,7 @@ pub struct TablesRepo {
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
@@ -846,7 +846,7 @@ impl TablesRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
             return Ok(());

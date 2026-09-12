@@ -514,7 +514,7 @@ mod tests {
         node_b
             .sync_repo
             .wait_until_peers_sync(
-                std::slice::from_ref(&big_sync_core::PeerId::new(*bootstrap.id.as_bytes())),
+                std::slice::from_ref(&big_sync_core::PeerKey::new(*bootstrap.id.as_bytes())),
                 None,
             )
             .await?;

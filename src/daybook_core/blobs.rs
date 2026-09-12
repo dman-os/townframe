@@ -14,19 +14,19 @@ pub mod sync;
 pub(crate) use pin_worker::spawn_blob_pin_worker;
 pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
 
-pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartId {
+pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartKey {
     let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");
     hasher.update(doc_id.as_bytes());
-    PartId::new(*hasher.finalize().as_bytes())
+    PartKey::new(*hasher.finalize().as_bytes())
 }
 
-pub fn blob_inventory_part_id_from_doc_id(doc_id: &str) -> PartId {
+pub fn blob_inventory_part_id_from_doc_id(doc_id: &str) -> PartKey {
     if let Ok(id) = doc_id.parse::<DocumentId>() {
         blob_inventory_part_id(&id)
     } else {
         let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");
         hasher.update(doc_id.as_bytes());
-        PartId::new(*hasher.finalize().as_bytes())
+        PartKey::new(*hasher.finalize().as_bytes())
     }
 }
 
@@ -74,7 +74,7 @@ pub enum BlobMaterializeRequest {
 
 pub const BLOB_SCHEME: &str = "db+blob";
 
-pub type BlobId = ObjId;
+pub type BlobId = ObjKey;
 
 pub fn blob_id_from_hash(hash: &str) -> BlobId {
     use std::str::FromStr;

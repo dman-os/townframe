@@ -41,7 +41,7 @@ pub(crate) struct SubscriptionEntry {
     pub tx: irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
 }
 
-pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerId, SubscriptionEntry>>>;
+pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerKey, SubscriptionEntry>>>;
 
 /// Producer-side handle to the dispatcher task.
 #[derive(Clone)]
@@ -54,7 +54,7 @@ impl KeyhiveChangeDispatcher {
     /// the initial confirmation event. Returns the subscription ID.
     pub(crate) async fn subscribe(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         tx: irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
     ) -> Uuid {
         let sub_id = Uuid::new_v4();
@@ -94,7 +94,7 @@ impl KeyhiveChangeDispatcher {
     }
 
     /// Unregister a peer's notification stream for the given subscription ID.
-    pub(crate) async fn unsubscribe(&self, peer_id: &PeerId, sub_id: Uuid) {
+    pub(crate) async fn unsubscribe(&self, peer_id: &PeerKey, sub_id: Uuid) {
         surelock::key::lock_scope(|key| {
             let (mut subscriptions, _key) = key.lock(&self.subscriptions);
             if let Some(entry) = subscriptions.get(peer_id)
@@ -181,7 +181,7 @@ async fn run_dispatcher(
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> Res<()> {
-    let mut batcher: KeyedBatcher<PeerId, (), DebouncePolicy> =
+    let mut batcher: KeyedBatcher<PeerKey, (), DebouncePolicy> =
         KeyedBatcher::new(policy, |_: &()| 0, |(), ()| {});
     // Boot at the current head: pre-boot incorporations are covered by each
     // subscriber's initial pull. The shared reader owns replay-boundary and
@@ -231,7 +231,7 @@ async fn run_dispatcher(
 /// failure surfaces through the task's unwrap rather than being retried
 /// forever.
 async fn classify_rows(
-    batcher: &mut KeyedBatcher<PeerId, (), DebouncePolicy>,
+    batcher: &mut KeyedBatcher<PeerKey, (), DebouncePolicy>,
     protocol: &BigRepoKeyhiveProtocol,
     subscriptions: &SubscriptionMap,
     rows: &[keyhive_admission::AdmittedRow],
@@ -413,7 +413,7 @@ async fn classify_rows(
             // neither selected nor covered by the unattributed fallback is a
             // peer the cache proved is not a recipient.
             if selected {
-                let peer_id = PeerId::new(*peer.verifying_key());
+                let peer_id = PeerKey::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
             }
         }
@@ -422,7 +422,7 @@ async fn classify_rows(
 }
 
 /// Deliver due notifications concurrently, dropping subscriptions whose stream closed.
-async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
+async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerKey, ())>) {
     if due.is_empty() {
         return;
     }
@@ -431,7 +431,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
         tracing::debug!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
     }
     let targets: Vec<(
-        PeerId,
+        PeerKey,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
     )> =
@@ -479,7 +479,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
         }
     });
     let results = futures::future::join_all(delivery_futures).await;
-    let failed: Vec<(PeerId, Uuid)> = results.into_iter().flatten().collect();
+    let failed: Vec<(PeerKey, Uuid)> = results.into_iter().flatten().collect();
     if !failed.is_empty() {
         surelock::key::lock_scope(|key| {
             let (mut subs, _key) = key.lock(subscriptions);

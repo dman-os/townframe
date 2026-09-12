@@ -28,7 +28,7 @@ pub const REPO_SYNC_ALPN: &[u8] = big_repo::rpc::REPO_SYNC_ALPN;
 pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
 pub(crate) const BLOBS_BACKEND_ID: &str = "blobs";
 
-pub type PeerKey = Arc<str>;
+pub type PeerId = Arc<str>;
 
 #[derive(Debug, Clone)]
 struct SubductionProtocolHandler {
@@ -64,7 +64,7 @@ enum ActivePeerState {
         closed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     },
     Connected {
-        peer_key: PeerKey,
+        peer_key: PeerId,
         // The connection's end flag (shared with the runtime's watcher),
         // used to identify which connection a `ConnFinishSignal` belongs to.
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -85,7 +85,7 @@ pub struct IrohSyncRepo {
     progress_repo: Option<Arc<ProgressRepo>>,
 
     conn_end_signal_tx: mpsc::UnboundedSender<big_repo::ConnFinishSignal>,
-    active_peers: tokio::sync::RwLock<HashMap<PeerId, ActivePeerState>>,
+    active_peers: tokio::sync::RwLock<HashMap<PeerKey, ActivePeerState>>,
     // sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
@@ -97,25 +97,25 @@ pub struct IrohSyncRepo {
 #[derive(Debug, Clone)]
 pub enum IrohSyncEvent {
     IncomingConnection {
-        peer_key: PeerKey,
+        peer_key: PeerId,
     },
     OutgoingConnection {
-        peer_key: PeerKey,
+        peer_key: PeerId,
     },
     ConnectionClosed {
-        peer_key: PeerKey,
+        peer_key: PeerId,
         reason: String,
     },
     PeerFullySynced {
-        peer_key: PeerKey,
+        peer_key: PeerId,
         doc_count: usize,
     },
     PartitionFullySynced {
-        peer_key: PeerKey,
+        peer_key: PeerId,
         partition: String,
     },
     DocSyncedWithPeer {
-        peer_key: PeerKey,
+        peer_key: PeerId,
         doc_id: DocumentId,
     },
     BlobSynced {
@@ -134,7 +134,7 @@ pub enum IrohSyncEvent {
         attempt_no: usize,
     },
     StalePeer {
-        peer_key: PeerKey,
+        peer_key: PeerId,
     },
 }
 
@@ -239,6 +239,11 @@ impl IrohSyncRepo {
             doc_sync_backends,
             "daybook-docs",
             max_task_backoff,
+            // Cursor replay, explicitly: bucket-diff was observed stalling in this
+            // embedder's offline-reopen path — the machine starts post-reopen and never
+            // completes, blocking `wait_for_full_sync` — and no test here covers that
+            // path, so this embedder stays opted out until one does.
+            Some(big_sync::SyncMode::CursorOnly),
             Arc::from("daybook-core"),
         )?;
 
@@ -250,6 +255,8 @@ impl IrohSyncRepo {
                 blob_sync_backends,
                 "daybook-blobs",
                 max_task_backoff,
+                // Cursor replay, explicitly: see the note on the docs worker above.
+                Some(big_sync::SyncMode::CursorOnly),
                 Arc::from("daybook-blobs"),
             )?;
 
@@ -364,7 +371,7 @@ impl IrohSyncRepo {
 
 impl IrohSyncRepo {
     #[inline]
-    pub fn is_blob_part(&self, part_id: PartId) -> bool {
+    pub fn is_blob_part(&self, part_id: PartKey) -> bool {
         let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);
         let docs_blob = crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id);
         part_id == core_blob || part_id == docs_blob
@@ -374,7 +381,7 @@ impl IrohSyncRepo {
         &self,
         _peer_key: &str,
         include_blob_parts: bool,
-    ) -> HashMap<PartId, BackendId> {
+    ) -> HashMap<PartKey, BackendId> {
         let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
         let mut parts = HashMap::from([
             (
@@ -409,8 +416,8 @@ impl IrohSyncRepo {
     }
 
     fn split_partitions(
-        parts: HashMap<PartId, BackendId>,
-    ) -> (HashMap<PartId, BackendId>, HashMap<PartId, BackendId>) {
+        parts: HashMap<PartKey, BackendId>,
+    ) -> (HashMap<PartKey, BackendId>, HashMap<PartKey, BackendId>) {
         let blob_backend = BLOBS_BACKEND_ID.into();
         let mut doc = HashMap::new();
         let mut blob = HashMap::new();
@@ -761,7 +768,7 @@ impl IrohSyncRepo {
 
     /// Tear down a peer's registration without touching `active_peers` (the
     /// caller manages that). Idempotent per peer.
-    async fn teardown_peer_registration(&self, peer_id: PeerId) {
+    async fn teardown_peer_registration(&self, peer_id: PeerKey) {
         self.big_repo_rpc.unregister_peer(peer_id);
         self.blobs_sync_backend.unregister_peer_addr(peer_id);
         self.big_sync_worker.remove_peer(peer_id).await.ok();
@@ -816,7 +823,7 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    async fn reserve_endpoint_connection(&self, peer_id: PeerId) -> bool {
+    async fn reserve_endpoint_connection(&self, peer_id: PeerKey) -> bool {
         let mut active_peers = self.active_peers.write().await;
         if active_peers.contains_key(&peer_id) {
             return false;
@@ -872,7 +879,7 @@ impl IrohSyncRepo {
             eyre::bail!("connecting to ourself is not supported");
         }
         let endpoint_id = endpoint_addr.id;
-        let peer_id = PeerId::new(*endpoint_id.as_bytes());
+        let peer_id = PeerKey::new(*endpoint_id.as_bytes());
 
         let endpoint = self.router.endpoint().clone();
 
@@ -1025,8 +1032,8 @@ impl IrohSyncRepo {
     #[tracing::instrument(skip(self))]
     pub async fn wait_for_full_sync(
         &self,
-        peer_ids: &[PeerId],
-        required_partitions: &[PartId],
+        peer_ids: &[PeerKey],
+        required_partitions: &[PartKey],
         timeout: Option<Duration>,
     ) -> Res<()> {
         self.ensure_repo_live()?;
@@ -1066,8 +1073,8 @@ impl IrohSyncRepo {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_network_rest(
         &self,
-        peer_ids: &[PeerId],
-        required_partitions: &[PartId],
+        peer_ids: &[PeerKey],
+        required_partitions: &[PartKey],
     ) -> Res<()> {
         self.ensure_repo_live()?;
         let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
@@ -1096,7 +1103,7 @@ impl IrohSyncRepo {
 
     pub async fn wait_until_peers_sync(
         &self,
-        peer_ids: &[PeerId],
+        peer_ids: &[PeerKey],
         timeout: Option<Duration>,
     ) -> Res<()> {
         let parts = self

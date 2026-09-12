@@ -77,8 +77,12 @@ CREATE TABLE IF NOT EXISTS big_sync_peer_cursors (
 
 CREATE TABLE IF NOT EXISTS big_sync_syncable (
       scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id)
-    , obj_ref INTEGER NOT NULL REFERENCES big_sync_objs(obj_ref)
+    , part_ref INTEGER NOT NULL REFERENCES big_sync_parts(part_ref)
     , principal_id BLOB NOT NULL
     , access_level INTEGER NOT NULL
-    , PRIMARY KEY(scope_id, obj_ref, principal_id)
+    , changed_at INTEGER NOT NULL
+    , PRIMARY KEY(scope_id, part_ref, principal_id)
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS big_sync_syncable_principal_changed_idx
+    ON big_sync_syncable(principal_id, changed_at);

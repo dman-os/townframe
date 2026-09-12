@@ -5,6 +5,11 @@ use big_repo::{BigRepo, SharedBigRepo};
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 
+/// The band these harnesses run. They mirror the daybook embedder, which opts out of the
+/// bucket path because bucket-diff was observed stalling in its offline-reopen scenario, so
+/// its tests stay on the cursor path rather than inheriting the new default.
+const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::CursorOnly);
+
 pub struct DaybookTestContext {
     pub _acx: SharedBigRepo,
     pub big_sync_stop: big_sync::StopToken,
@@ -169,10 +174,12 @@ pub async fn test_cx_with_options(
     })
     .await?;
     let part_store = big_repo.shared_part_store();
-    let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-test-cx",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
 
@@ -516,10 +523,12 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
         .await?,
     );
     let store: Arc<dyn big_sync::HostPartStore> = store as _;
-    let (worker, stop) = big_sync::spawn_big_sync_worker(
+    let (worker, stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&store),
         HashMap::new(),
         "daybook-test-part-store",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
     Ok((big_sync::Ctx { store, worker }, stop))
@@ -541,10 +550,12 @@ pub async fn boot_repo() -> Res<(
     })
     .await?;
     let part_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-boot-repo",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
     let big_sync_host = big_sync::Ctx {
@@ -586,10 +597,12 @@ pub async fn boot_disk_repo(
     })
     .await?;
     let part_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-boot-disk",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
     let big_sync_host = big_sync::Ctx {

@@ -9,7 +9,12 @@ use big_sync::backend::contract::{
 };
 use big_sync::stress_support;
 use big_sync::{HostPartStore, SyncBackend};
-use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
+use big_sync_core::{ByteKey, PartKey, PeerKey, SyncCompletionDeets};
+
+/// The band these harnesses run. They mirror the embedder they belong to, and big_repo is
+/// where bucket-diff was observed stalling in the offline-reopen scenario, so its tests stay
+/// on the cursor path they were debugged on rather than inheriting the new default.
+const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::CursorOnly);
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
 use std::collections::HashMap;
@@ -37,10 +42,12 @@ pub async fn boot_repo() -> Res<(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-repo",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
@@ -82,10 +89,12 @@ pub async fn _boot_disk_repo(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-disk",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
@@ -165,7 +174,7 @@ async fn recv_head_batch(
         .expect("head listener closed unexpectedly")
 }
 
-async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
+async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
     let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
     repo.keyhive().get_agent_by_peer_id(&kh_peer_id).await
 }
@@ -184,7 +193,7 @@ fn keyhive_document_id_for_big_repo_doc(
 async fn wait_for_document_access_notification(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<crate::changes::BigRepoDomainNotification>>,
     doc_id: DocumentId,
-    member_id: PeerId,
+    member_id: PeerKey,
     expected_access: crate::changes::BigRepoAccess,
 ) -> Res<()> {
     timeout(utils_rs::scale_timeout(Duration::from_secs(10)), async {
@@ -2568,7 +2577,7 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
                     .expect("failed mutating remote doc");
             },
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([9_u8; 32]),
+                peer_id: PeerKey::new([9_u8; 32]),
             },
         )
         .await?;
@@ -2841,19 +2850,19 @@ fn new_sync_doc(actor: automerge::ActorId, value: &serde_json::Value) -> automer
     doc
 }
 
-fn sync_test_part() -> PartId {
-    PartId(Byte32Id::new([
+fn sync_test_part() -> PartKey {
+    PartKey(ByteKey::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
     ]))
 }
 
-fn sync_test_parts() -> Vec<PartId> {
+fn sync_test_parts() -> Vec<PartKey> {
     vec![sync_test_part()]
 }
 
-fn sync_test_parts_multi() -> Vec<PartId> {
-    vec![sync_test_part(), PartId(Byte32Id::new([7; 32]))]
+fn sync_test_parts_multi() -> Vec<PartKey> {
+    vec![sync_test_part(), PartKey(ByteKey::new([7; 32]))]
 }
 
 struct BigRepoSyncBackendContractHarness {
@@ -2972,7 +2981,7 @@ async fn create_shared_sync_doc(
     // (has_doc_worker || contains_sedimentree) passes for
     // subsequent sync scenarios.
     let doc_id = handle.document_id();
-    // The runtime listener registers the doc in GLOBAL_PART_ID on the
+    // The runtime listener registers the doc in global_part_id() on the
     // grantee when the delegation arrives via ephemeral notification.
     // If the grantee restarted and the listener isn't active, the caller
     // is responsible for restoring partition membership.
@@ -3083,7 +3092,7 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
 
 pub(crate) struct StressBigSyncRpcClient {
     pub(crate) target_part_store: SharedPartStore,
-    pub(crate) subscriber: PeerId,
+    pub(crate) subscriber: PeerKey,
 }
 
 #[async_trait::async_trait]
@@ -3100,30 +3109,42 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             .target_part_store
             .summarize_parts(req.inner.parts)
             .await?;
-        Ok(Ok(summarized.map(|parts| {
-            big_sync_core::rpc::PeerSummaryResult {
-                parts: parts
-                    .into_iter()
-                    .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                    .collect(),
-            }
+        // A part-level failure is a response error, not a transport one.
+        let summarized = match summarized {
+            Ok(parts) => parts,
+            Err(err) => return Ok(Ok(Err(err))),
+        };
+        let asker = Some(self.subscriber);
+        let mut summaries = HashMap::new();
+        for (part_id, summary) in summarized {
+            let since = req
+                .inner
+                .asker_part_cursors
+                .get(&part_id)
+                .copied()
+                .unwrap_or(0);
+            let dirty = self
+                .target_part_store
+                .part_dirty_count(part_id, asker, since)
+                .await?;
+            summaries.insert(part_id, summary.into_strat_summaries(dirty));
+        }
+        Ok(Ok(Ok(big_sync_core::rpc::PeerSummaryResult {
+            parts: summaries,
         })))
     }
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::SubPartsRequest>,
-    ) -> Res<
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<
-                big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
-                big_sync_core::rpc::ListPartsError,
-            >,
-        >,
-    > {
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
+    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplayPageOutcome>> {
+        // The double caps the caller's hold so a caught-up page answers promptly
+        // rather than parking on the long production poll.
+        let hold =
+            Duration::from_millis(u64::from(req.inner.hold_ms)).min(Duration::from_millis(50));
         Ok(Ok(self
             .target_part_store
-            .subscribe(req.inner, self.subscriber)
+            .replay_page(req.inner.target, req.inner.limit, self.subscriber, hold)
             .await?))
     }
 
@@ -3159,7 +3180,7 @@ struct SyncRepoNode {
     repo: Arc<BigRepo>,
     big_sync_store: SharedPartStore,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
-    connections: Arc<tokio::sync::Mutex<HashMap<PeerId, BigRepoConnection>>>,
+    connections: Arc<tokio::sync::Mutex<HashMap<PeerKey, BigRepoConnection>>>,
     stop_token: BigRepoStopToken,
     endpoint: iroh::Endpoint,
     router: iroh::protocol::Router,
@@ -3191,10 +3212,12 @@ impl SyncRepoNode {
         })
         .await?;
         let shared_store = repo.shared_part_store();
-        let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&shared_store),
             HashMap::new(),
             "big-repo-sync-test",
+            None,
+            HARNESS_SYNC_MODE,
             Arc::from("big-repo-test"),
         )?;
         let big_sync_host = Arc::new(big_sync::Ctx {
@@ -3226,10 +3249,12 @@ impl SyncRepoNode {
         );
         let mut sync_backends = HashMap::new();
         sync_backends.insert(BigRepo::BACKEND_ID.into(), Arc::clone(&sync_backend) as _);
-        let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&big_sync_host.store),
             sync_backends,
             "big-repo-sync-test-main",
+            None,
+            HARNESS_SYNC_MODE,
             Arc::from("big-repo-test"),
         )?;
 
@@ -3278,7 +3303,7 @@ impl SyncRepoNode {
         })
     }
 
-    fn peer_id(&self) -> PeerId {
+    fn peer_id(&self) -> PeerKey {
         self.repo.local_peer_id()
     }
 
@@ -3876,7 +3901,7 @@ async fn run_sync_backend_case(
     remote_mutation: Option<SyncMutation>,
     expected_deets: SyncCompletionDeets,
     expect_client_doc: bool,
-    sync_part_hints: Vec<PartId>,
+    sync_part_hints: Vec<PartKey>,
     remote_payload_missing: bool,
 ) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -4042,8 +4067,8 @@ async fn run_sync_backend_case(
         // The runtime auto-adds docs to the global partition on read access
         // (marker model). Include it in expectations.
         let mut parts = base;
-        if !parts.contains(&crate::GLOBAL_PART_ID) {
-            parts.push(crate::GLOBAL_PART_ID);
+        if !parts.contains(&crate::global_part_id()) {
+            parts.push(crate::global_part_id());
         }
         parts
     };
@@ -4133,7 +4158,7 @@ async fn run_sync_backend_missing_local_and_remote_payload_case() -> Res<()> {
 }
 
 async fn run_sync_backend_remote_payload_missing_changed_case(
-    sync_part_hints: Vec<PartId>,
+    sync_part_hints: Vec<PartKey>,
 ) -> Res<()> {
     run_sync_backend_case(
         None,
@@ -4269,7 +4294,7 @@ async fn wait_for_pair_full_sync(left: &SyncRepoNode, right: &SyncRepoNode) -> R
 async fn assert_pair_sync_alignment(
     left: &SyncRepoNode,
     right: &SyncRepoNode,
-    doc_id: ObjId,
+    doc_id: ObjKey,
 ) -> Res<()> {
     let left_heads = left.repo.doc_payload_heads(doc_id).await?;
     let right_heads = right.repo.doc_payload_heads(doc_id).await?;

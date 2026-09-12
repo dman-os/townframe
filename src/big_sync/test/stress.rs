@@ -35,7 +35,7 @@ impl LwwStressFixture {
 impl StressFixture for LwwStressFixture {
     type World = TestWorld;
     type Node = NodeHarness;
-    type StressObj = ObjId;
+    type StressObj = ObjKey;
     type Observation = (WorkerSnapshot, ObservedStoreSnapshot);
 
     fn label(&self) -> &'static str {
@@ -104,7 +104,7 @@ impl StressFixture for LwwStressFixture {
         tokio::try_join!(node.handle.snapshot(), node.snapshot())
     }
 
-    fn peer_id(&self, node: &Self::Node) -> PeerId {
+    fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id
     }
 
@@ -114,9 +114,9 @@ impl StressFixture for LwwStressFixture {
 }
 
 fn diff_scoped_obj_snapshots(
-    left_peer: PeerId,
+    left_peer: PeerKey,
     left: &ObservedStoreSnapshot,
-    right_peer: PeerId,
+    right_peer: PeerKey,
     right: &ObservedStoreSnapshot,
 ) -> String {
     let mut out = String::new();
@@ -272,7 +272,7 @@ async fn boot_sqlite_node_at(
         )
         .await?,
     );
-    let node = boot_node_with_store(world, peer_id, store, None).await?;
+    let node = boot_node_with_store(world, peer_id, store, None, None).await?;
     Ok(NodeHarness {
         sqlite_temp_dir: Some(temp_dir),
         ..node
@@ -326,7 +326,7 @@ struct PolicyMembershipFixture;
 impl StressFixture for PolicyMembershipFixture {
     type World = TestWorld;
     type Node = NodeHarness;
-    type StressObj = ObjId;
+    type StressObj = ObjKey;
     type Observation = (WorkerSnapshot, ObservedStoreSnapshot);
 
     fn label(&self) -> &'static str {
@@ -389,7 +389,7 @@ impl StressFixture for PolicyMembershipFixture {
         tokio::try_join!(node.handle.snapshot(), node.snapshot())
     }
 
-    fn peer_id(&self, node: &Self::Node) -> PeerId {
+    fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id
     }
 

@@ -540,10 +540,10 @@ impl Rt {
             },
         ))
     }
-    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjId {
+    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjKey {
         let bytes = format!("v1|doc:{doc_id}|proc:{processor_full_id}");
         let digest = blake3::hash(bytes.as_bytes());
-        ObjId::new(*digest.as_bytes())
+        ObjKey::new(*digest.as_bytes())
     }
 
     pub async fn get_processor_runlog_done(
@@ -2830,7 +2830,7 @@ mod tests {
     use big_sync::HostPartStore;
 
     async fn make_partition_store()
-    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartKey)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =

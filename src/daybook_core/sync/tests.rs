@@ -1107,7 +1107,7 @@ async fn wait_for_sync_convergence(
         .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
-    let peer_id = PeerId::new(*endpoint_id.as_bytes());
+    let peer_id = PeerKey::new(*endpoint_id.as_bytes());
     // Keyhive convergence is driven by the production notification
     // subscription. The test waits for the observable BigSync and drawer
     // results instead of reaching through the daybook API into BigRepo to
@@ -1159,7 +1159,7 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
         .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
-    let peer_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
+    let peer_id = PeerKey::new(*endpoint_addr_ba.id.as_bytes());
     node_b
         .sync_repo
         .wait_for_full_sync(std::slice::from_ref(&peer_id), &required_partitions, None)

@@ -1,18 +1,18 @@
 use crate::interlude::*;
 
-use big_sync::HostPartStore;
+use big_sync::{HostPartStore, PartScope};
 use big_sync::open_sqlite_local_revision_reader;
 use big_sync::sqlite_core::{
     EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
     SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
 };
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{BuckId, Byte32Id, Fingerprint, mpsc};
+use big_sync_core::{BuckId, ByteKey, Fingerprint, mpsc};
 use futures::future::BoxFuture;
 use sedimentree_core::{
     blob::Blob,
@@ -74,16 +74,16 @@ pub(crate) enum TreeStorageMutation {
 
 struct BigRepoSubscription {
     sender: mpsc::Sender<SubEvent>,
-    principal: Option<PeerId>,
+    principal: Option<PeerKey>,
     pending: Arc<PendingSubscription>,
 }
 
 #[derive(Default)]
 struct BigRepoSubscriptions {
-    by_part: HashMap<PartId, HashSet<Uuid>>,
-    parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
-    by_obj: HashMap<ObjId, HashSet<Uuid>>,
-    objs_by_sub: HashMap<Uuid, HashSet<ObjId>>,
+    by_part: HashMap<PartKey, HashSet<Uuid>>,
+    parts_by_sub: HashMap<Uuid, HashSet<PartKey>>,
+    by_obj: HashMap<ObjKey, HashSet<Uuid>>,
+    objs_by_sub: HashMap<Uuid, HashSet<ObjKey>>,
     pending: HashSet<Uuid>,
     live: HashSet<Uuid>,
     subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
@@ -136,7 +136,7 @@ pub(crate) struct KeyhiveEventLedger {
 pub struct SqliteBigRepoStore {
     core: SqliteCore,
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
-    hidden_parts: Arc<HashSet<PartId>>,
+    hidden_parts: Arc<HashSet<PartKey>>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
     local_revision_wakeups: Arc<Notify>,
@@ -145,11 +145,11 @@ pub struct SqliteBigRepoStore {
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigSyncStoreSnapshot {
-    pub objects: Vec<(ObjId, Option<serde_json::Value>)>,
-    pub memberships: Vec<(PartId, ObjId, i64, i64)>,
-    pub pending_memberships: Vec<(PartId, ObjId)>,
-    pub part_cursors: Vec<(PartId, i64)>,
-    pub peer_part_cursors: Vec<(PeerId, PartId, i64)>,
+    pub objects: Vec<(ObjKey, Option<serde_json::Value>)>,
+    pub memberships: Vec<(PartKey, ObjKey, i64, i64)>,
+    pub pending_memberships: Vec<(PartKey, ObjKey)>,
+    pub part_cursors: Vec<(PartKey, i64)>,
+    pub peer_part_cursors: Vec<(PeerKey, PartKey, i64)>,
     pub keyhive_event_count: i64,
     pub keyhive_event_bytes: i64,
     pub local_cgka_secret_count: usize,
@@ -302,10 +302,16 @@ impl SqliteBigRepoStore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GroupPartReconciliation {
-    pub(crate) doc: ObjId,
-    pub(crate) agents: HashMap<PeerId, keyhive_core::access::Access>,
-    pub(crate) managed_group_parts: HashSet<PartId>,
-    pub(crate) desired_group_parts: HashSet<PartId>,
+    pub(crate) doc: ObjKey,
+    /// The doc-level union of [`Self::part_agents`]: used by the grant re-emit and the
+    /// global-marker flag. Never written to a part row.
+    pub(crate) agents: HashMap<PeerKey, keyhive_core::access::Access>,
+    /// The agent set of each part the doc resides in — these are the access rows that
+    /// get written, so a principal of one group never receives another group's part.
+    pub(crate) part_agents:
+        HashMap<PartKey, Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
+    pub(crate) managed_group_parts: HashSet<PartKey>,
+    pub(crate) desired_group_parts: HashSet<PartKey>,
     pub(crate) desired_global: bool,
 }
 
@@ -474,12 +480,15 @@ impl SqliteBigRepoStore {
         SqliteCore::next_cursor(tx).await
     }
 
-    fn event_part_id(event: &SubEvent) -> Option<PartId> {
+    fn event_scope(event: &SubEvent) -> PartScope {
         match event {
-            SubEvent::Changed(_) => None,
-            SubEvent::Added(inner) => Some(inner.part_id),
-            SubEvent::Removed(inner) => Some(inner.part_id),
-            SubEvent::ReplayComplete => None,
+            SubEvent::Changed(inner) if !inner.part_ids.is_empty() => {
+                PartScope::AnyOf(inner.part_ids.clone())
+            }
+            SubEvent::Changed(_) => PartScope::FromObject,
+            SubEvent::Added(inner) => PartScope::Part(inner.part_id),
+            SubEvent::Removed(inner) => PartScope::Part(inner.part_id),
+            SubEvent::ReplayComplete => PartScope::FromObject,
         }
     }
 
@@ -545,7 +554,7 @@ impl SqliteBigRepoStore {
     async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
         let mut promote = Vec::new();
         let mut dispatch = Vec::new();
-        let mut recipients: HashMap<(Uuid, ObjId, CursorIndex, Option<PartId>), SubEvent> =
+        let mut recipients: HashMap<(Uuid, ObjKey, CursorIndex, Option<PartKey>), SubEvent> =
             HashMap::new();
         let mut push_recipient = |sub_id: Uuid, event: SubEvent| {
             let (obj_id, cursor, part_id) = match &event {
@@ -671,10 +680,13 @@ impl SqliteBigRepoStore {
         for (sub_id, event, obj_id, principal, sender) in dispatch {
             // A policy-check failure must not masquerade as a denial: that
             // would silently drop a deliverable event from a live subscriber.
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || self
-                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await?;
+            // Filtered parts are the authorization decision AND the non-exposure
+            // rule: a dropped event disclosed nothing about a part the recipient
+            // cannot read.
+            let readable = self
+                .permitted_parts(Self::event_scope(&event), obj_id, principal)
+                .await?;
+            let permitted = !readable.is_some_and(|readable| readable.is_empty());
             let event = if permitted {
                 event
             } else if self.take_revocation_notice(obj_id, principal) {
@@ -708,10 +720,10 @@ impl SqliteBigRepoStore {
         }
 
         for (sub_id, event, obj_id, principal, sender) in promote {
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || self
-                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await?;
+            let readable = self
+                .permitted_parts(Self::event_scope(&event), obj_id, principal)
+                .await?;
+            let permitted = !readable.is_some_and(|readable| readable.is_empty());
             let event = if permitted {
                 Some(event)
             } else if self.take_revocation_notice(obj_id, principal) {
@@ -777,54 +789,106 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    pub(crate) async fn is_event_permitted(
+    /// Filter an outbound event's candidate parts down to the parts `principal` may read;
+    /// `None` when unfiltered (trusted local subscriber). See
+    /// [`big_sync::PartScope`] — authorization and non-exposure are the same operation.
+    pub(crate) async fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> Res<bool> {
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
         let Some(peer) = principal else {
-            return Ok(true);
+            return Ok(None);
         };
         let peer_blob = Self::peer_blob(peer);
-        let access_level: Option<i64> = sqlx::query_scalar!(
-            "SELECT access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1 AND obj_ref = (
-                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-             ) AND principal_id = ?3",
-            self.scope_id,
-            Self::obj_blob(obj_id),
-            &peer_blob
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        let permitted = access_level
-            .map(|lvl| u8::try_from(lvl).expect(ERROR_IMPOSSIBLE))
-            .map(big_sync::sqlite_core::decode_access)
-            .is_some_and(|access| access.is_fetcher());
+        let candidates: Vec<PartKey> = match scope {
+            // Resolve and filter in one query: the object's live parts that grant this
+            // principal access. An event that named nothing usable still delivers when
+            // the principal can read some part of it.
+            PartScope::FromObject => {
+                let rows = sqlx::query!(
+                    "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
+                     FROM big_sync_members m
+                     JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+                     JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
+                     WHERE m.scope_id = ?1
+                       AND m.obj_ref = (
+                           SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+                       )
+                       AND m.maybe_part_ref > 0
+                       AND m.event_type != 2
+                       AND s.principal_id = ?3
+                     ORDER BY p.part_id",
+                    self.scope_id,
+                    Self::obj_blob(obj_id),
+                    &peer_blob
+                )
+                .fetch_all(&self.sql.read_pool)
+                .await?;
+                let readable = rows
+                    .into_iter()
+                    .filter(|row| is_fetch_access(row.access_level))
+                    .map(|row| Self::part_from_blob(row.part_id))
+                    .collect::<Vec<_>>();
+                tracing::trace!(
+                    ?obj_id,
+                    ?principal,
+                    part_count = readable.len(),
+                    "policy event permission",
+                );
+                return Ok(Some(readable));
+            }
+            PartScope::Part(part_id) => vec![part_id],
+            PartScope::AnyOf(part_ids) => part_ids,
+        };
+        let mut readable = Vec::with_capacity(candidates.len());
+        for part_id in candidates {
+            let Some(part_ref) = self.core.find_part_ref(part_id).await? else {
+                continue;
+            };
+            let access_level: Option<i64> = sqlx::query_scalar!(
+                "SELECT access_level
+                 FROM big_sync_syncable
+                 WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+                self.scope_id,
+                part_ref,
+                &peer_blob
+            )
+            .fetch_optional(&self.sql.read_pool)
+            .await?;
+            if access_level.is_some_and(is_fetch_access) {
+                readable.push(part_id);
+            }
+        }
         tracing::trace!(
-            ?part_id,
             ?obj_id,
             ?principal,
-            permitted,
+            part_count = readable.len(),
             "policy event permission",
         );
-        Ok(permitted)
+        Ok(Some(readable))
     }
 }
-fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
+
+fn is_fetch_access(access_level: i64) -> bool {
+    u8::try_from(access_level)
+        .ok()
+        .map(big_sync::sqlite_core::decode_access)
+        .is_some_and(|access| access.is_fetcher())
+}
+fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjKey, Option<ObjKey>) {
     let prefix_bits = u32::from(bucket_id.level()) * u32::from(BuckId::BITS_PER_LEVEL);
     debug_assert!(prefix_bits <= u16::BITS);
     if prefix_bits == 0 {
-        return (ObjId(Byte32Id::new([0; 32])), None);
+        return (ObjKey(ByteKey::new([0; 32])), None);
     }
     let shift = u16::BITS - prefix_bits;
     let start_prefix = u32::from(bucket_id.index()) << shift;
     let start = {
         let mut bytes = [0; 32];
         bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     };
     if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
         return (start, None);
@@ -835,7 +899,7 @@ fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
     }
     let mut bytes = [0; 32];
     bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
-    (start, Some(ObjId(Byte32Id::new(bytes))))
+    (start, Some(ObjKey(ByteKey::new(bytes))))
 }
 
 #[derive(Debug, thiserror::Error)]

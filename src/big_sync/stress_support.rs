@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
+use big_sync_core::{ByteKey, ObjKey, PartKey, PeerKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ struct LwwPayload {
     #[serde(rename = "writtenAt")]
     written_at: u64,
     #[serde(rename = "writerId")]
-    writer_id: PeerId,
+    writer_id: PeerKey,
 }
 
 impl LwwPayload {
@@ -33,7 +33,7 @@ impl LwwPayload {
 pub fn payload(
     value: impl Into<serde_json::Value>,
     written_at: u64,
-    writer_id: PeerId,
+    writer_id: PeerKey,
 ) -> serde_json::Value {
     LwwPayload {
         value: value.into(),
@@ -43,14 +43,14 @@ pub fn payload(
     .into_value()
 }
 
-pub fn test_part() -> PartId {
-    PartId(Byte32Id::new([
+pub fn test_part() -> PartKey {
+    PartKey(ByteKey::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
     ]))
 }
 
-pub fn test_parts() -> Vec<PartId> {
+pub fn test_parts() -> Vec<PartKey> {
     vec![test_part()]
 }
 
@@ -90,7 +90,7 @@ pub trait StressFixture: Sync {
         payload: serde_json::Value,
     ) -> Res<()>;
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
-    fn peer_id(&self, node: &Self::Node) -> PeerId;
+    fn peer_id(&self, node: &Self::Node) -> PeerKey;
     // Fixture-specific application content for a document mutation.
     #[expect(clippy::too_many_arguments)]
     fn make_doc_content(
@@ -101,7 +101,7 @@ pub trait StressFixture: Sync {
         obj: &Self::StressObj,
         nonce: u64,
         written_at: u64,
-        writer_id: PeerId,
+        writer_id: PeerKey,
     ) -> serde_json::Value {
         stress_payload(phase, step, node_idx, obj, nonce, written_at, writer_id)
     }
@@ -184,10 +184,10 @@ impl<Obj: Clone> StressState<Obj> {
     }
 }
 
-pub fn stress_obj(rng: &mut impl Rng) -> ObjId {
+pub fn stress_obj(rng: &mut impl Rng) -> ObjKey {
     let mut bytes = [0u8; 32];
     rng.fill(&mut bytes);
-    ObjId(Byte32Id::new(bytes))
+    ObjKey(ByteKey::new(bytes))
 }
 
 pub fn stress_payload(
@@ -197,7 +197,7 @@ pub fn stress_payload(
     obj: &impl std::fmt::Debug,
     nonce: u64,
     written_at: u64,
-    writer_id: PeerId,
+    writer_id: PeerKey,
 ) -> serde_json::Value {
     payload(
         format!("{phase}:step={step}:node={node_idx}:obj={obj:?}:nonce={nonce}"),

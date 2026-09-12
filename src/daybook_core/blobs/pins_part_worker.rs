@@ -962,7 +962,7 @@ mod tests {
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
                 .await?,
-            Vec::<PartId>::new()
+            Vec::<PartKey>::new()
         );
 
         let hashes_after_update = list_hashes_for_doc(&sql, &doc_id).await?;

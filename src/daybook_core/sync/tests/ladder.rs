@@ -426,7 +426,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                 vec![blob_part],
             )
             .await?;
-        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
@@ -578,7 +578,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
         let endpoint_id_a = node_a.sync_repo.endpoint_addr().id;
-        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
@@ -1238,12 +1238,12 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
 
     assert_eq!(
         cloned.doc_app.document_id(),
-        ObjId::new(*source_doc_app.as_bytes()),
+        ObjKey::new(*source_doc_app.as_bytes()),
         "cloned app_doc must reference the source's app doc id"
     );
     assert_eq!(
         cloned.doc_drawer.document_id(),
-        ObjId::new(*source_doc_drawer.as_bytes()),
+        ObjKey::new(*source_doc_drawer.as_bytes()),
         "cloned drawer_doc must reference the source's drawer doc id"
     );
 

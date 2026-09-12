@@ -1,5 +1,5 @@
 mod interlude {
-    pub use big_sync_core::{ObjId, PartId, PeerId};
+    pub use big_sync_core::{ObjKey, PartKey, PeerKey};
 
     pub use future_form::{FutureForm, Local, Sendable};
     pub use utils_rs::prelude::*;
@@ -88,17 +88,19 @@ pub use changes::{
     OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
 
-pub type DocumentId = big_sync_core::ObjId;
+pub type DocumentId = big_sync_core::ObjKey;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
 /// The global partition: every doc we can read appears here as a marker.
-/// Embedders pass this PartId to big_sync's `set_peer`.
-pub const GLOBAL_PART_ID: big_sync_core::PartId = big_sync_core::PartId::new([
-    0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-]);
+/// Embedders pass this part key to big_sync's `set_peer`.
+pub fn global_part_id() -> big_sync_core::PartKey {
+    big_sync_core::PartKey::new([
+        0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ])
+}
 /// Return the deterministic BigSync partition derived from a Keyhive group.
-pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartId {
+pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartKey {
     runtime2::group_part_id(group_id)
 }
 
@@ -110,7 +112,7 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
-    pub hidden_parts: HashSet<PartId>,
+    pub hidden_parts: HashSet<PartKey>,
     /// Keyhive groups whose documents the Automerge frontier worker processes.
     pub automerge_frontier_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents the causal checkpoint worker processes.
@@ -135,7 +137,7 @@ pub enum StorageConfig {
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct BigRepo {
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
@@ -380,7 +382,7 @@ impl BigRepo {
         ));
         let signer =
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
-        let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
+        let peer_id = PeerKey::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         // The embedder-facing scope controller: workers read the live scope
@@ -446,7 +448,7 @@ impl BigRepo {
         ))
     }
 
-    pub fn local_peer_id(&self) -> PeerId {
+    pub fn local_peer_id(&self) -> PeerKey {
         self.local_peer_id
     }
 
@@ -502,7 +504,7 @@ impl BigRepo {
         self.keyhive.receive_contact_card(contact_card).await
     }
     /// Resolve a connected peer's Keyhive agent.
-    pub async fn keyhive_agent_for_peer(&self, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
+    pub async fn keyhive_agent_for_peer(&self, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
         let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(*peer_id.as_bytes());
         self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
     }
@@ -539,19 +541,19 @@ impl BigRepo {
     /// classified by the dispatcher.
     pub(crate) async fn subscribe_keyhive_changes(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         tx: irpc::channel::mpsc::Sender<crate::rpc::KeyhiveChangedRpcEvent>,
     ) -> Uuid {
         self.keyhive_dispatcher.subscribe(peer_id, tx).await
     }
 
     /// Unregister a peer's notification stream for the given subscription ID.
-    pub(crate) async fn unsubscribe_keyhive_changes(&self, peer_id: &PeerId, sub_id: Uuid) {
+    pub(crate) async fn unsubscribe_keyhive_changes(&self, peer_id: &PeerKey, sub_id: Uuid) {
         self.keyhive_dispatcher.unsubscribe(peer_id, sub_id).await;
     }
 
     /// Synchronize local Keyhive state with a directly connected peer.
-    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> Res<()> {
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerKey) -> Res<()> {
         self.runtime.sync_keyhive_with_peer(peer_id).await
     }
 
@@ -559,7 +561,7 @@ impl BigRepo {
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<SyncDocReceipt, SyncDocError> {
         self.runtime
             .sync_doc_with_peer_receipt(doc_id, peer_id)
@@ -928,7 +930,7 @@ impl BigRepo {
         self: &Arc<Self>,
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
         let (peer_id, closed, end_rx) = self
@@ -982,7 +984,7 @@ impl BigRepo {
 /// channel (used by the sync layer to release per-peer state when a
 /// connection drops, whether outbound or inbound).
 pub(crate) fn watch_connection_end(
-    peer_id: PeerId,
+    peer_id: PeerKey,
     closed_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     end_rx: futures::channel::oneshot::Receiver<(
         std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1018,13 +1020,13 @@ pub(crate) fn watch_connection_end(
 pub struct BigRepoConnection {
     #[educe(Debug(ignore))]
     repo: Arc<BigRepo>,
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     #[educe(Debug(ignore))]
     closed: Arc<AtomicBool>,
 }
 
 pub struct ConnFinishSignal {
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     /// The ended connection's end flag (shared with the runtime's watcher).
     /// Lets consumers distinguish WHICH connection ended when a peer id is
     /// reused across connections (e.g. re-establishment after a replace).
@@ -1033,7 +1035,7 @@ pub struct ConnFinishSignal {
 }
 
 impl BigRepoConnection {
-    pub fn peer_id(&self) -> PeerId {
+    pub fn peer_id(&self) -> PeerKey {
         self.peer_id
     }
 

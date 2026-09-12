@@ -17,34 +17,34 @@ structstruck::strike! {
     #[derive(Debug)]
     pub enum BucketMachineCommand {
         SyncObj {
-            obj_id: ObjId,
+            obj_id: ObjKey,
             remote_payload: Option<ObjPayload>,
-            part_id: PartId,
+            part_id: PartKey,
         },
         RemoveObjFromParts {
-            obj_id: ObjId,
-            part_id: PartId,
+            obj_id: ObjKey,
+            part_id: PartKey,
         },
         ListBuckets {
-            part_id: PartId,
+            part_id: PartKey,
             offset: BuckId,
             since: CursorIndex,
             working_level: BuckLevel,
         }
         LeafBuckets {
-            part_id: PartId,
+            part_id: PartKey,
             since: CursorIndex,
             buckets: Vec<LeafBucketRequest>,
         }
         UpgradeToCursor {
-            part_id: PartId,
+            part_id: PartKey,
         }
     }
 }
 
 structstruck::strike! {
     pub struct BucketMachine {
-        part_id: PartId,
+        part_id: PartKey,
         //remote_depth: BuckLevel,
 
         done_listing: bool,
@@ -55,12 +55,12 @@ structstruck::strike! {
         working_buckets: Map<BuckId, struct WorkingBucketState {
             #![derive(Debug, Clone)]
             summary: BucketSummary,
-            leaf_after: Option<ObjId>,
+            leaf_after: Option<ObjKey>,
             leaf_seen: u64,
             leaf_inflight: bool,
             leaf_exhausted: bool,
             pending_objs: Vec<BucketObjEntry>,
-            active_objs: Map<ObjId, BucketObjEntry>,
+            active_objs: Map<ObjKey, BucketObjEntry>,
         }>,
 
         // Bound the initial number of buckets we admit to the active
@@ -68,7 +68,7 @@ structstruck::strike! {
         initial_working_set: u64,
         leaf_watermark: u64,
 
-        active_obj_jobs: Map<ObjId, BuckId>,
+        active_obj_jobs: Map<ObjKey, BuckId>,
 
         last_cursor: u64,
     }
@@ -76,12 +76,33 @@ structstruck::strike! {
 
 impl BucketMachine {
     const ACTIVE_SYNC_JOB_TARGET: u32 = 1024;
-    pub const BUCKET_DIFF_THRESHOLD: u64 = 256;
+    /// The relevance a peer may be behind on before the bucket walk is worth
+    /// entering.
+    ///
+    /// Still an UNMEASURED placeholder. `dirty.total()` is logged at the decision site
+    /// next to the raw counter gap it replaced, so the number can be chosen from data
+    /// rather than guessed. Two regimes have been measured end to end (the `band work
+    /// measured` lines in `big_sync::test`) and both sit *above* this value:
+    ///
+    /// - dense dirt, 1k objects, dirty 1000: the bands move identical object work (1000
+    ///   syncs each) and land within 20% on the clock, because a cold peer has nothing
+    ///   to prune — this is the case decision 7 calls enumeration;
+    /// - sparse dirt, 20k objects, 3 objects changed: the walk moves 3 object syncs
+    ///   against the cursor's 20000, carrying 276 bucket summaries and 230 leaf entries
+    ///   instead of the whole event gap.
+    ///
+    /// Neither pins a crossing point below the placeholder, where the walk pays a fixed
+    /// summary round trip to discover very little. Choosing the value needs a dense-dirt
+    /// sweep over roughly 8..=512 at part sizes either side of `ACTIVE_SYNC_JOB_TARGET *
+    /// ARITY` (below which the whole part is one root bucket and there is nothing to
+    /// prune). That sweep needs a way to force the walk below this cutoff: the per-part
+    /// hint cannot, because this check overrides it.
+    pub const BUCKET_DIRTY_THRESHOLD: u64 = 256;
     pub const GET_BUCKET_LIMIT_HINT: u32 = 8 * BuckId::ARITY as u32;
     pub const LEAF_BUCKET_LIMIT_HINT: u32 = Self::ACTIVE_SYNC_JOB_TARGET;
 
     pub fn new(
-        part_id: PartId,
+        part_id: PartKey,
         remote_depth: BuckLevel,
         remote_size: u64,
         last_cursor: CursorIndex,
@@ -179,7 +200,7 @@ impl BucketMachine {
 
     #[tracing::instrument(skip_all)]
     pub fn on_obj_sync_completed(&mut self, evt: &SyncJobEvt, out: &mut Vec<BucketMachineCommand>) {
-        let buck_id = BuckId::from_obj_id(self.working_level, &evt.obj_id);
+        let buck_id = BuckId::from_obj_key(self.working_level, &evt.obj_id);
         if let Some(state) = self.working_buckets.get_mut(&buck_id) {
             let had_active_obj = self.active_obj_jobs.remove(&evt.obj_id).is_some();
             tracing::debug!(
@@ -392,10 +413,27 @@ pub enum FilteredBuckets {
     Relist(BuckId),
 }
 
+/// Whether a remote bucket summary describes the same set as the local one.
+///
+/// Fingerprints alone are not enough to prune on. Bucket fingerprints are modular
+/// sums under the fixed `BUCKET_LIVE_FP_SEED`/`BUCKET_DEAD_FP_SEED` constants, which
+/// the two sides compute independently and persist, so their basis is stable — but a
+/// sum is still cancellable by a crafted pair of objects. Requiring the materialized
+/// counts to agree as well means cancellation needs a count-preserving collision, and
+/// it also catches summary-maintenance defects. Every field compared here is already
+/// on the wire.
+///
+/// `changed_at` is deliberately NOT compared. It is a watermark for since-filtering,
+/// not content, and dirt is view-relative: two sides holding identical sets routinely
+/// carry different watermarks, so comparing it would make every bucket dirty forever.
+fn summaries_agree(local: &BucketSummary, remote: &BucketSummary) -> bool {
+    local.fp == remote.fp && local.len == remote.len && local.live_count == remote.live_count
+}
+
 /// Use the part store and the local bucket fingerprins to filter out
 /// buckets that are identical to local.
 pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
-    part_id: PartId,
+    part_id: PartKey,
     working_lvl: BuckLevel,
     buckets: Vec<BucketSummary>,
     part_store: &S,
@@ -423,7 +461,7 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
             }
         }
         let local_summary = part_store.get_bucket_summary(part_id, buck.id).await;
-        if local_summary.fp == buck.fp {
+        if summaries_agree(&local_summary, &buck) {
             clean_bucks.insert(buck.id);
             clean_ctr += 1;
             continue;
@@ -464,20 +502,20 @@ enum PartObjDelta {
 
 #[derive(Debug, Clone)]
 pub struct BucketObjEntry {
-    obj_id: ObjId,
+    obj_id: ObjKey,
     delta: PartObjDelta,
 }
 
 #[derive(Debug, Clone)]
 pub struct BucketObjLeafPage {
     pub entries: Vec<BucketObjEntry>,
-    pub next_after: Option<ObjId>,
+    pub next_after: Option<ObjKey>,
     pub done: bool,
 }
 
 // FIXME: this is too expensive
 pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
-    part_id: PartId,
+    part_id: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
     part_store: &S,
@@ -560,6 +598,12 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
 mod tests {
     use super::*;
 
+    use crate::part_store::PartDirtyCount;
+    use crate::rpc::BucketFp;
+    use future_form::Local;
+    use futures::future::LocalBoxFuture;
+    use std::collections::HashMap;
+
     /// `calc_working_level` must never return a level exceeding `remote_depth`,
     /// even at extreme `remote_size`.  When `remote_depth = 0` and `remote_size`
     /// is large enough that `remote_size / ARITY > ACTIVE_SYNC_JOB_TARGET`,
@@ -592,5 +636,134 @@ mod tests {
         // Boundary: zero-size remote should cleanly return 0.
         assert_eq!(calc_working_level(0, 0), 0);
         assert_eq!(calc_working_level(0, 10), 0);
+    }
+
+    /// A part store that answers bucket summaries from a table. `filter_buckets`
+    /// reads nothing else, so the remaining methods are unreachable rather than
+    /// stubbed.
+    struct SummaryStore {
+        summaries: HashMap<BuckId, BucketSummary>,
+    }
+
+    impl PartStoreReadOnly<Local> for SummaryStore {
+        fn member_count<'a>(&'a self, _part_id: PartKey) -> LocalBoxFuture<'a, u64> {
+            unreachable!("filter_buckets does not read member counts")
+        }
+
+        fn obj_payload<'a>(&'a self, _obj_id: ObjKey) -> LocalBoxFuture<'a, Option<ObjPayload>> {
+            unreachable!("filter_buckets does not read payloads")
+        }
+
+        fn obj_parts<'a>(&'a self, _obj_id: ObjKey) -> LocalBoxFuture<'a, Vec<PartKey>> {
+            unreachable!("filter_buckets does not read object parts")
+        }
+
+        fn get_peer_part_cursor<'a>(
+            &'a self,
+            _peer_id: PeerKey,
+            _part_id: PartKey,
+        ) -> LocalBoxFuture<'a, CursorIndex> {
+            unreachable!("filter_buckets does not read peer cursors")
+        }
+
+        fn get_bucket_summary<'a>(
+            &'a self,
+            _part_id: PartKey,
+            id: BuckId,
+        ) -> LocalBoxFuture<'a, BucketSummary> {
+            let summary = self
+                .summaries
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| panic!("no local summary for {id:?}"));
+            Local::from_future(async move { summary })
+        }
+
+        fn part_dirty_count<'a>(
+            &'a self,
+            _part_id: PartKey,
+            _principal: Option<PeerKey>,
+            _since: CursorIndex,
+        ) -> LocalBoxFuture<'a, PartDirtyCount> {
+            unreachable!("filter_buckets does not read dirty counts")
+        }
+    }
+
+    fn summary(
+        id: BuckId,
+        fp: BucketFp,
+        len: u32,
+        live_count: u32,
+        changed_at: CursorIndex,
+    ) -> BucketSummary {
+        BucketSummary {
+            id,
+            fp,
+            len,
+            live_count,
+            changed_at,
+        }
+    }
+
+    /// Pruning must not rest on fingerprint equality alone. Both buckets below agree
+    /// on their fingerprint pair, but the second disagrees on the materialized counts,
+    /// so it is dirty and must be handed off. Fingerprint-only pruning called it clean,
+    /// left `out` empty and returned `Relist`, silently dropping the difference.
+    #[test]
+    fn filter_buckets_equal_fp_different_counts_is_dirty() {
+        let clean = BuckId::new(1, 0);
+        let dirty = BuckId::new(1, 1);
+        let fp: BucketFp = (0xdead_beef, 0xfeed_face);
+        let store = SummaryStore {
+            summaries: HashMap::from([
+                // Counts agree; the watermark disagrees and must not matter.
+                (clean, summary(clean, fp, 5, 3, 99)),
+                (dirty, summary(dirty, fp, 4, 3, 7)),
+            ]),
+        };
+        let remote = vec![summary(clean, fp, 5, 3, 7), summary(dirty, fp, 5, 3, 7)];
+
+        match futures::executor::block_on(filter_buckets::<Local, _>(
+            PartKey::random(),
+            1,
+            remote,
+            &store,
+        )) {
+            FilteredBuckets::Handoff(out) => {
+                assert_eq!(out.len(), 1, "only the count-mismatched bucket is dirty");
+                assert_eq!(out[0].id, dirty);
+            }
+            FilteredBuckets::Done => panic!("count-mismatched bucket was pruned as clean"),
+            FilteredBuckets::Relist(id) => {
+                panic!("count-mismatched bucket was pruned as clean, relisting {id:?}")
+            }
+        }
+    }
+
+    /// The guard for the test above: equal counts still prune, even when the two sides
+    /// disagree on `changed_at`.
+    #[test]
+    fn filter_buckets_equal_counts_different_watermark_is_clean() {
+        let buck = BuckId::ROOT;
+        let fp: BucketFp = (0xdead_beef, 0xfeed_face);
+        let store = SummaryStore {
+            summaries: HashMap::from([(buck, summary(buck, fp, 5, 3, 99))]),
+        };
+        let remote = vec![summary(buck, fp, 5, 3, 7)];
+
+        match futures::executor::block_on(filter_buckets::<Local, _>(
+            PartKey::random(),
+            0,
+            remote,
+            &store,
+        )) {
+            FilteredBuckets::Done => {}
+            FilteredBuckets::Handoff(out) => {
+                panic!("identical bucket was not pruned, handed off {out:?}")
+            }
+            FilteredBuckets::Relist(id) => {
+                panic!("identical bucket was not pruned, relisted {id:?}")
+            }
+        }
     }
 }

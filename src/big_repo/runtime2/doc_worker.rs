@@ -14,7 +14,7 @@ use crate::runtime2::{
     DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
     MaterializationStatus, messages::DocWorkerMsg,
 };
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
 use sedimentree_core::sedimentree::SedimentreeItem;
@@ -1234,7 +1234,7 @@ impl<F: FutureForm> DocWorker2<F> {
     )]
     async fn apply_sync_session(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         commit_ids: Vec<CommitId>,
         fragment_ids: Vec<CommitId>,
         reply: Option<
@@ -1626,7 +1626,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// receipt must report `Pending` for a doc that is still blocked.
     async fn report_sync_outcome(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         has_caller: bool,
         reply: Option<
             futures::channel::oneshot::Sender<
@@ -1880,7 +1880,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn notif_pending_heads(
         &mut self,
         tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> eyre::Result<()> {
         let commit_ids = tree.heads(&sedimentree_core::depth::CountLeadingZeroBytes);
         let heads = commit_ids

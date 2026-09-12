@@ -77,7 +77,7 @@ async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::Docum
 impl big_sync::SyncBackend for BigRepoSyncBackend {
     /// Part membership is exclusively owned by runtime2 reconciliation workers.
     /// Sync replay acknowledges removals without mutating that projection.
-    async fn remove_obj_from_parts(&self, _obj_id: ObjId, _parts: Vec<PartId>) -> Res<()> {
+    async fn remove_obj_from_parts(&self, _obj_id: ObjKey, _parts: Vec<PartKey>) -> Res<()> {
         Ok(())
     }
 
@@ -87,12 +87,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
     )]
     async fn sync_obj(
         &self,
-        peer_id: PeerId,
-        obj_id: big_sync_core::ObjId,
+        peer_id: PeerKey,
+        obj_id: big_sync_core::ObjKey,
         // Part hints are deliberately ignored: big_repo part membership is
         // owned by the runtime2 workers (group-part reconciliation, frontier
         // publishing), never by the sync path.
-        _parts: Vec<big_sync_core::PartId>,
+        _parts: Vec<big_sync_core::PartKey>,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
         let repo: Arc<crate::BigRepo> = self

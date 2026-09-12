@@ -742,10 +742,10 @@ async fn tier5_remote_restart_notification_propagates_existing_doc_update() -> c
     restart_right(&mut pair, right_path).await?;
     pair.connect().await?;
     pair.left()
-        .set_peer_parts(pair.right(), vec![crate::GLOBAL_PART_ID])
+        .set_peer_parts(pair.right(), vec![crate::global_part_id()])
         .await?;
     pair.right()
-        .set_peer_parts(pair.left(), vec![crate::GLOBAL_PART_ID])
+        .set_peer_parts(pair.left(), vec![crate::global_part_id()])
         .await?;
     owner_doc
         .with_document(|doc| {
@@ -772,8 +772,8 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.right(),
             vec![
-                crate::GLOBAL_PART_ID,
-                crate::PartId::new(doc_id.into_bytes()),
+                crate::global_part_id(),
+                crate::PartKey::new(doc_id.into_bytes()),
             ],
         )
         .await?;
@@ -781,8 +781,8 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.left(),
             vec![
-                crate::GLOBAL_PART_ID,
-                crate::PartId::new(doc_id.into_bytes()),
+                crate::global_part_id(),
+                crate::PartKey::new(doc_id.into_bytes()),
             ],
         )
         .await?;

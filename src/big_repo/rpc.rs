@@ -1,6 +1,6 @@
 use crate::{BigRepo, interlude::*};
 
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use irpc::{WithChannels, channel, rpc_requests};
@@ -41,12 +41,12 @@ pub enum RepoSyncRpc {
 
 #[derive(Debug, Default)]
 struct RpcPeerMap {
-    by_endpoint: HashMap<iroh::EndpointId, PeerId>,
-    by_peer: HashMap<PeerId, iroh::EndpointId>,
+    by_endpoint: HashMap<iroh::EndpointId, PeerKey>,
+    by_peer: HashMap<PeerKey, iroh::EndpointId>,
 }
 
 impl RpcPeerMap {
-    fn register(&mut self, endpoint_id: iroh::EndpointId, peer_id: PeerId) {
+    fn register(&mut self, endpoint_id: iroh::EndpointId, peer_id: PeerKey) {
         if let Some(old_peer_id) = self.by_endpoint.insert(endpoint_id, peer_id) {
             self.by_peer.remove(&old_peer_id);
         }
@@ -55,25 +55,25 @@ impl RpcPeerMap {
         }
     }
 
-    fn unregister(&mut self, peer_id: PeerId) {
+    fn unregister(&mut self, peer_id: PeerKey) {
         if let Some(endpoint_id) = self.by_peer.remove(&peer_id) {
             self.by_endpoint.remove(&endpoint_id);
         }
     }
 
-    fn lookup(&self, endpoint_id: iroh::EndpointId) -> Option<PeerId> {
+    fn lookup(&self, endpoint_id: iroh::EndpointId) -> Option<PeerKey> {
         self.by_endpoint.get(&endpoint_id).copied()
     }
 }
 
 #[derive(Clone)]
 pub struct BigRepoRpcHandle {
-    rpc_tx: mpsc::Sender<(PeerId, RepoSyncRpcMessage)>,
+    rpc_tx: mpsc::Sender<(PeerKey, RepoSyncRpcMessage)>,
     peer_map: Arc<RwLock<RpcPeerMap>>,
 }
 
 impl BigRepoRpcHandle {
-    pub fn local_sender(&self) -> mpsc::Sender<(PeerId, RepoSyncRpcMessage)> {
+    pub fn local_sender(&self) -> mpsc::Sender<(PeerKey, RepoSyncRpcMessage)> {
         self.rpc_tx.clone()
     }
 
@@ -81,7 +81,7 @@ impl BigRepoRpcHandle {
     ///
     /// The mapping is only an identity seam for RPC consumers; notification
     /// delivery itself does not perform authorization.
-    pub fn register_peer(&self, endpoint_id: iroh::EndpointId, peer_id: PeerId) {
+    pub fn register_peer(&self, endpoint_id: iroh::EndpointId, peer_id: PeerKey) {
         self.peer_map
             .write()
             .expect(ERROR_MUTEX)
@@ -89,7 +89,7 @@ impl BigRepoRpcHandle {
     }
 
     /// Remove the identity mapping for a disconnected BigRepo peer.
-    pub fn unregister_peer(&self, peer_id: PeerId) {
+    pub fn unregister_peer(&self, peer_id: PeerKey) {
         self.peer_map
             .write()
             .expect(ERROR_MUTEX)
@@ -106,7 +106,7 @@ impl BigRepoRpcHandle {
 
 #[derive(Clone, Debug)]
 pub struct BigRepoRpcProtocolHandler {
-    tx: mpsc::Sender<(PeerId, RepoSyncRpcMessage)>,
+    tx: mpsc::Sender<(PeerKey, RepoSyncRpcMessage)>,
     peer_map: Arc<RwLock<RpcPeerMap>>,
 }
 
@@ -123,7 +123,7 @@ impl ProtocolHandler for BigRepoRpcProtocolHandler {
                 // path still notifies, but the misconfiguration must be visible
                 // rather than silent — embedders register the mapping from the
                 // repo-sync connection (`BigRepoRpcHandle::register_peer`).
-                let peer_id = PeerId::new(*endpoint_id.as_bytes());
+                let peer_id = PeerKey::new(*endpoint_id.as_bytes());
                 tracing::warn!(
                     %endpoint_id,
                     %peer_id,
@@ -214,7 +214,7 @@ async fn handle_rpc_message(
     big_repo: Arc<BigRepo>,
     subscription_tasks: &utils_rs::AbortableJoinSet,
     cancel_token: &CancellationToken,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     msg: RepoSyncRpcMessage,
 ) {
     match msg {
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn rpc_peer_mapping_tracks_application_identity() {
         let endpoint_id = iroh::SecretKey::from_bytes(&[7; 32]).public();
-        let application_peer = PeerId::new([8; 32]);
+        let application_peer = PeerKey::new([8; 32]);
         let mut map = RpcPeerMap::default();
 
         map.register(endpoint_id, application_peer);

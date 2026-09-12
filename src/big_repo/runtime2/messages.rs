@@ -3,7 +3,7 @@
 
 use crate::DocumentId;
 use crate::interlude::*;
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicU64;
 /// fully closes.
 type ConnOpenResp = futures::channel::oneshot::Sender<
     eyre::Result<(
-        PeerId,
+        PeerKey,
         Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(Arc<std::sync::atomic::AtomicBool>, eyre::Result<()>)>,
     )>,
@@ -130,7 +130,7 @@ pub enum Runtime2Cmd {
             futures::channel::oneshot::Sender<eyre::Result<Option<crate::runtime2::DocHeadState>>>,
     },
     OpenConn {
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
         #[educe(Debug(ignore))]
         resp: ConnOpenResp,
@@ -141,7 +141,7 @@ pub enum Runtime2Cmd {
         resp: ConnOpenResp,
     },
     CloseConn {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         /// End flag of the specific connection being closed. Subduction
         /// tracks multiple connections per peer, so a close must identify
         /// WHICH connection it targets; the peer's registration is only
@@ -152,7 +152,7 @@ pub enum Runtime2Cmd {
     },
     SyncDocWithPeer {
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
@@ -175,7 +175,7 @@ pub enum Runtime2Cmd {
         error: crate::runtime2::types::SyncDocError,
     },
     SyncKeyhiveWithPeer {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -186,11 +186,11 @@ pub enum Runtime2Cmd {
     },
     CancelDocSyncWaiter {
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
     },
     CancelKeyhiveSyncWaiter {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
     },
     RegisterDocLease {
@@ -256,16 +256,16 @@ pub enum Runtime2Evt {
         session: subduction_core::sync_session::SyncSession,
     },
     ConnEstablished {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
     ConnLost {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
         error: Option<String>,
     },
     KeyhiveSyncDone {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
         changed: bool,
     },
@@ -273,7 +273,7 @@ pub enum Runtime2Evt {
     /// completion event. The hub uses this to resolve the public waiter
     /// instead of allowing a network error to panic a child task.
     KeyhiveSyncFailed {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
         error: String,
     },
@@ -283,7 +283,7 @@ pub enum Runtime2Evt {
     /// quiescence via `active_keyhive_syncs`. The notification itself is a
     /// hint, not the source of Keyhive state.
     KeyhiveChangeNotif {
-        peer_id: PeerId,
+        peer_id: PeerKey,
     },
     /// The durable incorporation-log head advanced: an incorporation hook
     /// appended a batch and everything through `seq` is now applied to the
@@ -385,7 +385,7 @@ pub enum DocWorkerMsg {
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
     ApplySyncSession {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         /// Resolve the caller's sync receipt with the outcome. `None` for

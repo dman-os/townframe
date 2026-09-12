@@ -363,7 +363,7 @@ where
 }
 
 /// The full multi-stream machine: one instance holds MANY named streams
-/// (mirroring `cursor_state: HashMap<PartId, CursorStreamState>`) plus the
+/// (mirroring `cursor_state: HashMap<PartKey, CursorStreamState>`) plus the
 /// job board aggregating concurrent work across them. Composition granularity
 /// follows the existing code: one machine per entity (peer), not per stream.
 ///
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn multi_stream_scenario_mirrors_peer_part_structure() {
         // Mirrors `CursorSyncMachine`'s real shape: ONE machine instance holds
-        // many part-streams (`cursor_state: HashMap<PartId, _>`) while a
+        // many part-streams (`cursor_state: HashMap<PartKey, _>`) while a
         // single obj job aggregates work across them — a Changed event lists
         // several part_ids and one job gates every listed part's watermark
         // (`waiter.parts` in the original).

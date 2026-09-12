@@ -2,16 +2,24 @@ use crate::interlude::*;
 
 use crate::part_store::HostPartStore;
 
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
-    SubPartsRequest,
+    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPageOutcome,
+    ReplayPageRequest,
 };
 use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
 
 pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
+
+/// The longest a page request is held while its target has nothing to send.
+///
+/// The caller asks for a hold and this caps it, so a caller cannot park a request
+/// for as long as it likes. It paces the caught-up case only: a page that has
+/// events answers at once, and the caller re-issues either way. A protocol knob,
+/// not a measured threshold.
+const MAX_PAGE_HOLD: Duration = Duration::from_secs(15);
 
 /// A request stamped with the storage scope it targets.
 ///
@@ -36,10 +44,10 @@ pub trait WireBigSyncRpcClient: Send + Sync {
         req: ScopedRequest<PeerSummaryRequest>,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: ScopedRequest<SubPartsRequest>,
-    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>;
+        req: ScopedRequest<ReplayPageRequest>,
+    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
 
     async fn get_changed_buckets(
         &self,
@@ -74,13 +82,12 @@ impl HostBigRpcClient for ScopedRpcClient {
             .await
     }
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: SubPartsRequest,
-    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
-    {
+        req: ReplayPageRequest,
+    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>> {
         self.inner
-            .sub_parts(ScopedRequest {
+            .replay_page(ScopedRequest {
                 scope_key: Arc::clone(&self.scope_key),
                 inner: req,
             })
@@ -119,10 +126,10 @@ pub trait HostBigRpcClient: Send + Sync {
         req: PeerSummaryRequest,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: SubPartsRequest,
-    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>;
+        req: ReplayPageRequest,
+    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
 
     async fn get_changed_buckets(
         &self,
@@ -140,8 +147,8 @@ pub trait HostBigRpcClient: Send + Sync {
 pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
     PeerSummary(ScopedRequest<PeerSummaryRequest>),
-    #[rpc(tx = channel::mpsc::Sender<SubEvent>)]
-    SubParts(ScopedRequest<SubPartsRequest>),
+    #[rpc(tx = channel::oneshot::Sender<ReplayPageOutcome>)]
+    ReplayPage(ScopedRequest<ReplayPageRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<Vec<BucketSummary>, ListPartsError>>)]
     GetChangedBuckets(ScopedRequest<GetChangedBucketsRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
@@ -180,7 +187,7 @@ impl BigSyncRpcHandle {
 
 #[derive(Clone)]
 pub struct BigSyncRpcProtocolHandler {
-    tx: mpsc::Sender<(PeerId, BigSyncRpcMessage)>,
+    tx: mpsc::Sender<(PeerKey, BigSyncRpcMessage)>,
 }
 
 impl std::fmt::Debug for BigSyncRpcProtocolHandler {
@@ -196,7 +203,7 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
         &self,
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
-        let peer_id = PeerId::new(*conn.remote_id().as_bytes());
+        let peer_id = PeerKey::new(*conn.remote_id().as_bytes());
         loop {
             let msg = match irpc_iroh::read_request::<BigSyncIrpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -216,17 +223,12 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
 
 pub struct BigSyncRpcStopToken {
     cancel_token: CancellationToken,
-    subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
     join_handle: tokio::task::JoinHandle<()>,
 }
 
 impl BigSyncRpcStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        self.subscription_tasks
-            .stop(Duration::from_secs(5))
-            .await
-            .wrap_err("failed stopping big sync rpc subscription forwarders")?;
         utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(5))
             .await
             .wrap_err("failed stopping big sync rpc")
@@ -241,15 +243,9 @@ pub async fn spawn_big_sync_rpc(
     let client = irpc::Client::<BigSyncIrpc>::local(rpc_tx);
 
     let cancel_token = CancellationToken::new();
-    let subscription_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
     let fut = {
         let cancel_token = cancel_token.clone();
-        let subscription_tasks = Arc::clone(&subscription_tasks);
-        let mut worker = BigSyncRpcWorker {
-            stores,
-            cancel_token: cancel_token.clone(),
-            subscription_tasks,
-        };
+        let mut worker = BigSyncRpcWorker { stores };
         async move {
             loop {
                 tokio::select! {
@@ -283,7 +279,6 @@ pub async fn spawn_big_sync_rpc(
         },
         BigSyncRpcStopToken {
             cancel_token,
-            subscription_tasks,
             join_handle,
         },
     ))
@@ -310,67 +305,18 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
         Ok(Ok(response))
     }
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: ScopedRequest<SubPartsRequest>,
-    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
-    {
-        let parts: std::collections::HashSet<_> = req
-            .inner
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
-                big_sync_core::rpc::SubscriptionTarget::Object { .. } => None,
-            })
-            .collect();
-        if !parts.is_empty() {
-            match self
-                .peer_summary(ScopedRequest {
-                    scope_key: Arc::clone(&req.scope_key),
-                    inner: PeerSummaryRequest { parts },
-                })
-                .await?
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => return Ok(Ok(Err(err))),
-                Err(err) => return Ok(Err(err)),
-            }
-        }
-
-        let remote_rx = match self.client.server_streaming(req, 1024).await {
-            Ok(rx) => rx,
+        req: ScopedRequest<ReplayPageRequest>,
+    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>> {
+        let response = match self.client.rpc(req).await {
+            Ok(response) => response,
             Err(err) => {
-                warn!(?err, "big sync sub_parts rpc transport failed");
+                warn!(?err, "big sync replay_page rpc transport failed");
                 return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
             }
         };
-
-        let (local_tx, local_rx) = big_sync_core::mpsc::unbounded(
-            "big-sync-iroh-rpc".into(),
-            "big-sync-rpc-client".into(),
-        );
-        tokio::spawn(async move {
-            let mut remote_rx = remote_rx;
-            loop {
-                match remote_rx.recv().await {
-                    Ok(Some(evt)) => {
-                        if local_tx.send(evt).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(err) => {
-                        warn!(?err, "big sync sub_parts bridge failed");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Ok(Ok(local_rx)))
+        Ok(Ok(response))
     }
 
     async fn get_changed_buckets(
@@ -404,8 +350,6 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
 
 struct BigSyncRpcWorker {
     stores: HashMap<Arc<str>, Arc<dyn HostPartStore>>,
-    cancel_token: CancellationToken,
-    subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
 impl BigSyncRpcWorker {
@@ -413,7 +357,7 @@ impl BigSyncRpcWorker {
     async fn handle_rpc_message(
         &mut self,
         msg: BigSyncRpcMessage,
-        authenticated_peer: Option<PeerId>,
+        authenticated_peer: Option<PeerKey>,
     ) {
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
@@ -429,93 +373,69 @@ impl BigSyncRpcWorker {
                     return;
                 };
                 let out = {
-                    store
-                        .summarize_parts(inner.inner.parts)
-                        .await
-                        .unwrap()
-                        .map(|parts| PeerSummaryResult {
-                            parts: parts
-                                .into_iter()
-                                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                                .collect(),
-                        })
+                    // The count is a fact about the asker, so the responder counts it
+                    // against the cursor the asker advertised. `authenticated_peer` is
+                    // the asker's principal; `None` there is the local in-process
+                    // caller, which access rows do not gate.
+                    let PeerSummaryRequest {
+                        parts,
+                        asker_part_cursors,
+                    } = inner.inner;
+                    match store.summarize_parts(parts).await.unwrap() {
+                        Ok(parts) => {
+                            let mut summaries = HashMap::new();
+                            for (part_id, summary) in parts {
+                                let since =
+                                    asker_part_cursors.get(&part_id).copied().unwrap_or(0);
+                                let dirty = store
+                                    .part_dirty_count(part_id, authenticated_peer, since)
+                                    .await
+                                    .unwrap();
+                                summaries.insert(part_id, summary.into_strat_summaries(dirty));
+                            }
+                            Ok(PeerSummaryResult { parts: summaries })
+                        }
+                        Err(err) => Err(err),
+                    }
                 };
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            BigSyncRpcMessage::SubParts(req) => {
+            BigSyncRpcMessage::ReplayPage(req) => {
                 let WithChannels { inner, tx, .. } = req;
+                // An unauthenticated caller is not a special case of "nothing to
+                // send": it is unauthorized, and says so.
                 let Some(subscriber) = authenticated_peer else {
-                    warn!("rejecting unauthenticated sub_parts request");
+                    warn!("rejecting unauthenticated replay_page request");
+                    tx.send(ReplayPageOutcome::Unauthorized)
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                     return;
                 };
                 let Some(store) = self.stores.get(&inner.scope_key) else {
-                    warn!(scope_key = %inner.scope_key, "sub_parts for unknown scope");
+                    warn!(scope_key = %inner.scope_key, "replay_page for unknown scope");
+                    tx.send(ReplayPageOutcome::UnknownPart)
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                     return;
                 };
-                let sub = store.subscribe(inner.inner, subscriber).await.unwrap();
-                let Ok(sub) = sub else {
-                    warn!("sub_parts request for unknown parts");
-                    return;
-                };
-                let child_token = self.cancel_token.child_token();
-                let fut = async move {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = child_token.cancelled() => break,
-                            evt = sub.recv() => {
-                                let evt = match evt {
-                                    Ok(evt) => evt,
-                                    Err(_err) => {
-                                        break;
-                                    }
-                                };
-                                match &evt {
-                                    big_sync_core::rpc::SubEvent::Added(inner) => tracing::debug!(
-                                        ?subscriber,
-                                        obj_id = %inner.obj_id,
-                                        part_id = %inner.part_id,
-                                        cursor = inner.cursor,
-                                        payload = !inner.payload.is_null(),
-                                        "rpc forwarding Added event",
-                                    ),
-                                    big_sync_core::rpc::SubEvent::Changed(inner) => tracing::debug!(
-                                        ?subscriber,
-                                        obj_id = %inner.obj_id,
-                                        cursor = inner.cursor,
-                                        part_count = inner.part_ids.len(),
-                                        payload = !inner.payload.is_null(),
-                                        "rpc forwarding Changed event",
-                                    ),
-                                    big_sync_core::rpc::SubEvent::Removed(inner) => tracing::debug!(
-                                        ?subscriber,
-                                        obj_id = %inner.obj_id,
-                                        part_id = %inner.part_id,
-                                        cursor = inner.cursor,
-                                        "rpc forwarding Removed event",
-                                    ),
-                                    big_sync_core::rpc::SubEvent::ReplayComplete => tracing::debug!(
-                                        ?subscriber,
-                                        "rpc forwarding ReplayComplete",
-                                    ),
-                                }
-                                if tx.send(evt).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    eyre::Ok(())
-                };
-                if let Err(err) = self
-                    .subscription_tasks
-                    .spawn(async move { fut.await.unwrap() })
-                {
-                    warn!(?err, "failed spawning subscription task");
-                }
+                let out = store
+                    .replay_page(
+                        inner.inner.target,
+                        inner.inner.limit,
+                        subscriber,
+                        Duration::from_millis(u64::from(inner.inner.hold_ms)).min(MAX_PAGE_HOLD),
+                    )
+                    .await
+                    .unwrap();
+                tx.send(out)
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
             }
             BigSyncRpcMessage::GetChangedBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;
@@ -561,38 +481,25 @@ mod tests {
 
     use crate::part_store::HostPartStore;
     use crate::part_store::memory::MemoryPartStore;
-    use big_sync_core::rpc::SubEvent;
-    use big_sync_core::{BuckId, Byte32Id, FingerprintSeed, ObjId, PartId};
+    use big_sync_core::{BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey};
     use iroh::protocol::Router;
     use std::net::Ipv4Addr;
 
-    fn test_part() -> PartId {
-        PartId(Byte32Id::new([
+    fn test_part() -> PartKey {
+        PartKey(ByteKey::new([
             32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
             32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
         ]))
     }
 
-    fn test_obj(byte: u8) -> ObjId {
+    fn test_obj(byte: u8) -> ObjKey {
         let mut bytes = [0u8; 32];
         bytes[0] = byte;
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     }
 
-    async fn collect_sub_events(rx: big_sync_core::mpsc::Receiver<SubEvent>) -> Res<Vec<SubEvent>> {
-        let mut out = Vec::new();
-        loop {
-            let evt = rx.recv().await?;
-            let done = matches!(evt, SubEvent::ReplayComplete);
-            out.push(evt);
-            if done {
-                break;
-            }
-        }
-        Ok(out)
-    }
 
-    async fn seed_test_store(store: &MemoryPartStore, part_id: PartId) -> Res<()> {
+    async fn seed_test_store(store: &MemoryPartStore, part_id: PartKey) -> Res<()> {
         store.ensure_part(part_id).await?;
 
         let live_obj = test_obj(1);
@@ -618,14 +525,21 @@ mod tests {
         let store = Arc::new(MemoryPartStore::new());
         seed_test_store(&store, part_id).await?;
 
-        let expected_peer_summary = PeerSummaryResult {
-            parts: store
+        // The same expectation is asserted for the in-process call and the network
+        // call. They agree because this store holds no access rows, so the access half
+        // is 0 for the local principal and for the connecting peer alike, and the
+        // member half does not depend on who is asking.
+        let expected_peer_summary = {
+            let mut summaries = HashMap::new();
+            for (part_id, summary) in store
                 .summarize_parts([part_id].into_iter().collect())
                 .await?
                 .unwrap()
-                .into_iter()
-                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                .collect(),
+            {
+                let dirty = HostPartStore::part_dirty_count(store.as_ref(), part_id, None, 0).await?;
+                summaries.insert(part_id, summary.into_strat_summaries(dirty));
+            }
+            PeerSummaryResult { parts: summaries }
         };
         let expected_changed_buckets = store
             .get_changed_buckets(GetChangedBucketsRequest {
@@ -649,21 +563,19 @@ mod tests {
             })
             .await?
             .unwrap();
-        let expected_sub_events = collect_sub_events(
-            store
-                .subscribe(
-                    SubPartsRequest {
-                        lower_bound: 0,
-                        targets: std::collections::HashSet::from([
-                            big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
-                        ]),
-                    },
-                    PeerId::new([0u8; 32]),
-                )
-                .await?
-                .unwrap(),
-        )
-        .await?;
+        // The in-process call and the network call must answer the same page.
+        // They agree because this store holds no access rows, so the member half
+        // is the same for both and neither is denied.
+        let page_target =
+            big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 };
+        let expected_page = store
+            .replay_page(
+                page_target,
+                16,
+                PeerKey::new([0u8; 32]),
+                Duration::from_millis(250),
+            )
+            .await?;
 
         let rpc_store = Arc::<MemoryPartStore>::clone(&store);
         let rpc_store: Arc<dyn HostPartStore> = rpc_store;
@@ -675,6 +587,7 @@ mod tests {
                 scope_key: Arc::from("test-scope"),
                 inner: PeerSummaryRequest {
                     parts: [part_id].into_iter().collect(),
+                    asker_part_cursors: HashMap::from([(part_id, 0)]),
                 },
             })
             .await?;
@@ -705,6 +618,7 @@ mod tests {
                 scope_key: Arc::from("test-scope"),
                 inner: PeerSummaryRequest {
                     parts: [part_id].into_iter().collect(),
+                    asker_part_cursors: HashMap::from([(part_id, 0)]),
                 },
             })
             .await?;
@@ -740,20 +654,17 @@ mod tests {
             .await?;
         assert_eq!(leaf_buckets, Ok(Ok(expected_leaf_buckets)));
 
-        let sub_events = client
-            .sub_parts(ScopedRequest {
+        let page = client
+            .replay_page(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
-                inner: SubPartsRequest {
-                    lower_bound: 0,
-                    targets: std::collections::HashSet::from([
-                        big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
-                    ]),
+                inner: big_sync_core::rpc::ReplayPageRequest {
+                    hold_ms: 50,
+                    target: page_target,
+                    limit: 16,
                 },
             })
-            .await???;
-        let sub_events =
-            tokio::time::timeout(Duration::from_secs(10), collect_sub_events(sub_events)).await??;
-        assert_eq!(sub_events, expected_sub_events);
+            .await??;
+        assert_eq!(page, expected_page);
 
         drop(client);
         rpc_stop.stop().await?;

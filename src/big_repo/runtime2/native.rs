@@ -95,7 +95,7 @@ where
     /// Keyhive protocol handle — sync initiation, cache refresh, compaction.
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -1369,7 +1369,7 @@ where
 
     fn sync_keyhive_with_peer(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<KeyhiveSyncOutcome>> {
         Sendable::from_future(async move {
@@ -1392,7 +1392,7 @@ where
     fn sync_doc_with_peer(
         &self,
         sed_id: SedimentreeId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
@@ -1524,7 +1524,7 @@ struct KeyhiveNotifWiring {
     /// Cancel token per peer; a new connection supersedes the previous
     /// subscription for the same peer.
     cancels: std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<PeerId, tokio_util::sync::CancellationToken>>,
+        tokio::sync::Mutex<std::collections::HashMap<PeerKey, tokio_util::sync::CancellationToken>>,
     >,
 }
 
@@ -1538,7 +1538,7 @@ where
     pub(crate) subduction: Arc<BigRepoSubduction<S>>,
     pub(crate) signer: subduction_crypto::signer::memory::MemorySigner,
     pub(crate) nonce_cache: Arc<subduction_core::nonce_cache::NonceCache>,
-    pub(crate) local_peer_id: PeerId,
+    pub(crate) local_peer_id: PeerKey,
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     pub(crate) keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Live authenticated connections keyed by their end flag. Subduction
@@ -1586,7 +1586,7 @@ where
 /// logged, never fatal to the connection.
 async fn spawn_keyhive_change_subscription(
     wiring: KeyhiveNotifWiring,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
     cancel: tokio_util::sync::CancellationToken,
@@ -1658,12 +1658,12 @@ where
 {
     fn connect(
         &self,
-        expected_peer: PeerId,
+        expected_peer: PeerKey,
         addr_blob: Box<dyn std::any::Any + Send>,
     ) -> <Sendable as FutureForm>::Future<
         'static,
         eyre::Result<(
-            PeerId,
+            PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             <Sendable as FutureForm>::Future<'static, eyre::Result<()>>,
         )>,
@@ -1691,7 +1691,7 @@ where
                 ),
             )
             .await?;
-            let peer_id = PeerId::new(*result.authenticated.peer_id().as_bytes());
+            let peer_id = PeerKey::new(*result.authenticated.peer_id().as_bytes());
 
             // Register with subduction.
             subduction
@@ -1786,7 +1786,7 @@ where
     ) -> <Sendable as FutureForm>::Future<
         'static,
         eyre::Result<(
-            PeerId,
+            PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             <Sendable as FutureForm>::Future<'static, eyre::Result<()>>,
         )>,
@@ -1818,7 +1818,7 @@ where
                 subduction_core::peer::id::PeerId::new(*local_peer_id.as_bytes());
             let result: IrohConnectResult =
                 accept_incoming(conn, &signer, nonce_cache.as_ref(), subduction_peer_id).await?;
-            let peer_id = PeerId::new(*result.authenticated.peer_id().as_bytes());
+            let peer_id = PeerKey::new(*result.authenticated.peer_id().as_bytes());
 
             // Register with subduction.
             subduction
@@ -1930,7 +1930,7 @@ where
 
     fn close(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> <Sendable as FutureForm>::Future<
         'static,
@@ -2185,7 +2185,7 @@ where
         let evt_tx = evt_tx.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
-                let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
+                let peer_id = PeerKey::new(*keyhive_peer_id.verifying_key());
                 if evt_tx
                     .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
                         peer_id,
@@ -2238,7 +2238,7 @@ where
         keyhive: keyhive.clone(),
         keyhive_storage: keyhive_storage.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(*local_peer_id.as_bytes()),
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
     });
 
@@ -2246,7 +2246,7 @@ where
         subduction: Arc::clone(&subduction_handle),
         signer: connect_signer,
         nonce_cache: Arc::new(NonceCache::new(sync_policy.subduction_nonce_ttl)),
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(*local_peer_id.as_bytes()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         conns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2266,7 +2266,7 @@ where
 
     // ── Spawn runtime2 ───────────────────────────────────────────────────
     let config = crate::runtime2::Runtime2Config {
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(*local_peer_id.as_bytes()),
         runtime_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
         doc_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::DocIo<Sendable>>,
         sync_policy,
@@ -2288,7 +2288,7 @@ where
     let spawned_group_part = crate::runtime2::spawn_group_part_worker(
         group_part_store.clone(),
         keyhive.clone(),
-        PeerId::new(*local_peer_id.as_bytes()),
+        PeerKey::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
         group_part_group_scope,

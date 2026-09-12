@@ -48,20 +48,20 @@ impl RepoAuthority {
         self.core_docs.clone().into()
     }
 
-    pub(crate) fn core_docs_part_id(&self) -> PartId {
+    pub(crate) fn core_docs_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.core_docs.id().to_bytes())
     }
-    pub(crate) fn content_docs_part_id(&self) -> PartId {
+    pub(crate) fn content_docs_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.content_docs.id().to_bytes())
     }
-    pub(crate) fn default_drawer_part_id(&self) -> PartId {
+    pub(crate) fn default_drawer_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.default_drawer.id().to_bytes())
     }
     #[expect(dead_code)]
     pub(crate) fn blob_inventories_parent(&self) -> BigKeyhiveAuthority {
         self.blob_inventories.clone().into()
     }
-    pub(crate) fn blob_inventories_part_id(&self) -> PartId {
+    pub(crate) fn blob_inventories_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.blob_inventories.id().to_bytes())
     }
 

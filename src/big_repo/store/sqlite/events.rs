@@ -12,7 +12,7 @@ impl SqliteBigRepoStore {
     /// Used by the `All` worker-scope path to watch every part without
     /// enumerating keyhive groups (a keyhive enumeration would miss parts
     /// for groups not yet in the hive and pays a graph walk).
-    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartId>> {
+    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartKey>> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
             "SELECT part_id AS 'part_id: Vec<u8>'
              FROM big_sync_parts WHERE scope_id = ?",

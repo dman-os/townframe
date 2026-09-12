@@ -333,7 +333,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     /// Initiate a keyhive sync round with a peer.
     fn sync_keyhive_with_peer(
         &self,
-        peer_id: big_sync_core::PeerId,
+        peer_id: big_sync_core::PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'_, eyre::Result<KeyhiveSyncOutcome>>;
 
@@ -347,7 +347,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     fn sync_doc_with_peer(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        peer_id: big_sync_core::PeerId,
+        peer_id: big_sync_core::PeerKey,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
 }

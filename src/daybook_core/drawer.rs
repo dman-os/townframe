@@ -176,7 +176,7 @@ pub struct DrawerRepo {
     drawer_group: BigKeyhiveGroup,
     pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     local_user_path: daybook_types::doc::UserPathBuf,
 
     // LRU Caches
@@ -367,7 +367,7 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path);
     }
 
-    pub(crate) fn replicated_partition_id(&self) -> PartId {
+    pub(crate) fn replicated_partition_id(&self) -> PartKey {
         big_repo::group_part_id(self.drawer_group.id().to_bytes())
     }
 
@@ -418,7 +418,7 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             let part_id = self.replicated_partition_id();
-            let obj_id = big_sync_core::ObjId::new(*branch_doc_id.as_bytes());
+            let obj_id = big_sync_core::ObjKey::new(*branch_doc_id.as_bytes());
             self.partition_store
                 .remove_obj_from_part(obj_id, part_id)
                 .await?;

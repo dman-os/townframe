@@ -429,7 +429,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let old_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     let mut sync_stats = pair.right().worker.subscribe_stats();
 
@@ -466,7 +466,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let revoked_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     assert!(
         revoked_cursor > old_cursor,
@@ -483,7 +483,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
         &backend,
         pair.left().peer_id(),
         doc_id,
-        vec![crate::GLOBAL_PART_ID],
+        vec![crate::global_part_id()],
         None,
     )
     .await?;
@@ -531,7 +531,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let fresh_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     assert!(
         fresh_cursor > revoked_cursor,

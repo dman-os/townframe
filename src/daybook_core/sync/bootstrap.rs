@@ -344,6 +344,11 @@ async fn pull_required_partitions_via_big_sync_worker(
         doc_sync_backends,
         "daybook-docs",
         max_task_backoff,
+        // Cursor replay, explicitly: bucket-diff was observed stalling in this embedder's
+        // offline-reopen path — the machine starts post-reopen and never completes,
+        // blocking `wait_for_full_sync` — and no test here covers that path, so this
+        // embedder stays opted out until one does.
+        Some(big_sync::SyncMode::CursorOnly),
         Arc::from("daybook-core"),
     )?;
     let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -351,6 +356,8 @@ async fn pull_required_partitions_via_big_sync_worker(
         blob_sync_backends,
         "daybook-blobs",
         max_task_backoff,
+        // Cursor replay, explicitly: see the note on the docs worker above.
+        Some(big_sync::SyncMode::CursorOnly),
         Arc::from("daybook-blobs"),
     )?;
     let (big_sync_rpc, big_sync_rpc_stop) =
@@ -370,7 +377,7 @@ async fn pull_required_partitions_via_big_sync_worker(
         .accept(big_repo::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
         .spawn();
 
-    let peer_id = PeerId::new(*bootstrap.endpoint_id.as_bytes());
+    let peer_id = PeerKey::new(*bootstrap.endpoint_id.as_bytes());
     let conn = big_repo
         .open_connection_iroh(
             endpoint.clone(),
@@ -401,7 +408,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
         Arc::new(big_sync_rpc_client);
 
-    let initial_partitions: HashMap<PartId, big_sync::BackendId> = [
+    let initial_partitions: HashMap<PartKey, big_sync::BackendId> = [
         (core_docs_partition_id, Arc::clone(&repo_backend_id)),
         (content_docs_partition_id, Arc::clone(&repo_backend_id)),
         (drawer_partition_id, Arc::clone(&repo_backend_id)),

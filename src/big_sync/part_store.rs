@@ -1,20 +1,20 @@
 use crate::interlude::*;
 
 use big_sync_core::keyed_frontier::{FrontierRead, FrontierRevision, KeyedFrontierReader};
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::rpc::{
     BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, SubEvent, SubPartsRequest,
+    PartSummary, ReplayPageOutcome, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{BuckId, Byte32Id, ObjId, PartId, PeerId, mpsc};
+use big_sync_core::{BuckId, ByteKey, ObjKey, PartKey, PeerKey, mpsc};
 
 /// The logical object and part routes represented by the part-store frontier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PartFrontierKey {
-    Object(ObjId),
-    Part { obj_id: ObjId, part_id: PartId },
+    Object(ObjKey),
+    Part { obj_id: ObjKey, part_id: PartKey },
 }
 
 pub(crate) use sqlite_frontier::SqlitePartFrontier;
@@ -41,8 +41,8 @@ pub(crate) struct PartRevisionReader {
     inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
     /// `true` selects every object and part (the `All` local scope).
     all: bool,
-    objects: HashSet<ObjId>,
-    parts: HashSet<PartId>,
+    objects: HashSet<ObjKey>,
+    parts: HashSet<PartKey>,
     pending: std::collections::VecDeque<RevisionRead<FrontierRevision, SubEvent>>,
     pending_replay_complete: Option<FrontierRevision>,
     last_revision: FrontierRevision,
@@ -52,8 +52,8 @@ pub(crate) struct PartRevisionReader {
 impl PartRevisionReader {
     pub(crate) fn new(
         inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
-        objects: HashSet<ObjId>,
-        parts: HashSet<PartId>,
+        objects: HashSet<ObjKey>,
+        parts: HashSet<PartKey>,
     ) -> Self {
         Self {
             inner,
@@ -133,11 +133,11 @@ impl PartRevisionReader {
         }
     }
 
-    fn selects_object(&self, obj_id: &ObjId) -> bool {
+    fn selects_object(&self, obj_id: &ObjKey) -> bool {
         self.all || self.objects.contains(obj_id)
     }
 
-    fn selects_part(&self, part_id: &PartId) -> bool {
+    fn selects_part(&self, part_id: &PartKey) -> bool {
         self.all || self.parts.contains(part_id)
     }
 
@@ -231,7 +231,7 @@ impl LocalPartRevisionReader for PartRevisionReader {
 #[derive(Debug, Clone)]
 pub struct HostPartStoreConfig {
     /// Parts that remain physically present but are invisible to remote part access.
-    pub hidden_parts: HashSet<PartId>,
+    pub hidden_parts: HashSet<PartKey>,
     pub debounce_quiet_window: std::time::Duration,
     pub debounce_max_latency: std::time::Duration,
 }
@@ -259,8 +259,8 @@ pub trait HostPartStore: Send + Sync {
     async fn latest_revision(&self) -> Res<CursorIndex>;
     async fn summarize_parts(
         &self,
-        parts: HashSet<PartId>,
-    ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>>;
+        parts: HashSet<PartKey>,
+    ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>>;
     async fn get_changed_buckets(
         &self,
         req: GetChangedBucketsRequest,
@@ -269,46 +269,55 @@ pub trait HostPartStore: Send + Sync {
         &self,
         req: LeafBucketsRequest,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>>;
-    async fn member_count(&self, part_id: PartId) -> Res<u64>;
-    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary>;
+    async fn member_count(&self, part_id: PartKey) -> Res<u64>;
+    /// The relevance `principal` is behind on `part_id` at `since`.
+    ///
+    /// `None` is the local principal, which access rows do not gate.
+    async fn part_dirty_count(
+        &self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> Res<PartDirtyCount>;
+    async fn get_bucket_summary(&self, part_id: PartKey, id: BuckId) -> Res<BucketSummary>;
 
-    async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>>;
-    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool>;
+    async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>>;
+    async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool>;
 
     // NOTE: upsert_obj doesn't take/invalidate leases since
     // it doesn't affect part membership
-    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()>;
+    async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()>;
 
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>>;
+    async fn obj_payload(&self, obj_id: ObjKey) -> Res<Option<ObjPayload>>;
 
-    // async fn get_obj_lease(&self, obj_id: ObjId) -> Res<ObjStoreLease>;
+    // async fn get_obj_lease(&self, obj_id: ObjKey) -> Res<ObjStoreLease>;
 
-    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()>;
+    async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()>;
 
-    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()>;
+    async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()>;
 
     async fn set_peer_part_cursor(
         &self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
         cursor: CursorIndex,
     ) -> Res<()>;
 
-    async fn get_peer_part_cursor(&self, peer_id: PeerId, part_id: PartId) -> Res<CursorIndex>;
+    async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex>;
 
     async fn list_events(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>>;
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>>;
     async fn list_events_with_policy(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
         enforce_policy: bool,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
         if enforce_policy {
             return Err(ferr!("policy enforcement not supported on this store"));
         }
@@ -321,8 +330,116 @@ pub trait HostPartStore: Send + Sync {
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
-        subscriber: PeerId,
+        subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>>;
+
+    /// Whether a page request for `target` is denied for `subscriber`.
+    ///
+    /// A page uses this to answer "not for you" rather than an empty page, which
+    /// a caller could otherwise only read as "nothing to send". Every store answers this
+    /// for itself: a store that filters its subscriptions per recipient has something to
+    /// deny, and a store that genuinely hands every subscriber the same stream must say so
+    /// explicitly rather than inherit an assumed `false`.
+    async fn page_denied(&self, target: &SubscriptionTarget, subscriber: PeerKey) -> Res<bool>;
+
+    /// One bounded, filtered page of a single target's events, held while there
+    /// is nothing to send.
+    ///
+    /// This is the responder half of client-driven delivery. The page is drained
+    /// from the same filtered subscription the push path used, bounded by
+    /// `limit`, and the caller re-issues from the cursor it gets back. Paging is
+    /// the flow control, so a caller's processing rate is what decides how fast
+    /// events arrive.
+    ///
+    /// The authorization answers are decided here rather than inferred from an
+    /// empty page: the event filter drops unreadable parts silently, which would
+    /// collapse "nothing to send" and "you may not read this" into one answer.
+    async fn replay_page(
+        &self,
+        target: SubscriptionTarget,
+        limit: u32,
+        subscriber: PeerKey,
+        hold: Duration,
+    ) -> Res<ReplayPageOutcome> {
+        let cursor = match &target {
+            SubscriptionTarget::Part { part_id, cursor } => {
+                if let Err(ListPartsError::UnkownParts { .. }) =
+                    self.summarize_parts(HashSet::from([*part_id])).await?
+                {
+                    return Ok(ReplayPageOutcome::UnknownPart);
+                }
+                *cursor
+            }
+            // An object target replays its derived part from the start; the store
+            // materializes that part while subscribing.
+            SubscriptionTarget::Object { .. } => 0,
+        };
+        if self.page_denied(&target, subscriber).await? {
+            return Ok(ReplayPageOutcome::Unauthorized);
+        }
+
+        let rx = match self
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: cursor,
+                    targets: HashSet::from([target]),
+                },
+                subscriber,
+            )
+            .await?
+        {
+            Ok(rx) => rx,
+            Err(ListPartsError::UnkownParts { .. }) => {
+                return Ok(ReplayPageOutcome::UnknownPart);
+            }
+        };
+
+        let limit = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
+        let mut events = Vec::new();
+        let mut resume = None;
+        // Whether the replay half of the subscription was exhausted, which is the
+        // difference between "nothing further is waiting" and "this page is full".
+        let mut drained = false;
+        let hold = tokio::time::sleep(utils_rs::scale_timeout(hold));
+        tokio::pin!(hold);
+        loop {
+            let evt = tokio::select! {
+                biased;
+                evt = rx.recv() => match evt {
+                    Ok(evt) => evt,
+                    Err(_) => break,
+                },
+                () = &mut hold => break,
+            };
+            let (evt_cursor, event) = match evt {
+                // The replay half is drained. Answer as soon as the page holds
+                // something; an empty replay means the caller is caught up, so
+                // keep holding for a live event instead of answering nothing at
+                // once.
+                SubEvent::ReplayComplete => {
+                    if !events.is_empty() {
+                        drained = true;
+                        break;
+                    }
+                    continue;
+                }
+                SubEvent::Changed(inner) => (inner.cursor, PartEvent::Changed(inner)),
+                SubEvent::Added(inner) => (inner.cursor, PartEvent::Added(inner)),
+                SubEvent::Removed(inner) => (inner.cursor, PartEvent::Removed(inner)),
+            };
+            resume = Some(evt_cursor);
+            events.push(event);
+            if events.len() >= limit {
+                break;
+            }
+        }
+        Ok(ReplayPageOutcome::Events(PartPage {
+            events,
+            // `Some` means more is waiting, so the caller resumes from it.
+            // `None` means the log is caught up as of the last event.
+            next_cursor: if drained { None } else { resume },
+        }))
+    }
     /// Subscribe a trusted local consumer without remote authorization or
     /// hidden-part filtering. This method is intentionally not exposed by RPC.
     /// Stores that do not provide a local mirror return an error.
@@ -379,48 +496,73 @@ pub trait HostPartStore: Send + Sync {
     ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
         Err(ferr!("local revision reader is not available"))
     }
-    async fn ensure_part(&self, part_id: PartId) -> Res<()>;
+    async fn ensure_part(&self, part_id: PartKey) -> Res<()>;
 
-    /// Set the agents who have access to `obj` and their [`Access`] level.
+    /// Replace the agents who have access to `part` and their [`Access`] level.
     /// The store's [`ObjAccessPolicy`] uses this to determine fetchability.
-    async fn set_obj_members(
+    async fn set_part_members(
         &self,
-        obj: ObjId,
-        agents: HashMap<PeerId, keyhive_core::access::Access>,
+        part: PartKey,
+        agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()>;
 
-    /// Add a single member to `obj` with the given [`Access`] level.
-    async fn add_obj_member(
+    /// Add a single member to `part` with the given [`Access`] level.
+    async fn add_part_member(
         &self,
-        obj: ObjId,
-        member: PeerId,
+        part: PartKey,
+        member: PeerKey,
         access: keyhive_core::access::Access,
     ) -> Res<()>;
 
-    /// Remove a single member from `obj`.
-    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()>;
+    /// Remove a single member from `part`.
+    async fn remove_part_member(&self, part: PartKey, member: PeerKey) -> Res<()>;
 
-    /// Whether `principal` may receive events for `obj_id`.
+    /// Filter an outbound event down to the parts `principal` may read.
     ///
-    /// - `principal == None` (trusted local subscriber): always permitted.
-    /// - `part_id` is the part the event belongs to when known.
-    async fn is_event_permitted(
+    /// `scope` is the event's *candidate* part set: the parts the event names, or
+    /// [`PartScope::FromObject`] when nothing usable is named and the object's
+    /// containing parts must be resolved from membership. Access is granted per
+    /// part, so authorization and non-exposure are the same operation: a part id
+    /// is disclosed only to a principal that may read it.
+    ///
+    /// - `principal == None` (trusted local subscriber): `Ok(None)`, unfiltered.
+    ///   Delivery proceeds with the event's own part list untouched.
+    /// - Otherwise `Ok(Some(readable))` with `readable ⊆ candidates`. Empty means
+    ///   nothing about this event is the principal's business: drop it.
+    async fn permitted_parts(
         &self,
-        _part_id: Option<PartId>,
-        _obj_id: ObjId,
-        _principal: Option<PeerId>,
-    ) -> Res<bool> {
-        Ok(true)
+        _scope: PartScope,
+        _obj_id: ObjKey,
+        _principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
+        Ok(None)
     }
 }
 
-pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
+/// The candidate part set an outbound event is about, to be filtered down to the
+/// parts the recipient may read.
+///
+/// `Part`/`AnyOf` carry the parts the event itself names; `FromObject` means the
+/// event named no usable part (an object-scoped change, or an unreliable empty
+/// list) and the object's live containing parts must be resolved from membership
+/// instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartScope {
+    /// The event names exactly one part.
+    Part(PartKey),
+    /// The event names several parts.
+    AnyOf(Vec<PartKey>),
+    /// Nothing usable is named: resolve the object's containing parts.
+    FromObject,
+}
+
+pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjKey, Option<ObjKey>) {
     let level = bucket_id.level();
     let prefix_bits = u32::from(level) * u32::from(BuckId::BITS_PER_LEVEL);
     debug_assert!(prefix_bits <= u16::BITS);
 
     if prefix_bits == 0 {
-        return (ObjId(Byte32Id::new([0; 32])), None);
+        return (ObjKey(ByteKey::new([0; 32])), None);
     }
 
     let shift = u16::BITS - prefix_bits;
@@ -428,7 +570,7 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
     let start = {
         let mut bytes = [0; 32];
         bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     };
     if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
         return (start, None);
@@ -440,7 +582,7 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
     let end = Some({
         let mut bytes = [0; 32];
         bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     });
     (start, end)
 }
@@ -485,7 +627,7 @@ pub mod contract {
     //
     //     let unique_leaf_buckets: BTreeSet<_> = obj_ids
     //         .iter()
-    //         .map(|obj_id| BuckId::from_obj_id(BuckId::MAX_LEVEL, obj_id))
+    //         .map(|obj_id| BuckId::from_obj_key(BuckId::MAX_LEVEL, obj_id))
     //         .collect();
     //     assert!(
     //         unique_leaf_buckets.len() >= 8,
@@ -496,8 +638,8 @@ pub mod contract {
 
     async fn expected_bucket_summary<S>(
         store: &S,
-        live_ids: &BTreeSet<ObjId>,
-        dead_ids: &BTreeSet<ObjId>,
+        live_ids: &BTreeSet<ObjKey>,
+        dead_ids: &BTreeSet<ObjKey>,
     ) -> Res<BucketSummary>
     where
         S: HostPartStore + Sync,
@@ -553,9 +695,9 @@ pub mod contract {
     pub async fn assert_root_bucket_summary<S>(
         store: &S,
 
-        part_id: PartId,
-        live_ids: &[ObjId],
-        dead_ids: &[ObjId],
+        part_id: PartKey,
+        live_ids: &[ObjKey],
+        dead_ids: &[ObjKey],
     ) -> Res<()>
     where
         S: HostPartStore + Sync,
@@ -611,10 +753,10 @@ pub mod contract {
     pub async fn assert_root_leaf_pagination<S>(
         store: &S,
 
-        part_id: PartId,
+        part_id: PartKey,
         seed: FingerprintSeed,
-        live_ids: &[ObjId],
-        dead_ids: &[ObjId],
+        live_ids: &[ObjKey],
+        dead_ids: &[ObjKey],
         limit_hint: u32,
     ) -> Res<()>
     where
@@ -716,10 +858,10 @@ pub mod contract {
     pub async fn assert_root_bucket_contract<S>(
         store: &S,
 
-        part_id: PartId,
+        part_id: PartKey,
         seed: FingerprintSeed,
-        live_ids: &[ObjId],
-        dead_ids: &[ObjId],
+        live_ids: &[ObjKey],
+        dead_ids: &[ObjKey],
         limit_hint: u32,
     ) -> Res<()>
     where
@@ -736,7 +878,8 @@ pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{
         BUCKET_LIVE_FP_SEED, BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest,
-        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest,
+        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, ReplayPageOutcome, SubEvent,
+        SubPartsRequest, SubscriptionTarget,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use keyhive_core::access::Access;
@@ -747,14 +890,14 @@ pub mod host_contract {
         fn store(&self) -> &dyn HostPartStore;
     }
 
-    fn test_part(seed: u8) -> PartId {
-        PartId(Byte32Id::new([seed; 32]))
+    fn test_part(seed: u8) -> PartKey {
+        PartKey(ByteKey::new([seed; 32]))
     }
 
-    fn test_obj(seed: u8) -> ObjId {
+    fn test_obj(seed: u8) -> ObjKey {
         let mut bytes = [0; 32];
         bytes[0] = seed;
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     }
 
     fn payload(tag: &'static str, idx: u64) -> ObjPayload {
@@ -764,18 +907,18 @@ pub mod host_contract {
         })
     }
 
-    fn obj_in_bucket(bucket_id: BuckId, salt: u8) -> ObjId {
+    fn obj_in_bucket(bucket_id: BuckId, salt: u8) -> ObjKey {
         let (start, _) = super::obj_id_bounds_for_bucket(bucket_id);
         let mut bytes = start.0.into_bytes();
         bytes[31] = salt;
-        ObjId(Byte32Id::new(bytes))
+        ObjKey(ByteKey::new(bytes))
     }
 
     async fn seed_live_obj<S>(
         store: &S,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         payload: ObjPayload,
-        parts: &[PartId],
+        parts: &[PartKey],
     ) -> Res<()>
     where
         S: HostPartStore + Sync + ?Sized,
@@ -791,8 +934,8 @@ pub mod host_contract {
     fn assert_added(
         event: &PartEvent,
         cursor: CursorIndex,
-        part_id: PartId,
-        obj_id: ObjId,
+        part_id: PartKey,
+        obj_id: ObjKey,
         payload: ObjPayload,
     ) {
         let PartEvent::Added(transition) = event else {
@@ -845,6 +988,188 @@ pub mod host_contract {
         assert_list_events_next_cursor_exactness_contract(harness).await?;
         assert_local_revision_reader_contract(harness).await?;
         assert_local_revision_reader_all_contract(harness).await?;
+        assert_latest_revision_is_a_read_contract(harness).await?;
+        assert_page_outcome_contract(harness).await?;
+        Ok(())
+    }
+
+    /// `latest_revision` is a read: it reports the newest allocated revision and never
+    /// allocates one of its own, so two consecutive reads agree. A store that allocated here
+    /// would advance the cursor space on reads alone, which no write can account for.
+    pub async fn assert_latest_revision_is_a_read_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let first = store.latest_revision().await?;
+        let second = store.latest_revision().await?;
+        assert_eq!(
+            first, second,
+            "reading the latest revision must not allocate a revision"
+        );
+        Ok(())
+    }
+
+    /// The page outcomes are distinct answers, for every store: an unknown part is not a
+    /// denial, a denial is not an empty page, and a granted part with nothing to send is an
+    /// empty page. Collapsing the denial into the empty page tells a caller it is caught up
+    /// when it has in fact lost access.
+    ///
+    /// Visibility follows *current* access rather than the time access was granted, so both
+    /// orders are pinned below — grant before the event, and grant after it. A page's filter
+    /// resolves the parts a subscriber may read now and keeps no record of when it could first
+    /// read them.
+    pub async fn assert_page_outcome_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(230);
+        let granted_empty = test_part(231);
+        let unknown = test_part(232);
+        let obj = test_obj(233);
+        let member = big_sync_core::PeerKey::new([234u8; 32]);
+        let outsider = big_sync_core::PeerKey::new([235u8; 32]);
+        let late_grant = test_part(236);
+        let late_obj = test_obj(237);
+
+        /// A part's events, read through the documented resume protocol.
+        ///
+        /// The subscription a page drains is produced by a spawned task, so a first page can come
+        /// back empty before that task has delivered anything. A zero hold removes the entire
+        /// window in which that delivery could happen, which turns the assertions below into
+        /// tests of scheduling rather than of filtering, so this asks for a hold and re-issues
+        /// while nothing has arrived — re-issuing from the returned cursor is how a caller is
+        /// meant to resume.
+        async fn page_events_for(
+            store: &dyn HostPartStore,
+            part_id: PartKey,
+            subscriber: PeerKey,
+        ) -> Res<Vec<PartEvent>> {
+            const PAGE_HOLD: Duration = Duration::from_millis(50);
+            const ATTEMPTS: u8 = 8;
+            for _ in 0..ATTEMPTS {
+                let outcome = store
+                    .replay_page(
+                        SubscriptionTarget::Part {
+                            part_id,
+                            cursor: 0,
+                        },
+                        8,
+                        subscriber,
+                        PAGE_HOLD,
+                    )
+                    .await?;
+                match outcome {
+                    ReplayPageOutcome::Events(page) if !page.events.is_empty() => {
+                        return Ok(page.events);
+                    }
+                    ReplayPageOutcome::Events(_) => continue,
+                    other => panic!("a granted member reads a page, got {other:?}"),
+                }
+            }
+            Ok(Vec::new())
+        }
+
+        store.ensure_part(part).await?;
+        store.ensure_part(granted_empty).await?;
+        store
+            .set_part_members(
+                part,
+                std::collections::HashMap::from([(member, Access::Read)]),
+            )
+            .await?;
+        store
+            .set_part_members(
+                granted_empty,
+                std::collections::HashMap::from([(member, Access::Read)]),
+            )
+            .await?;
+        seed_live_obj(store, obj, payload("page-outcome", 1), &[part]).await?;
+
+        let unknown_outcome = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: unknown,
+                    cursor: 0,
+                },
+                8,
+                member,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert_eq!(
+            unknown_outcome,
+            ReplayPageOutcome::UnknownPart,
+            "an unknown part is its own answer"
+        );
+
+        let denied = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+                8,
+                outsider,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert_eq!(
+            denied,
+            ReplayPageOutcome::Unauthorized,
+            "a subscriber with no access row is denied, not reported as caught up"
+        );
+
+        let events = page_events_for(store, part, member).await?;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PartEvent::Added(added) if added.obj_id == obj && added.part_id == part
+            )),
+            "a granted member sees the part's events, got {events:?}"
+        );
+
+        // The same property, with the grant landing *after* the event it authorizes reading.
+        // Both stores filter on current access rows, so this ordering is visible too; pinned so
+        // that a later change to grant-time filtering has to be deliberate.
+        store.ensure_part(late_grant).await?;
+        seed_live_obj(store, late_obj, payload("page-outcome-late", 2), &[late_grant]).await?;
+        store
+            .set_part_members(
+                late_grant,
+                std::collections::HashMap::from([(member, Access::Read)]),
+            )
+            .await?;
+        let late_events = page_events_for(store, late_grant, member).await?;
+        assert!(
+            late_events.iter().any(|event| matches!(
+                event,
+                PartEvent::Added(added)
+                    if added.obj_id == late_obj && added.part_id == late_grant
+            )),
+            "a member granted after the event was written still reads it, because the filter is \
+             current access and not grant time; got {late_events:?}"
+        );
+
+        let empty = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: granted_empty,
+                    cursor: 0,
+                },
+                8,
+                member,
+                // The hold bounds how long the responder waits for something to arrive, so the
+                // claim "nothing to send" is only meaningful after it has waited.
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = empty else {
+            panic!("a granted part with nothing to send is an empty page, got {empty:?}");
+        };
+        assert!(page.events.is_empty(), "this part has nothing to send");
+        assert_eq!(page.next_cursor, None, "and nothing to resume from");
         Ok(())
     }
 
@@ -898,8 +1223,16 @@ pub mod host_contract {
             "events for a part created after the reader was opened must be observed"
         );
 
-        // A reader opened after the writes replays nothing.
+        // A reader opened after the writes replays nothing. The bound is read twice: a store
+        // that advanced the cursor on the read would report two different bounds, and its
+        // second read would sit beyond every event — which is how an allocating read kept
+        // this assertion true for the wrong reason.
         let after = store.latest_revision().await?;
+        assert_eq!(
+            store.latest_revision().await?,
+            after,
+            "reading the latest revision must not allocate a revision"
+        );
         let mut bounded = store.open_local_revision_reader_all(after).await??;
         while let RevisionRead::Entries { entries, .. } = bounded
             .next(RevisionReadLimits {
@@ -1645,12 +1978,12 @@ pub mod host_contract {
         let store = harness.store();
         let part = test_part(54);
         let obj = test_obj(55);
-        let reader = big_sync_core::PeerId::new([56u8; 32]);
+        let reader = big_sync_core::PeerKey::new([56u8; 32]);
 
         store.ensure_part(part).await?;
         store
-            .set_obj_members(
-                obj,
+            .set_part_members(
+                part,
                 std::collections::HashMap::from([(reader, Access::Read)]),
             )
             .await?;
@@ -1702,14 +2035,17 @@ pub mod host_contract {
         store.ensure_part(part_a).await?;
         store.ensure_part(part_b).await?;
 
-        // Grant the subscriber Read access so the filter passes events.
-        let sub_peer = big_sync_core::PeerId::new([0u8; 32]);
-        store
-            .set_obj_members(
-                obj,
-                std::collections::HashMap::from([(sub_peer, Access::Read)]),
-            )
-            .await?;
+        // Grant the subscriber Read access on every part the object is in, so the
+        // filter passes events.
+        let sub_peer = big_sync_core::PeerKey::new([0u8; 32]);
+        for part in [part_a, part_b] {
+            store
+                .set_part_members(
+                    part,
+                    std::collections::HashMap::from([(sub_peer, Access::Read)]),
+                )
+                .await?;
+        }
 
         seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;
@@ -1761,8 +2097,8 @@ pub mod host_contract {
         let store = harness.store();
         let part = test_part(61);
         let obj = test_obj(62);
-        let auth_peer = big_sync_core::PeerId::new([63u8; 32]);
-        let denied_peer = big_sync_core::PeerId::new([64u8; 32]);
+        let auth_peer = big_sync_core::PeerKey::new([63u8; 32]);
+        let denied_peer = big_sync_core::PeerKey::new([64u8; 32]);
 
         store.ensure_part(part).await?;
 
@@ -1775,8 +2111,8 @@ pub mod host_contract {
         // Set explicit membership: auth_peer has Read; denied_peer gets
         // an empty membership map (explicitly denied).
         store
-            .set_obj_members(
-                obj,
+            .set_part_members(
+                part,
                 std::collections::HashMap::from([(auth_peer, Access::Read)]),
             )
             .await?;
@@ -1864,9 +2200,9 @@ pub mod host_contract {
         let part = test_part(71);
         let overlapping_part = test_part(76);
         let obj = test_obj(72);
-        let auth_peer = big_sync_core::PeerId::new([73u8; 32]);
-        let relay_peer = big_sync_core::PeerId::new([74u8; 32]);
-        let denied_peer = big_sync_core::PeerId::new([75u8; 32]);
+        let auth_peer = big_sync_core::PeerKey::new([73u8; 32]);
+        let relay_peer = big_sync_core::PeerKey::new([74u8; 32]);
+        let denied_peer = big_sync_core::PeerKey::new([75u8; 32]);
 
         store.ensure_part(part).await?;
         store.ensure_part(overlapping_part).await?;
@@ -1879,17 +2215,19 @@ pub mod host_contract {
             .add_obj_to_parts(obj, vec![part, overlapping_part])
             .await?;
 
-        // Set membership: auth_peer has Read, relay_peer has Relay,
-        // denied_peer has no entry (explicitly denied via empty map).
-        store
-            .set_obj_members(
-                obj,
-                std::collections::HashMap::from([
-                    (auth_peer, Access::Read),
-                    (relay_peer, Access::Relay),
-                ]),
-            )
-            .await?;
+        // Grant both parts the object is in: auth_peer has Read, relay_peer has
+        // Relay, denied_peer has no row in either (explicitly denied).
+        for part in [part, overlapping_part] {
+            store
+                .set_part_members(
+                    part,
+                    std::collections::HashMap::from([
+                        (auth_peer, Access::Read),
+                        (relay_peer, Access::Relay),
+                    ]),
+                )
+                .await?;
+        }
 
         // Subscribe all three and drain through ReplayComplete so each
         // is registered for live events.
@@ -1989,17 +2327,19 @@ pub mod host_contract {
             store: &dyn HostPartStore,
             mode: u8,
             order: u8,
-            obj: ObjId,
-            part_a: PartId,
-            part_b: PartId,
-            peer: PeerId,
+            obj: ObjKey,
+            part_a: PartKey,
+            part_b: PartKey,
+            peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             store.ensure_part(part_a).await?;
             store.ensure_part(part_b).await?;
-            store
-                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
-                .await?;
+            for part in [part_a, part_b] {
+                store
+                    .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                    .await?;
+            }
             store.set_obj_payload(obj, payload("matrix", 0)).await?;
             store.add_obj_to_parts(obj, vec![part_a, part_b]).await?;
             let baseline_cursor = store
@@ -2072,22 +2412,22 @@ pub mod host_contract {
         #[derive(Debug, Clone, PartialEq, Eq)]
         struct CanonicalState {
             payload: Option<ObjPayload>,
-            live_parts: BTreeSet<PartId>,
+            live_parts: BTreeSet<PartKey>,
         }
 
         struct EventLedger {
             mode: u8,
-            obj: ObjId,
-            requested_parts: BTreeSet<PartId>,
+            obj: ObjKey,
+            requested_parts: BTreeSet<PartKey>,
             state: CanonicalState,
             last_cursor: Option<CursorIndex>,
             replay_complete_count: u8,
-            changed_groups: HashMap<(CursorIndex, ObjId), BTreeSet<PartId>>,
+            changed_groups: HashMap<(CursorIndex, ObjKey), BTreeSet<PartKey>>,
             violations: Vec<String>,
         }
 
         impl EventLedger {
-            fn new(mode: u8, obj: ObjId, part_a: PartId, part_b: PartId) -> Self {
+            fn new(mode: u8, obj: ObjKey, part_a: PartKey, part_b: PartKey) -> Self {
                 Self {
                     mode,
                     obj,
@@ -2113,7 +2453,7 @@ pub mod host_contract {
                 self.last_cursor = Some(self.last_cursor.map_or(cursor, |last| last.max(cursor)));
             }
 
-            fn check_part(&mut self, part_id: PartId, event: &str) {
+            fn check_part(&mut self, part_id: PartKey, event: &str) {
                 if self.mode == 1 || !self.requested_parts.contains(&part_id) {
                     self.violations.push(format!(
                         "{event} projected invalid part {part_id:?} for subscription mode {}",
@@ -2122,7 +2462,7 @@ pub mod host_contract {
                 }
             }
 
-            fn check_changed_projection(&mut self, part_ids: &[PartId]) {
+            fn check_changed_projection(&mut self, part_ids: &[PartKey]) {
                 if self.mode == 1 && !part_ids.is_empty() {
                     self.violations.push(format!(
                         "object-target Changed contained real parts: {part_ids:?}"
@@ -2208,9 +2548,9 @@ pub mod host_contract {
         }
         fn canonical_state(
             mode: u8,
-            obj: ObjId,
-            part_a: PartId,
-            part_b: PartId,
+            obj: ObjKey,
+            part_a: PartKey,
+            part_b: PartKey,
             events: Vec<SubEvent>,
             expected: CanonicalState,
         ) -> CanonicalState {
@@ -2222,7 +2562,7 @@ pub mod host_contract {
         }
 
         let store = harness.store();
-        let peer = PeerId::new([90u8; 32]);
+        let peer = PeerKey::new([90u8; 32]);
         for (mode, order, seed) in [
             (0u8, 0u8, 91u8),
             (0, 1, 94),
@@ -2293,15 +2633,44 @@ pub mod host_contract {
             );
         }
 
-        async fn run_zero_part_case(
+        // Partless objects keep their lane locally, where filtering does not apply:
+        // replay and live must still converge there.
+        async fn run_zero_part_local_case(
             store: &dyn HostPartStore,
-            obj: ObjId,
-            peer: PeerId,
+            obj: ObjKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
-            store
-                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
-                .await?;
+            if !live {
+                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+            }
+            let rx = store
+                .subscribe_local(SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id: obj,
+                    }]),
+                })
+                .await??;
+            if live {
+                let mut events = collect_sub_events(&rx).await?;
+                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+                events.push(recv_sub_event(&rx).await?);
+                Ok(events)
+            } else {
+                collect_sub_events(&rx).await
+            }
+        }
+
+        // Access is granted per part and a partless object is in no part, so it has no
+        // remote authorization: the lane denies it outright (fail-closed) rather than
+        // falling back to an unauthenticated object lane. Nothing but the replay marker
+        // may arrive, which also means no part id can leak.
+        async fn run_zero_part_remote_case(
+            store: &dyn HostPartStore,
+            obj: ObjKey,
+            peer: PeerKey,
+            live: bool,
+        ) -> Res<Vec<SubEvent>> {
             if !live {
                 store.set_obj_payload(obj, payload("zero-part", 1)).await?;
             }
@@ -2316,40 +2685,23 @@ pub mod host_contract {
                     peer,
                 )
                 .await??;
+            let events = collect_sub_events(&rx).await?;
             if live {
-                let mut events = collect_sub_events(&rx).await?;
                 store.set_obj_payload(obj, payload("zero-part", 1)).await?;
-                events.push(recv_sub_event(&rx).await?);
-                Ok(events)
-            } else {
-                collect_sub_events(&rx).await
+                match timeout(Duration::from_millis(250), rx.recv()).await {
+                    Err(_) => {}
+                    Ok(Ok(event)) => {
+                        panic!("partless object change must not reach a remote subscriber: {event:?}")
+                    }
+                    Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
+                }
             }
+            Ok(events)
         }
 
-        let zero_replay =
-            run_zero_part_case(store, test_obj(180), PeerId::new([181; 32]), false).await?;
-        let zero_live = {
-            let obj = test_obj(182);
-            let peer = PeerId::new([183; 32]);
-            store
-                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
-                .await?;
-            let rx = store
-                .subscribe(
-                    SubPartsRequest {
-                        lower_bound: 0,
-                        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                            obj_id: obj,
-                        }]),
-                    },
-                    peer,
-                )
-                .await??;
-            let mut events = collect_sub_events(&rx).await?;
-            store.set_obj_payload(obj, payload("zero-part", 1)).await?;
-            events.push(recv_sub_event(&rx).await?);
-            events
-        };
+        // The local lane is unfiltered, so partless replay and live still converge.
+        let zero_replay = run_zero_part_local_case(store, test_obj(180), false).await?;
+        let zero_live = run_zero_part_local_case(store, test_obj(182), true).await?;
         let zero_expected = CanonicalState {
             payload: Some(payload("zero-part", 1)),
             live_parts: BTreeSet::new(),
@@ -2372,19 +2724,36 @@ pub mod host_contract {
         );
         assert_eq!(
             zero_replay_state, zero_live_state,
-            "zero-real-part object replay and live object subscriptions must converge",
+            "zero-real-part object replay and live LOCAL object subscriptions must converge",
         );
+
+        // Partless objects have no remote authorization until virtual parts land: denied
+        // on both the replay and the live path, and no part ids disclosed either way.
+        for (live, obj_seed, peer_seed) in [(false, 184u8, 186u8), (true, 185, 187)] {
+            let events = run_zero_part_remote_case(
+                store,
+                test_obj(obj_seed),
+                PeerKey::new([peer_seed; 32]),
+                live,
+            )
+            .await?;
+            assert_eq!(
+                events,
+                vec![SubEvent::ReplayComplete],
+                "a partless object must not be delivered to a remote subscriber (live={live})",
+            );
+        }
 
         async fn run_zero_mixed_case(
             store: &dyn HostPartStore,
-            obj: ObjId,
-            part: PartId,
-            peer: PeerId,
+            obj: ObjKey,
+            part: PartKey,
+            peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             store.ensure_part(part).await?;
             store
-                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
                 .await?;
             store.set_obj_payload(obj, payload("mixed", 0)).await?;
             store.add_obj_to_parts(obj, vec![part]).await?;
@@ -2435,14 +2804,14 @@ pub mod host_contract {
 
         async fn run_populated_object_case(
             store: &dyn HostPartStore,
-            obj: ObjId,
-            part: PartId,
-            peer: PeerId,
+            obj: ObjKey,
+            part: PartKey,
+            peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             store.ensure_part(part).await?;
             store
-                .set_obj_members(obj, HashMap::from([(peer, Access::Read)]))
+                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
                 .await?;
             store
                 .set_obj_payload(obj, payload("object-only", 0))
@@ -2493,7 +2862,7 @@ pub mod host_contract {
             store,
             test_obj(190),
             test_part(191),
-            PeerId::new([192; 32]),
+            PeerKey::new([192; 32]),
             false,
         )
         .await?;
@@ -2501,7 +2870,7 @@ pub mod host_contract {
             store,
             test_obj(193),
             test_part(194),
-            PeerId::new([195; 32]),
+            PeerKey::new([195; 32]),
             true,
         )
         .await?;
@@ -2535,7 +2904,7 @@ pub mod host_contract {
             store,
             test_obj(184),
             mixed_replay_part,
-            PeerId::new([186; 32]),
+            PeerKey::new([186; 32]),
             false,
         )
         .await?;
@@ -2544,7 +2913,7 @@ pub mod host_contract {
             store,
             test_obj(187),
             mixed_live_part,
-            PeerId::new([189; 32]),
+            PeerKey::new([189; 32]),
             true,
         )
         .await?;
@@ -2597,16 +2966,18 @@ pub mod host_contract {
         let part_a = test_part(81);
         let part_b = test_part(82);
         let obj = test_obj(83);
-        let peer = big_sync_core::PeerId::new([84u8; 32]);
+        let peer = big_sync_core::PeerKey::new([84u8; 32]);
 
         store.ensure_part(part_a).await?;
         store.ensure_part(part_b).await?;
-        store
-            .set_obj_members(
-                obj,
-                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
-            )
-            .await?;
+        for part in [part_a, part_b] {
+            store
+                .set_part_members(
+                    part,
+                    HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                )
+                .await?;
+        }
         // Build events: cursor 1-4 only for part_a, 5-6 involve part_b.
         // First set payload while obj has no parts (no event recorded).
         store.set_obj_payload(obj, payload("per-cursor", 1)).await?;
@@ -2686,7 +3057,7 @@ pub mod host_contract {
 
         // Paginate with limit=1, following next_cursor until exhaustion.
         let mut cursor = 0;
-        let mut collected: Vec<(CursorIndex, ObjId)> = Vec::new();
+        let mut collected: Vec<(CursorIndex, ObjKey)> = Vec::new();
         loop {
             let page = store
                 .list_events(HashSet::from([part]), cursor, 1)
@@ -2740,7 +3111,7 @@ pub mod host_contract {
     {
         let store = harness.store();
         let part = test_part(101);
-        let peer = big_sync_core::PeerId::new([102u8; 32]);
+        let peer = big_sync_core::PeerKey::new([102u8; 32]);
 
         store.ensure_part(part).await?;
 

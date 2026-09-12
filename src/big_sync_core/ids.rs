@@ -1,17 +1,17 @@
-// FIXME: consdier using u64 or u128 for ObjIds since they'll
+// FIXME: consdier using u64 or u128 for ObjKeys since they'll
 // be repo scoped
 
 use crate::interlude::*;
 use crate::rpc::BuckLevel;
 
-macro_rules! alias_byte32id {
+macro_rules! alias_byte_key {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         #[repr(transparent)]
-        pub struct $name(pub Byte32Id);
+        pub struct $name(pub ByteKey);
         impl std::ops::Deref for $name {
-            type Target = Byte32Id;
+            type Target = ByteKey;
 
             fn deref(&self) -> &Self::Target {
                 &self.0
@@ -20,11 +20,11 @@ macro_rules! alias_byte32id {
         impl $name {
             #[must_use]
             pub const fn new(bytes: [u8; 32]) -> Self {
-                Self(Byte32Id::new(bytes))
+                Self(ByteKey::new(bytes))
             }
 
             pub fn random() -> Self {
-                Self(Byte32Id::random())
+                Self(ByteKey::random())
             }
         }
         impl std::fmt::Display for $name {
@@ -41,7 +41,7 @@ macro_rules! alias_byte32id {
             type Err = DecodeError;
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Ok(Self(Byte32Id::from_str(value)?))
+                Ok(Self(ByteKey::from_str(value)?))
             }
         }
 
@@ -68,20 +68,38 @@ macro_rules! alias_byte32id {
                 }
                 let mut buf = [0_u8; 32];
                 buf.copy_from_slice(&bytes[0..32]);
-                Ok(Self(Byte32Id(buf)))
+                Ok(Self(ByteKey(buf)))
             }
         }
     };
 }
 
-alias_byte32id!(PartId);
-alias_byte32id!(ObjId);
-alias_byte32id!(PeerId);
+alias_byte_key!(PartKey);
+alias_byte_key!(ObjKey);
+alias_byte_key!(PeerKey);
+
+impl ObjKey {
+    /// The derived part key of this object's single-object part.
+    ///
+    /// ADR 012 decision 3: an object part is an ordinary one-member part whose key is
+    /// derived from the object key, so anyone holding the object key can compute it and
+    /// it cannot collide with an unrelated part. The reserved key spaces of decision 1
+    /// make this expressible as the literal `o:{object_key}`, but that needs keys to be
+    /// variable-length; while they are still fixed 32-byte values the derivation is a
+    /// domain-separated digest, which is computable from the key and collision-free
+    /// against unrelated parts just the same.
+    #[must_use]
+    pub fn object_part_key(self) -> PartKey {
+        let mut bytes = b"townframe/big-sync/object-part/v1".to_vec();
+        bytes.extend_from_slice(self.as_bytes());
+        PartKey::new(*blake3::hash(&bytes).as_bytes())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Byte32Id([u8; 32]);
+pub struct ByteKey([u8; 32]);
 
-impl Byte32Id {
+impl ByteKey {
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -102,7 +120,7 @@ impl Byte32Id {
     }
 }
 
-impl std::fmt::Display for Byte32Id {
+impl std::fmt::Display for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // FIXME: use fixed size stack buffer to write string onto and then write that onto the
         // formatter
@@ -110,7 +128,7 @@ impl std::fmt::Display for Byte32Id {
     }
 }
 
-impl std::fmt::Debug for Byte32Id {
+impl std::fmt::Debug for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, formatter)
     }
@@ -120,7 +138,7 @@ impl std::fmt::Debug for Byte32Id {
 /// Error decoding bs58 string
 pub struct DecodeError;
 
-impl std::str::FromStr for Byte32Id {
+impl std::str::FromStr for ByteKey {
     type Err = DecodeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -131,7 +149,7 @@ impl std::str::FromStr for Byte32Id {
     }
 }
 
-impl Serialize for Byte32Id {
+impl Serialize for ByteKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -144,7 +162,7 @@ impl Serialize for Byte32Id {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Byte32Id {
+impl<'de> serde::Deserialize<'de> for ByteKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -185,7 +203,7 @@ impl<'de> serde::Deserialize<'de> for Byte32Id {
 }
 
 #[cfg(feature = "automerge")]
-impl autosurgeon::Reconcile for Byte32Id {
+impl autosurgeon::Reconcile for ByteKey {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
@@ -194,7 +212,7 @@ impl autosurgeon::Reconcile for Byte32Id {
 }
 
 #[cfg(feature = "automerge")]
-impl autosurgeon::Hydrate for Byte32Id {
+impl autosurgeon::Hydrate for ByteKey {
     fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
         if bytes.len() != 32 {
             return Err(autosurgeon::HydrateError::unexpected(
@@ -276,10 +294,18 @@ impl BuckId {
         }
     }
 
+    /// The deepest bucket an object key falls into.
+    ///
+    /// This inherits the bucket index from the key's leading bytes. ADR 012 decision 1
+    /// makes distribution an explicitly chosen hash of the key at the point of use, so
+    /// that a key's *ordering* and its *layout* stay independent — which matters as soon
+    /// as keys are textual (a reserved or path-shaped key would otherwise pile every
+    /// object into the ranges its prefix implies). That change rides with the
+    /// variable-length key representation.
     #[inline]
-    pub fn from_obj_id(level: BuckLevel, obj_id: &ObjId) -> Self {
+    pub fn from_obj_key(level: BuckLevel, obj_key: &ObjKey) -> Self {
         debug_assert!(level <= Self::MAX_LEVEL);
-        let l4_index = u16::from_be_bytes([obj_id.0.0[0], obj_id.0.0[1]]);
+        let l4_index = u16::from_be_bytes([obj_key.0.0[0], obj_key.0.0[1]]);
         Self::new(4, l4_index).to_level(level)
     }
 

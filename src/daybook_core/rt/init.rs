@@ -46,7 +46,7 @@ pub struct InitRepo {
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
@@ -253,7 +253,7 @@ impl InitRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<InitEvent>,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Live notification path only: skip local self-echoes here.
         // Replay/diff calls pass `live_origin = None` and are never skipped.

@@ -11,18 +11,41 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(u64::try_from(revision)?)
     }
 
-    async fn is_event_permitted(
+    async fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
+        Self::permitted_parts(self, scope, obj_id, principal).await
+    }
+
+    /// This store's subscriptions are filtered per recipient, so a page can be
+    /// denied rather than silently empty.
+    async fn page_denied(
+        &self,
+        target: &big_sync_core::rpc::SubscriptionTarget,
+        subscriber: PeerKey,
     ) -> Res<bool> {
-        Self::is_event_permitted(self, part_id, obj_id, principal).await
+        let (scope, obj_id) = match target {
+            big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
+                // `permitted_parts` reads the object only for a `FromObject` scope,
+                // so a part is asked about directly.
+                (PartScope::Part(*part_id), ObjKey::new([0u8; 32]))
+            }
+            big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
+                (PartScope::FromObject, *obj_id)
+            }
+        };
+        Ok(self
+            .permitted_parts(scope, obj_id, Some(subscriber))
+            .await?
+            .is_some_and(|readable| readable.is_empty()))
     }
     async fn summarize_parts(
         &self,
-        parts: HashSet<PartId>,
-    ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>> {
+        parts: HashSet<PartKey>,
+    ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>> {
         if parts.is_empty() {
             return Ok(Ok(HashMap::new()));
         }
@@ -55,7 +78,7 @@ impl HostPartStore for SqliteBigRepoStore {
         let rows = query.build().fetch_all(&self.sql.read_pool).await?;
 
         if rows.len() != parts.len() {
-            let found: HashSet<PartId> = rows
+            let found: HashSet<PartKey> = rows
                 .iter()
                 .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
                 .collect();
@@ -83,7 +106,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(Ok(out))
     }
 
-    async fn member_count(&self, part_id: PartId) -> Res<u64> {
+    async fn member_count(&self, part_id: PartKey) -> Res<u64> {
         let member_count: Option<i64> = sqlx::query_scalar!(
             "SELECT live_count
              FROM big_sync_buckets
@@ -100,7 +123,64 @@ impl HostPartStore for SqliteBigRepoStore {
             .unwrap_or_default())
     }
 
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>> {
+    async fn part_dirty_count(
+        &self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> Res<PartDirtyCount> {
+        let since = i64::try_from(since).expect(ERROR_IMPOSSIBLE);
+        // A member row carries the cursor of its last transition, removal included,
+        // so a removal counts as a relevant change.
+        let member_changes: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*)
+               FROM big_sync_members
+              WHERE scope_id = ?1
+                AND maybe_part_ref = (
+                    SELECT part_ref
+                      FROM big_sync_parts
+                     WHERE scope_id = ?1 AND part_id = ?2
+                )
+                AND txid > ?3",
+            self.scope().id(),
+            Self::part_blob(part_id),
+            since
+        )
+        .fetch_one(&self.sql.read_pool)
+        .await?;
+        // One row per (part, principal). A revocation deletes that row, so a
+        // revocation does not count here. `None` is the local principal, which
+        // access rows do not gate, so it has no access half.
+        let access_changes: i64 = match principal {
+            Some(principal) => {
+                sqlx::query_scalar!(
+                    "SELECT COUNT(*)
+                       FROM big_sync_syncable
+                      WHERE scope_id = ?1
+                        AND part_ref = (
+                            SELECT part_ref
+                              FROM big_sync_parts
+                             WHERE scope_id = ?1 AND part_id = ?2
+                        )
+                        AND principal_id = ?3
+                        AND changed_at > ?4",
+                    self.scope().id(),
+                    Self::part_blob(part_id),
+                    Self::peer_blob(principal),
+                    since
+                )
+                .fetch_one(&self.sql.read_pool)
+                .await?
+            }
+            None => 0,
+        };
+        Ok(PartDirtyCount {
+            member_changes: u64::try_from(member_changes).expect(ERROR_IMPOSSIBLE),
+            access_changes: u64::try_from(access_changes).expect(ERROR_IMPOSSIBLE),
+        })
+    }
+
+    async fn obj_payload(&self, obj_id: ObjKey) -> Res<Option<ObjPayload>> {
         let row = sqlx::query!(
             "SELECT payload_json
              FROM big_sync_objs
@@ -121,7 +201,7 @@ impl HostPartStore for SqliteBigRepoStore {
             .transpose()
     }
 
-    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
+    async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let events = self.set_obj_payload_in_tx(&mut tx, obj_id, payload).await?;
         tx.commit().await?;
@@ -129,7 +209,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>> {
+    async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
         let rows = sqlx::query!(
             "SELECT p.part_id
              FROM big_sync_members m
@@ -157,7 +237,7 @@ impl HostPartStore for SqliteBigRepoStore {
             .collect())
     }
 
-    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+    async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
         let exists: Option<i64> = sqlx::query_scalar!(
             "SELECT 1
              FROM big_sync_objs
@@ -170,7 +250,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(exists.is_some())
     }
 
-    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
+    async fn get_bucket_summary(&self, part_id: PartKey, id: BuckId) -> Res<BucketSummary> {
         self.core.bucket_summary_for_path(part_id, id).await
     }
 
@@ -426,10 +506,10 @@ impl HostPartStore for SqliteBigRepoStore {
         }))
     }
 
-    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
+    async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
         let parts = parts
             .into_iter()
-            .filter(|part_id| *part_id != crate::GLOBAL_PART_ID)
+            .filter(|part_id| *part_id != crate::global_part_id())
             .collect::<Vec<_>>();
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id).await?;
@@ -490,7 +570,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
+    async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(obj_ref) = self.core.find_obj_ref(obj_id).await? else {
             tx.commit().await?;
@@ -542,7 +622,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn get_peer_part_cursor(&self, peer_id: PeerId, part_id: PartId) -> Res<CursorIndex> {
+    async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex> {
         let cursor: Option<i64> = sqlx::query_scalar!(
             "SELECT cursor FROM big_sync_peer_cursors
              WHERE scope_id = ?1 AND peer_id = ?2 AND part_ref = (
@@ -561,8 +641,8 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn set_peer_part_cursor(
         &self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
         cursor: CursorIndex,
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin().await?;
@@ -580,21 +660,21 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn list_events(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
         self.list_events_with_policy(parts, cursor, limit, true)
             .await
     }
 
     async fn list_events_with_policy(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
         enforce_policy: bool,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
         if enforce_policy && let Err(err) = self.summarize_parts(parts.clone()).await? {
             return Ok(Err(err));
         }
@@ -673,7 +753,9 @@ impl HostPartStore for SqliteBigRepoStore {
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
                 if enforce_policy
-                    && !Self::is_event_permitted(self, Some(part_id), obj_id, None).await?
+                    && Self::permitted_parts(self, PartScope::Part(part_id), obj_id, None)
+                        .await?
+                        .is_some_and(|readable| readable.is_empty())
                 {
                     continue;
                 }
@@ -713,7 +795,7 @@ impl HostPartStore for SqliteBigRepoStore {
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
-        subscriber: PeerId,
+        subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         self.subscribe_with_policy(reqs, Some(subscriber)).await
     }
@@ -744,7 +826,7 @@ impl HostPartStore for SqliteBigRepoStore {
         .await
     }
 
-    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+    async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
         sqlx::query!(
             "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
              VALUES (?1, ?2, 0)
@@ -757,70 +839,52 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn set_obj_members(
+    async fn set_part_members(
         &self,
-        doc: ObjId,
-        agents: HashMap<PeerId, keyhive_core::access::Access>,
+        part: PartKey,
+        agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, doc).await?;
+        let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
+        let changed_at =
+            i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
         sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2",
+            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
             self.scope().id(),
-            obj_ref
+            part_ref
         )
         .execute(&mut *tx)
         .await?;
         for (principal, access) in &agents {
-            sqlx::query!("INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)", self.scope().id(), obj_ref, Self::peer_blob(*principal), encode_access(access)).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(*principal), encode_access(access), changed_at).execute(&mut *tx).await?;
         }
-        let payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
         tx.commit().await?;
-        if let Some(payload_json) = payload_json.filter(|value| !value.is_empty()) {
-            self.set_obj_payload(doc, serde_json::from_str(&payload_json).expect(ERROR_JSON))
-                .await?;
-        }
         Ok(())
     }
 
-    async fn add_obj_member(
+    async fn add_part_member(
         &self,
-        doc: ObjId,
-        member: PeerId,
+        part: PartKey,
+        member: PeerKey,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, doc).await?;
-        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2 AND principal_id = ?3", self.scope().id(), obj_ref, Self::peer_blob(member)).execute(&mut *tx).await?;
-        sqlx::query!("INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)", self.scope().id(), obj_ref, Self::peer_blob(member), encode_access(&access)).execute(&mut *tx).await?;
-        let payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
+        let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
+        let changed_at =
+            i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
+        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3", self.scope().id(), part_ref, Self::peer_blob(member)).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(member), encode_access(&access), changed_at).execute(&mut *tx).await?;
         tx.commit().await?;
-        if let Some(payload_json) = payload_json.filter(|value| !value.is_empty()) {
-            self.set_obj_payload(doc, serde_json::from_str(&payload_json).expect(ERROR_JSON))
-                .await?;
-        }
         Ok(())
     }
 
-    async fn remove_obj_member(&self, doc: ObjId, member: PeerId) -> Res<()> {
+    async fn remove_part_member(&self, part: PartKey, member: PeerKey) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(obj_ref) = self.core.find_obj_ref(doc).await? else {
+        let Some(part_ref) = self.core.find_part_ref(part).await? else {
             tx.commit().await?;
             return Ok(());
         };
-        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2 AND principal_id = ?3", self.scope().id(), obj_ref, Self::peer_blob(member)).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3", self.scope().id(), part_ref, Self::peer_blob(member)).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }

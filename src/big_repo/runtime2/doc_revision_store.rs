@@ -20,19 +20,19 @@ pub enum AutomergeFrontierEvent {
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
         causal_epoch: Option<[u8; 32]>,
-        route: PartId,
+        route: PartKey,
         revision: u64,
     },
     Changed {
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
         causal_epoch: Option<[u8; 32]>,
-        routes: Vec<PartId>,
+        routes: Vec<PartKey>,
         revision: u64,
     },
     Removed {
         doc_id: crate::DocumentId,
-        route: PartId,
+        route: PartKey,
         revision: u64,
     },
 }
@@ -43,10 +43,10 @@ pub enum AutomergeFrontierTarget {
     /// Read every part and object in the local store, including newly-created parts.
     All,
     Part {
-        part_id: PartId,
+        part_id: PartKey,
     },
     Object {
-        obj_id: ObjId,
+        obj_id: ObjKey,
     },
 }
 
@@ -55,7 +55,7 @@ pub enum AutomergeFrontierTarget {
 /// objects reader. The replay cursor is supplied separately to `open`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutomergeFrontierSelector {
-    // The dedicated frontier scope makes ObjId -> DocumentId bijective;
+    // The dedicated frontier scope makes ObjKey -> DocumentId bijective;
     // object/part targets additionally restrict reads for per-document users.
     pub targets: Vec<AutomergeFrontierTarget>,
 }
@@ -145,7 +145,7 @@ type FrontierDocState = (
     Option<[u8; 32]>,
 );
 
-fn doc_and_heads(obj_id: ObjId, payload: &ObjPayload, revision: u64) -> Res<FrontierDocState> {
+fn doc_and_heads(obj_id: ObjKey, payload: &ObjPayload, revision: u64) -> Res<FrontierDocState> {
     let heads = payload
         .get("heads")
         .and_then(Value::as_array)
@@ -304,9 +304,9 @@ mod tests {
 
     #[tokio::test]
     async fn reader_maps_atomic_events_and_replay_boundary() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
-        let p1 = PartId::new([1; 32]);
-        let p2 = PartId::new([2; 32]);
+        let obj = ObjKey::new([9; 32]);
+        let p1 = PartKey::new([1; 32]);
+        let p2 = PartKey::new([2; 32]);
         let reads = VecDeque::from([
             RevisionRead::Entries {
                 revision: 3,
@@ -367,9 +367,9 @@ mod tests {
 
     #[tokio::test]
     async fn reader_skips_route_removal_with_remaining_frontier_route() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
-        let p1 = PartId::new([1; 32]);
-        let p2 = PartId::new([2; 32]);
+        let obj = ObjKey::new([9; 32]);
+        let p1 = PartKey::new([1; 32]);
+        let p2 = PartKey::new([2; 32]);
         let store = Arc::new(big_sync::MemoryPartStore::default());
         store.add_obj_to_parts(obj, vec![p1, p2]).await?;
         store.remove_obj_from_part(obj, p1).await?;
@@ -397,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_ignores_object_subscription_route_removal_churn() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
+        let obj = ObjKey::new([9; 32]);
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
             entries: vec![SubEvent::Changed(ObjChanged {
@@ -427,7 +427,7 @@ mod tests {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let epoch = [7; 32];
         let (_, parsed_heads, parsed_epoch) = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": epoch }),
             1,
         )
@@ -440,7 +440,7 @@ mod tests {
     fn frontier_payload_accepts_null_causal_epoch() {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let (_, _, parsed_epoch) = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": null }),
             1,
         )
@@ -450,9 +450,9 @@ mod tests {
 
     #[test]
     fn malformed_heads_are_errors() {
-        let err = doc_and_heads(ObjId::new([7; 32]), &serde_json::json!({"heads": [3]}), 1);
+        let err = doc_and_heads(ObjKey::new([7; 32]), &serde_json::json!({"heads": [3]}), 1);
         assert!(err.is_err());
-        let err = doc_and_heads(ObjId::new([7; 32]), &serde_json::json!({}), 1);
+        let err = doc_and_heads(ObjKey::new([7; 32]), &serde_json::json!({}), 1);
         assert!(err.is_err());
     }
 
@@ -460,7 +460,7 @@ mod tests {
     fn malformed_causal_epoch_is_error() {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let err = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": [1, 2] }),
             1,
         );
@@ -535,7 +535,7 @@ mod tests {
                 doc_id: crate::DocumentId::new([index as u8; 32]),
                 heads: Arc::from([automerge::ChangeHash([index as u8; 32])]),
                 causal_epoch: None,
-                route: PartId::new([index as u8; 32]),
+                route: PartKey::new([index as u8; 32]),
                 revision: 0,
             }
         }

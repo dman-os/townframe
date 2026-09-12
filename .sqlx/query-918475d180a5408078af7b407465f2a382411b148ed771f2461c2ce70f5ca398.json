@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) FROM big_sync_members\n             WHERE scope_id = ?1 AND obj_ref = ?2 AND maybe_part_ref > 0 AND event_type != ?3",
+  "query": "SELECT COUNT(*)\n               FROM big_sync_members\n              WHERE scope_id = ?1\n                AND maybe_part_ref = ?2\n                AND txid > ?3",
   "describe": {
     "columns": [
       {
@@ -17,5 +17,5 @@
       false
     ]
   },
-  "hash": "2e53275ad10970a308d024d30a42a045f07af376cb31298f7c05478ed7222ff9"
+  "hash": "918475d180a5408078af7b407465f2a382411b148ed771f2461c2ce70f5ca398"
 }

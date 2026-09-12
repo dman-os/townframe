@@ -219,7 +219,7 @@ mod tests {
     use crate::keyed_frontier::contract;
     use big_sync_core::keyed_frontier::FrontierRevision;
     use big_sync_core::rpc::{ObjChanged, PartEvent};
-    use big_sync_core::{BuckId, ObjId, PartId};
+    use big_sync_core::{BuckId, ObjKey, PartKey};
     use sqlx_utils_rs::SqlCtx;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -268,11 +268,11 @@ mod tests {
         }
 
         fn key(&self, index: u64) -> PartFrontierKey {
-            let obj_id = ObjId::new([index as u8; 32]);
+            let obj_id = ObjKey::new([index as u8; 32]);
             if index == 2 {
                 PartFrontierKey::Part {
                     obj_id,
-                    part_id: PartId::new([index as u8; 32]),
+                    part_id: PartKey::new([index as u8; 32]),
                 }
             } else {
                 PartFrontierKey::Object(obj_id)
@@ -284,11 +284,11 @@ mod tests {
             PartEvent::Changed(ObjChanged {
                 cursor: 0,
                 part_ids: if object_index == 2 {
-                    vec![PartId::new([object_index; 32])]
+                    vec![PartKey::new([object_index; 32])]
                 } else {
                     Vec::new()
                 },
-                obj_id: ObjId::new([object_index; 32]),
+                obj_id: ObjKey::new([object_index; 32]),
                 payload: serde_json::json!({ "value": index }),
             })
         }

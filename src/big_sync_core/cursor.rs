@@ -4,6 +4,7 @@
 use crate::interlude::*;
 
 use crate::part_store::{CursorIndex, ObjPayload};
+use crate::watermark::WatermarkBook;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -11,27 +12,27 @@ structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum CursorMachineCommand {
         SyncObj {
-            obj_id: ObjId,
+            obj_id: ObjKey,
             remote_payload: ObjPayload,
             cursor: CursorIndex,
             /// Upsert the object at the sync backend to these
             /// parts
-            parts: Vec<PartId>,
+            parts: Vec<PartKey>,
         },
         SetPartCursor {
-            part_id: PartId,
+            part_id: PartKey,
             cursor: CursorIndex
         },
         /// Scheduling signal only: the outer machine turns this into a
         /// `SyncTaskKind::RemoveFromParts` task executed by the backend.
         /// The machine itself never mutates part membership.
         RemoveObjFromParts {
-            obj_id: ObjId,
-            part_id: PartId,
+            obj_id: ObjKey,
+            part_id: PartKey,
             cursor: CursorIndex,
         },
         PartIdle {
-            part_id: PartId,
+            part_id: PartKey,
         }
     }
 }
@@ -50,24 +51,15 @@ pub struct CursorSyncMachine {
     /// Object-target events have no real part cursor to advance. Keep the
     /// last cursor locally so duplicate deliveries do not schedule the same
     /// object sync twice; durable replay bounds remain request-level.
-    object_cursors: HashMap<ObjId, CursorIndex>,
-    cursor_state: HashMap<
-        PartId,
-        struct CursorStreamState {
-                #![derive(Debug, Default)]
-                last_emitted_cursor: Option<CursorIndex>,
-                slots: BTreeMap<
-                    CursorIndex,
-                    enum CursorSlotState {
-                        #![derive(Debug, Clone, Copy, PartialEq, Eq)]
-                        Pending,
-                        Ready,
-                    }
-                >,
-            }
-        >,
+    object_cursors: HashMap<ObjKey, CursorIndex>,
+    /// Per-part slot bookkeeping: which cursors are pending work and where the
+    /// emitted watermark stands. This is the [`WatermarkBook`] primitive rather
+    /// than a machine-local copy of it, so "what is outstanding, what has
+    /// settled, when may the cursor advance" has one implementation, shared with
+    /// the delta walker.
+    watermarks: HashMap<PartKey, WatermarkBook<CursorIndex>>,
         active_obj_jobs: BTreeMap<
-            ObjId,
+            ObjKey,
 
             /// Look at [`SyncMachine::on_obj_sync_completed`] impl for how this
             /// actually works in more detail.
@@ -81,12 +73,12 @@ pub struct CursorSyncMachine {
                     CursorIndex,
                     struct CursorWaiter {
                         #![derive(Debug, Default, Clone)]
-                        pub parts: Vec<PartId>,
+                        pub parts: Vec<PartKey>,
                         pub pending_membership: bool,
                         pub pending_sync: bool,
                     }
                 >,
-                // removed_from_parts: Set<PartId>,
+                // removed_from_parts: Set<PartKey>,
             }
 
         >,
@@ -94,8 +86,8 @@ pub struct CursorSyncMachine {
 }
 
 impl CursorSyncMachine {
-    pub(crate) fn remove_part(&mut self, part_id: PartId) {
-        self.cursor_state.remove(&part_id);
+    pub(crate) fn remove_part(&mut self, part_id: PartKey) {
+        self.watermarks.remove(&part_id);
         self.active_obj_jobs.retain(|_, job| {
             job.waiters.retain(|_, waiter| {
                 waiter.parts.retain(|candidate| *candidate != part_id);
@@ -107,8 +99,8 @@ impl CursorSyncMachine {
 
     pub(crate) fn supersede_obj_part(
         &mut self,
-        obj_id: ObjId,
-        part_id: PartId,
+        obj_id: ObjKey,
+        part_id: PartKey,
         before_cursor: CursorIndex,
         out: &mut Vec<CursorMachineCommand>,
     ) {
@@ -140,36 +132,32 @@ impl CursorSyncMachine {
             }
         }
         for cursor in ready_cursors {
-            let state = self.cursor_state.entry(part_id).or_default();
-            state.slots.insert(cursor, CursorSlotState::Ready);
+            self.watermarks
+                .entry(part_id)
+                .or_default()
+                .force_finish(cursor);
             self.drain_ready_cursor_advances(part_id, out);
         }
     }
-    fn mark_pending_cursor(&mut self, part_id: PartId, cursor: CursorIndex) -> bool {
-        let state = self.cursor_state.entry(part_id).or_default();
-        if cursor <= state.last_emitted_cursor.unwrap_or_default() {
-            // Replay/live handoff is at-least-once. A replacement immutable
-            // subscription can repeat an event whose cursor was already
-            // durably advanced by the previous generation.
+    fn mark_pending_cursor(&mut self, part_id: PartKey, cursor: CursorIndex) -> bool {
+        // The admission guard (duplicate cursor, or at-or-below the emitted
+        // watermark) lives in the primitive.
+        let book = self.watermarks.entry(part_id).or_default();
+        let emitted = book.watermark();
+        let admitted = book.begin(cursor);
+        if !admitted {
+            // Upstream's diagnostic lived at this site before the guard moved into
+            // the primitive. `emitted` is logged so the two rejections stay apart: a
+            // cursor at or below it is a duplicate of the emitted watermark, otherwise
+            // it is an already-pending duplicate.
             tracing::debug!(
                 ?part_id,
                 ?cursor,
-                ?state.last_emitted_cursor,
-                "cursor machine ignored event: cursor not newer than emitted cursor",
+                ?emitted,
+                "cursor machine ignored event: cursor not admitted by watermark book",
             );
-            return false;
         }
-        if let Some(_old) = state.slots.get_mut(&cursor) {
-            // duplicate cursor
-            tracing::debug!(
-                ?part_id,
-                ?cursor,
-                "cursor machine ignored event: duplicate pending cursor",
-            );
-            return false;
-        }
-        state.slots.insert(cursor, CursorSlotState::Pending);
-        true
+        admitted
     }
     pub fn on_subscription_evt(
         &mut self,
@@ -274,7 +262,7 @@ impl CursorSyncMachine {
 
     pub fn on_obj_sync_job_evt(
         &mut self,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         kind: CursorJobCompletionKind,
         out: &mut Vec<CursorMachineCommand>,
@@ -306,8 +294,10 @@ impl CursorSyncMachine {
         }
         let waiter = job.waiters.remove(&cursor).expect(ERROR_UNRECONIZED);
         for part_id in waiter.parts {
-            let state = self.cursor_state.entry(part_id).or_default();
-            state.slots.insert(cursor, CursorSlotState::Ready);
+            self.watermarks
+                .entry(part_id)
+                .or_default()
+                .force_finish(cursor);
             self.drain_ready_cursor_advances(part_id, out);
         }
         if !job.waiters.is_empty() {
@@ -317,37 +307,22 @@ impl CursorSyncMachine {
 
     fn drain_ready_cursor_advances(
         &mut self,
-        part_id: PartId,
+        part_id: PartKey,
         out: &mut Vec<CursorMachineCommand>,
     ) {
-        let state = self.cursor_state.entry(part_id).or_default();
-        // calculate Ready highmark
-        let latest_ready = {
-            let mut latest_ready = None;
-            for (cursor, slot) in state.slots.range(..) {
-                match slot {
-                    CursorSlotState::Ready => latest_ready = Some(*cursor),
-                    CursorSlotState::Pending => break,
-                }
-            }
-            latest_ready
-        };
-
-        let Some(cursor) = latest_ready else {
+        // Advance to the contiguous prefix of finished slots; the primitive owns
+        // the highmark search, the covered-slot sweep and the emitted watermark.
+        let Some(cursor) = self.watermarks.entry(part_id).or_default().drain() else {
             return;
         };
 
         // update sync store
         out.push(CursorMachineCommand::SetPartCursor { part_id, cursor });
-        while state
-            .slots
-            .first_key_value()
-            .is_some_and(|(slot_cursor, _)| *slot_cursor <= cursor)
+        if self
+            .watermarks
+            .get(&part_id)
+            .is_none_or(WatermarkBook::is_settled)
         {
-            state.slots.pop_first();
-        }
-        state.last_emitted_cursor = Some(cursor);
-        if state.slots.is_empty() {
             out.push(CursorMachineCommand::PartIdle { part_id });
         }
     }

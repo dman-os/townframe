@@ -4,7 +4,7 @@ use crate::blobs::{BlobId, BlobsRepo, blob_id_to_iroh_hash};
 use big_repo::SharedPartStore;
 
 use big_sync::{SyncBackend, SyncTaskRunOutcome};
-use big_sync_core::{ObjId, PeerId, SyncCompletionDeets, SyncTaskCompletion};
+use big_sync_core::{ObjKey, PeerKey, SyncCompletionDeets, SyncTaskCompletion};
 
 #[derive(Clone)]
 pub struct BlobSyncBackend {
@@ -12,7 +12,7 @@ pub struct BlobSyncBackend {
     part_store: SharedPartStore,
     endpoint: iroh::Endpoint,
     address_lookup: iroh::address_lookup::MemoryLookup,
-    peer_addrs: Arc<surelock::mutex::Mutex<HashMap<PeerId, iroh::EndpointAddr>>>,
+    peer_addrs: Arc<surelock::mutex::Mutex<HashMap<PeerKey, iroh::EndpointAddr>>>,
 }
 
 impl BlobSyncBackend {
@@ -31,7 +31,7 @@ impl BlobSyncBackend {
         }
     }
 
-    pub fn register_peer_addr(&self, peer_id: PeerId, addr: iroh::EndpointAddr) {
+    pub fn register_peer_addr(&self, peer_id: PeerKey, addr: iroh::EndpointAddr) {
         self.address_lookup.add_endpoint_info(addr.clone());
         surelock::key::lock_scope(|key| {
             let (mut map, _key) = key.lock(&self.peer_addrs);
@@ -39,21 +39,21 @@ impl BlobSyncBackend {
         });
     }
 
-    pub fn active_peer_ids(&self) -> Vec<PeerId> {
+    pub fn active_peer_ids(&self) -> Vec<PeerKey> {
         surelock::key::lock_scope(|key| {
             let (map, _key) = key.lock(&self.peer_addrs);
             map.keys().copied().collect()
         })
     }
 
-    pub fn unregister_peer_addr(&self, peer_id: PeerId) {
+    pub fn unregister_peer_addr(&self, peer_id: PeerKey) {
         surelock::key::lock_scope(|key| {
             let (mut map, _key) = key.lock(&self.peer_addrs);
             map.remove(&peer_id);
         });
     }
 
-    pub async fn ensure_local_blob(&self, peer_id: PeerId, blob_id: BlobId) -> Res<()> {
+    pub async fn ensure_local_blob(&self, peer_id: PeerKey, blob_id: BlobId) -> Res<()> {
         if self.blobs_repo.has_blob_on_disk(blob_id).await? {
             return Ok(());
         }
@@ -91,9 +91,9 @@ impl BlobSyncBackend {
 impl SyncBackend for BlobSyncBackend {
     async fn sync_obj(
         &self,
-        peer_id: PeerId,
-        obj_id: ObjId,
-        parts: Vec<PartId>,
+        peer_id: PeerKey,
+        obj_id: ObjKey,
+        parts: Vec<PartKey>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         let blob_id = BlobId::new(*obj_id.as_bytes());
@@ -145,8 +145,8 @@ impl SyncBackend for BlobSyncBackend {
 
     async fn remove_obj_from_parts(
         &self,
-        obj_id: big_sync_core::ObjId,
-        parts: Vec<big_sync_core::PartId>,
+        obj_id: big_sync_core::ObjKey,
+        parts: Vec<big_sync_core::PartKey>,
     ) -> Res<()> {
         for part_id in parts {
             self.part_store
@@ -168,16 +168,16 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    fn test_part() -> PartId {
-        PartId::new([9; 32])
+    fn test_part() -> PartKey {
+        PartKey::new([9; 32])
     }
 
-    fn test_parts() -> Vec<PartId> {
+    fn test_parts() -> Vec<PartKey> {
         vec![test_part()]
     }
 
-    fn extra_part() -> PartId {
-        PartId::new([8; 32])
+    fn extra_part() -> PartKey {
+        PartKey::new([8; 32])
     }
 
     async fn build_blob_backend() -> Res<(
@@ -241,14 +241,14 @@ mod tests {
         vec![
             SyncBackendScenario::noop(
                 "noop_when_membership_and_payload_match",
-                PeerId::new([2; 32]),
+                PeerKey::new([2; 32]),
                 noop_blob_id,
                 noop_payload.clone(),
                 parts.clone(),
             ),
             SyncBackendScenario {
                 name: "noop_when_remote_payload_is_missing_and_blob_exists",
-                peer_id: PeerId::new([2; 32]),
+                peer_id: PeerKey::new([2; 32]),
                 obj_id: noop_missing_remote_blob_id,
                 initial_payload: Some(noop_payload.clone()),
                 initial_parts: parts.clone(),
@@ -260,7 +260,7 @@ mod tests {
             },
             SyncBackendScenario::changed_object(
                 "changed_object_applies_remote_payload",
-                PeerId::new([2; 32]),
+                PeerKey::new([2; 32]),
                 changed_blob_id,
                 old_payload.clone(),
                 new_payload.clone(),
@@ -268,7 +268,7 @@ mod tests {
             ),
             SyncBackendScenario::changed_object(
                 "changed_object_with_empty_part_hints",
-                PeerId::new([2; 32]),
+                PeerKey::new([2; 32]),
                 changed_empty_hints_blob_id,
                 old_payload.clone(),
                 new_payload.clone(),
@@ -276,7 +276,7 @@ mod tests {
             ),
             SyncBackendScenario::changed_object(
                 "changed_object_with_multiple_part_hints",
-                PeerId::new([2; 32]),
+                PeerKey::new([2; 32]),
                 changed_multi_hints_blob_id,
                 old_payload.clone(),
                 new_payload.clone(),
@@ -284,7 +284,7 @@ mod tests {
             ),
             SyncBackendScenario::added_member(
                 "added_member_materializes_missing_blob",
-                PeerId::new([2; 32]),
+                PeerKey::new([2; 32]),
                 added_blob_id,
                 new_payload.clone(),
                 parts.clone(),
@@ -384,7 +384,7 @@ mod tests {
                 .into_iter()
                 .map(iroh::TransportAddr::Ip),
         );
-        let peer_id_a = PeerId::new(*endpoint_a.id().as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_a.id().as_bytes());
 
         backend_b.register_peer_addr(peer_id_a, addr_a);
         backend_b.ensure_local_blob(peer_id_a, hash).await?;
@@ -453,13 +453,13 @@ mod tests {
                 .into_iter()
                 .map(iroh::TransportAddr::Ip),
         );
-        let peer_id_a = PeerId::new(*endpoint_a.id().as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_a.id().as_bytes());
         backend_b.register_peer_addr(peer_id_a, addr_a);
 
         // Case 1: Remote Blob Added — Node B is missing blob bytes and sync_obj materializes it from Node A over iroh downloader
         let payload_added = b"contract-multi-node-added-blob".to_vec();
         let hash_added = blobs_repo_a.put(&payload_added).await?;
-        let obj_id_added = ObjId::new(*hash_added.as_bytes());
+        let obj_id_added = ObjKey::new(*hash_added.as_bytes());
 
         assert!(!blobs_repo_b.has_hash(hash_added).await?);
 
@@ -572,7 +572,7 @@ mod tests {
                             .into_iter()
                             .map(iroh::TransportAddr::Ip),
                     );
-                    let peer_id = PeerId::new(*nodes[j].endpoint.id().as_bytes());
+                    let peer_id = PeerKey::new(*nodes[j].endpoint.id().as_bytes());
                     nodes[i].backend.register_peer_addr(peer_id, addr);
                 }
             }
@@ -591,9 +591,9 @@ mod tests {
         }
 
         // Phase 2: Node 1 syncs all blobs from Node 0
-        let peer_0 = PeerId::new(*nodes[0].endpoint.id().as_bytes());
+        let peer_0 = PeerKey::new(*nodes[0].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjId::new(*hash.as_bytes());
+            let obj_id = ObjKey::new(*hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[1]
                 .backend
@@ -621,9 +621,9 @@ mod tests {
         }
 
         // Phase 4: Node 2 syncs all 8 blobs from Node 1
-        let peer_1 = PeerId::new(*nodes[1].endpoint.id().as_bytes());
+        let peer_1 = PeerKey::new(*nodes[1].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjId::new(*hash.as_bytes());
+            let obj_id = ObjKey::new(*hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[2]
                 .backend

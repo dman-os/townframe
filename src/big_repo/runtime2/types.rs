@@ -352,7 +352,7 @@ pub enum WorkerGroupScope {
     /// assignment — so eligibility never races the group-part worker, and a
     /// document that joins an eligible group later is picked up by its next
     /// admitted event (the delegating event itself).
-    Groups(std::collections::HashSet<PartId>),
+    Groups(std::collections::HashSet<PartKey>),
 }
 
 impl WorkerGroupScope {
@@ -386,7 +386,7 @@ impl WorkerGroupScope {
     /// (`None` — no group lookups at all) or filter events by these groups
     /// (`Some(set)` — the set is the group list, never derived from a keyhive
     /// enumeration).
-    pub fn groups(&self) -> Option<&std::collections::HashSet<PartId>> {
+    pub fn groups(&self) -> Option<&std::collections::HashSet<PartKey>> {
         match self {
             Self::All => None,
             Self::Groups(groups) => Some(groups),

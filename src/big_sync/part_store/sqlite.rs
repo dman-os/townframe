@@ -1,26 +1,27 @@
 use super::HostPartStore;
 use super::LocalPartRevisionReader;
 use super::sqlite_core::{EVENT_ADDED, EVENT_REMOVED};
-use super::{PartFrontierKey, SqlitePartFrontier, SqlitePartSelector};
+use super::{PartFrontierKey, PartScope, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
 use crate::keyed_frontier::open_sqlite_reader;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
 #[cfg(test)]
-use big_sync_core::Byte32Id;
+use big_sync_core::ByteKey;
 use big_sync_core::keyed_frontier::{
     FrontierRead, FrontierReadLimits, KeyedFrontier, KeyedFrontierTransaction,
 };
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjAddedToPart, ObjChanged,
     ObjRemovedFromPart, PartEvent, PartPage, PartSummary, SubEvent, SubPartsRequest,
+    SubscriptionTarget,
 };
-use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
+use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 #[cfg(test)]
 use future_form::{FutureForm, Sendable};
 #[cfg(test)]
@@ -35,7 +36,7 @@ use super::sqlite_core::encode_access;
 
 struct ReplayCandidate {
     txid: CursorIndex,
-    obj_id: ObjId,
+    obj_id: ObjKey,
     event_type: i64,
     payload: ObjPayload,
 }
@@ -44,7 +45,7 @@ struct ReplayCandidate {
 pub struct SqlitePartStore {
     pub(crate) core: SqliteCore,
     pub(crate) frontier: SqlitePartFrontier,
-    hidden_parts: Arc<HashSet<PartId>>,
+    hidden_parts: Arc<HashSet<PartKey>>,
 }
 
 /// Open a local revision reader over an existing BigSync SQLite schema.
@@ -129,13 +130,13 @@ use super::sqlite_core::SqliteCore;
 /// Thin forwarding helpers so call sites inside SqlitePartStore's
 /// HostPartStore impl continue to compile without changes.
 impl SqlitePartStore {
-    fn part_blob(id: PartId) -> Vec<u8> {
+    fn part_blob(id: PartKey) -> Vec<u8> {
         SqliteCore::part_blob(id)
     }
-    fn obj_blob(id: ObjId) -> Vec<u8> {
+    fn obj_blob(id: ObjKey) -> Vec<u8> {
         SqliteCore::obj_blob(id)
     }
-    fn peer_blob(id: PeerId) -> Vec<u8> {
+    fn peer_blob(id: PeerKey) -> Vec<u8> {
         SqliteCore::peer_blob(id)
     }
     fn buck_i64(id: BuckId) -> i64 {
@@ -147,14 +148,14 @@ impl SqlitePartStore {
     fn u64_from_db(value: i64) -> u64 {
         SqliteCore::u64_from_db(value)
     }
-    fn part_from_blob(blob: Vec<u8>) -> PartId {
+    fn part_from_blob(blob: Vec<u8>) -> PartKey {
         SqliteCore::part_from_blob(blob)
     }
-    fn obj_from_blob(blob: Vec<u8>) -> ObjId {
+    fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
         SqliteCore::obj_from_blob(blob)
     }
     #[cfg(test)]
-    fn peer_from_blob(blob: Vec<u8>) -> PeerId {
+    fn peer_from_blob(blob: Vec<u8>) -> PeerKey {
         SqliteCore::peer_from_blob(blob)
     }
 }
@@ -189,10 +190,94 @@ impl SqlitePartStore {
 }
 
 impl SqlitePartStore {
+    /// Materialize the derived single-object part for each object a remote subscriber asked
+    /// for: the part row plus its one live membership row.
+    ///
+    /// ADR 012 decision 3. The membership row is load-bearing rather than decorative:
+    /// delivery filters an event's candidate parts by the recipient's access rows, so unless
+    /// the object appears in its own part, an explicit share on `o:{object_key}` resolves to
+    /// nothing and is never delivered. In this store a membership row is also the keyed-frontier
+    /// entry, so materialization is observable as one `Changed` for the object part at the
+    /// current revision; it allocates no revision and never records `Added`, because subscribing
+    /// is not a sync event.
+    async fn materialize_object_parts(&self, obj_ids: Vec<ObjKey>) -> Res<()> {
+        let cursor = self.latest_revision().await?;
+        for obj_id in obj_ids {
+            let part_id = obj_id.object_part_key();
+            let mut tx = self
+                .core
+                .sql
+                .write_pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await?;
+            let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id).await?;
+            let payload_json: Option<String> = sqlx::query_scalar!(
+                "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
+                obj_ref
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+            let Some(payload_json) = payload_json.filter(|payload_json| !payload_json.is_empty())
+            else {
+                // No payload yet: stage the membership the way `add_obj_to_parts` does, so it
+                // lands when a payload arrives. There is nothing to deliver without one.
+                let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+                sqlx::query!(
+                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
+                     VALUES (?1, ?2, ?3)",
+                    self.core.scope_id,
+                    obj_ref,
+                    part_ref
+                )
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                continue;
+            };
+            let old_state = self.core.load_member_state(&mut tx, part_id, obj_id).await?;
+            if matches!(old_state, MemberState::Live(_)) {
+                tx.commit().await?;
+                continue;
+            }
+            let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
+            let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+            self.core
+                .apply_bucket_transition(
+                    &mut tx,
+                    part_id,
+                    obj_id,
+                    cursor,
+                    &old_state,
+                    &MemberState::Live(payload),
+                )
+                .await?;
+            // `apply_bucket_transition` maintains the range summaries only. The membership row
+            // is also this store's keyed-frontier entry (`decode_row` turns a member row into a
+            // frontier event), so materialization is recorded as a plain `Changed` at the
+            // current revision: an object part never emits `Added`/`Removed`, and no revision is
+            // allocated because subscribing is not a sync event.
+            sqlx::query!(
+                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
+                self.core.scope_id,
+                obj_ref,
+                part_ref,
+                crate::sqlite_core::EVENT_CHANGED,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            )
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
+
     async fn replay_candidates(
         &self,
-        parts: &HashSet<PartId>,
-        objects: &HashSet<ObjId>,
+        parts: &HashSet<PartKey>,
+        objects: &HashSet<ObjKey>,
         lower_bound: CursorIndex,
         exact_txid: Option<CursorIndex>,
         limit: Option<u32>,
@@ -280,8 +365,8 @@ impl HostPartStore for SqlitePartStore {
 
     async fn summarize_parts(
         &self,
-        parts: HashSet<PartId>,
-    ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>> {
+        parts: HashSet<PartKey>,
+    ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>> {
         if parts.is_empty() {
             return Ok(Ok(HashMap::new()));
         }
@@ -313,7 +398,7 @@ impl HostPartStore for SqlitePartStore {
         let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
 
         if rows.len() != parts.len() {
-            let found: HashSet<PartId> = rows
+            let found: HashSet<PartKey> = rows
                 .iter()
                 .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
                 .collect();
@@ -343,10 +428,10 @@ impl HostPartStore for SqlitePartStore {
 
     async fn list_events(
         &self,
-        parts: HashSet<PartId>,
+        parts: HashSet<PartKey>,
         cursor: CursorIndex,
         limit: u32,
-    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+    ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
         if let Err(err) = self.summarize_parts(parts.clone()).await? {
             return Ok(Err(err));
         }
@@ -408,7 +493,7 @@ impl HostPartStore for SqlitePartStore {
         Ok(Ok(out))
     }
 
-    async fn member_count(&self, part_id: PartId) -> Res<u64> {
+    async fn member_count(&self, part_id: PartKey) -> Res<u64> {
         let member_count: Option<i64> = sqlx::query_scalar!(
             "SELECT live_count
              FROM big_sync_buckets
@@ -425,7 +510,61 @@ impl HostPartStore for SqlitePartStore {
             .unwrap_or_default())
     }
 
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>> {
+    async fn part_dirty_count(
+        &self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> Res<PartDirtyCount> {
+        let Some(part_ref) = self.core.find_part_ref(part_id).await? else {
+            // A part this scope has never seen has no members to be behind on and no
+            // row authorizing the principal.
+            return Ok(PartDirtyCount::default());
+        };
+        let since = i64::try_from(since).expect(ERROR_IMPOSSIBLE);
+        // A member row carries the cursor of its last transition, removal included,
+        // so a removal counts as a relevant change.
+        let member_changes: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*)
+               FROM big_sync_members
+              WHERE scope_id = ?1
+                AND maybe_part_ref = ?2
+                AND txid > ?3",
+            self.core.scope_id,
+            part_ref,
+            since
+        )
+        .fetch_one(&self.core.sql.read_pool)
+        .await?;
+        // One row per (part, principal). A revocation deletes that row, so a
+        // revocation does not count here. `None` is the local principal, which
+        // access rows do not gate, so it has no access half.
+        let access_changes: i64 = match principal {
+            Some(principal) => {
+                sqlx::query_scalar!(
+                    "SELECT COUNT(*)
+                       FROM big_sync_syncable
+                      WHERE scope_id = ?1
+                        AND part_ref = ?2
+                        AND principal_id = ?3
+                        AND changed_at > ?4",
+                    self.core.scope_id,
+                    part_ref,
+                    Self::peer_blob(principal),
+                    since
+                )
+                .fetch_one(&self.core.sql.read_pool)
+                .await?
+            }
+            None => 0,
+        };
+        Ok(PartDirtyCount {
+            member_changes: u64::try_from(member_changes).expect(ERROR_IMPOSSIBLE),
+            access_changes: u64::try_from(access_changes).expect(ERROR_IMPOSSIBLE),
+        })
+    }
+
+    async fn obj_payload(&self, obj_id: ObjKey) -> Res<Option<ObjPayload>> {
         let row = sqlx::query!(
             "SELECT payload_json
                  FROM big_sync_objs
@@ -446,7 +585,7 @@ impl HostPartStore for SqlitePartStore {
             .transpose()
     }
 
-    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
+    async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
         let mut frontier_tx = self.frontier.begin().await?;
         let cursor = frontier_tx.revision().await?;
@@ -592,7 +731,7 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>> {
+    async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
         let rows = sqlx::query!(
             "SELECT p.part_id
              FROM big_sync_members m
@@ -620,7 +759,7 @@ impl HostPartStore for SqlitePartStore {
             .collect())
     }
 
-    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+    async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
         let exists: Option<i64> = sqlx::query_scalar!(
             "SELECT 1
              FROM big_sync_objs
@@ -633,7 +772,7 @@ impl HostPartStore for SqlitePartStore {
         Ok(exists.is_some())
     }
 
-    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
+    async fn get_bucket_summary(&self, part_id: PartKey, id: BuckId) -> Res<BucketSummary> {
         self.core.bucket_summary_for_path(part_id, id).await
     }
 
@@ -871,7 +1010,7 @@ impl HostPartStore for SqlitePartStore {
         }))
     }
 
-    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
+    async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
         let mut frontier_tx = self.frontier.begin().await?;
         let tx = frontier_tx.context_mut();
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id).await?;
@@ -949,7 +1088,7 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
+    async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
         let mut frontier_tx = self.frontier.begin().await?;
         let tx = frontier_tx.context_mut();
         let obj_ref: Option<i64> = sqlx::query_scalar!(
@@ -1014,7 +1153,7 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn get_peer_part_cursor(&self, peer_id: PeerId, part_id: PartId) -> Res<CursorIndex> {
+    async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex> {
         let cursor: Option<i64> = sqlx::query_scalar!(
             "SELECT cursor
              FROM big_sync_peer_cursors
@@ -1034,8 +1173,8 @@ impl HostPartStore for SqlitePartStore {
 
     async fn set_peer_part_cursor(
         &self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
         cursor: CursorIndex,
     ) -> Res<()> {
         let mut tx = self.core.sql.write_pool.begin().await?;
@@ -1058,7 +1197,7 @@ impl HostPartStore for SqlitePartStore {
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
-        subscriber: PeerId,
+        subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
         let mut selector = SqlitePartSelector::default();
@@ -1077,6 +1216,10 @@ impl HostPartStore for SqlitePartStore {
                     selector.objects.insert(*obj_id, reqs.lower_bound);
                 }
             }
+        }
+        if !objects.is_empty() {
+            self.materialize_object_parts(objects.iter().copied().collect())
+                .await?;
         }
         if let Err(err) = self.summarize_parts(parts.clone()).await? {
             return Ok(Err(err));
@@ -1192,11 +1335,18 @@ impl HostPartStore for SqlitePartStore {
                     {
                         continue;
                     }
-                    let permitted =
-                        event_permitted(&store.core, part_id, key_obj_id, Some(subscriber))
+                    // A concrete subscriber is always filtered; `None` (unfiltered) is
+                    // reserved for the trusted local principal.
+                    let scope = match part_id {
+                        Some(part_id) => PartScope::Part(part_id),
+                        None => PartScope::FromObject,
+                    };
+                    let readable =
+                        permitted_parts(&store.core, scope, key_obj_id, Some(subscriber))
                             .await
+                            .expect(ERROR_IMPOSSIBLE)
                             .expect(ERROR_IMPOSSIBLE);
-                    if !permitted {
+                    if readable.is_empty() {
                         continue;
                     }
                     match event {
@@ -1296,17 +1446,17 @@ impl HostPartStore for SqlitePartStore {
         Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
-    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+    async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
         let mut tx = self.core.sql.write_pool.begin().await?;
         self.core.ensure_part_ref(&mut tx, part_id).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    async fn set_obj_members(
+    async fn set_part_members(
         &self,
-        obj: ObjId,
-        agents: HashMap<PeerId, keyhive_core::access::Access>,
+        part: PartKey,
+        agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()> {
         let mut tx = self
             .core
@@ -1314,22 +1464,25 @@ impl HostPartStore for SqlitePartStore {
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
             .await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj).await?;
+        let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
+        let changed_at =
+            i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
         sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2",
+            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
             self.core.scope_id,
-            obj_ref
+            part_ref
         )
         .execute(&mut *tx)
         .await?;
         for (principal, access) in &agents {
             sqlx::query!(
-                "INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 self.core.scope_id,
-                obj_ref,
+                part_ref,
                 Self::peer_blob(*principal),
-                encode_access(access)
+                encode_access(access),
+                changed_at
             )
             .execute(&mut *tx)
             .await?;
@@ -1338,10 +1491,10 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn add_obj_member(
+    async fn add_part_member(
         &self,
-        obj: ObjId,
-        member: PeerId,
+        part: PartKey,
+        member: PeerKey,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         let mut tx = self
@@ -1350,18 +1503,21 @@ impl HostPartStore for SqlitePartStore {
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
             .await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj).await?;
+        let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
+        let changed_at =
+            i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
         sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2 AND principal_id = ?3",
-            self.core.scope_id, obj_ref, Self::peer_blob(member)
+            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+            self.core.scope_id, part_ref, Self::peer_blob(member)
         ).execute(&mut *tx).await?;
         sqlx::query!(
-            "INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             self.core.scope_id,
-            obj_ref,
+            part_ref,
             Self::peer_blob(member),
-            encode_access(&access)
+            encode_access(&access),
+            changed_at
         )
         .execute(&mut *tx)
         .await?;
@@ -1369,75 +1525,149 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) -> Res<()> {
+    async fn remove_part_member(&self, part: PartKey, member: PeerKey) -> Res<()> {
         let mut tx = self
             .core
             .sql
             .write_pool
             .begin_with("BEGIN IMMEDIATE")
             .await?;
-        let Some(obj_ref) = self.core.find_obj_ref(obj).await? else {
+        let Some(part_ref) = self.core.find_part_ref(part).await? else {
             tx.commit().await?;
             return Ok(());
         };
         sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2 AND principal_id = ?3",
-            self.core.scope_id, obj_ref, Self::peer_blob(member)
+            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+            self.core.scope_id, part_ref, Self::peer_blob(member)
         ).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    async fn is_event_permitted(
+    async fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
+        permitted_parts(&self.core, scope, obj_id, principal).await
+    }
+
+    /// This store's subscriptions are filtered per recipient, so a page can be
+    /// denied rather than silently empty.
+    async fn page_denied(
+        &self,
+        target: &SubscriptionTarget,
+        subscriber: PeerKey,
     ) -> Res<bool> {
-        event_permitted(&self.core, part_id, obj_id, principal).await
+        let (scope, obj_id) = match target {
+            SubscriptionTarget::Part { part_id, .. } => {
+                // `permitted_parts` reads the object only for a `FromObject` scope,
+                // so a part is asked about directly.
+                (PartScope::Part(*part_id), ObjKey::new([0u8; 32]))
+            }
+            SubscriptionTarget::Object { obj_id } => (PartScope::FromObject, *obj_id),
+        };
+        Ok(self
+            .permitted_parts(scope, obj_id, Some(subscriber))
+            .await?
+            .is_some_and(|readable| readable.is_empty()))
     }
 }
 
-/// Policy check for delivering an event to a remote subscriber.
-async fn event_permitted(
+/// Filter an outbound event's candidate parts down to the parts `principal` may read.
+///
+/// Access is granted per part, so this single operation is both the authorization
+/// check and the non-exposure rule: a part id the principal cannot read is never
+/// disclosed. `Ok(None)` means unfiltered (trusted local subscriber).
+async fn permitted_parts(
     core: &SqliteCore,
-    part_id: Option<PartId>,
-    obj_id: ObjId,
-    principal: Option<PeerId>,
-) -> Res<bool> {
+    scope: PartScope,
+    obj_id: ObjKey,
+    principal: Option<PeerKey>,
+) -> Res<Option<Vec<PartKey>>> {
     let Some(peer) = principal else {
-        return Ok(true);
+        return Ok(None);
     };
     let peer_blob = SqliteCore::peer_blob(peer);
-    let access_level: Option<i64> = sqlx::query_scalar!(
-        "SELECT access_level
-         FROM big_sync_syncable
-         WHERE scope_id = ?1 AND obj_ref = (
-             SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-         ) AND principal_id = ?3",
-        core.scope_id,
-        SqliteCore::obj_blob(obj_id),
-        &peer_blob
-    )
-    .fetch_optional(&core.sql.read_pool)
-    .await?;
-    let permitted = access_level
-        .map(|lvl| u8::try_from(lvl).expect(ERROR_IMPOSSIBLE))
-        .map(super::sqlite_core::decode_access)
-        .is_some_and(|access| access.is_fetcher());
+    let candidates: Vec<PartKey> = match scope {
+        // Resolve and filter in one query: the object's live parts that grant this
+        // principal access. An event that named nothing usable still delivers when
+        // the principal can read some part of it.
+        PartScope::FromObject => {
+            let rows = sqlx::query!(
+                "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
+                 FROM big_sync_members m
+                 JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+                 JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
+                 WHERE m.scope_id = ?1
+                   AND m.obj_ref = (
+                       SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+                   )
+                   AND m.maybe_part_ref > 0
+                   AND m.event_type != 2
+                   AND s.principal_id = ?3
+                 ORDER BY p.part_id",
+                core.scope_id,
+                SqliteCore::obj_blob(obj_id),
+                &peer_blob
+            )
+            .fetch_all(&core.sql.read_pool)
+            .await?;
+            let readable = rows
+                .into_iter()
+                .filter(|row| is_fetch_access(row.access_level))
+                .map(|row| SqliteCore::part_from_blob(row.part_id))
+                .collect::<Vec<_>>();
+            tracing::trace!(
+                ?obj_id,
+                ?principal,
+                part_count = readable.len(),
+                "policy event permission",
+            );
+            return Ok(Some(readable));
+        }
+        PartScope::Part(part_id) => vec![part_id],
+        PartScope::AnyOf(part_ids) => part_ids,
+    };
+    let mut readable = Vec::with_capacity(candidates.len());
+    for part_id in candidates {
+        let Some(part_ref) = core.find_part_ref(part_id).await? else {
+            continue;
+        };
+        let access_level: Option<i64> = sqlx::query_scalar!(
+            "SELECT access_level
+             FROM big_sync_syncable
+             WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+            core.scope_id,
+            part_ref,
+            &peer_blob
+        )
+        .fetch_optional(&core.sql.read_pool)
+        .await?;
+        if access_level.is_some_and(is_fetch_access) {
+            readable.push(part_id);
+        }
+    }
     tracing::trace!(
-        ?part_id,
         ?obj_id,
         ?principal,
-        permitted,
+        part_count = readable.len(),
         "policy event permission",
     );
-    Ok(permitted)
+    Ok(Some(readable))
+}
+
+fn is_fetch_access(access_level: i64) -> bool {
+    u8::try_from(access_level)
+        .ok()
+        .map(super::sqlite_core::decode_access)
+        .is_some_and(|access| access.is_fetcher())
 }
 
 #[cfg(test)]
 impl PartStoreReadOnly<Sendable> for SqlitePartStore {
-    fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
+    fn member_count<'a>(&'a self, part_id: PartKey) -> BoxFuture<'a, u64> {
         Sendable::from_future(async move {
             HostPartStore::member_count(self, part_id)
                 .await
@@ -1445,7 +1675,20 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
         })
     }
 
-    fn obj_payload<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Option<ObjPayload>> {
+    fn part_dirty_count<'a>(
+        &'a self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> BoxFuture<'a, PartDirtyCount> {
+        Sendable::from_future(async move {
+            HostPartStore::part_dirty_count(self, part_id, principal, since)
+                .await
+                .expect(ERROR_IMPOSSIBLE)
+        })
+    }
+
+    fn obj_payload<'a>(&'a self, obj_id: ObjKey) -> BoxFuture<'a, Option<ObjPayload>> {
         Sendable::from_future(async move {
             HostPartStore::obj_payload(self, obj_id)
                 .await
@@ -1455,7 +1698,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 
     fn get_bucket_summary<'a>(
         &'a self,
-        part_id: PartId,
+        part_id: PartKey,
         id: BuckId,
     ) -> BoxFuture<'a, BucketSummary> {
         Sendable::from_future(async move {
@@ -1465,7 +1708,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
         })
     }
 
-    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
+    fn obj_parts<'a>(&'a self, obj_id: ObjKey) -> BoxFuture<'a, Vec<PartKey>> {
         Sendable::from_future(async move {
             HostPartStore::obj_parts(self, obj_id)
                 .await
@@ -1475,8 +1718,8 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 
     fn get_peer_part_cursor<'a>(
         &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
     ) -> BoxFuture<'a, CursorIndex> {
         Sendable::from_future(async move {
             HostPartStore::get_peer_part_cursor(self, peer_id, part_id)
@@ -1488,7 +1731,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 
 #[cfg(test)]
 impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
-    fn upsert_obj<'a>(&'a self, obj_id: ObjId, payload: &ObjPayload) -> BoxFuture<'a, ()> {
+    fn upsert_obj<'a>(&'a self, obj_id: ObjKey, payload: &ObjPayload) -> BoxFuture<'a, ()> {
         let payload = payload.clone();
         Sendable::from_future(async move {
             HostPartStore::set_obj_payload(self, obj_id, payload)
@@ -1497,7 +1740,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
         })
     }
 
-    fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> BoxFuture<'a, ()> {
+    fn add_obj_to_parts<'a>(&'a self, obj_id: ObjKey, parts: &[PartKey]) -> BoxFuture<'a, ()> {
         let parts = parts.to_vec();
         Sendable::from_future(async move {
             HostPartStore::add_obj_to_parts(self, obj_id, parts)
@@ -1506,7 +1749,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
         })
     }
 
-    fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> BoxFuture<'a, ()> {
+    fn remove_obj_from_part<'a>(&'a self, obj_id: ObjKey, part_id: PartKey) -> BoxFuture<'a, ()> {
         Sendable::from_future(async move {
             HostPartStore::remove_obj_from_part(self, obj_id, part_id)
                 .await
@@ -1516,8 +1759,8 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
 
     fn set_peer_part_cursor<'a>(
         &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
         cursor: CursorIndex,
     ) -> BoxFuture<'a, ()> {
         Sendable::from_future(async move {
@@ -1596,6 +1839,7 @@ mod tests {
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
     use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
     use big_sync_core::part_store::contract;
+    use big_sync_core::rpc::ReplayPageOutcome;
 
     async fn test_sql() -> Res<SqlCtx> {
         let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
@@ -1608,12 +1852,12 @@ mod tests {
         SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
     }
 
-    fn test_part_id(seed: u8) -> PartId {
-        PartId(Byte32Id::new([seed; 32]))
+    fn test_part_id(seed: u8) -> PartKey {
+        PartKey(ByteKey::new([seed; 32]))
     }
 
-    fn test_obj_id(seed: u8) -> ObjId {
-        ObjId(Byte32Id::new([seed; 32]))
+    fn test_obj_id(seed: u8) -> ObjKey {
+        ObjKey(ByteKey::new([seed; 32]))
     }
 
     async fn put_frontier_event(
@@ -1657,7 +1901,7 @@ mod tests {
     async fn sqlite_part_store_contract_peer_cursor_roundtrip() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://repo").await?;
         let part_id = test_part_id(5);
-        contract::assert_peer_cursor_roundtrip(&store, PeerId(Byte32Id::new([42; 32])), part_id)
+        contract::assert_peer_cursor_roundtrip(&store, PeerKey(ByteKey::new([42; 32])), part_id)
             .await;
         Ok(())
     }
@@ -1814,10 +2058,10 @@ mod tests {
 
         // ---- first session ----
         let store1 = SqlitePartStore::new(sql.clone(), scope_key, BuckId::MAX_LEVEL).await?;
-        let part = PartId(Byte32Id::new([201u8; 32]));
-        let obj = ObjId(Byte32Id::new([202u8; 32]));
-        let auth = PeerId::new([203u8; 32]);
-        let denied = PeerId::new([204u8; 32]);
+        let part = PartKey(ByteKey::new([201u8; 32]));
+        let obj = ObjKey(ByteKey::new([202u8; 32]));
+        let auth = PeerKey::new([203u8; 32]);
+        let denied = PeerKey::new([204u8; 32]);
 
         store1.ensure_part(part).await?;
         store1
@@ -1827,7 +2071,7 @@ mod tests {
 
         // Persist membership.
         store1
-            .set_obj_members(obj, std::collections::HashMap::from([(auth, Access::Read)]))
+            .set_part_members(part, std::collections::HashMap::from([(auth, Access::Read)]))
             .await?;
 
         // Helper to drain through ReplayComplete.
@@ -1843,7 +2087,7 @@ mod tests {
             }
         }
 
-        let sub = |peer: PeerId| {
+        let sub = |peer: PeerKey| {
             let store = &store1;
             let part = &part;
             async move {
@@ -1898,7 +2142,7 @@ mod tests {
         // ---- second session on the same database and scope ----
         let store2 = SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await?;
 
-        let sub2 = |peer: PeerId| {
+        let sub2 = |peer: PeerKey| {
             let store = &store2;
             let part = &part;
             async move {
@@ -1952,16 +2196,60 @@ mod tests {
         Ok(())
     }
 
+    /// The object lane is the local/unfiltered lane: a partless object still delivers on
+    /// it. REMOTE object subscriptions to a partless object are denied (see
+    /// `sqlite_subscribe_partless_object_denied_remotely`), because access is granted per
+    /// part and this object is in no part.
     #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_exact_object_receives_changed() -> Res<()> {
-        use keyhive_core::access::Access;
-
+    async fn sqlite_subscribe_local_exact_object_receives_changed() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://subscribe-object").await?;
         let obj_id = test_obj_id(210);
-        let peer = PeerId::new([211; 32]);
-        store
-            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
-            .await?;
+        put_frontier_event(
+            &store,
+            PartFrontierKey::Object(obj_id),
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: Vec::new(),
+                obj_id,
+                payload: serde_json::json!({"value": 1}),
+            }),
+        )
+        .await?;
+
+        let rx = store
+            .subscribe_local(SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                    obj_id,
+                }]),
+            })
+            .await?
+            .map_err(eyre::Report::from)?;
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Changed(changed) => {
+                assert_eq!(changed.cursor, 1);
+                assert_eq!(changed.obj_id, obj_id);
+                assert!(changed.part_ids.is_empty());
+                assert_eq!(changed.payload, serde_json::json!({"value": 1}));
+            }
+            event => panic!("expected object Changed, got {event:?}"),
+        }
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+        Ok(())
+    }
+
+    /// Access is granted per part, and a partless object is in no part, so it has no
+    /// remote authorization until virtual parts land (ADR 012). Fail-closed: a remote
+    /// subscriber receives the replay marker and nothing else, on both the replay and the
+    /// live path, so neither a part id nor a payload can leak.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_partless_object_denied_remotely() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://subscribe-partless-denied").await?;
+        let obj_id = test_obj_id(225);
+        let peer = PeerKey::new([226; 32]);
         put_frontier_event(
             &store,
             PartFrontierKey::Object(obj_id),
@@ -1986,19 +2274,190 @@ mod tests {
             )
             .await?
             .map_err(eyre::Report::from)?;
-        match rx.recv().await.expect("subscription channel stays open") {
-            SubEvent::Changed(changed) => {
-                assert_eq!(changed.cursor, 1);
-                assert_eq!(changed.obj_id, obj_id);
-                assert!(changed.part_ids.is_empty());
-                assert_eq!(changed.payload, serde_json::json!({"value": 1}));
-            }
-            event => panic!("expected object Changed, got {event:?}"),
-        }
         assert_eq!(
             rx.recv().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
+            SubEvent::ReplayComplete,
+            "a partless object must not be delivered to a remote subscriber",
         );
+
+        put_frontier_event(
+            &store,
+            PartFrontierKey::Object(obj_id),
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: Vec::new(),
+                obj_id,
+                payload: serde_json::json!({"value": 2}),
+            }),
+        )
+        .await?;
+        match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+            Err(_) => {}
+            Ok(Ok(event)) => {
+                panic!("partless object change leaked to a remote subscriber: {event:?}")
+            }
+            Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
+        }
+        Ok(())
+    }
+
+    /// Decision 3: the object part is derived from the object key, and an explicit row on it is
+    /// a direct share. It delivers only because subscribing materializes the object's single
+    /// membership row — that row is what the recipient's access is resolved through.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_object_part_direct_share_is_delivered_remotely() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://object-part-direct-share").await?;
+        let obj_id = test_obj_id(230);
+        let peer = PeerKey::new([231; 32]);
+        let payload = serde_json::json!({"value": 1});
+        store.set_obj_payload(obj_id, payload.clone()).await?;
+        store
+            .set_part_members(obj_id.object_part_key(), HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        // The object part is materialized by the subscription, and in this store that
+        // materialization itself is a `Changed` for the object part, so the payload may arrive
+        // more than once. What must hold is that it arrives.
+        let mut delivered = Vec::new();
+        loop {
+            match rx.recv().await.expect("subscription channel stays open") {
+                SubEvent::Changed(changed) => {
+                    assert_eq!(changed.obj_id, obj_id);
+                    delivered.push(changed.payload);
+                }
+                SubEvent::ReplayComplete => break,
+                event => panic!("unexpected event {event:?}"),
+            }
+        }
+        assert!(
+            delivered.contains(&payload),
+            "the directly shared object was not delivered: {delivered:?}"
+        );
+        Ok(())
+    }
+
+    /// An explicit row on the object part is *additive*: the object also lives in a part the
+    /// peer cannot read, and the share still delivers it. The live change lands in both parts,
+    /// and only the object part is readable, so what arrives must have come through it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_object_part_share_is_additive_to_an_unreadable_part() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://object-part-additive").await?;
+        let obj_id = test_obj_id(232);
+        let part_id = test_part_id(233);
+        let peer = PeerKey::new([234; 32]);
+        store.ensure_part(part_id).await?;
+        store
+            .set_obj_payload(obj_id, serde_json::json!({"value": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_id, vec![part_id]).await?;
+        store
+            .set_part_members(obj_id.object_part_key(), HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        // The share delivers the object, and never names the part the peer cannot read: a part
+        // id the recipient may not read is not disclosed by delivery or by omission.
+        loop {
+            match rx.recv().await.expect("subscription channel stays open") {
+                SubEvent::Changed(changed) => {
+                    assert_eq!(changed.obj_id, obj_id);
+                    assert!(
+                        changed.part_ids.is_empty(),
+                        "the unreadable part must not be named: {:?}",
+                        changed.part_ids
+                    );
+                }
+                SubEvent::ReplayComplete => break,
+                event => panic!("unexpected event {event:?}"),
+            }
+        }
+
+        let payload = serde_json::json!({"value": 2});
+        store.set_obj_payload(obj_id, payload.clone()).await?;
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Ok(SubEvent::Changed(changed))) => {
+                assert_eq!(changed.obj_id, obj_id);
+                assert!(
+                    changed.part_ids.is_empty(),
+                    "the unreadable part must not be named: {:?}",
+                    changed.part_ids
+                );
+                assert_eq!(changed.payload, payload);
+            }
+            Ok(Ok(event)) => panic!("expected the shared object's live change, got {event:?}"),
+            Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
+            Err(_) => panic!("timed out waiting for the shared object's live change"),
+        }
+        Ok(())
+    }
+
+    /// Access to the object part is *inherited*: a peer that may read a part holding the object
+    /// may read the object with no row on the derived part — and materializing that part must
+    /// not take that access away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_object_part_inherits_access_from_a_containing_part() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://object-part-inherited").await?;
+        let obj_id = test_obj_id(235);
+        let part_id = test_part_id(236);
+        let peer = PeerKey::new([237; 32]);
+        store.ensure_part(part_id).await?;
+        store
+            .set_part_members(part_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        let payload = serde_json::json!({"value": 1});
+        store.set_obj_payload(obj_id, payload.clone()).await?;
+        store.add_obj_to_parts(obj_id, vec![part_id]).await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Ok(SubEvent::Changed(changed))) => {
+                assert_eq!(changed.obj_id, obj_id);
+                assert_eq!(changed.payload, payload);
+            }
+            Ok(Ok(event)) => panic!("expected the inherited object, got {event:?}"),
+            Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
+            Err(_) => panic!("timed out waiting for the inherited object"),
+        }
         Ok(())
     }
 
@@ -2010,46 +2469,44 @@ mod tests {
         let obj_id = test_obj_id(212);
         let first_part = test_part_id(213);
         let second_part = test_part_id(214);
-        let peer = PeerId::new([215; 32]);
+        let peer = PeerKey::new([215; 32]);
         store.ensure_part(first_part).await?;
         store.ensure_part(second_part).await?;
-        store
-            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
-            .await?;
-        assert_eq!(
-            put_frontier_event(
-                &store,
-                PartFrontierKey::Part {
-                    obj_id,
-                    part_id: first_part,
-                },
-                PartEvent::Added(ObjAddedToPart {
-                    cursor: 0,
-                    part_id: first_part,
-                    obj_id,
-                    payload: serde_json::json!({"part": 1}),
-                }),
-            )
-            .await?,
-            1
-        );
-        assert_eq!(
-            put_frontier_event(
-                &store,
-                PartFrontierKey::Part {
-                    obj_id,
-                    part_id: second_part,
-                },
-                PartEvent::Added(ObjAddedToPart {
-                    cursor: 0,
-                    part_id: second_part,
-                    obj_id,
-                    payload: serde_json::json!({"part": 2}),
-                }),
-            )
-            .await?,
-            2
-        );
+        for part in [first_part, second_part] {
+            store
+                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                .await?;
+        }
+        // Access writes consume scope cursor values (ADR 012 decision 5), so the first
+        // frontier edit does not start at 1: derive the cursors instead of hard-coding.
+        let first_cursor = put_frontier_event(
+            &store,
+            PartFrontierKey::Part {
+                obj_id,
+                part_id: first_part,
+            },
+            PartEvent::Added(ObjAddedToPart {
+                cursor: 0,
+                part_id: first_part,
+                obj_id,
+                payload: serde_json::json!({"part": 1}),
+            }),
+        )
+        .await?;
+        let second_cursor = put_frontier_event(
+            &store,
+            PartFrontierKey::Part {
+                obj_id,
+                part_id: second_part,
+            },
+            PartEvent::Added(ObjAddedToPart {
+                cursor: 0,
+                part_id: second_part,
+                obj_id,
+                payload: serde_json::json!({"part": 2}),
+            }),
+        )
+        .await?;
 
         let rx = store
             .subscribe(
@@ -2058,7 +2515,7 @@ mod tests {
                     targets: HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: first_part,
-                            cursor: 1,
+                            cursor: first_cursor,
                         },
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: second_part,
@@ -2072,7 +2529,7 @@ mod tests {
             .map_err(eyre::Report::from)?;
         match rx.recv().await.expect("subscription channel stays open") {
             SubEvent::Added(added) => {
-                assert_eq!(added.cursor, 2);
+                assert_eq!(added.cursor, second_cursor);
                 assert_eq!(added.part_id, second_part);
                 assert_eq!(added.obj_id, obj_id);
             }
@@ -2093,12 +2550,14 @@ mod tests {
         let obj_id = test_obj_id(216);
         let first_part = test_part_id(217);
         let second_part = test_part_id(218);
-        let peer = PeerId::new([219; 32]);
+        let peer = PeerKey::new([219; 32]);
         store.ensure_part(first_part).await?;
         store.ensure_part(second_part).await?;
-        store
-            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
-            .await?;
+        for part in [first_part, second_part] {
+            store
+                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                .await?;
+        }
         let mut tx = store.frontier.begin().await?;
         tx.put(
             PartFrontierKey::Part {
@@ -2126,7 +2585,8 @@ mod tests {
             }),
         )
         .await?;
-        assert_eq!(tx.commit().await?, 1);
+        // One commit is one revision: a single cursor covers both parts (ADR 012 decision 8).
+        let revision = tx.commit().await?;
 
         let rx = store
             .subscribe(
@@ -2149,7 +2609,7 @@ mod tests {
             .map_err(eyre::Report::from)?;
         match rx.recv().await.expect("subscription channel stays open") {
             SubEvent::Changed(changed) => {
-                assert_eq!(changed.cursor, 1);
+                assert_eq!(changed.cursor, revision);
                 assert_eq!(changed.obj_id, obj_id);
                 assert_eq!(
                     changed.part_ids.iter().copied().collect::<HashSet<_>>(),
@@ -2172,12 +2632,13 @@ mod tests {
         let store = test_store("big-sync-sqlite-test://subscribe-tombstone").await?;
         let obj_id = test_obj_id(220);
         let part_id = test_part_id(221);
-        let peer = PeerId::new([222; 32]);
+        let peer = PeerKey::new([222; 32]);
         store.ensure_part(part_id).await?;
         store
-            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
+            .set_part_members(part_id, HashMap::from([(peer, Access::Read)]))
             .await?;
-        delete_frontier_key(&store, PartFrontierKey::Part { obj_id, part_id }).await?;
+        let tombstone_cursor =
+            delete_frontier_key(&store, PartFrontierKey::Part { obj_id, part_id }).await?;
 
         let rx = store
             .subscribe(
@@ -2195,7 +2656,7 @@ mod tests {
         assert_eq!(
             rx.recv().await.expect("subscription channel stays open"),
             SubEvent::Removed(ObjRemovedFromPart {
-                cursor: 1,
+                cursor: tombstone_cursor,
                 part_id,
                 obj_id,
             })
@@ -2207,16 +2668,12 @@ mod tests {
         Ok(())
     }
 
+    /// Object-lane replay boundary, on the local/unfiltered lane (see the remote-denial
+    /// note on `sqlite_subscribe_local_exact_object_receives_changed`).
     #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_replays_once_then_reads_after_boundary() -> Res<()> {
-        use keyhive_core::access::Access;
-
+    async fn sqlite_subscribe_local_replays_once_then_reads_after_boundary() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://subscribe-boundary").await?;
         let obj_id = test_obj_id(223);
-        let peer = PeerId::new([224; 32]);
-        store
-            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
-            .await?;
         put_frontier_event(
             &store,
             PartFrontierKey::Object(obj_id),
@@ -2230,15 +2687,12 @@ mod tests {
         .await?;
 
         let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                        obj_id,
-                    }]),
-                },
-                peer,
-            )
+            .subscribe_local(SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                    obj_id,
+                }]),
+            })
             .await?
             .map_err(eyre::Report::from)?;
         assert!(matches!(
@@ -2270,6 +2724,316 @@ mod tests {
             }
             event => panic!("expected post-boundary Changed, got {event:?}"),
         }
+        Ok(())
+    }
+
+    /// See the memory store's twin for why the primitive is asserted at the store
+    /// level: local rows newer than a cursor are counted, with the two relevance
+    /// sources reported separately.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_part_dirty_count_separates_member_and_access_changes() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://part-dirty-count").await?;
+        let part = test_part_id(60);
+        let other_part = test_part_id(61);
+        let peer = PeerKey::new([62; 32]);
+        let other_peer = PeerKey::new([63; 32]);
+        let obj_a = test_obj_id(64);
+        let obj_b = test_obj_id(65);
+        let obj_c = test_obj_id(66);
+        let read = keyhive_core::access::Access::Read;
+
+        store.ensure_part(part).await?;
+        store.ensure_part(other_part).await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount::default(),
+            "a part with neither members nor grants has no relevance to count"
+        );
+
+        // A member write moves the member number only.
+        store
+            .set_obj_payload(obj_a, serde_json::json!({"a": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_a, vec![part]).await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 0,
+            }
+        );
+
+        // A grant on this part for this peer adds the access number alongside it.
+        store
+            .set_part_members(part, HashMap::from([(peer, read)]))
+            .await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 1,
+            }
+        );
+
+        // The local principal is never gated by access rows, so it has no access half;
+        // the member half does not depend on who is asking and still counts.
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, None, 0).await?,
+            PartDirtyCount {
+                member_changes: 1,
+                access_changes: 0,
+            }
+        );
+
+        // A second member write moves only the member number.
+        store
+            .set_obj_payload(obj_b, serde_json::json!({"b": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_b, vec![part]).await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            }
+        );
+
+        // Another principal's grant on this part is not this principal's relevance.
+        store.add_part_member(part, other_peer, read).await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            },
+            "another principal's grant must not be counted for this one"
+        );
+
+        // Another part's member write and grant are not this part's relevance.
+        store
+            .set_obj_payload(obj_c, serde_json::json!({"c": 1}))
+            .await?;
+        store.add_obj_to_parts(obj_c, vec![other_part]).await?;
+        store
+            .set_part_members(other_part, HashMap::from([(peer, read)]))
+            .await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), 0).await?,
+            PartDirtyCount {
+                member_changes: 2,
+                access_changes: 1,
+            },
+            "another part's rows must not be counted here"
+        );
+
+        // The comparison is strictly newer-than, so nothing clears the store's own
+        // current revision. Derived rather than a literal: the cursor domain here is
+        // the sqlite integer range, so a `u64::MAX` ceiling is not a legal cursor.
+        let ceiling = store.latest_revision().await?;
+        assert_eq!(
+            HostPartStore::part_dirty_count(&store, part, Some(peer), ceiling).await?,
+            PartDirtyCount::default(),
+            "no row can be newer than the store's current revision"
+        );
+        Ok(())
+    }
+
+    /// A page is bounded, and its cursor resumes without replaying or skipping.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_replay_page_is_bounded_and_resumes() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://replay-page-cursor").await?;
+        let part_id = test_part_id(241);
+        let peer = PeerKey::new([242; 32]);
+        store.ensure_part(part_id).await?;
+        store
+            .set_part_members(part_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        let mut cursors = Vec::new();
+        for seed in 0..5u8 {
+            let obj_id = test_obj_id(seed);
+            cursors.push(
+                put_frontier_event(
+                    &store,
+                    PartFrontierKey::Part { obj_id, part_id },
+                    PartEvent::Added(ObjAddedToPart {
+                        cursor: 0,
+                        part_id,
+                        obj_id,
+                        payload: serde_json::json!({"seed": seed}),
+                    }),
+                )
+                .await?,
+            );
+        }
+
+        let page = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id,
+                    cursor: 0,
+                },
+                2,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = page else {
+            panic!("expected a page, got {page:?}");
+        };
+        assert_eq!(page.events.len(), 2, "a page obeys its limit");
+        assert_eq!(
+            page.next_cursor,
+            Some(cursors[1]),
+            "the resume point is the last delivered event"
+        );
+
+        // Resuming from the page's cursor picks up exactly where it stopped.
+        let page = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id,
+                    cursor: page.next_cursor.expect(ERROR_IMPOSSIBLE),
+                },
+                10,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = page else {
+            panic!("expected a page, got {page:?}");
+        };
+        assert_eq!(page.events.len(), 3, "the remaining events, no replay");
+        assert_eq!(
+            page.next_cursor, None,
+            "a drained log has nothing further to resume from"
+        );
+        Ok(())
+    }
+
+    /// The three answers a page can give are distinct, and an empty page says so
+    /// instead of standing in for a denial.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_replay_page_reports_unknown_unauthorized_and_empty() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://replay-page-outcomes").await?;
+        let granted_part = test_part_id(243);
+        let ungranted_part = test_part_id(244);
+        let peer = PeerKey::new([245; 32]);
+        store.ensure_part(granted_part).await?;
+        store.ensure_part(ungranted_part).await?;
+        store
+            .set_part_members(granted_part, HashMap::from([(peer, Access::Read)]))
+            .await?;
+
+        let unknown = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: test_part_id(246),
+                    cursor: 0,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        assert_eq!(unknown, ReplayPageOutcome::UnknownPart);
+
+        let denied = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: ungranted_part,
+                    cursor: 0,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        assert_eq!(
+            denied,
+            ReplayPageOutcome::Unauthorized,
+            "a part with no access row is denied, not reported as empty"
+        );
+
+        // A granted part with nothing to send is an empty page, and the hold
+        // bounds how long the responder waits for something to arrive.
+        let empty = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: granted_part,
+                    cursor: 0,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = empty else {
+            panic!("expected a page, got {empty:?}");
+        };
+        assert!(page.events.is_empty(), "no events to send");
+        assert_eq!(page.next_cursor, None, "and nothing to resume from");
+        Ok(())
+    }
+
+    /// Filtering survives the move to pages: a peer reads the parts it was
+    /// granted, and only those.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_replay_page_filters_to_readable_parts() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://replay-page-filter").await?;
+        let readable_part = test_part_id(247);
+        let other_part = test_part_id(248);
+        let peer = PeerKey::new([249; 32]);
+        store.ensure_part(readable_part).await?;
+        store.ensure_part(other_part).await?;
+        store
+            .set_part_members(readable_part, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        store
+            .set_part_members(other_part, HashMap::from([(PeerKey::new([250; 32]), Access::Read)]))
+            .await?;
+        let obj_id = test_obj_id(251);
+        for part_id in [readable_part, other_part] {
+            put_frontier_event(
+                &store,
+                PartFrontierKey::Part { obj_id, part_id },
+                PartEvent::Added(ObjAddedToPart {
+                    cursor: 0,
+                    part_id,
+                    obj_id,
+                    payload: serde_json::json!({"value": 1}),
+                }),
+            )
+            .await?;
+        }
+
+        let page = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: readable_part,
+                    cursor: 0,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = page else {
+            panic!("expected a page, got {page:?}");
+        };
+        assert_eq!(page.events.len(), 1, "the granted part's event is delivered");
+        assert!(
+            matches!(
+                page.events.first(),
+                Some(PartEvent::Added(added)) if added.part_id == readable_part
+            ),
+            "and it carries only the granted part"
+        );
         Ok(())
     }
 }

@@ -98,6 +98,12 @@ A phone authors H1, but P requires a GPU.
 4. GPU-capable B later obtains the pool descriptor and T1 from the relay.
 5. B registers with the active router and accepts T1 only after materializing H1 and matching the exact processor/configuration generation.
 
+!> yeah so this is a bit painful when it comes to "accept/retry" I bet
+!> maybe we can do hints in the worker node heartbeats so that they specify
+!> if they're settled for incoming data
+!> i.e. if their triage is settled (done processing incoming stuff)
+!> this can be a hint to the router
+
 Task declaration and executor readiness remain separate.
 
 ### 4. Source supersedes running work
@@ -113,6 +119,8 @@ A is processing T1 for G1 when source H2 produces G2.
 
 The generic task layer does not model mutable task revisions. Replacement is an old obligation becoming obsolete and a new obligation appearing.
 
+!> btw, how is cancellation working? every node do have a direct line to the router, it could be an RPC call
+
 ### 5. Processor no longer matches
 
 H2 no longer satisfies P's predicate.
@@ -123,6 +131,8 @@ H2 no longer satisfies P's predicate.
 4. No replacement task is created.
 
 A disappeared task alone never proves that the processor stopped matching; the processor slot carries that durable meaning.
+
+!> very interesting scenario that i haven't thought aobut before, do succesive processor mismatches deschedule work from previous matches? I agree that's a yay
 
 ### 6. Task arrives before source materialization
 
@@ -137,6 +147,19 @@ B receives T2 before the document changes required to materialize H2.
 
 The triage cursor, task cursor, and source version are different domains and are never compared numerically.
 
+!> yeah so this is the messy bit
+!> btw, in our system, we do have a consistent authority
+!> the router. we could have multiple routers for the same task but that's all eventually consistent
+!> what i'm getting at is that we could make a dag from tasks.
+!> i.e. some kind of seen set for tasks. T2 can say seen: [T1]
+!> the point is, the worker nodes can tell the router their seen tasks frontier
+!> but wait a minute, is this even necessary
+!> because i got confused and assumed worker nodes looking at the incoming tasks
+!> implied they'd have to receive it through big_sync for them to be elgible to accept it
+!> not really, their elgibility ddoens't depend on their task frontier but the data frontier which is equivalent to the processor frontier
+!> the question is then, do we need to classify tasks as we see them or do we just mantain a desired set from the processor evaluations that have run and correlate tasks with those?
+!> i suppose it's equivalent to the routine described here, sorry for yapping
+
 ### 7. Source arrives before task coordination
 
 An established node B receives replicated H2 before S or T2.
@@ -149,6 +172,14 @@ An established node B receives replicated H2 before S or T2.
 6. Otherwise adoption policy may eventually recreate deterministic T2.
 
 Unwitnessed candidates are not limited to new-node bootstrap.
+
+!> this one is tricky because it's one of the places where the triage and
+!> the router closely work
+!> unwitnessed candidates reclaimings should only be done by routers maybe?
+!> i.e. instead of multiple nodes nominating unwitnessed candidates tehy have
+!> the current router just considers it's local ones?
+!> this implies the triage knows if it's a router node or not but it does remove
+!> coordination around unwitnessed candidate claimings if I understand correcltty
 
 ### 8. Source peer disappears before coordination arrives
 
@@ -174,6 +205,12 @@ B, C, and D independently adopt matching H1.
 5. Any valid settlement G1 makes every observed T1 obsolete.
 
 Triage decides when uncertain source-derived work should exist; ADR 011 routes the resulting obligation.
+
+!> this is another question that we have. while any node submitting tasks is important for the generalized task pool, in the triage case, we can make it so that the router node's triage only submits
+!> that does defeat the scenario 2 case tho
+!> and this hurts latency
+!> the clear answer that falls out is that the router node's triage doesn't attenuate weather or not a task gets scheduled (to improvel latency)
+!> the router is just helping us with execute once guarantees on a single partition
 
 ### 10. New-node historical replay
 
@@ -212,6 +249,13 @@ A has already settled current G3. Delayed pending T2 arrives.
 
 A permanent task tombstone is unnecessary while S retains the compact authoritative settlement.
 
+!> this is another blurry thing. here, it implies that the router's traige is attenuating scheduling
+!> a valid case I guess, if the router's triage knows that this is obsolete, better nip it in the buds
+!> but the previous case avoided this attenutation
+!> this also interplays with the accept/reject semantis
+!> presumabily, the offered node will also see that it's obsolete and reject it
+!> but i wonder if we can solve this without having traige attenuated scheduling
+
 ### 13. Settlement bridges into a stale-task partition
 
 Partition A completes T1, records settlement G1, and prunes T1. Partition B retains pending T1 but has no GPU. Node N syncs with A after pruning, then connects to B.
@@ -224,6 +268,8 @@ Partition A completes T1, records settlement G1, and prunes T1. Partition B reta
 
 If another GPU executor sees T1 before it sees settlement, it may duplicate execution. Avoiding every such cross-partition race would require a designated online authority and violate local-first availability.
 
+!> this is a good case falling out of rejection due to obsolete or not carrying data
+
 ### 14. Two bridges and newly gained capability
 
 N1 carries stale T1 while N2 carries settlement G1. A node in the destination partition gains a GPU between their arrivals.
@@ -233,6 +279,8 @@ N1 carries stale T1 while N2 carries settlement G1. A node in the destination pa
 - `CoordinationIncomplete` and domain replay boundaries narrow ordinary ordering races but do not create unavailable knowledge.
 
 Triage processors must therefore be duplicate-safe unless their placement/effect policy deliberately sacrifices partition progress.
+
+!> or they should use policies that is safer like origin only
 
 ### 15. Processor generation changes
 
@@ -275,6 +323,16 @@ A node receives S settling G while its local DispatchRepo runs T(G).
 
 Settlement-driven cancellation and pruning are required on every participating triage replica.
 
+!> hmm, so is the triage actively pruning dispatches?
+!> or do we have the task settlement arriving to the node cancel the dispatch?
+!> and anyways, the router knows who is running what yes? it can do the cancellations
+!> we do have to lock in 011 how takeover router works with knowing who's currently
+!> allocated which task tho
+
+!> if we do router based cancellations, we'd have to have a decision where a node currently executing a task goes offline. presumably, it becomes a router for it's own network of one
+!> but in this case, we probably expect the main network to re-allocate the task to another node
+!> we gotta talk and design for this scenario even tho it's an 011 concern
+
 ## Decision
 
 ### 1. TriageRepo
@@ -302,6 +360,7 @@ per-(document, branch) inspected cursor
 evaluation receipts
 unwitnessed candidates
 deferred materialization/domain coordination
+!> what is deferred mat?
 processor-slot projection cursor
 task-pool projection cursor
 ```

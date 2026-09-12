@@ -56,11 +56,11 @@ const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// Frontier payloads live in their own storage scope (derived from the main
 /// scope key), so the raw `doc_id` cannot collide with the document's own
 /// sedimentree object in the main scope.
-pub fn automerge_doc_obj_id(doc_id: crate::DocumentId) -> ObjId {
-    ObjId(big_sync_core::Byte32Id::new(*doc_id.as_bytes()))
+pub fn automerge_doc_obj_id(doc_id: crate::DocumentId) -> ObjKey {
+    ObjKey(big_sync_core::ByteKey::new(*doc_id.as_bytes()))
 }
 
-pub fn automerge_obj_to_doc_id(obj_id: ObjId) -> crate::DocumentId {
+pub fn automerge_obj_to_doc_id(obj_id: ObjKey) -> crate::DocumentId {
     crate::DocumentId::new(*obj_id.as_bytes())
 }
 
@@ -227,7 +227,7 @@ pub fn spawn_automerge_frontier_worker(
 enum Cmd {
     RemoveFrontierMembership {
         doc_id: crate::DocumentId,
-        part_id: PartId,
+        part_id: PartKey,
     },
     AdvanceKhCursor(u64),
 }
@@ -365,7 +365,7 @@ async fn publish_heads(
 }
 
 /// A scoped worker mirrors only explicitly selected partitions.
-fn scope_includes_part(scope: &WorkerGroupScope, part_id: PartId) -> bool {
+fn scope_includes_part(scope: &WorkerGroupScope, part_id: PartKey) -> bool {
     scope
         .groups()
         .is_none_or(|groups| groups.contains(&part_id))
@@ -473,7 +473,7 @@ struct Worker<'a> {
     >,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
     pending_part_sources: HashMap<crate::DocumentId, SourceCursor>,
-    pending_parts: HashMap<crate::DocumentId, BTreeMap<PartId, u64>>,
+    pending_parts: HashMap<crate::DocumentId, BTreeMap<PartKey, u64>>,
     /// The outbox unit carries the source to acknowledge once the command's
     /// durable effect has executed — acknowledgements must not precede the
     /// effect they cover.
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn duplicate_part_events_keep_the_latest_cursor() {
         let document = doc(12);
-        let part = PartId::new([4; 32]);
+        let part = PartKey::new([4; 32]);
         let mut pending = HashMap::new();
         pending
             .entry(document)
@@ -1008,10 +1008,10 @@ mod tests {
 
     #[test]
     fn scoped_frontier_mirroring_excludes_global_membership() {
-        let group = PartId::new([8; 32]);
+        let group = PartKey::new([8; 32]);
         let scope = WorkerGroupScope::Groups([group].into_iter().collect());
-        assert!(!scope_includes_part(&scope, crate::GLOBAL_PART_ID));
+        assert!(!scope_includes_part(&scope, crate::global_part_id()));
         assert!(scope_includes_part(&scope, group));
-        assert!(!scope_includes_part(&scope, PartId::new([9; 32])));
+        assert!(!scope_includes_part(&scope, PartKey::new([9; 32])));
     }
 }

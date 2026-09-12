@@ -6,8 +6,8 @@ const REPLAY_RAW_BATCH_SIZE: u32 = 256;
 
 struct ReplayCandidate {
     txid: CursorIndex,
-    obj_id: ObjId,
-    _maybe_part_id: Option<PartId>,
+    obj_id: ObjKey,
+    _maybe_part_id: Option<PartKey>,
     event_type: i64,
     payload: ObjPayload,
 }
@@ -17,7 +17,7 @@ impl SqliteBigRepoStore {
     /// `HostPartStore` method so runtime workers can call it without the
     /// crate-private trait in scope — a part is advertiseable once its row
     /// exists.
-    pub(crate) async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+    pub(crate) async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
         sqlx::query!(
             "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
              VALUES (?1, ?2, 0)
@@ -32,8 +32,8 @@ impl SqliteBigRepoStore {
 
     async fn replay_candidates(
         &self,
-        parts: &HashSet<PartId>,
-        objects: &HashSet<ObjId>,
+        parts: &HashSet<PartKey>,
+        objects: &HashSet<ObjKey>,
         lower_bound: CursorIndex,
         exact_txid: Option<CursorIndex>,
         limit: Option<u32>,
@@ -119,9 +119,9 @@ impl SqliteBigRepoStore {
     pub(crate) async fn subscribe_with_policy(
         &self,
         reqs: SubPartsRequest,
-        subscriber: Option<PeerId>,
+        subscriber: Option<PeerKey>,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        let parts: HashSet<PartId> = reqs
+        let parts: HashSet<PartKey> = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -129,7 +129,7 @@ impl SqliteBigRepoStore {
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect();
-        let objects: HashSet<ObjId> = reqs
+        let objects: HashSet<ObjKey> = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -218,16 +218,14 @@ impl SqliteBigRepoStore {
                         PartEvent::Added(inner) => inner.obj_id,
                         PartEvent::Removed(inner) => inner.obj_id,
                     };
-                    // A policy-check failure must not masquerade as a
-                    // denial: this spawned task cannot propagate errors,
-                    // so fail loudly instead of silently skipping a
-                    // deliverable event.
-                    let permitted = matches!(event, PartEvent::Removed(_))
-                        || store
-                            .is_event_permitted(Some(part_id), obj_id, subscriber)
-                            .await
-                            .expect(ERROR_IMPOSSIBLE);
-                    if !permitted {
+                    // Access is granted per part, and the filter is the authorization
+                    // decision: an event whose parts are not readable is dropped, which
+                    // keeps a part id from reaching a principal that cannot read it.
+                    let readable = store
+                        .permitted_parts(PartScope::Part(part_id), obj_id, subscriber)
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                    if readable.is_some_and(|readable| readable.is_empty()) {
                         continue;
                     }
                     match event {
@@ -256,7 +254,7 @@ impl SqliteBigRepoStore {
                     }
                 }
                 if object_replay_pending {
-                    let no_parts: HashSet<PartId> = HashSet::new();
+                    let no_parts: HashSet<PartKey> = HashSet::new();
                     let object_candidates = store
                         .replay_candidates(&no_parts, &objects, cursor, None, None)
                         .await
@@ -264,11 +262,13 @@ impl SqliteBigRepoStore {
                     for candidate in object_candidates {
                         max_cursor = max_cursor.max(candidate.txid);
                         raw_event_count += 1;
-                        let permitted = store
-                            .is_event_permitted(None, candidate.obj_id, subscriber)
+                        let readable = store
+                            .permitted_parts(PartScope::FromObject, candidate.obj_id, subscriber)
                             .await
                             .expect(ERROR_IMPOSSIBLE);
-                        if !permitted || candidate.event_type != EVENT_CHANGED {
+                        if readable.is_some_and(|readable| readable.is_empty())
+                            || candidate.event_type != EVENT_CHANGED
+                        {
                             continue;
                         }
                         // FIXME: use binary search? i imagine the items are in order?
@@ -326,7 +326,7 @@ impl SqliteBigRepoStore {
     pub(crate) async fn set_obj_payload_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         payload: ObjPayload,
     ) -> Res<Vec<SubEvent>> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
@@ -497,9 +497,16 @@ impl SqliteBigRepoStore {
             .execute(&mut *tx)
             .await?;
 
+            // Rows are per part, so "prior" is the union over the parts this doc
+            // currently resides in — the same shape the grant re-emit below compares.
             let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar!(
-                "SELECT principal_id FROM big_sync_syncable
-                     WHERE scope_id = ?1 AND obj_ref = ?2",
+                "SELECT DISTINCT s.principal_id FROM big_sync_syncable s
+                  WHERE s.scope_id = ?1
+                    AND s.part_ref IN (
+                        SELECT m.maybe_part_ref FROM big_sync_members m
+                         WHERE m.scope_id = ?1 AND m.obj_ref = ?2
+                           AND m.maybe_part_ref > 0 AND m.event_type != 2
+                    )",
                 self.scope().id(),
                 obj_ref
             )
@@ -507,25 +514,6 @@ impl SqliteBigRepoStore {
             .await?
             .into_iter()
             .collect();
-            sqlx::query!(
-                "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_ref = ?2",
-                self.scope().id(),
-                obj_ref
-            )
-            .execute(&mut *tx)
-            .await?;
-            for (principal, access) in &mutation.agents {
-                sqlx::query!(
-                    "INSERT INTO big_sync_syncable(scope_id, obj_ref, principal_id, access_level)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    self.scope().id(),
-                    obj_ref,
-                    Self::peer_blob(*principal),
-                    encode_access(access)
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
             reconciled_docs.insert(mutation.doc, mutation.agents.clone());
             // A principal that just lost fetch access must still learn that the
             // object moved, or a revoke could be discovered only by accident:
@@ -560,19 +548,19 @@ impl SqliteBigRepoStore {
             )
             .fetch_all(&mut *tx)
             .await?;
-            let current_parts: HashSet<PartId> =
+            let current_parts: HashSet<PartKey> =
                 current_rows.into_iter().map(Self::part_from_blob).collect();
             let mut desired_parts = mutation.desired_group_parts.clone();
             if mutation.desired_global {
-                desired_parts.insert(crate::GLOBAL_PART_ID);
+                desired_parts.insert(crate::global_part_id());
             }
             let stale = current_parts
                 .intersection(&mutation.managed_group_parts)
                 .filter(|part| !desired_parts.contains(part))
                 .copied()
                 .chain(
-                    (!mutation.desired_global && current_parts.contains(&crate::GLOBAL_PART_ID))
-                        .then_some(crate::GLOBAL_PART_ID),
+                    (!mutation.desired_global && current_parts.contains(&crate::global_part_id()))
+                        .then_some(crate::global_part_id()),
                 )
                 .collect::<HashSet<_>>();
             let additions = desired_parts.difference(&current_parts).copied();
@@ -631,6 +619,41 @@ impl SqliteBigRepoStore {
                     if !matches!(old, MemberState::Absent) {
                         transitions.push((part_id, mutation.doc, old, MemberState::Dead));
                     }
+                }
+            }
+
+            // Replace this doc's access rows — one set per part. A part with no agent set
+            // gets its rows cleared, and so do the parts the doc is leaving. Rows come
+            // from `part_agents` (per group), never from the doc-level union, so a
+            // principal of one group never gains another group's part.
+            let changed_at =
+                i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
+            let mut access_parts = current_parts.clone();
+            access_parts.extend(desired_parts.iter().copied());
+            for part_id in access_parts {
+                let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+                sqlx::query!(
+                    "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
+                    self.scope().id(),
+                    part_ref
+                )
+                .execute(&mut *tx)
+                .await?;
+                let Some(agents) = mutation.part_agents.get(&part_id) else {
+                    continue;
+                };
+                for (principal, access) in agents.iter() {
+                    sqlx::query!(
+                        "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        self.scope().id(),
+                        part_ref,
+                        Self::peer_blob(*principal),
+                        encode_access(access),
+                        changed_at
+                    )
+                    .execute(&mut *tx)
+                    .await?;
                 }
             }
 
@@ -869,7 +892,7 @@ impl SqliteBigRepoStore {
         IdCodec::tree_blob(id)
     }
 
-    pub(crate) fn obj_id(id: SedimentreeId) -> ObjId {
+    pub(crate) fn obj_id(id: SedimentreeId) -> ObjKey {
         IdCodec::obj_id(id)
     }
 

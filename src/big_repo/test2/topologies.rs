@@ -47,12 +47,12 @@ async fn assert_relay_only(
     assert_eq!(access, Some(Access::Relay));
     repo.wait_for_quiescence(None).await?;
     // Global-part membership is written only by local group-part
-    // reconciliation (big-sync gossip drops GLOBAL_PART_ID), so a Relay-only
+    // reconciliation (big-sync gossip drops global_part_id()), so a Relay-only
     // holder must never record the doc there — regardless of markers synced
     // from peers over the discovery partition.
     assert!(
         !relay
-            .obj_parts_contains(doc_id, crate::GLOBAL_PART_ID)
+            .obj_parts_contains(doc_id, crate::global_part_id())
             .await?,
         "Relay-only access must not place the document in the readable global partition"
     );

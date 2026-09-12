@@ -114,7 +114,7 @@ pub struct ConfigRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     repo_sql: crate::app::SqlCtx,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
@@ -410,7 +410,7 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted directly by mutators.
         // Historical replay passes `live_origin = None` and must not be skipped.

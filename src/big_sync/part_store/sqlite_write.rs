@@ -9,7 +9,7 @@ use big_sync_core::keyed_frontier::{
     TransactionIsolation,
 };
 use big_sync_core::rpc::PartEvent;
-use big_sync_core::{ObjId, PartId};
+use big_sync_core::{ObjKey, PartKey};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,7 +83,7 @@ impl<'a> SqliteFrontierWrite<'a> {
         u64::try_from(value).map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
-    async fn obj_ref(&mut self, obj_id: ObjId) -> KeyedFrontierResult<i64> {
+    async fn obj_ref(&mut self, obj_id: ObjKey) -> KeyedFrontierResult<i64> {
         sqlx::query("INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id) VALUES (?, ?)")
             .bind(self.scope_id)
             .bind(obj_id.0.into_bytes().to_vec())
@@ -98,7 +98,7 @@ impl<'a> SqliteFrontierWrite<'a> {
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
-    async fn part_ref(&mut self, part_id: PartId) -> KeyedFrontierResult<i64> {
+    async fn part_ref(&mut self, part_id: PartKey) -> KeyedFrontierResult<i64> {
         sqlx::query("INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id) VALUES (?, ?)")
             .bind(self.scope_id)
             .bind(part_id.0.into_bytes().to_vec())

@@ -1,12 +1,12 @@
 use crate::interlude::*;
 
 use big_sync_core::{
-    BuckId, ObjId, PartId, PeerId, mpsc,
-    part_store::{CursorIndex, ObjPayload, PartStoreReadOnly},
+    BuckId, ObjKey, PartKey, PeerKey,
+    part_store::{CursorIndex, ObjPayload, PartDirtyCount, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest,
         LeafBucketResult, LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
-        PeerSummaryResult, SubEvent, SubPartsRequest,
+        PeerSummaryResult, ReplayPageOutcome, ReplayPageRequest,
     },
 };
 use future_form::{FutureForm, Sendable};
@@ -52,19 +52,19 @@ pub struct TrappedPartStore {
 
 impl PartStoreReadOnly<Sendable> for TrappedPartStore {
     #[tracing::instrument(skip(self))]
-    fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
+    fn member_count<'a>(&'a self, part_id: PartKey) -> BoxFuture<'a, u64> {
         let fut = self.inner.member_count(part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
     #[tracing::instrument(skip(self))]
-    fn obj_payload<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Option<ObjPayload>> {
+    fn obj_payload<'a>(&'a self, obj_id: ObjKey) -> BoxFuture<'a, Option<ObjPayload>> {
         let fut = self.inner.obj_payload(obj_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
     #[tracing::instrument(skip(self))]
-    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
+    fn obj_parts<'a>(&'a self, obj_id: ObjKey) -> BoxFuture<'a, Vec<PartKey>> {
         let fut = self.inner.obj_parts(obj_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
@@ -72,8 +72,8 @@ impl PartStoreReadOnly<Sendable> for TrappedPartStore {
     #[tracing::instrument(skip(self))]
     fn get_peer_part_cursor<'a>(
         &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
+        peer_id: PeerKey,
+        part_id: PartKey,
     ) -> BoxFuture<'a, CursorIndex> {
         let fut = self.inner.get_peer_part_cursor(peer_id, part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
@@ -82,10 +82,21 @@ impl PartStoreReadOnly<Sendable> for TrappedPartStore {
     #[tracing::instrument(skip(self))]
     fn get_bucket_summary<'a>(
         &'a self,
-        part_id: PartId,
+        part_id: PartKey,
         id: BuckId,
     ) -> BoxFuture<'a, BucketSummary> {
         let fut = self.inner.get_bucket_summary(part_id, id);
+        Sendable::from_future(self.trap.run_or_trap(fut))
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn part_dirty_count<'a>(
+        &'a self,
+        part_id: PartKey,
+        principal: Option<PeerKey>,
+        since: CursorIndex,
+    ) -> BoxFuture<'a, PartDirtyCount> {
+        let fut = self.inner.part_dirty_count(part_id, principal, since);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 }
@@ -94,9 +105,9 @@ impl PartStoreReadOnly<Sendable> for TrappedPartStore {
 //     #[tracing::instrument(skip(self, payload), fields(part_count = parts.len()))]
 //     fn upsert_obj<'a>(
 //         &'a self,
-//         obj_id: ObjId,
+//         obj_id: ObjKey,
 //         payload: &ObjPayload,
-//         parts: &[PartId],
+//         parts: &[PartKey],
 //     ) -> BoxFuture<'a, ()> {
 //         let lease = self.lease.take();
 //         let fut = self
@@ -106,14 +117,14 @@ impl PartStoreReadOnly<Sendable> for TrappedPartStore {
 //     }
 //
 //     #[tracing::instrument(skip(self), fields(part_count = parts.len()))]
-//     fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> BoxFuture<'a, ()> {
+//     fn add_obj_to_parts<'a>(&'a self, obj_id: ObjKey, parts: &[PartKey]) -> BoxFuture<'a, ()> {
 //         let lease = self.lease.take();
 //         let fut = self.inner.add_obj_to_parts(obj_id, parts.into(), lease);
 //         Sendable::from_future(self.trap.run_or_trap(fut))
 //     }
 //
 //     #[tracing::instrument(skip(self))]
-//     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> BoxFuture<'a, ()> {
+//     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjKey, part_id: PartKey) -> BoxFuture<'a, ()> {
 //         let lease = self.lease.take();
 //         let fut = self.inner.remove_obj_from_part(obj_id, part_id, lease);
 //         Sendable::from_future(self.trap.run_or_trap(fut))
@@ -122,8 +133,8 @@ impl PartStoreReadOnly<Sendable> for TrappedPartStore {
 //     #[tracing::instrument(skip(self))]
 //     fn set_peer_part_cursor<'a>(
 //         &'a self,
-//         peer_id: PeerId,
-//         part_id: PartId,
+//         peer_id: PeerKey,
+//         part_id: PartKey,
 //         cursor: CursorIndex,
 //     ) -> BoxFuture<'a, ()> {
 //         let fut = self.inner.set_peer_part_cursor(peer_id, part_id, cursor);
@@ -146,11 +157,11 @@ impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
-    fn sub_parts<'a>(
+    fn replay_page<'a>(
         &'a self,
-        req: SubPartsRequest,
-    ) -> BoxFuture<'a, BigSyncRpcResult<Result<mpsc::Receiver<SubEvent>, ListPartsError>>> {
-        let fut = self.inner.sub_parts(req);
+        req: ReplayPageRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<ReplayPageOutcome>> {
+        let fut = self.inner.replay_page(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 

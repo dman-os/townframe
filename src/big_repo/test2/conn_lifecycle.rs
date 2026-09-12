@@ -4,7 +4,7 @@
 //! second connection to the same peer replaces the first, and a superseded
 //! connection's end must not tear down the replacement (the `Arc::ptr_eq`
 //! gate on `ConnFinishSignal::closed`). The runtime hub, by contrast, is
-//! strictly **peer-keyed**: `connected_peers: HashMap<PeerId, ConnDeets>`,
+//! strictly **peer-keyed**: `connected_peers: HashMap<PeerKey, ConnDeets>`,
 //! `subduction` registers one connection per peer, and
 //! `BigRepoConnection::stop` is a peer-scoped close.
 //!
