@@ -10,7 +10,6 @@ import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.core.DocBundle
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
@@ -42,10 +41,7 @@ private data class DrawerRefreshIntent(
     }
 }
 
-class DrawerViewModel(
-    private val drawerRepo: DrawerRepoFfi,
-    private val rt: RtFfi? = null,
-) : ViewModel() {
+class DrawerViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
     // Document IDs list (loaded lazily)
     private val _docListState = MutableStateFlow<DocListState>(DocListState.Loading)
     val docListState = _docListState.asStateFlow()

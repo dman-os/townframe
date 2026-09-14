@@ -13,6 +13,10 @@ slow-timeout = { period = "60s", terminate-after = 16 }
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
+# Captured test output belongs in the uploaded artifacts, not the job log: at RUST_LOG_TEST=debug a
+# single failing test can emit thousands of lines. The failure detail is in the `nextest-results`
+# JUnit artifact (store-failure-output below) and in the `nextest-recording` zip.
+failure-output = "never"
  
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"

@@ -36,47 +36,37 @@ repos:
         name: format scripts
         language: system
         entry: deno fmt ./x/
-        files: |
-          (?x)^(
-              ./x/
-          )$
+        files: ^x/
         pass_filenames: false
       - id: deno-lint-x
         name: lint scripts
         language: system
         entry: deno lint ./x/
         pass_filenames: false
-        files: |
-          (?x)^(
-              ./x/
-          )$
+        files: ^x/
       - id: deno-check-x
         name: check scripts
         language: system
         entry: deno check ./x/
         pass_filenames: false
-        files: |
-          (?x)^(
-              ./x/
-          )$
+        files: ^x/
       - id: zizmor 
         name: check CI config
         language: system
         entry: zizmor .github/
         pass_filenames: false
-        files: |
-          (?x)^(
-              ./.github
-          )$
+        # Kept out of the default run on purpose: with the pattern fixed this hook reports 122
+        # findings (90 unpinned `uses:` refs, plus template-injection, cache-poisoning and
+        # excessive-permissions). Run it deliberately with `prek run --stage manual zizmor` until
+        # that backlog is cleared.
+        files: ^\.github/
+        stages: [manual]
       - id: detekt-kotlin
         name: detekt Kotlin
         language: system
         entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
         pass_filenames: false
-        files: |
-          (?x)^(
-              ./src/daybook_compose/
-          )$
+        files: ^src/daybook_compose/
       - id: syncpack-fmt
         name: syncpack format
         language: system
