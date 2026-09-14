@@ -7,6 +7,9 @@ description: Record and replay Rust tests with rr on Nix/Linux, including AMD Ze
 
 Use this skill only on Linux. First prove that rr can record and replay a tiny or focused test on the current host before adding project configuration or trusting a trace.
 
+Routing: load-only races have no deterministic invocation to record. Until a seed or a single failing
+command exists, use `.agents/skills/stress-sync-investigation` instead of trying to record one.
+
 ## Host prerequisites
 
 `nixpkgs#rr` may lag the host's glibc syscall definitions. On AMD Zen, rr also requires the SpecLockMap workaround.

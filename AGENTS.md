@@ -81,6 +81,10 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - `printf` and experimental debugging is always quicker than trying to come up with premature hypothesis.
   - Need to prove/demo a hypothesis, throw together a quick commaind in ./src/xtask/ cli.
 
+- Every failure a run surfaces is pinned or instrumented in the same turn. "Pre-existing", "unrelated", and "my change didn't cause it" are not findings, and neither are two clean runs after a change.
+- `../keyhive` and `../subduction` are ours to instrument. Ask before *concluding* a bug is upstream, not before adding a log line.
+- Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
+- Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only).
 ## VCS
 
 > [!INFO]
@@ -196,3 +200,7 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 - **Reuse one agent across tasks** via `resume: <id>`; do not spawn a fresh subagent per task — each fresh agent re-reads the codebase (cost).
 - If `resume` reports the agent cleaned up / evicted, that is the **only** sanctioned case to spawn a fresh subagent. First recover the prior agent's findings from its task transcript at `~/.pi/agent/sessions/<proj>/<session>/tasks/<id>.jsonl` and fold them into the new agent's prompt.
 - Ask before ever using subagents.
+- Forked subagents are for **bounded, reviewable** work: one item per fork, not a workstream. Observed failure modes are a fork dying mid-work, a fork timing out because it ran the full suite, and a fork deciding a product question it had no authority to decide.
+- Prompt contract: name the single item, the files to touch, what to verify (`cargo clippy -p <crate>` plus the narrowest affected test), and explicitly **forbid** full-suite runs — they time out and buy nothing.
+- Require the fork to report product and design questions instead of answering them, and to state exactly which commands it ran.
+- Never take a fork's report on trust: read its diff, then rerun the targeted test and clippy yourself. A fork that reports a timeout may still have finished the implementation.
