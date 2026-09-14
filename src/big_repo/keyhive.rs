@@ -547,6 +547,12 @@ impl BigKeyhiveHandle {
             .collect())
     }
 
+    /// Whether `doc_id` is shaped like a Keyhive document id (an Ed25519
+    /// verifying key). The shape is not a classifier: blake3-derived object ids
+    /// pass it about half the time. Only the frontier worker's test-only scope
+    /// assertion uses this — the document/derived scope boundary, not id shape,
+    /// is what keeps non-documents out of the frontier source.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn is_valid_keyhive_document_id(doc_id: DocumentId) -> bool {
         keyhive_doc_id(doc_id).is_ok()
     }

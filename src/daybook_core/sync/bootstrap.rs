@@ -646,6 +646,7 @@ pub async fn clone_repo_init_from_url(
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),
+            derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,

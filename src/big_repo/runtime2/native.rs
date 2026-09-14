@@ -545,8 +545,9 @@ where
             // TEMPORARY DIAGNOSTIC: the checkpoint blob names the PCS update op
             // it was encrypted under. Record that op alongside every local CGKA
             // op hash so a peer reporting `update_op_known=false` can be traced
-            // back to whether the serving node ever held the op at all.
-            {
+            // back to whether the serving node ever held the op at all. Emitted at
+            // debug level so the op-hash walk below only runs when it is wanted.
+            if tracing::enabled!(tracing::Level::DEBUG) {
                 let local_ops: Vec<String> = {
                     let locked = kh_doc.lock().await;
                     match locked.cgka_ops() {
@@ -563,7 +564,7 @@ where
                 let blob_op = decode_encrypted_blob(encrypted_blob.as_slice())
                     .map(|blob| format!("{:?}", blob.pcs_update_op_hash))
                     .unwrap_or_else(|error| format!("decode-error: {error}"));
-                tracing::warn!(
+                tracing::debug!(
                     ?sed_id,
                     ?covered_frontier,
                     checkpoint_pcs_update_op_hash = %blob_op,
@@ -1424,8 +1425,8 @@ where
 
             match result {
                 Ok((had_success, stats, conn_errs)) => {
-                    if std::env::var_os("DAYB_KEYHIVE_DIAG").is_some() {
-                        tracing::warn!(
+                    if tracing::enabled!(tracing::Level::DEBUG) {
+                        tracing::debug!(
                             %doc_id,
                             %peer_id,
                             had_success,

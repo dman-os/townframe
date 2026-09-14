@@ -6,7 +6,8 @@ if (!$.argv.includes("--quick")) {
   await $`${$.path(import.meta.resolve("./gen-ffi-dayb.ts"))}`;
 }
 
-const failurePattern = /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|Exception in thread|Exception during)/im;
+const failurePattern =
+  /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|Exception in thread|Exception during)/im;
 
 const processHandle = new Deno.Command("/bin/sh", {
   args: ["-lc", "./gradlew hotReloadDesktopMain"],

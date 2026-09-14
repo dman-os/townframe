@@ -221,8 +221,8 @@ impl<'a> Worker<'a> {
                         ConcurrentDeltaRead::ReplayComplete { .. } => {}
                         ConcurrentDeltaRead::Entries { entries, .. } => {
                             for delta in entries {
-                                if std::env::var_os("DAYB_REST_DIAG").is_some() {
-                                    tracing::warn!(
+                                if tracing::enabled!(tracing::Level::DEBUG) {
+                                    tracing::debug!(
                                         ?delta,
                                         durable = self.admission.durable_revision(),
                                         "CAUSAL delta"
@@ -235,8 +235,8 @@ impl<'a> Worker<'a> {
                 }
             }
             self.drain_outbox().await?;
-            if std::env::var_os("DAYB_REST_DIAG").is_some() {
-                tracing::warn!(
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
                     durable = self.admission.durable_revision(),
                     pending = ?self.admission.pending_jobs(),
                     active = self.tasks.active_count(),
@@ -287,8 +287,8 @@ impl<'a> Worker<'a> {
             }
             // Admission rows with no document payload only gate the cursor.
             FrontierKey::Decode(_) => {
-                if std::env::var_os("DAYB_REST_DIAG").is_some() {
-                    tracing::warn!(?source, "CAUSAL decode-key ack");
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    tracing::debug!(?source, "CAUSAL decode-key ack");
                 }
                 self.acknowledge_source(source).await
             }
@@ -302,7 +302,7 @@ impl<'a> Worker<'a> {
         match (completion.command, completion.result) {
             (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::Covered))
             | (Task::EnsureCoverage { doc_id, source }, Ok(TaskOutput::OutOfScope)) => {
-                if std::env::var_os("DAYB_REST_DIAG").is_some() {
+                if tracing::enabled!(tracing::Level::DEBUG) {
                     // Report the Keyhive's own CGKA op count for the document
                     // alongside the coverage acknowledgement: a peer whose
                     // materialization reports `MissingDocumentKeys` while this
@@ -315,7 +315,7 @@ impl<'a> Worker<'a> {
                         .await
                         .map(|count| count.to_string())
                         .unwrap_or_else(|error| format!("error: {error:?}"));
-                    tracing::warn!(
+                    tracing::debug!(
                         ?doc_id,
                         ?source,
                         cgka_ops = %cgka_ops,

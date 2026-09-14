@@ -103,6 +103,8 @@ pub struct RepoCtx {
     pub blob_part_store: SharedPartStore,
     /// Local-only store backing the automerge frontier (heads) partitions.
     pub frontier_part_store: SharedPartStore,
+    /// Local-only store backing consumer-derived objects that are not documents.
+    pub derived_part_store: SharedPartStore,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -139,6 +141,8 @@ pub(crate) struct RepoCtxParts {
     pub blob_part_store: SharedPartStore,
     /// Local-only store backing the automerge frontier (heads) partitions.
     pub frontier_part_store: SharedPartStore,
+    /// Local-only store backing consumer-derived objects that are not documents.
+    pub derived_part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
     pub local_peer_key: PeerKey,
@@ -186,6 +190,7 @@ impl RepoCtx {
             part_store: parts.part_store,
             blob_part_store: parts.blob_part_store,
             frontier_part_store: parts.frontier_part_store,
+            derived_part_store: parts.derived_part_store,
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -393,6 +398,7 @@ impl RepoCtx {
         let part_store = big_repo.shared_part_store();
         let blob_part_store = open_blob_part_store(big_repo.sql_ctx()).await?;
         let frontier_part_store = big_repo.frontier_part_store();
+        let derived_part_store = big_repo.derived_part_store();
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
@@ -458,6 +464,7 @@ impl RepoCtx {
             &docs_inventory_doc_id,
         )
         .await?;
+        ensure_derived_partitions(&derived_part_store).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: core partitions ensured");
 
         info!(repo_root = %layout.repo_root.display(), initialize_repo, "repo open_inner: completed");
@@ -471,6 +478,7 @@ impl RepoCtx {
             part_store,
             blob_part_store,
             frontier_part_store,
+            derived_part_store,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
@@ -934,6 +942,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         &docs_inventory_doc_id,
     )
     .await?;
+    ensure_derived_partitions(&parts.derived_part_store).await?;
     Ok(RepoCtx::from_parts(
         parts,
         doc_app,
@@ -955,10 +964,24 @@ pub(crate) async fn ensure_authority_partitions(
         authority.content_docs_part_id(),
         authority.default_drawer_part_id(),
         authority.blob_inventories_part_id(),
-        crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
     ] {
         partition_store.ensure_part(part_id).await?;
     }
+    Ok(())
+}
+
+/// Ensure the derived-scope partitions exist in the local-only derived store.
+///
+/// The processor runlog is local derived state, so it must not live in the
+/// document scope: the automerge frontier worker reads that scope's match-all
+/// part stream as documents. The derived scope is deliberately not registered
+/// with the big-sync RPC server, so nothing here is replicated.
+pub(crate) async fn ensure_derived_partitions(partition_store: &SharedPartStore) -> Res<()> {
+    partition_store
+        .ensure_part(crate::part_id_from_label(
+            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
+        ))
+        .await?;
     Ok(())
 }
 

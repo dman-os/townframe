@@ -132,12 +132,68 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
 struct ConnDeets {
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
+/// Test-only orphan-round detector.
+///
+/// A round is retired by the protocol completion, protocol error, or
+/// connection-loss paths. A round that outlives this bound means one of those
+/// silently failed; a test must surface that instead of hanging on it.
+#[cfg(any(test, feature = "test-support"))]
 const KEYHIVE_SYNC_ROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Production slow-round reporting threshold.
+///
+/// There is deliberately no internal round timeout outside tests: we expect to
+/// run on slow networks, and an application-level deadline belongs to the
+/// caller, which can cancel a `sync_keyhive` call safely — the caller's waiter
+/// guard removes the waiter, so a cancelled call never cascades a follow-up
+/// round. A round that outlives this bound is suspicious, so report it once and
+/// keep waiting rather than failing a transfer the peer may still complete.
+#[cfg(not(any(test, feature = "test-support")))]
+const KEYHIVE_SYNC_SLOW_ROUND_WARN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A Keyhive sync round that outlived its reporting threshold, captured so the
+/// janitor can report it without holding a borrow on the round map.
+struct UnresolvedKeyhiveRound {
+    round_id: u64,
+    request_id: subduction_keyhive::message::RequestId,
+    elapsed_secs: u64,
+    admitted_waiters: usize,
+}
+
+impl KeyhiveSyncRound {
+    /// Latch and describe this round when it has outlived `threshold` and was
+    /// not reported yet. Latching keeps a stuck round from being reported on
+    /// every janitor tick; `None` means "not reportable".
+    fn latch_if_unresolved(
+        &mut self,
+        now: std::time::Instant,
+        threshold: std::time::Duration,
+    ) -> Option<UnresolvedKeyhiveRound> {
+        if self.slow_warned {
+            return None;
+        }
+        let elapsed = now.saturating_duration_since(self.started_at);
+        if elapsed < threshold {
+            return None;
+        }
+        self.slow_warned = true;
+        Some(UnresolvedKeyhiveRound {
+            round_id: self.round_id,
+            request_id: self.request_id.clone(),
+            elapsed_secs: elapsed.as_secs(),
+            admitted_waiters: self.admitted_ids.len(),
+        })
+    }
+}
 
 struct KeyhiveSyncRound {
     round_id: u64,
     started_at: std::time::Instant,
     request_id: subduction_keyhive::message::RequestId,
+    /// Latches the one-shot slow-round report so a stuck round warns once
+    /// instead of on every janitor tick. Tests read it too: a round that was
+    /// already reported is not the orphan their panic detector looks for.
+    slow_warned: bool,
     /// Ids of the waiters queued when this round started; the round resolves
     /// them on completion. Waiters admitted during the round cascade.
     admitted_ids: std::collections::HashSet<u64>,
@@ -1098,9 +1154,10 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 {
                     Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {
                         // TEMP-DIAGNOSTIC: rounds completing with an empty exchange
-                        // (serving side sends 0 for an explicit hash request) are
-                        // invisible at debug level; surface every round here.
-                        tracing::warn!(
+                        // (serving side sends 0 for an explicit hash request) leave no
+                        // trace of the round at default levels; log every round start,
+                        // visible under `RUST_LOG_TEST=debug`.
+                        tracing::debug!(
                             %peer_id,
                             nonce = request_id.nonce,
                             "KEYHIVE_DIAG keyhive sync round initiated"
@@ -2173,6 +2230,7 @@ where
                 round_id,
                 started_at: self.clock.instant(),
                 request_id: request_id.clone(),
+                slow_warned: false,
                 admitted_ids,
             },
         );
@@ -2694,22 +2752,64 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         );
     }
 
+    /// Report unresolved Keyhive sync rounds.
+    ///
+    /// Production: report each round once when it outlives
+    /// `KEYHIVE_SYNC_SLOW_ROUND_WARN` and keep waiting — we run on slow
+    /// networks and an application-level deadline belongs to the caller, who
+    /// can cancel `sync_keyhive` safely because the waiter guard removes the
+    /// waiter (so a cancelled call never cascades a follow-up round).
+    ///
+    /// Tests: panic on `KEYHIVE_SYNC_ROUND_TIMEOUT` so a stress run surfaces a
+    /// round that no completion, protocol error, or connection loss retired
+    /// instead of hanging on it.
+    fn report_unresolved_keyhive_round(&mut self, now: std::time::Instant) {
+        #[cfg(any(test, feature = "test-support"))]
+        let threshold = KEYHIVE_SYNC_ROUND_TIMEOUT;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let threshold = KEYHIVE_SYNC_SLOW_ROUND_WARN;
+
+        let unresolved = self
+            .active_keyhive_syncs
+            .iter_mut()
+            .filter_map(|(peer_id, round)| {
+                round
+                    .latch_if_unresolved(now, threshold)
+                    .map(|report| (*peer_id, report))
+            })
+            .collect::<Vec<_>>();
+
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((peer_id, report)) = unresolved.first() {
+            panic!(
+                "Keyhive sync round timed out without response, protocol error, or connection loss: peer={peer_id} request={:?} round={} elapsed_secs={} admitted_waiters={}",
+                report.request_id, report.round_id, report.elapsed_secs, report.admitted_waiters
+            );
+        }
+
+        #[cfg(not(any(test, feature = "test-support")))]
+        for (peer_id, report) in unresolved {
+            warn!(
+                %peer_id,
+                round_id = report.round_id,
+                request_id = ?report.request_id,
+                elapsed_secs = report.elapsed_secs,
+                slow_after_secs = threshold.as_secs(),
+                connected = self.connected_peers.contains_key(&peer_id),
+                admitted_waiters = report.admitted_waiters,
+                pending_waiters = self
+                    .keyhive_waiters
+                    .get(&peer_id)
+                    .map_or(0, |waiters| waiters.waiters.len()),
+                "Keyhive sync round unresolved; still waiting"
+            );
+        }
+    }
+
     fn janitor_tick(&mut self) {
         let now = self.clock.instant();
         self.report_quiescence_stall(now);
-        let expired_keyhive_rounds = self
-            .active_keyhive_syncs
-            .iter()
-            .filter(|(_, round)| {
-                now.saturating_duration_since(round.started_at) >= KEYHIVE_SYNC_ROUND_TIMEOUT
-            })
-            .map(|(peer_id, round)| (*peer_id, round.request_id.clone()))
-            .collect::<Vec<_>>();
-        if let Some((peer_id, request_id)) = expired_keyhive_rounds.into_iter().next() {
-            panic!(
-                "Keyhive sync round timed out without response, protocol error, or connection loss: peer={peer_id} request={request_id:?}"
-            );
-        }
+        self.report_unresolved_keyhive_round(now);
         let expired: Vec<DocumentId> = self
             .doc_workers
             .iter()
@@ -3165,5 +3265,37 @@ mod tests {
             waiters.waiters.is_empty(),
             &mut notification_pending,
         ));
+    }
+
+    #[test]
+    fn unresolved_keyhive_round_is_reported_once() {
+        let now = std::time::Instant::now();
+        let threshold = std::time::Duration::from_secs(30);
+        let round = |elapsed: std::time::Duration| super::KeyhiveSyncRound {
+            round_id: 4,
+            started_at: now - elapsed,
+            request_id: subduction_keyhive::message::RequestId {
+                requestor: subduction_keyhive::KeyhivePeerId::from_bytes([9; 32]),
+                nonce: 4,
+            },
+            slow_warned: false,
+            admitted_ids: std::collections::HashSet::from([7]),
+        };
+
+        // A fresh round is not reportable, and must not be latched by asking.
+        let mut fresh = round(std::time::Duration::from_secs(29));
+        assert!(fresh.latch_if_unresolved(now, threshold).is_none());
+        assert!(!fresh.slow_warned);
+
+        // A stale round reports its age and admitted waiters exactly once: the
+        // janitor ticks on a fixed cadence and must not repeat the report.
+        let mut stale = round(std::time::Duration::from_secs(31));
+        let report = stale
+            .latch_if_unresolved(now, threshold)
+            .expect("a stale round is reported");
+        assert_eq!(report.round_id, 4);
+        assert_eq!(report.elapsed_secs, 31);
+        assert_eq!(report.admitted_waiters, 1);
+        assert!(stale.latch_if_unresolved(now, threshold).is_none());
     }
 }

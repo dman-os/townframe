@@ -390,6 +390,7 @@ pub async fn test_cx_with_options(
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),
+            derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
             local_peer_key,

@@ -552,7 +552,7 @@ impl Rt {
         processor_full_id: &str,
     ) -> Res<Option<ProcessorRunlogDone>> {
         let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
-        let payload = self.rcx.part_store.obj_payload(item_id).await?;
+        let payload = self.rcx.derived_part_store.obj_payload(item_id).await?;
         let Some(payload) = payload else {
             return Ok(None);
         };
@@ -1567,7 +1567,7 @@ impl Rt {
         done_token: &str,
     ) -> Res<()> {
         upsert_processor_runlog_item(
-            &self.rcx.part_store,
+            &self.rcx.derived_part_store,
             &self.config.device_id,
             doc_id,
             processor_full_id,
@@ -2875,6 +2875,60 @@ mod tests {
             .ok_or_eyre("expected runlog payload row")?;
         assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
         assert_eq!(payload["done_token"], serde_json::json!("token-2"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn processor_runlog_stays_in_the_derived_scope() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let temp_root = tempfile::tempdir()?;
+        let repo_root = temp_root.path().join("repo");
+        tokio::fs::create_dir_all(&repo_root).await?;
+        let rtx = crate::repo::RepoCtx::init(
+            &repo_root,
+            crate::repo::RepoOpenOptions::default(),
+            "derived-scope-test".into(),
+            "derived-scope-test".into(),
+        )
+        .await?;
+
+        let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
+        let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
+
+        // Open ensures the partition in the derived scope.
+        assert!(
+            rtx.derived_part_store
+                .summarize_parts(std::collections::HashSet::from([part_id]))
+                .await??
+                .contains_key(&part_id),
+            "open should ensure the processor-runlog partition in the derived scope"
+        );
+
+        upsert_processor_runlog_item(
+            &rtx.derived_part_store,
+            "peer-a",
+            "doc-1",
+            "@daybook/plabels/label-note",
+            "token-1",
+        )
+        .await?;
+
+        // The document scope must not learn about the item at all: the automerge
+        // frontier worker reads that scope's match-all part stream as documents.
+        assert!(
+            rtx.part_store.obj_payload(item_id).await?.is_none(),
+            "processor-runlog items must not be written to the document scope"
+        );
+        assert!(
+            rtx.part_store.obj_parts(item_id).await?.is_empty(),
+            "processor-runlog items must not join a document-scope partition"
+        );
+        assert_eq!(
+            rtx.derived_part_store.obj_parts(item_id).await?,
+            vec![part_id]
+        );
+
+        rtx.shutdown().await?;
         Ok(())
     }
 }

@@ -3201,19 +3201,13 @@ impl SyncRepoNode {
             store: shared_store,
             worker: initial_worker,
         });
-        let part_init_obj = ObjId(big_sync_core::Byte32Id::new(
-            [255_u8.wrapping_sub(seed); 32],
-        ));
+        // The stress test part must exist before membership is written to it. It
+        // must not be seeded with a synthetic object payload: every object in the
+        // document scope has to be a document, which the frontier worker asserts
+        // in test builds.
         big_sync_host
             .store
-            .set_obj_payload(
-                part_init_obj,
-                serde_json::json!({ "heads": Vec::<String>::new() }),
-            )
-            .await?;
-        big_sync_host
-            .store
-            .remove_obj_from_part(part_init_obj, stress_support::test_part())
+            .ensure_part(stress_support::test_part())
             .await?;
         big_sync_stop.stop().await?;
 

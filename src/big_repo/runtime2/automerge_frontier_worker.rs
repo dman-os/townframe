@@ -933,13 +933,16 @@ async fn run_concurrent_frontier_task(
                 scoped = scope.groups().is_some(),
                 "AFW physical publish task entered"
             );
-            // The match-all part stream also carries non-document objects. Only
-            // valid Keyhive document ids can be materialized; scoped workers then
-            // additionally filter live group membership below.
-            if !crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id) {
-                tracing::debug!(%doc_id, "ignoring non-Keyhive object in frontier source");
-                return Ok(ConcurrentTaskOutput::OutOfScope);
-            }
+            // This scope carries documents only: non-document derived state
+            // lives in its own scope (see `BigRepo::derived_part_store`). Tests
+            // assert that boundary so a new non-document producer is surfaced
+            // here instead of quietly consuming a document worker.
+            #[cfg(any(test, feature = "test-support"))]
+            assert!(
+                crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id),
+                "non-document object reached the automerge frontier source: obj_id={doc_id}. \
+                 State that is not a document belongs in the derived scope, not the document scope"
+            );
             if scope.groups().is_some() {
                 // Eligibility is checked against live Keyhive membership so part
                 // events for documents that joined or left the scope are handled
