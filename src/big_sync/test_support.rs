@@ -52,8 +52,15 @@ where
     let mut before = cursor_snapshot(targets).await?;
     tracing::debug!(?before, "network-rest initial cursors");
     loop {
-        for target in targets {
+        for (target_index, target) in targets.iter().enumerate() {
             if !target.peer_ids.is_empty() && !target.part_ids.is_empty() {
+                tracing::info!(
+                    target_index,
+                    peer_count = target.peer_ids.len(),
+                    part_ids = ?target.part_ids,
+                    stable_rounds,
+                    "network-rest target sync begin"
+                );
                 target
                     .worker
                     .wait_for_full_sync(
@@ -61,6 +68,11 @@ where
                         target.part_ids.iter().copied(),
                     )
                     .await?;
+                tracing::info!(
+                    target_index,
+                    stable_rounds,
+                    "network-rest target sync complete"
+                );
             }
         }
         quiesce().await?;

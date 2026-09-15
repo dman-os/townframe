@@ -7,6 +7,7 @@ const CORE_DOCS_GROUP_KEY: &str = "global.authority.core_docs_group";
 const CONTENT_DOCS_GROUP_KEY: &str = "global.authority.content_docs_group";
 const DRAWER_GROUP_KEY: &str = "global.authority.default_drawer_group";
 const BLOB_INVENTORIES_GROUP_KEY: &str = "global.authority.blob_inventories_group";
+const PENDING_DOCUMENTS_GROUP_KEY: &str = "local.authority.pending_documents_group";
 
 /// Stable identifiers for the initial repository authority groups.
 ///
@@ -29,6 +30,7 @@ pub(crate) struct RepoAuthority {
     pub content_docs: BigKeyhiveGroup,
     pub default_drawer: BigKeyhiveGroup,
     pub blob_inventories: BigKeyhiveGroup,
+    pending_documents: BigKeyhiveGroup,
 }
 
 impl RepoAuthority {
@@ -61,6 +63,10 @@ impl RepoAuthority {
     }
     pub(crate) fn blob_inventories_part_id(&self) -> PartId {
         big_repo::group_part_id(self.blob_inventories.id().to_bytes())
+    }
+
+    pub(crate) fn pending_documents_group(&self) -> BigKeyhiveGroup {
+        self.pending_documents.clone()
     }
 }
 
@@ -104,6 +110,8 @@ pub(crate) async fn ensure(
         supplied_ids.map(|ids| ids.blob_inventories),
     )
     .await?;
+    let (pending_documents, _) =
+        ensure_group(big_repo, sql, PENDING_DOCUMENTS_GROUP_KEY, None).await?;
 
     if repo_agents_created
         || core_docs_created
@@ -139,15 +147,39 @@ pub(crate) async fn ensure(
         }
     }
 
+    recover_pending_documents(big_repo, &pending_documents).await?;
+
     let auth = RepoAuthority {
         repo_agents,
         core_docs,
         content_docs,
         default_drawer,
         blob_inventories,
+        pending_documents,
     };
 
     Ok(auth)
+}
+
+async fn recover_pending_documents(
+    big_repo: &SharedBigRepo,
+    pending_documents: &BigKeyhiveGroup,
+) -> Res<()> {
+    // Reservations are the durable enumeration of allocated-but-unfinalized
+    // document IDs; the pending group cannot enumerate a merely reserved
+    // public key before a signed Keyhive authority exists.
+    for document_id in big_repo.reserved_doc_ids().await? {
+        if !big_repo
+            .recover_allocated_doc(document_id, pending_documents.clone())
+            .await
+            .map_err(eyre::Report::from)
+            .wrap_err_with(|| format!("finalizing pending document {document_id}"))?
+        {
+            // Allocation without staged content remains a GC candidate.
+            continue;
+        }
+    }
+    Ok(())
 }
 
 async fn ensure_group(

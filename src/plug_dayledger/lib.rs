@@ -364,9 +364,7 @@ pub fn plug_manifest() -> PlugManifest {
                 desc: "Parse hledger journal notes into dayledger claims".into(),
                 deets: ProcessorDeets::DocProcessor {
                     event_predicate: ProcessorEventPredicate {
-                        doc_change_predicate: DocChangePredicate::ChangedFacetTags(vec![
-                            note_tag.clone(),
-                        ]),
+                        doc_change_predicate: DocChangePredicate::Any,
                         ..Default::default()
                     },
                     routine_name: "parse-hledger".into(),

@@ -37,7 +37,9 @@ thiserror.workspace = true
 # async
 # tokio-util.workspace = true
 async-channel.workspace = true
+async-trait.workspace = true
 future_form.workspace = true
+parking_lot.workspace = true
 
 #
 # logging
@@ -46,3 +48,6 @@ tracing.workspace = true
 #
 # ffi
 uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures.workspace = true

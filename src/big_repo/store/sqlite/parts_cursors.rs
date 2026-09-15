@@ -3,6 +3,14 @@ use sqlx::{QueryBuilder, Row};
 
 #[async_trait]
 impl HostPartStore for SqliteBigRepoStore {
+    async fn latest_revision(&self) -> Res<CursorIndex> {
+        let revision: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&self.sql.read_pool)
+                .await?;
+        Ok(u64::try_from(revision)?)
+    }
+
     async fn is_event_permitted(
         &self,
         part_id: Option<PartId>,
@@ -710,11 +718,30 @@ impl HostPartStore for SqliteBigRepoStore {
         self.subscribe_with_policy(reqs, Some(subscriber)).await
     }
 
-    async fn subscribe_local(
+    async fn open_local_revision_reader(
         &self,
         reqs: SubPartsRequest,
-    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        self.subscribe_with_policy(reqs, None).await
+    ) -> Res<Result<Box<dyn big_sync::LocalPartRevisionReader>, ListPartsError>> {
+        open_sqlite_local_revision_reader(
+            self.sql.read_pool.clone(),
+            self.scope().id(),
+            Arc::clone(&self.local_revision_wakeups),
+            reqs,
+        )
+        .await
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: u64,
+    ) -> Res<Result<Box<dyn big_sync::LocalPartRevisionReader>, ListPartsError>> {
+        big_sync::open_sqlite_local_revision_reader_all(
+            self.sql.read_pool.clone(),
+            self.scope().id(),
+            Arc::clone(&self.local_revision_wakeups),
+            after,
+        )
+        .await
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {

@@ -125,7 +125,7 @@ repos:
           - "warnings"
   - repo: local
     hooks:
-      - id: sqlx-prepare-check
+      - id: sqlx
         name: check SQLx query metadata
         language: system
         entry: bash -c

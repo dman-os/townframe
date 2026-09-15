@@ -1,356 +1,578 @@
-use super::mutations::RecordKnownOutcome;
+//! Plug config events: the two-version diff over the PlugConfig facet's
+//! automerge history, the revisioned store exposing it, and the consumers.
+//!
+//! The event producer is a struct diff, never an automerge patch interpreter
+//! (patches surface dead intermediary state; see the tables.rs
+//! `diff_events`/`events_for_patch` split for the two-use pattern — here the
+//! shared diff path serves both the revisioned store below and the live
+//! consumers through the same `PlugsEvent` vocabulary).
+//!
+//! Durability: the facet-set walker cursor is the only durable state. The
+//! revisioned reader folds the config facet's history from its seed on every
+//! open (config revisions are rare, so the replay cost is a handful of
+//! hydrations) and diffs consecutive versions, which keeps replay
+//! deterministic: the same history always produces the same events.
+
 use super::*;
 
-/// a doc change forwarded from the switch sink to the notif
-/// loop
-#[derive(Debug, Clone)]
-pub(crate) enum PlugsNotif {
-    ConfigDocChanged {
-        prev_heads: Option<ChangeHashSet>,
-        new_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    ManifestDocChanged {
-        doc_id: daybook_types::doc::DocId,
-        new_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
+use crate::drawer::{DrawerRepo, MaterializationChange};
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_set::{FacetSetReader, FacetSetRevisionStore, FacetSetSelector};
+use crate::stores::FacetStore;
+use big_sync::SqliteDeltaWalkerStateRepo;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
+use big_sync_core::revisioned_store::{
+    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
+};
+use big_sync_core::serial_delta_walker::SerialDeltaWalker;
+use daybook_types::doc::{FacetKey, WellKnownFacetTag};
+use sqlx_utils_rs::SqlCtx;
+
+pub(crate) const PLUGS_CONFIG_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-config-facet-set";
+
+pub(crate) const PLUG_MANIFEST_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-manifest-delta";
+
+#[derive(Default)]
+struct PendingManifestWakes {
+    watchers: tokio::task::JoinSet<Res<(String, u64, MaterializationChange)>>,
+    registrations: std::collections::HashMap<String, (u64, tokio::task::AbortHandle)>,
+    next_id: u64,
 }
 
-// Granular event enum for specific changes (ADR 007 §7: enabled-only).
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum PlugsEvent {
-    /// Config entry added, or pending -> active (ADR 007 §6). Emitted for
-    /// local enables and for remote config writes that add/change an enabled
-    /// ref (via the notif loop's config diff).
-    PlugEnabled {
-        id: String,
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// Config entry removed (local disable or remote drop of an enabled ref).
-    PlugDisabled {
-        id: String,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// The enabled ref was re-pinned to different heads (explicit update to
-    /// a newer version). Same plug, new pinned version.
-    EnabledPlugUpdated {
-        id: String,
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// The plugs config facet moved to `heads`. A coarse state-version
-    /// marker: fires on every config write whether or not a granular
-    /// `PlugEnabled`/`PlugDisabled`/`EnabledPlugUpdated` fired (e.g. a
-    /// remote known-manifest record has no plug-level event). Consumers that
-    /// mirror the whole config (triage's processor refresh, the facet-ref
-    /// index) act on any plugs event; the heads let a consumer re-read the
-    /// config at a known point.
-    PlugsConfigChanged {
-        heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    /// A manifest update was rejected by the version/compat gate (ADR 007
-    /// §5): republish without a version bump, downgrade, or a breaking
-    /// change in a non-major update. The rejection is also durable in the
-    /// config's per-plug track (latest + latest_rejection).
-    ManifestRejected {
-        id: String,
-        version: String,
-        reason: String,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-}
-
-impl PlugsRepo {
-    /// ADR 007 §7: diff two config versions of the write series into
-    /// enabled-only events, maintaining the derived cache incrementally.
-    /// Unchanged refs no-op via the fast paths in the cache helpers.
-    async fn apply_config_diff(
-        &self,
-        prev: Option<&PlugsConfig>,
-        cur: &PlugsConfig,
-        out: &mut Vec<PlugsEvent>,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<()> {
-        // known_plugs: added/changed last_valid refs refresh the manifest
-        // cache for that plug only; removed entries drop it. A rejected
-        // latest or a last_enabled_version-only change has no cache effect
-        // (the cache materializes valid versions only).
-        for (id, track) in &cur.known_plugs {
-            let changed = prev.as_ref().is_none_or(|plug| {
-                plug.known_plugs.get(id).map(|old| &old.last_valid) != Some(&track.last_valid)
-            });
-            if changed
-                && let Some((_, manifest)) = self.read_manifest_at_ref(&track.last_valid).await?
-            {
-                surelock::key::lock_scope(|key| {
-                    let (mut cache, _key) = key.lock(&self.cache);
-                    cache.upsert_known(id, &manifest);
-                });
-            }
+impl PendingManifestWakes {
+    fn remove(&mut self, plug_id: &str) {
+        if let Some((_id, abort)) = self.registrations.remove(plug_id) {
+            abort.abort();
         }
-        if let Some(prev) = prev {
-            for id in prev.known_plugs.keys() {
-                if !cur.known_plugs.contains_key(id) {
-                    surelock::key::lock_scope(|key| {
-                        let (mut cache, _key) = key.lock(&self.cache);
-                        cache.drop_known(id);
-                    });
-                }
-            }
-        }
-        // enabled: the event type comes from the config delta — a ref that
-        // was absent is `PlugEnabled`, a changed ref is
-        // `EnabledPlugUpdated`, a removed ref is `PlugDisabled`. The cache
-        // is only the materialization side effect.
-        for (id, ref_url) in &cur.enabled {
-            let prev_ref = prev.as_ref().and_then(|plug| plug.enabled.get(id));
-            if prev_ref == Some(ref_url) {
-                continue; // unchanged — no event, no read
-            }
-            if let Some(event) = self
-                .activate_from_ref(id, ref_url, prev_ref.is_none(), origin)
-                .await?
-            {
-                out.push(event);
-            }
-        }
-        if let Some(prev) = prev {
-            for id in prev.enabled.keys() {
-                if !cur.enabled.contains_key(id) {
-                    surelock::key::lock_scope(|key| {
-                        let (mut cache, _key) = key.lock(&self.cache);
-                        cache.clear_active(id);
-                    });
-                    out.push(PlugsEvent::PlugDisabled {
-                        id: id.clone(),
-                        origin: origin.clone(),
-                    });
-                }
-            }
-        }
-        Ok(())
     }
 
-    /// ADR 007 §7: a manifest doc moved (remote). Re-record the known ref
-    /// (which updates the derived cache incrementally for this plug) and
-    /// resolve a pending plug whose pinned heads became readable.
-    async fn process_manifest_doc_change(
-        &self,
-        doc_id: &daybook_types::doc::DocId,
-        new_heads: &ChangeHashSet,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<()> {
-        match self.record_known_manifest_doc(doc_id, new_heads).await? {
-            RecordKnownOutcome::Recorded { plug_id } => {
-                // Pending resolution: if the plug is enabled but not yet
-                // materialized, its pinned heads may have just become
-                // readable — activate it. An already-active plug was handled
-                // synchronously by its own mutator; re-resolving it here from
-                // a possibly-stale enabled ref could revert or drop the
-                // cache entry, so only touch plugs that are genuinely pending.
-                let enabled_ref = self
-                    .config_store()?
-                    .query_sync(|config| config.enabled.get(&plug_id).cloned())
-                    .await;
-                let is_pending = surelock::key::lock_scope(|key| {
-                    let (cache, _key) = key.lock(&self.cache);
-                    !cache.active_manifests.contains_key(&plug_id)
-                });
-                if let Some(ref_url) = enabled_ref.filter(|_| is_pending) {
-                    // Pending -> active: the pinned heads became readable.
-                    if let Some(event) = self
-                        .activate_from_ref(&plug_id, &ref_url, true, origin)
-                        .await?
+    async fn watch(&mut self, drawer: &DrawerRepo, plug_id: &str, ref_url: &url::Url) -> Res<bool> {
+        if self.registrations.contains_key(plug_id) {
+            return Ok(false);
+        }
+        let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(ref_url)?;
+        let branch_id = daybook_types::doc::BranchId(parsed.doc_id.to_string());
+        let mut wake = drawer
+            .subscribe_document_materialization(&branch_id)
+            .await?;
+        let registration_id = self.next_id;
+        self.next_id += 1;
+        let plug_id = plug_id.to_owned();
+        let task_plug_id = plug_id.clone();
+        let abort = self.watchers.spawn(async move {
+            wake.ready_changed()
+                .await
+                .map(|change| (task_plug_id, registration_id, change))
+        });
+        self.registrations.insert(plug_id, (registration_id, abort));
+        Ok(true)
+    }
+
+    async fn next(&mut self) -> Res<(String, MaterializationChange)> {
+        loop {
+            let Some(result) = self.watchers.join_next().await else {
+                std::future::pending::<()>().await;
+                unreachable!();
+            };
+            match result {
+                Ok(Ok((plug_id, registration_id, change))) => {
+                    if self
+                        .registrations
+                        .get(&plug_id)
+                        .is_some_and(|(current_id, _)| *current_id == registration_id)
                     {
-                        self.registry.notify([event]);
+                        self.registrations.remove(&plug_id);
+                        return Ok((plug_id, change));
                     }
                 }
-            }
-            RecordKnownOutcome::Rejected {
-                plug_id,
-                version,
-                reason,
-            } => {
-                tracing::warn!(
-                    plug_id,
-                    version = %version,
-                    reason,
-                    "manifest update rejected by version/compat gate"
-                );
-                self.registry.notify([PlugsEvent::ManifestRejected {
-                    id: plug_id,
-                    version: version.to_string(),
-                    reason,
-                    origin: origin.clone(),
-                }]);
-            }
-            RecordKnownOutcome::Unreadable => {}
-        }
-        Ok(())
-    }
-
-    /// ADR 007 §7: the notif loop, fed by the switch sink. Config changes
-    /// are processed as a series of facet write versions (drawer dmeta
-    /// snapshots) — basic diffing between consecutive versions; manifest
-    /// doc changes update the derived cache incrementally. No store reload.
-    pub(crate) async fn notif_loop(
-        &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<PlugsNotif>,
-        cancel_token: CancellationToken,
-    ) -> Res<()> {
-        loop {
-            let notif = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => break,
-                msg = notif_rx.recv() => match msg {
-                    Some(notif) => notif,
-                    None => break,
-                },
-            };
-            match notif {
-                PlugsNotif::ConfigDocChanged {
-                    prev_heads,
-                    new_heads,
-                    origin,
-                } => {
-                    self.process_config_doc_change(prev_heads.as_ref(), &new_heads, &origin)
-                        .await?;
-                }
-                PlugsNotif::ManifestDocChanged {
-                    doc_id,
-                    new_heads,
-                    origin,
-                } => {
-                    self.process_manifest_doc_change(&doc_id, &new_heads, &origin)
-                        .await?;
-                }
+                Ok(Err(error)) => return Err(error),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => return Err(ferr!("pending manifest wake task failed: {error}")),
             }
         }
-        Ok(())
+    }
+}
+
+/// ADR 007 §7: the typed plug config events. Emitted by diffing consecutive
+/// PlugConfig facet versions; consumed by the live cache maintenance, the FFI
+/// listener bridge, and (via the revisioned store) the pin worker's
+/// enablement-driven inventory maintenance.
+///
+/// No `origin` field: per the tables.rs convention, live/replay origin
+/// filtering is a consumer-side concern (`should_skip_live_patch`), not event
+/// payload — a replayed history cannot know an origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlugsEvent {
+    /// The config facet gained an enabled entry for the plug at the pinned
+    /// manifest heads. Also the pending→active transition shape (ADR 007 §6):
+    /// the entry existed before, but the manifest only just became readable.
+    PlugEnabled {
+        plug_id: String,
+        heads: ChangeHashSet,
+    },
+    /// The config facet's enabled entry for the plug was removed.
+    PlugDisabled { plug_id: String },
+    /// The enabled entry was re-pinned to different manifest heads.
+    PlugUpdated {
+        plug_id: String,
+        heads: ChangeHashSet,
+    },
+    /// The config facet moved without an enabled-set change (known-plug
+    /// recording, config doc id updates). Known-but-disabled manifest changes
+    /// are otherwise invisible (ADR 007 §7).
+    PlugsConfigChanged { heads: ChangeHashSet },
+}
+
+/// One config-facet revision's diff result, as delivered by
+/// [`PlugsConfigEventStore`]. Revisions that do not touch the config facet
+/// carry empty events so consumers can settle the cursor continuously.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlugsConfigRevision {
+    pub heads: ChangeHashSet,
+    /// The hydrated config facet value at this revision's heads. Consumers
+    /// install it as the config store's in-memory snapshot so later local
+    /// mutations build patches on fresh state.
+    pub config: PlugsConfig,
+    pub events: Vec<PlugsEvent>,
+}
+
+/// Diff two PlugConfig versions into typed events. Pure — no I/O, no cache,
+/// no store writes; both the revisioned reader and live-state consumers share
+/// this one path.
+///
+/// Enabled-set changes produce the specific events. A config that moved
+/// without any enabled-set change (known-plug recording, config doc ids)
+/// produces [`PlugsEvent::PlugsConfigChanged`] only.
+pub(crate) fn diff_plug_config(
+    from: Option<&PlugsConfig>,
+    to: &PlugsConfig,
+    heads: ChangeHashSet,
+) -> Vec<PlugsEvent> {
+    let mut events = Vec::new();
+    let from_enabled = from.map(|config| &config.enabled);
+    for (plug_id, ref_url) in &to.enabled {
+        let prev_ref = from_enabled.and_then(|enabled| enabled.get(plug_id));
+        let pinned_heads = ref_pinned_heads(ref_url);
+        match prev_ref {
+            None => events.push(PlugsEvent::PlugEnabled {
+                plug_id: plug_id.clone(),
+                heads: pinned_heads,
+            }),
+            Some(prev) if prev != ref_url => events.push(PlugsEvent::PlugUpdated {
+                plug_id: plug_id.clone(),
+                heads: pinned_heads,
+            }),
+            Some(_) => {}
+        }
+    }
+    if let Some(from) = from {
+        for plug_id in from.enabled.keys() {
+            if !to.enabled.contains_key(plug_id) {
+                events.push(PlugsEvent::PlugDisabled {
+                    plug_id: plug_id.clone(),
+                });
+            }
+        }
+        // The config moved but the enabled set did not: known-plug recording
+        // or config doc id drift. Specific events win; this is the residue.
+        if events.is_empty() && from != to {
+            events.push(PlugsEvent::PlugsConfigChanged { heads });
+        }
+    }
+    events
+}
+
+/// The manifest heads pinned by an enabled ref (empty set when unpinned —
+/// the ref then tracks the branch's current heads).
+fn ref_pinned_heads(ref_url: &url::Url) -> ChangeHashSet {
+    PlugsRepo::parse_enabled_ref(ref_url)
+        .ok()
+        .and_then(|parsed| parsed.at)
+        .and_then(|at| am_utils_rs::parse_commit_heads(at.as_ref()).ok())
+        .map(ChangeHashSet)
+        .unwrap_or_default()
+}
+
+/// The plugs revision store: typed config events over the PlugConfig facet's
+/// automerge history. The source is the facet-set store filtered to the
+/// config route; each entry is one config revision's hydrated value plus the
+/// diff events against the previous revision.
+///
+/// The reader folds the config history from its seed on every open — the
+/// diff is a pure function of the history, so replay is deterministic and the
+/// facet-set cursor is the only durability.
+pub struct PlugsConfigEventStore {
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    drawer: Arc<DrawerRepo>,
+    doc_config_id: daybook_types::doc::DocId,
+    route: crate::index::FacetRouteKey,
+}
+
+impl PlugsConfigEventStore {
+    pub(crate) fn new(
+        facet_set_store: Arc<FacetSetRevisionStore>,
+        drawer: Arc<DrawerRepo>,
+        plugs_repo: &PlugsRepo,
+    ) -> Self {
+        Self {
+            facet_set_store,
+            drawer,
+            doc_config_id: plugs_repo.config_doc_id(),
+            route: plugs_repo.config_facet_route(),
+        }
     }
 
-    /// ADR 007 §7: a config facet change between the before/after heads.
-    /// Enumerate the write versions (each with its author), skip local
-    /// writes (applied synchronously by the mutators), and basic-diff each
-    /// remaining version against the previous one.
-    async fn process_config_doc_change(
-        &self,
-        prev_heads: Option<&ChangeHashSet>,
-        new_heads: &ChangeHashSet,
-        origin: &crate::event_origin::SwitchEventOrigin,
-    ) -> Res<()> {
-        let store = self.config_store()?;
-        let versions = store.versions(prev_heads, new_heads).await?;
-        let local_store = store.local_writer_actor().await;
-        let mut events = vec![];
-        let mut prev_config = match prev_heads {
-            Some(prev) => store.at(prev).await?,
-            None => None,
+    fn config_facet_key() -> FacetKey {
+        <PlugsConfig as crate::stores::FacetStore>::facet_key()
+    }
+
+    /// Hydrate the config facet value at one revision's branch heads.
+    async fn hydrate_config_at(&self, heads: &ChangeHashSet) -> Res<PlugsConfig> {
+        let Some(doc) = self
+            .drawer
+            .get_doc_with_facets_at_branch_heads(
+                &self.doc_config_id,
+                daybook_types::doc::BranchPath::new("main"),
+                heads,
+                Some(vec![Self::config_facet_key()]),
+            )
+            .await?
+        else {
+            // The config doc is a core doc; a revision that touched its
+            // config facet must be hydratable at those heads.
+            eyre::bail!("config doc not readable at revision heads {heads:?}");
         };
-        for version in versions {
-            let is_local = local_store
-                .as_ref()
-                .is_some_and(|actor| actor == &version.actor_id);
-            if is_local {
-                // Applied synchronously by the mutator; advance the baseline.
-                prev_config = Some(version.value);
-                continue;
-            }
-            self.apply_config_diff(prev_config.as_ref(), &version.value, &mut events, origin)
-                .await?;
-            prev_config = Some(version.value);
-        }
-        events.push(PlugsEvent::PlugsConfigChanged {
-            heads: new_heads.clone(),
-            origin: origin.clone(),
-        });
-        self.registry.notify(events);
-        Ok(())
-    }
-}
-
-pub(crate) struct PlugsSwitchSink {
-    repo: Arc<PlugsRepo>,
-}
-
-impl PlugsSwitchSink {
-    pub(crate) fn new(repo: Arc<PlugsRepo>) -> Self {
-        Self { repo }
+        let Some(raw) = doc.facets.get(&Self::config_facet_key()) else {
+            return Ok(PlugsConfig::seed());
+        };
+        Ok(serde_json::from_value(raw.clone())?)
     }
 }
 
 #[async_trait]
-impl crate::rt::switch::SwitchSink for PlugsSwitchSink {
-    fn interest(&self) -> crate::rt::switch::SwtchSinkInterest {
-        use daybook_types::manifest::DocPredicateClause;
-        crate::rt::switch::SwtchSinkInterest {
-            consume_doc: true,
-            consume_drawer: false,
-            consume_plugs: false,
-            consume_dispatch: false,
-            consume_config: false,
-            // Only docs whose diff touches the plug facets reach on_event.
-            drawer_predicate: Some(DocPredicateClause::Or(vec![
-                DocPredicateClause::HasTag(
-                    daybook_types::doc::WellKnownFacetTag::PlugsConfig.into(),
-                ),
-                DocPredicateClause::HasTag(
-                    daybook_types::doc::WellKnownFacetTag::PlugManifest.into(),
-                ),
-            ])),
-        }
+impl RevisionedStore for PlugsConfigEventStore {
+    type Revision = u64;
+    type Entry = PlugsConfigRevision;
+    type Selector = ();
+    type Error = eyre::Report;
+    type Reader<'a>
+        = PlugsConfigEventReader<'a>
+    where
+        Self: 'a;
+
+    async fn latest_revision(&self) -> Result<Self::Revision, Self::Error> {
+        self.facet_set_store
+            .latest_revision()
+            .await
+            .map_err(|error| ferr!("reading facet-set revision: {error}"))
     }
 
-    async fn on_event(
+    async fn open<'a>(
+        &'a self,
+        _selector: Self::Selector,
+        after: Self::Revision,
+    ) -> Result<Self::Reader<'a>, Self::Error> {
+        // The inner reader replays from the facet history's beginning: the
+        // diff folds from the seed regardless of `after`, and only entries
+        // past `after` are yielded.
+        let inner = self
+            .facet_set_store
+            .open(
+                FacetSetSelector::Routes([self.route.clone()].into_iter().collect()),
+                0,
+            )
+            .await
+            .map_err(|error| ferr!("opening facet-set reader: {error}"))?;
+        Ok(PlugsConfigEventReader {
+            inner,
+            store: self,
+            after,
+            last_config: PlugsConfig::seed(),
+            last_heads: None,
+        })
+    }
+}
+
+/// Fold the config facet's history into typed diff events. `last_config` is
+/// the previous revision's hydrated value; every revision — including ones at
+/// or before the consumer's cursor — advances it so replay stays faithful.
+pub struct PlugsConfigEventReader<'a> {
+    inner: FacetSetReader<'a>,
+    store: &'a PlugsConfigEventStore,
+    after: u64,
+    last_config: PlugsConfig,
+    last_heads: Option<ChangeHashSet>,
+}
+
+#[async_trait]
+impl RevisionedStoreReader<u64, PlugsConfigRevision, eyre::Report> for PlugsConfigEventReader<'_> {
+    async fn next(
         &mut self,
-        event: &crate::rt::switch::SwitchEvent,
-        _ctx: &crate::rt::switch::SwitchSinkCtx<'_>,
-    ) -> Res<crate::rt::switch::SwitchSinkOutcome> {
-        let crate::rt::switch::SwitchEvent::Doc(evt) = event else {
-            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
-        };
-        let Some(diff) = &evt.diff else {
-            return Ok(crate::rt::switch::SwitchSinkOutcome::default());
-        };
-        // Forward to the notif loop with distinct config vs manifest
-        // variants plus before/after heads (the loop diffs value-level
-        // patches via the drawer API). Cheap — no reads in the sink.
-        let changed: Vec<&daybook_types::doc::FacetKey> = diff
-            .changed_facet_keys
-            .iter()
-            .chain(diff.added_facet_keys.iter())
-            .chain(diff.removed_facet_keys.iter())
-            .collect();
-        let plugs_config_tag = daybook_types::doc::FacetTag::WellKnown(
-            daybook_types::doc::WellKnownFacetTag::PlugsConfig,
-        );
-        let plug_manifest_tag = daybook_types::doc::FacetTag::WellKnown(
-            daybook_types::doc::WellKnownFacetTag::PlugManifest,
-        );
-        if changed.iter().any(|key| key.tag == plugs_config_tag) {
-            self.repo
-                .notif_tx
-                .send(PlugsNotif::ConfigDocChanged {
-                    prev_heads: evt.prev_heads.clone(),
-                    new_heads: evt.new_heads.clone(),
-                    origin: evt.origin.clone(),
+        limits: RevisionReadLimits,
+    ) -> Result<RevisionRead<u64, PlugsConfigRevision>, eyre::Report> {
+        loop {
+            match self
+                .inner
+                .next(RevisionReadLimits {
+                    max_entries: limits.max_entries,
                 })
-                .map_err(|_| ferr!("plugs notif channel closed"))?;
+                .await
+                .map_err(|error| ferr!("reading facet-set stream: {error}"))?
+            {
+                RevisionRead::ReplayComplete { through } => {
+                    return Ok(RevisionRead::ReplayComplete { through });
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    let mut events = Vec::new();
+                    for delta in &entries {
+                        let Some(heads) = delta.current_branch_heads.clone() else {
+                            // The config doc was removed; the facet-set store
+                            // tracks its route, so treat the value as cleared.
+                            let heads = self.last_heads.clone().unwrap_or_default();
+                            let config = PlugsConfig::seed();
+                            events.extend(diff_plug_config(
+                                Some(&self.last_config),
+                                &config,
+                                heads.clone(),
+                            ));
+                            self.last_config = config;
+                            self.last_heads = Some(heads);
+                            continue;
+                        };
+                        let config = self.store.hydrate_config_at(&heads).await?;
+                        events.extend(diff_plug_config(
+                            Some(&self.last_config),
+                            &config,
+                            heads.clone(),
+                        ));
+                        self.last_config = config;
+                        self.last_heads = Some(heads);
+                    }
+                    let entry = PlugsConfigRevision {
+                        heads: self.last_heads.clone().unwrap_or_default(),
+                        config: self.last_config.clone(),
+                        events,
+                    };
+                    if revision > self.after {
+                        return Ok(RevisionRead::Entries {
+                            revision,
+                            entries: vec![entry],
+                        });
+                    }
+                    // At or before the consumer's cursor: fold only, yield
+                    // nothing. The loop continues so live revisions are not
+                    // held back by replay catch-up.
+                }
+            }
         }
-        if changed.iter().any(|key| key.tag == plug_manifest_tag) {
-            self.repo
-                .notif_tx
-                .send(PlugsNotif::ManifestDocChanged {
-                    doc_id: evt.doc_id.clone(),
-                    new_heads: evt.new_heads.clone(),
-                    origin: evt.origin.clone(),
-                })
-                .map_err(|_| ferr!("plugs notif channel closed"))?;
+    }
+}
+
+/// Consume the config facet's event stream: apply each revision's events to
+/// the derived cache (the materialization side effects only — the diff itself
+/// is pure) and publish them to live subscribers. A materialization wake
+/// re-evaluates enabled-but-unreadable refs, emitting `PlugEnabled` for
+/// pending→active transitions (ADR 007 §6: pending resolution is exactly a
+/// new manual enablement, only the trigger differs).
+pub(crate) async fn spawn_plugs_config_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    drawer: Arc<DrawerRepo>,
+    plugs_repo: Arc<PlugsRepo>,
+    sql: SqlCtx,
+    parent_cancel_token: CancellationToken,
+) -> Res<crate::repos::RepoStopToken> {
+    let state = SqliteDeltaWalkerStateRepo::new(
+        sql.read_pool.clone(),
+        sql.write_pool.clone(),
+        PLUGS_CONFIG_CONSUMER_STATE_ID,
+        "facets",
+    )
+    .await?;
+    let event_store = Arc::new(PlugsConfigEventStore::new(
+        facet_set_store,
+        Arc::clone(&drawer),
+        &plugs_repo,
+    ));
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let worker_handle = tokio::spawn(async move {
+        let durable = state
+            .progress()
+            .await
+            .expect(ERROR_IMPOSSIBLE)
+            .upstream_revision;
+        let reader = event_store.open((), durable).await.expect(ERROR_IMPOSSIBLE);
+        let mut walker: SerialDeltaWalker<'_, PlugsConfigEventStore, _> =
+            SerialDeltaWalker::open(reader, &state)
+                .await
+                .expect(ERROR_IMPOSSIBLE);
+        let mut pending_wakes = PendingManifestWakes::default();
+        loop {
+            let read: RevisionRead<u64, PlugsConfigRevision> = tokio::select! {
+                biased;
+                _ = worker_cancel_token.cancelled() => break,
+                wake = pending_wakes.next() => {
+                    let (plug_id, _change) = wake.expect(ERROR_IMPOSSIBLE);
+                    let active = plugs_repo
+                        .resolve_pending_enabled_plug(&plug_id)
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                    if active {
+                        pending_wakes.remove(&plug_id);
+                    } else if let Some((_, ref_url)) = plugs_repo
+                        .list_pending()
+                        .await
+                        .into_iter()
+                        .find(|(pending_id, _)| pending_id == &plug_id)
+                    {
+                        pending_wakes
+                            .watch(&drawer, &plug_id, &ref_url)
+                            .await
+                            .expect(ERROR_IMPOSSIBLE);
+                    }
+                    continue;
+                }
+                read = walker.next() => read.expect(ERROR_IMPOSSIBLE),
+            };
+            match read {
+                RevisionRead::ReplayComplete { .. } => {
+                    refresh_pending_manifest_wakes(&drawer, &plugs_repo, &mut pending_wakes)
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    for entry in entries {
+                        plugs_repo
+                            .apply_config_revision(&entry)
+                            .await
+                            .expect(ERROR_IMPOSSIBLE);
+                    }
+                    walker.settle(revision).await.expect(ERROR_IMPOSSIBLE);
+                    refresh_pending_manifest_wakes(&drawer, &plugs_repo, &mut pending_wakes)
+                        .await
+                        .expect(ERROR_IMPOSSIBLE);
+                }
+            }
         }
-        Ok(crate::rt::switch::SwitchSinkOutcome::default())
+    });
+    Ok(crate::repos::RepoStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
+}
+
+async fn refresh_pending_manifest_wakes(
+    drawer: &DrawerRepo,
+    plugs_repo: &PlugsRepo,
+    pending_wakes: &mut PendingManifestWakes,
+) -> Res<()> {
+    let pending = plugs_repo.list_pending().await;
+    let pending_ids: std::collections::HashSet<_> = pending
+        .iter()
+        .map(|(plug_id, _)| plug_id.as_str())
+        .collect();
+    let stale = pending_wakes
+        .registrations
+        .keys()
+        .filter(|plug_id| !pending_ids.contains(plug_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for plug_id in stale {
+        pending_wakes.remove(&plug_id);
+    }
+    for (plug_id, ref_url) in pending {
+        if pending_wakes.watch(drawer, &plug_id, &ref_url).await?
+            && plugs_repo.resolve_pending_enabled_plug(&plug_id).await?
+        {
+            pending_wakes.remove(&plug_id);
+        }
+    }
+    Ok(())
+}
+
+/// Record remote manifest docs into the config facet's known-plug registry
+/// (version/compat gates and rejections live in `record_known_manifest_doc`).
+/// This consumer only drives that recording — the derived cache and the
+/// pending→active resolution belong to the config event consumer above.
+pub(crate) async fn spawn_facet_set_plugs_manifest_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    plugs_repo: Arc<PlugsRepo>,
+    manifest_sql: SqlCtx,
+    parent_cancel_token: CancellationToken,
+) -> Res<crate::repos::RepoStopToken> {
+    let state = SqliteDeltaWalkerStateRepo::new(
+        manifest_sql.read_pool.clone(),
+        manifest_sql.write_pool.clone(),
+        PLUG_MANIFEST_CONSUMER_STATE_ID,
+        "facets",
+    )
+    .await
+    .map_err(|error| ferr!("initializing Plugs manifest walker state: {error}"))?;
+    let cancel_token = parent_cancel_token.child_token();
+    let worker_cancel_token = cancel_token.clone();
+    let worker_handle = tokio::spawn(async move {
+        run_facet_set_plugs_manifest_consumer(
+            facet_set_store,
+            plugs_repo,
+            state,
+            worker_cancel_token,
+        )
+        .await
+        .unwrap();
+    });
+    Ok(crate::repos::RepoStopToken {
+        cancel_token,
+        worker_handle: Some(worker_handle),
+    })
+}
+
+async fn run_facet_set_plugs_manifest_consumer(
+    facet_set_store: Arc<FacetSetRevisionStore>,
+    plugs_repo: Arc<PlugsRepo>,
+    state: SqliteDeltaWalkerStateRepo,
+    cancel_token: CancellationToken,
+) -> Res<()> {
+    let durable = state.progress().await?.upstream_revision;
+    let reader = facet_set_store
+        .open(
+            FacetSetSelector::Tag(WellKnownFacetTag::PlugManifest),
+            durable,
+        )
+        .await
+        .map_err(|error| ferr!("opening Plugs manifest FacetSet reader: {error}"))?;
+    let mut walker: SerialDeltaWalker<'_, FacetSetRevisionStore, SqliteDeltaWalkerStateRepo> =
+        SerialDeltaWalker::open(reader, &state)
+            .await
+            .map_err(|error| ferr!("opening Plugs manifest FacetSet walker: {error}"))?;
+    loop {
+        let read: RevisionRead<u64, FacetDelta> = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => return Ok(()),
+            read = walker.next() => read.map_err(|error| ferr!("reading Plugs manifest FacetSet walker: {error}"))?,
+        };
+        match read {
+            RevisionRead::ReplayComplete { .. } => {}
+            RevisionRead::Entries { revision, entries } => {
+                for delta in entries {
+                    if delta.key.facet_key != FacetKey::from(WellKnownFacetTag::PlugManifest)
+                        || delta.key.branch_id.0.as_str() != delta.key.document_id.as_str()
+                    {
+                        continue;
+                    }
+                    // The record gate is idempotent per (doc, heads); the
+                    // config track is the durable registry, not a cache.
+                    let Some(snapshot) = &delta.current else {
+                        continue;
+                    };
+                    plugs_repo
+                        .record_known_manifest_doc(&delta.key.document_id, &snapshot.branch_heads)
+                        .await?;
+                }
+                walker
+                    .settle(revision)
+                    .await
+                    .map_err(|error| ferr!("settling Plugs manifest FacetSet walker: {error}"))?;
+            }
+        }
     }
 }

@@ -289,6 +289,7 @@ mod tests {
             automerge_frontier_group_scope: Default::default(),
             causal_checkpoint_group_scope: Default::default(),
             group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
         })
         .await?;
         let endpoint = test_endpoint().await?;
@@ -332,6 +333,7 @@ mod tests {
             automerge_frontier_group_scope: Default::default(),
             causal_checkpoint_group_scope: Default::default(),
             group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
         })
         .await?;
         let endpoint = test_endpoint().await?;

@@ -96,6 +96,8 @@ pub struct RepoCtx {
     pub options: RepoOpenOptions,
 
     pub sql: SqlCtx,
+    pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
     pub part_store: SharedPartStore,
     /// Standalone, policy-free store backing the blob partitions.
     pub blob_part_store: SharedPartStore,
@@ -130,6 +132,8 @@ pub(crate) struct RepoCtxParts {
     pub lock_guard: RepoLockGuard,
     pub options: RepoOpenOptions,
     pub sql: SqlCtx,
+    pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    pub sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
     pub part_store: SharedPartStore,
     /// Standalone, policy-free store backing the blob partitions.
     pub blob_part_store: SharedPartStore,
@@ -177,6 +181,8 @@ impl RepoCtx {
             lock_guard: parts.lock_guard,
             options: parts.options,
             sql: parts.sql,
+            sqlite_local_state_repo: parts.sqlite_local_state_repo,
+            sqlite_local_state_stop: parts.sqlite_local_state_stop,
             part_store: parts.part_store,
             blob_part_store: parts.blob_part_store,
             frontier_part_store: parts.frontier_part_store,
@@ -205,6 +211,7 @@ impl RepoCtx {
                     doc_drawer,
                     secret_repo,
                     big_repo_stop,
+                    sqlite_local_state_stop,
                     ..
                 } = self2;
 
@@ -218,6 +225,11 @@ impl RepoCtx {
                     .take()
                     .expect("big repo stop token missing, double shutdown!");
                 stop.stop().await?;
+                // Some embedders (notably the in-crate test harness) retain
+                // this worker token and stop it after their child repos.
+                if let Some(stop) = sqlite_local_state_stop.into_inner().expect(ERROR_MUTEX) {
+                    stop.stop().await?;
+                }
             }
             Err(self2) => {
                 warn!("someone is still holding on to the RepoCtx, shutdown order bug lurks!");
@@ -228,6 +240,14 @@ impl RepoCtx {
                     .take()
                     .expect("big repo stop token missing, double shutdown!");
                 stop.stop().await?;
+                let sqlite_local_state_stop = self2
+                    .sqlite_local_state_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take();
+                if let Some(stop) = sqlite_local_state_stop {
+                    stop.stop().await?;
+                }
             }
         }
         Ok(())
@@ -298,6 +318,9 @@ impl RepoCtx {
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
 
         let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone())).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(layout.repo_root.join("local_state"))
+                .await?;
         info!(
             repo_root = %layout.repo_root.display(),
             sqlite_path = %layout.sqlite_path.display(),
@@ -388,6 +411,7 @@ impl RepoCtx {
                     &doc_config,
                     &authority,
                     &local_user_path,
+                    &sqlite_local_state_repo,
                     &sql,
                     layout.blobs_root.clone(),
                 )
@@ -443,6 +467,8 @@ impl RepoCtx {
             lock_guard,
             options,
             sql,
+            sqlite_local_state_repo,
+            sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store,
             blob_part_store,
             frontier_part_store,
@@ -479,6 +505,7 @@ impl RepoCtx {
         doc_config: &BigDocHandle,
         authority: &crate::authority::RepoAuthority,
         local_user_path: &UserPath,
+        sqlite_local_state_repo: &Arc<crate::local_state::SqliteLocalStateRepo>,
         sql: &SqlCtx,
         blobs_root: PathBuf,
     ) -> Res<(DocumentId, DocumentId)> {
@@ -511,6 +538,7 @@ impl RepoCtx {
                 Arc::clone(&blobs_repo),
                 doc_config.document_id(),
                 local_user_path.to_owned(),
+                Arc::clone(sqlite_local_state_repo),
             )
             .await
             .wrap_err("error loading plugs repo during init dance")?;

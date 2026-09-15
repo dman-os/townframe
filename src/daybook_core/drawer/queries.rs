@@ -1,17 +1,432 @@
 use crate::interlude::*;
+use big_repo::BigRepoLocalFilter;
+use big_repo::{AutomergeFrontierEvent, AutomergeFrontierSelector, AutomergeFrontierTarget};
+use big_sync_core::revisioned_store::{
+    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
+};
 
-use super::DrawerRepo;
+use super::{DrawerRepo, MaterializationWake};
 
 use crate::drawer::{
-    dmeta, facet_recovery,
+    BranchIdentity, BranchIdentityResolution, ExactFacetValueHydration, dmeta, facet_recovery,
     types::{DocBundle, DocEntry, DocNBranches},
 };
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet};
+use daybook_types::doc::{
+    BranchId, ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
+};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+
+/// A Drawer-owned view of AFW materialization publications.
+///
+/// The underlying AFW stream is cursor-based because it is also used as a
+/// durable revision source. Drawer consumers should not manage that cursor:
+/// this reader owns its replay lower bound and suppresses duplicate wakeups
+/// for documents that appear in multiple source revisions.
+pub(crate) struct DrawerMaterializationReader {
+    reader: Box<dyn RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report>>,
+    lower_bound: u64,
+    last_seen: HashMap<DocId, u64>,
+    pending: VecDeque<DrawerMaterializationChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DrawerMaterializationChange {
+    pub(crate) doc_id: DocId,
+    pub(crate) heads: Arc<[automerge::ChangeHash]>,
+    pub(crate) causal_epoch: Option<[u8; 32]>,
+    pub(crate) revision: u64,
+}
+
+impl DrawerMaterializationReader {
+    fn record_new_revision(
+        last_seen: &mut HashMap<DocId, u64>,
+        doc_id: &DocId,
+        revision: u64,
+    ) -> bool {
+        if last_seen.get(doc_id).is_some_and(|seen| *seen >= revision) {
+            return false;
+        }
+        last_seen.insert(doc_id.clone(), revision);
+        true
+    }
+
+    async fn open_reader(
+        source: &big_repo::AutomergeFrontierRevisionStore,
+        documents: Option<&BTreeSet<DocId>>,
+        lower_bound: u64,
+    ) -> Res<Box<dyn RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report>>> {
+        let targets = if let Some(documents) = documents {
+            let mut targets = Vec::with_capacity(documents.len());
+            for doc_id in documents {
+                let doc_id = doc_id.parse::<big_repo::DocumentId>()?;
+                targets.push(AutomergeFrontierTarget::Object {
+                    obj_id: big_repo::automerge_doc_obj_id(doc_id),
+                });
+            }
+            targets
+        } else {
+            vec![AutomergeFrontierTarget::All]
+        };
+        Ok(Box::new(
+            source
+                .open(AutomergeFrontierSelector { targets }, lower_bound)
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn open(drawer: &DrawerRepo, documents: Option<BTreeSet<DocId>>) -> Res<Self> {
+        let source =
+            big_repo::AutomergeFrontierRevisionStore::new(drawer.big_repo.frontier_part_store());
+        let reader = Self::open_reader(&source, documents.as_ref(), 0).await?;
+        Ok(Self {
+            reader,
+            lower_bound: 0,
+            last_seen: HashMap::new(),
+            pending: VecDeque::new(),
+        })
+    }
+
+    pub(crate) async fn next(&mut self) -> Res<DrawerMaterializationChange> {
+        loop {
+            if let Some(change) = self.pending.pop_front() {
+                return Ok(change);
+            }
+            match self.reader.next(RevisionReadLimits::default()).await? {
+                RevisionRead::ReplayComplete { through } => {
+                    self.lower_bound = self.lower_bound.max(through);
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    self.lower_bound = self.lower_bound.max(revision);
+                    for event in entries {
+                        let change = match event {
+                            AutomergeFrontierEvent::Added {
+                                doc_id,
+                                heads,
+                                causal_epoch,
+                                revision,
+                                ..
+                            }
+                            | AutomergeFrontierEvent::Changed {
+                                doc_id,
+                                heads,
+                                causal_epoch,
+                                revision,
+                                ..
+                            } => DrawerMaterializationChange {
+                                doc_id: doc_id.to_string(),
+                                heads,
+                                causal_epoch,
+                                revision,
+                            },
+                            AutomergeFrontierEvent::Removed { .. } => continue,
+                        };
+                        if !Self::record_new_revision(
+                            &mut self.last_seen,
+                            &change.doc_id,
+                            change.revision,
+                        ) {
+                            continue;
+                        }
+                        self.pending.push_back(change);
+                    }
+                }
+            }
+        }
+    }
+}
 
 // queries
 impl DrawerRepo {
+    /// Open the AFW-backed materialization stream used by Drawer projections.
+    ///
+    /// `None` selects all local frontier parts and objects. A document set uses
+    /// object subscriptions scoped to those documents.
+    pub(crate) async fn open_materialization_reader(
+        &self,
+        documents: Option<BTreeSet<DocId>>,
+    ) -> Res<DrawerMaterializationReader> {
+        DrawerMaterializationReader::open(self, documents).await
+    }
+
+    pub(crate) async fn subscribe_document_materialization(
+        &self,
+        physical_branch_id: &BranchId,
+    ) -> Res<MaterializationWake> {
+        self.subscribe_materialization_wake(Some(physical_branch_id))
+            .await
+    }
+
+    pub(crate) async fn subscribe_materialization_wake(
+        &self,
+        physical_branch_id: Option<&BranchId>,
+    ) -> Res<MaterializationWake> {
+        let doc_id = physical_branch_id
+            .map(|branch_id| branch_id.0.parse::<big_repo::DocumentId>())
+            .transpose()?;
+        let (registration, receiver) = self
+            .big_repo
+            .subscribe_local_listener(BigRepoLocalFilter {
+                doc_id: doc_id.map(big_repo::BigRepoDocIdFilter::new),
+            })
+            .await?;
+        Ok(MaterializationWake {
+            _registration: registration,
+            receiver,
+            pending: std::collections::VecDeque::new(),
+        })
+    }
+
+    /// Resolve only the system Branch facet at exact heads.
+    ///
+    /// This is intentionally narrower than the ordinary facet hydration APIs:
+    /// DocDelta tracking must not hydrate dmeta or user facets.
+    pub(crate) async fn resolve_system_branch_identity_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        heads: &ChangeHashSet,
+    ) -> Res<BranchIdentityResolution> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::PendingMaterialization => {
+                tracing::debug!(
+                    ?physical_branch_id,
+                    lookup = "PendingMaterialization",
+                    op = "resolve_system_branch_identity_at_heads",
+                    "branch identity deferred until document materializes"
+                );
+                return Ok(BranchIdentityResolution::Deferred);
+            }
+            big_repo::DocLookup::Missing => {
+                tracing::warn!(
+                    ?physical_branch_id,
+                    lookup = "Missing",
+                    op = "resolve_system_branch_identity_at_heads",
+                    "branch identity deferred because branch document is missing"
+                );
+                return Ok(BranchIdentityResolution::Deferred);
+            }
+        };
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch).to_string();
+        let path = vec![
+            "facets".into(),
+            autosurgeon::Prop::Key(branch_key.clone().into()),
+        ];
+        let Some(raw) = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(&heads.0, automerge::ROOT, path)
+            .await
+            .wrap_err("hydrate system Branch facet at exact heads")?
+        else {
+            return Ok(BranchIdentityResolution::Ignored);
+        };
+        let branch = match WellKnownFacet::from_json(raw.0, WellKnownFacetTag::Branch)
+            .wrap_err("decode Branch facet")?
+        {
+            WellKnownFacet::Branch(value) => value,
+            _ => unreachable!("Branch facet decoded to another well-known variant"),
+        };
+        if branch.branch_id != *physical_branch_id {
+            // Merging one branch into another imports the source Automerge changes
+            // into the destination sedimentree. Historical events for those imported
+            // changes still resolve to the source Branch facet until the destination's
+            // identity-restoration commit is reached. They are known foreign history,
+            // not unresolved materialization: skip them and project the complete merged
+            // state when the restoration commit arrives.
+            tracing::debug!(
+                physical_branch_id = %physical_branch_id.0,
+                imported_branch_id = %branch.branch_id.0,
+                "ignoring imported branch-history event in destination sedimentree"
+            );
+            return Ok(BranchIdentityResolution::ImportedHistory);
+        }
+        Ok(BranchIdentityResolution::Found(BranchIdentity {
+            document_id: branch.document_id,
+            branch_id: branch.branch_id,
+        }))
+    }
+
+    /// Hydrate the dmeta-derived current facet state at exact heads.
+    ///
+    /// Only the Branch and Dmeta system facets are read as values. User facet
+    /// values are deliberately not hydrated: dmeta is the source of truth for
+    /// current membership, while `facet_snapshot_metadata` supplies the
+    /// exact heads and provenance needed by downstream projections.
+    pub(crate) async fn hydrate_dmeta_state_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        branch_heads: ChangeHashSet,
+    ) -> Res<Option<crate::drawer::ExactDmetaState>> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::PendingMaterialization => {
+                tracing::debug!(
+                    ?physical_branch_id,
+                    lookup = "PendingMaterialization",
+                    op = "hydrate_dmeta_state_at_heads",
+                    "dmeta hydration deferred until document materializes"
+                );
+                return Ok(None);
+            }
+            big_repo::DocLookup::Missing => {
+                tracing::warn!(
+                    ?physical_branch_id,
+                    lookup = "Missing",
+                    op = "hydrate_dmeta_state_at_heads",
+                    "dmeta hydration unavailable because branch document is missing"
+                );
+                return Ok(None);
+            }
+        };
+
+        let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
+        let branch_raw = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(branch_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate Branch facet at exact heads")?
+            .ok_or_else(|| ferr!("missing mandatory Branch facet"))?;
+        let branch = match WellKnownFacet::from_json(branch_raw.0, WellKnownFacetTag::Branch)
+            .wrap_err("decode Branch facet")?
+        {
+            WellKnownFacet::Branch(value) => value,
+            _ => unreachable!("Branch facet decoded to another well-known variant"),
+        };
+        if branch.branch_id != *physical_branch_id {
+            return Err(ferr!("physical branch id does not match Branch facet"));
+        }
+
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+        let dmeta_raw = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(dmeta_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate Dmeta facet at exact heads")?
+            .ok_or_else(|| ferr!("missing mandatory Dmeta facet"))?;
+        let dmeta = match WellKnownFacet::from_json(dmeta_raw.0, WellKnownFacetTag::Dmeta)
+            .wrap_err("decode Dmeta facet")?
+        {
+            WellKnownFacet::Dmeta(value) => value,
+            _ => unreachable!("Dmeta facet decoded to another well-known variant"),
+        };
+        if dmeta.id != branch.document_id {
+            return Err(ferr!("dmeta document id does not match Branch facet"));
+        }
+        let dmeta_id = dmeta.id.clone();
+
+        let all_facet_keys = dmeta
+            .facets
+            .keys()
+            .filter(|key| {
+                **key != branch_key
+                    && **key != FacetKey::from(WellKnownFacetTag::Branches)
+                    && **key != dmeta_key
+            })
+            .cloned()
+            .collect();
+        let mut facets = HashMap::new();
+        for (key, meta) in dmeta.facets {
+            if key == branch_key
+                || key == FacetKey::from(WellKnownFacetTag::Branches)
+                || !meta.deleted_at.is_empty()
+            {
+                continue;
+            }
+            let (facet_heads, actor_id) = handle
+                .with_document_read(|doc| {
+                    crate::drawer::facet_snapshot_metadata(doc, &key, &branch_heads.0)
+                })
+                .await?;
+            facets.insert(key, (facet_heads, actor_id));
+        }
+        let dmeta_actor_id = handle
+            .with_document_read(|doc| {
+                doc.get_changes(&[])
+                    .last()
+                    .map(|change| change.actor_id().clone())
+                    .ok_or_else(|| ferr!("dmeta facet has no write point"))
+            })
+            .await?;
+        let dmeta_heads = branch_heads.clone();
+        facets.insert(dmeta_key, (dmeta_heads, dmeta_actor_id));
+        Ok(Some(crate::drawer::ExactDmetaState {
+            document_id: dmeta_id,
+            branch_id: branch.branch_id,
+            branch_heads,
+            facets,
+            all_facet_keys,
+        }))
+    }
+
+    /// Hydrate one user-facet value at exact physical branch heads. The
+    /// drawer owns the BigRepo handle and exposes materialization separately
+    /// so consumers can retain their revision and retry after a wakeup.
+    pub(crate) async fn hydrate_facet_value_at_heads(
+        &self,
+        physical_branch_id: &BranchId,
+        branch_heads: &ChangeHashSet,
+        facet_key: &FacetKey,
+    ) -> Res<ExactFacetValueHydration> {
+        let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(ExactFacetValueHydration::Deferred);
+            }
+        };
+        let value = handle
+            .hydrate_path_at_heads::<ThroughJson<FacetRaw>>(
+                &branch_heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(facet_key.to_string().into()),
+                ],
+            )
+            .await
+            .wrap_err("hydrate facet value at exact heads")?;
+        Ok(value.map_or(ExactFacetValueHydration::Absent, |value| {
+            ExactFacetValueHydration::Present(value.0)
+        }))
+    }
+
+    /// Hydrate one physical document at exact heads for DocDelta projection.
+    pub(crate) async fn hydrate_physical_doc_at_heads(
+        &self,
+        physical_id: big_repo::DocumentId,
+        heads: ChangeHashSet,
+    ) -> Res<Option<HashMap<FacetKey, FacetRaw>>> {
+        let handle = match self.big_repo.get_doc(&physical_id).await? {
+            big_repo::DocLookup::Ready(handle) => handle,
+            big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+                return Ok(None);
+            }
+        };
+        handle
+            .hydrate_path_at_heads::<ThroughJson<HashMap<FacetKey, FacetRaw>>>(
+                &heads.0,
+                automerge::ROOT,
+                vec!["facets".into()],
+            )
+            .await
+            .wrap_err("hydrate physical document facets at exact heads")
+            .map(|value| value.map(|value| value.0))
+    }
+
     pub fn get_drawer_heads(&self) -> ChangeHashSet {
         surelock::key::lock_scope(|key| {
             let (heads, _key) = key.lock(&self.current_heads);
@@ -621,5 +1036,41 @@ impl DrawerRepo {
                 crate::drawer::facet_recovery::facet_write_points(am_doc, facet_key, from, to)
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod materialization_reader_tests {
+    use super::DrawerMaterializationReader;
+    use std::collections::HashMap;
+
+    #[test]
+    fn per_document_revisions_are_deduplicated() {
+        let mut last_seen = HashMap::new();
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            7,
+        ));
+        assert!(!DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            7,
+        ));
+        assert!(!DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            6,
+        ));
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-a".to_owned(),
+            8,
+        ));
+        assert!(DrawerMaterializationReader::record_new_revision(
+            &mut last_seen,
+            &"doc-b".to_owned(),
+            7,
+        ));
     }
 }

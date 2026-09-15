@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 use big_sync::HostPartStore;
+use big_sync::open_sqlite_local_revision_reader;
 use big_sync::sqlite_core::{
     EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
     SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
@@ -26,6 +27,7 @@ use sedimentree_core::{
 use sqlx_utils_rs::SqlCtx;
 use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
+use tokio::sync::Notify;
 mod checkpoints;
 mod events;
 pub(crate) use events::{
@@ -114,6 +116,7 @@ pub struct SqliteBigRepoStore {
     hidden_parts: Arc<HashSet<PartId>>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
+    local_revision_wakeups: Arc<Notify>,
 }
 
 #[cfg(feature = "test-support")]
@@ -438,6 +441,7 @@ impl SqliteBigRepoStore {
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
+            local_revision_wakeups: Arc::new(Notify::new()),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -612,6 +616,7 @@ impl SqliteBigRepoStore {
                 bus.remove(sub_id);
             }
         }
+        self.local_revision_wakeups.notify_waiters();
         Ok(())
     }
 

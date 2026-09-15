@@ -667,7 +667,7 @@ internal object UniffiLib {
     external fun ffi_daybook_types_rust_future_free_u8(`handle`: Long,
     ): Unit
     external fun ffi_daybook_types_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
+    ): Int
     external fun ffi_daybook_types_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
     external fun ffi_daybook_types_rust_future_cancel_i8(`handle`: Long,
@@ -683,7 +683,7 @@ internal object UniffiLib {
     external fun ffi_daybook_types_rust_future_free_u16(`handle`: Long,
     ): Unit
     external fun ffi_daybook_types_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
+    ): Int
     external fun ffi_daybook_types_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
     external fun ffi_daybook_types_rust_future_cancel_i16(`handle`: Long,
@@ -1356,6 +1356,173 @@ public object FfiConverterTypeBody: FfiConverterRustBuffer<Body> {
 
 
 
+data class Branch (
+    var `documentId`: kotlin.String
+    , 
+    var `branchId`: BranchId
+    , 
+    var `createdFrom`: BranchVersion?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranch: FfiConverterRustBuffer<Branch> {
+    override fun read(buf: ByteBuffer): Branch {
+        return Branch(
+            FfiConverterString.read(buf),
+            FfiConverterTypeBranchId.read(buf),
+            FfiConverterOptionalTypeBranchVersion.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Branch) = (
+            FfiConverterString.allocationSize(value.`documentId`) +
+            FfiConverterTypeBranchId.allocationSize(value.`branchId`) +
+            FfiConverterOptionalTypeBranchVersion.allocationSize(value.`createdFrom`)
+    )
+
+    override fun write(value: Branch, buf: ByteBuffer) {
+            FfiConverterString.write(value.`documentId`, buf)
+            FfiConverterTypeBranchId.write(value.`branchId`, buf)
+            FfiConverterOptionalTypeBranchVersion.write(value.`createdFrom`, buf)
+    }
+}
+
+
+
+data class BranchDeclaration (
+    var `name`: kotlin.String?
+    , 
+    var `publication`: BranchPublication
+    , 
+    var `scope`: AuthorityScope
+    , 
+    var `createdFrom`: BranchVersion?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranchDeclaration: FfiConverterRustBuffer<BranchDeclaration> {
+    override fun read(buf: ByteBuffer): BranchDeclaration {
+        return BranchDeclaration(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeBranchPublication.read(buf),
+            FfiConverterTypeAuthorityScope.read(buf),
+            FfiConverterOptionalTypeBranchVersion.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BranchDeclaration) = (
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterTypeBranchPublication.allocationSize(value.`publication`) +
+            FfiConverterTypeAuthorityScope.allocationSize(value.`scope`) +
+            FfiConverterOptionalTypeBranchVersion.allocationSize(value.`createdFrom`)
+    )
+
+    override fun write(value: BranchDeclaration, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterTypeBranchPublication.write(value.`publication`, buf)
+            FfiConverterTypeAuthorityScope.write(value.`scope`, buf)
+            FfiConverterOptionalTypeBranchVersion.write(value.`createdFrom`, buf)
+    }
+}
+
+
+
+data class BranchVersion (
+    var `branchId`: BranchId
+    , 
+    var `heads`: ChangeHashSet
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranchVersion: FfiConverterRustBuffer<BranchVersion> {
+    override fun read(buf: ByteBuffer): BranchVersion {
+        return BranchVersion(
+            FfiConverterTypeBranchId.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BranchVersion) = (
+            FfiConverterTypeBranchId.allocationSize(value.`branchId`) +
+            FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+    )
+
+    override fun write(value: BranchVersion, buf: ByteBuffer) {
+            FfiConverterTypeBranchId.write(value.`branchId`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+    }
+}
+
+
+
+data class Branches (
+    var `byName`: Map<kotlin.String, List<BranchId>>
+    , 
+    var `byId`: Map<BranchId, BranchDeclaration>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranches: FfiConverterRustBuffer<Branches> {
+    override fun read(buf: ByteBuffer): Branches {
+        return Branches(
+            FfiConverterMapStringSequenceTypeBranchId.read(buf),
+            FfiConverterMapTypeBranchIdTypeBranchDeclaration.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Branches) = (
+            FfiConverterMapStringSequenceTypeBranchId.allocationSize(value.`byName`) +
+            FfiConverterMapTypeBranchIdTypeBranchDeclaration.allocationSize(value.`byId`)
+    )
+
+    override fun write(value: Branches, buf: ByteBuffer) {
+            FfiConverterMapStringSequenceTypeBranchId.write(value.`byName`, buf)
+            FfiConverterMapTypeBranchIdTypeBranchDeclaration.write(value.`byId`, buf)
+    }
+}
+
+
+
 data class ButtonNodeV1 (
     var `label`: kotlin.String
     
@@ -1947,6 +2114,91 @@ public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadat
 
 
 
+/**
+ * ADR 007 §5: the per-plug track in the plugg config facet. We keep info
+ * about the activated and latest manifests of plugs — not an index of all
+ * version manifests. `latest` is the highest version seen (valid or
+ * rejected, with the rejection reason); `last_valid` is the ref the
+ * runtime cache materializes (equals `latest` when the latest is valid);
+ * `last_enabled_version` is the upgrade-compat baseline. Versions are
+ * stored as semver strings (semver is a `manifest`-feature-only dep here).
+ */
+data class KnownPlug (
+    /**
+     * full ref (pinned heads) at the latest version's manifest.
+     */
+    var `latest`: Url
+    , 
+    /**
+     * semver string of the latest version.
+     */
+    var `latestVersion`: kotlin.String
+    , 
+    /**
+     * rejection reason of the latest version; None when it is valid.
+     */
+    var `latestRejection`: kotlin.String?
+    , 
+    /**
+     * full ref at the last valid version's manifest (the cache baseline).
+     */
+    var `lastValid`: Url
+    , 
+    /**
+     * semver string of the last valid version.
+     */
+    var `lastValidVersion`: kotlin.String
+    , 
+    /**
+     * version last enabled, if ever — the upgrade-compat baseline.
+     */
+    var `lastEnabledVersion`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeKnownPlug: FfiConverterRustBuffer<KnownPlug> {
+    override fun read(buf: ByteBuffer): KnownPlug {
+        return KnownPlug(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: KnownPlug) = (
+            FfiConverterTypeUrl.allocationSize(value.`latest`) +
+            FfiConverterString.allocationSize(value.`latestVersion`) +
+            FfiConverterOptionalString.allocationSize(value.`latestRejection`) +
+            FfiConverterTypeUrl.allocationSize(value.`lastValid`) +
+            FfiConverterString.allocationSize(value.`lastValidVersion`) +
+            FfiConverterOptionalString.allocationSize(value.`lastEnabledVersion`)
+    )
+
+    override fun write(value: KnownPlug, buf: ByteBuffer) {
+            FfiConverterTypeUrl.write(value.`latest`, buf)
+            FfiConverterString.write(value.`latestVersion`, buf)
+            FfiConverterOptionalString.write(value.`latestRejection`, buf)
+            FfiConverterTypeUrl.write(value.`lastValid`, buf)
+            FfiConverterString.write(value.`lastValidVersion`, buf)
+            FfiConverterOptionalString.write(value.`lastEnabledVersion`, buf)
+    }
+}
+
+
+
 data class ListNodeV1 (
     var `items`: List<ViewNodeV1>
     
@@ -2263,6 +2515,58 @@ public object FfiConverterTypePending: FfiConverterRustBuffer<Pending> {
 
 
 
+data class PlugsConfig (
+    /**
+     * full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
+     * ?branch=<branch>&at=<head1>|<head2>
+     */
+    var `enabled`: Map<kotlin.String, Url>
+    , 
+    /**
+     * Known plugs (plug id -> track): the latest version seen with
+     * its validity status + the last valid/enabled versions (ADR
+     * 007 §5; replaces the facet-set index derivation).
+     */
+    var `knownPlugs`: Map<kotlin.String, KnownPlug>
+    , 
+    var `plugConfigDocIds`: Map<kotlin.String, kotlin.String>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlugsConfig: FfiConverterRustBuffer<PlugsConfig> {
+    override fun read(buf: ByteBuffer): PlugsConfig {
+        return PlugsConfig(
+            FfiConverterMapStringTypeUrl.read(buf),
+            FfiConverterMapStringTypeKnownPlug.read(buf),
+            FfiConverterMapStringString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PlugsConfig) = (
+            FfiConverterMapStringTypeUrl.allocationSize(value.`enabled`) +
+            FfiConverterMapStringTypeKnownPlug.allocationSize(value.`knownPlugs`) +
+            FfiConverterMapStringString.allocationSize(value.`plugConfigDocIds`)
+    )
+
+    override fun write(value: PlugsConfig, buf: ByteBuffer) {
+            FfiConverterMapStringTypeUrl.write(value.`enabled`, buf)
+            FfiConverterMapStringTypeKnownPlug.write(value.`knownPlugs`, buf)
+            FfiConverterMapStringString.write(value.`plugConfigDocIds`, buf)
+    }
+}
+
+
+
 data class Point (
     var `x`: kotlin.Float
     , 
@@ -2557,6 +2861,79 @@ public object FfiConverterTypeViewSpecV1: FfiConverterRustBuffer<ViewSpecV1> {
 
 
 
+sealed class AuthorityScope {
+    
+    object InheritDocument : AuthorityScope()
+    
+    
+    data class AccessSet(
+        val v1: org.example.daybook.uniffi.types.AccessSetId) : AuthorityScope()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAuthorityScope : FfiConverterRustBuffer<AuthorityScope>{
+    override fun read(buf: ByteBuffer): AuthorityScope {
+        return when(buf.getInt()) {
+            1 -> AuthorityScope.InheritDocument
+            2 -> AuthorityScope.AccessSet(
+                FfiConverterTypeAccessSetId.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: AuthorityScope) = when(value) {
+        is AuthorityScope.InheritDocument -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is AuthorityScope.AccessSet -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeAccessSetId.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: AuthorityScope, buf: ByteBuffer) {
+        when(value) {
+            is AuthorityScope.InheritDocument -> {
+                buf.putInt(1)
+                Unit
+            }
+            is AuthorityScope.AccessSet -> {
+                buf.putInt(2)
+                FfiConverterTypeAccessSetId.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 enum class BadgeToneV1 {
     
@@ -2586,6 +2963,39 @@ public object FfiConverterTypeBadgeToneV1: FfiConverterRustBuffer<BadgeToneV1> {
     override fun allocationSize(value: BadgeToneV1) = 4UL
 
     override fun write(value: BadgeToneV1, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class BranchPublication {
+    
+    SHARED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranchPublication: FfiConverterRustBuffer<BranchPublication> {
+    override fun read(buf: ByteBuffer) = try {
+        BranchPublication.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: BranchPublication) = 4UL
+
+    override fun write(value: BranchPublication, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -3371,353 +3781,6 @@ public object FfiConverterTypeViewSpec : FfiConverterRustBuffer<ViewSpec>{
 
 
 
-sealed class WellKnownFacet {
-    
-    data class Dmeta(
-        val v1: org.example.daybook.uniffi.types.Dmeta) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class RefGeneric(
-        val v1: kotlin.String) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class LabelGeneric(
-        val v1: kotlin.String) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class TitleGeneric(
-        val v1: kotlin.String) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class PathGeneric(
-        val v1: kotlin.String) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Pending(
-        val v1: org.example.daybook.uniffi.types.Pending) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Body(
-        val v1: org.example.daybook.uniffi.types.Body) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Note(
-        val v1: org.example.daybook.uniffi.types.Note) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Blob(
-        val v1: org.example.daybook.uniffi.types.Blob) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class BlobPin(
-        val v1: org.example.daybook.uniffi.types.BlobPin) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class ImageMetadata(
-        val v1: org.example.daybook.uniffi.types.ImageMetadata) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class OcrResult(
-        val v1: org.example.daybook.uniffi.types.OcrResult) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Embedding(
-        val v1: org.example.daybook.uniffi.types.Embedding) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-
-    
-
-    
-    
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownFacet>{
-    override fun read(buf: ByteBuffer): WellKnownFacet {
-        return when(buf.getInt()) {
-            1 -> WellKnownFacet.Dmeta(
-                FfiConverterTypeDmeta.read(buf),
-                )
-            2 -> WellKnownFacet.RefGeneric(
-                FfiConverterString.read(buf),
-                )
-            3 -> WellKnownFacet.LabelGeneric(
-                FfiConverterString.read(buf),
-                )
-            4 -> WellKnownFacet.TitleGeneric(
-                FfiConverterString.read(buf),
-                )
-            5 -> WellKnownFacet.PathGeneric(
-                FfiConverterString.read(buf),
-                )
-            6 -> WellKnownFacet.Pending(
-                FfiConverterTypePending.read(buf),
-                )
-            7 -> WellKnownFacet.Body(
-                FfiConverterTypeBody.read(buf),
-                )
-            8 -> WellKnownFacet.Note(
-                FfiConverterTypeNote.read(buf),
-                )
-            9 -> WellKnownFacet.Blob(
-                FfiConverterTypeBlob.read(buf),
-                )
-            10 -> WellKnownFacet.BlobPin(
-                FfiConverterTypeBlobPin.read(buf),
-                )
-            11 -> WellKnownFacet.ImageMetadata(
-                FfiConverterTypeImageMetadata.read(buf),
-                )
-            12 -> WellKnownFacet.OcrResult(
-                FfiConverterTypeOcrResult.read(buf),
-                )
-            13 -> WellKnownFacet.Embedding(
-                FfiConverterTypeEmbedding.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: WellKnownFacet) = when(value) {
-        is WellKnownFacet.Dmeta -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeDmeta.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.RefGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.LabelGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.TitleGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.PathGeneric -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.Pending -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypePending.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.Body -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeBody.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.Note -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeNote.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.Blob -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeBlob.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.BlobPin -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeBlobPin.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.ImageMetadata -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeImageMetadata.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.OcrResult -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeOcrResult.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.Embedding -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeEmbedding.allocationSize(value.v1)
-            )
-        }
-    }
-
-    override fun write(value: WellKnownFacet, buf: ByteBuffer) {
-        when(value) {
-            is WellKnownFacet.Dmeta -> {
-                buf.putInt(1)
-                FfiConverterTypeDmeta.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.RefGeneric -> {
-                buf.putInt(2)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.LabelGeneric -> {
-                buf.putInt(3)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.TitleGeneric -> {
-                buf.putInt(4)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.PathGeneric -> {
-                buf.putInt(5)
-                FfiConverterString.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.Pending -> {
-                buf.putInt(6)
-                FfiConverterTypePending.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.Body -> {
-                buf.putInt(7)
-                FfiConverterTypeBody.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.Note -> {
-                buf.putInt(8)
-                FfiConverterTypeNote.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.Blob -> {
-                buf.putInt(9)
-                FfiConverterTypeBlob.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.BlobPin -> {
-                buf.putInt(10)
-                FfiConverterTypeBlobPin.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.ImageMetadata -> {
-                buf.putInt(11)
-                FfiConverterTypeImageMetadata.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.OcrResult -> {
-                buf.putInt(12)
-                FfiConverterTypeOcrResult.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.Embedding -> {
-                buf.putInt(13)
-                FfiConverterTypeEmbedding.write(value.v1, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
 
 enum class WellKnownFacetTag {
     
@@ -3733,7 +3796,11 @@ enum class WellKnownFacetTag {
     BLOB_PIN,
     IMAGE_METADATA,
     OCR_RESULT,
-    EMBEDDING;
+    EMBEDDING,
+    PLUG_MANIFEST,
+    PLUGS_CONFIG,
+    BRANCH,
+    BRANCHES;
 
     
 
@@ -3853,6 +3920,38 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeBranchVersion: FfiConverterRustBuffer<BranchVersion?> {
+    override fun read(buf: ByteBuffer): BranchVersion? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeBranchVersion.read(buf)
+    }
+
+    override fun allocationSize(value: BranchVersion?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeBranchVersion.allocationSize(value)
+        }
+    }
+
+    override fun write(value: BranchVersion?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeBranchVersion.write(value, buf)
         }
     }
 }
@@ -4187,6 +4286,34 @@ public object FfiConverterSequenceTypeViewNodeV1: FfiConverterRustBuffer<List<Vi
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeBranchId: FfiConverterRustBuffer<List<BranchId>> {
+    override fun read(buf: ByteBuffer): List<BranchId> {
+        val len = buf.getInt()
+        return List<BranchId>(len) {
+            FfiConverterTypeBranchId.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<BranchId>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeBranchId.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<BranchId>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeBranchId.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeTimestamp: FfiConverterRustBuffer<List<Timestamp>> {
     override fun read(buf: ByteBuffer): List<Timestamp> {
         val len = buf.getInt()
@@ -4271,6 +4398,84 @@ public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
 /**
  * @suppress
  */
+public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.String, kotlin.String>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.String> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, kotlin.String>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterString.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, kotlin.String>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterString.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterString.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypeKnownPlug: FfiConverterRustBuffer<Map<kotlin.String, KnownPlug>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, KnownPlug> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, KnownPlug>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeKnownPlug.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, KnownPlug>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeKnownPlug.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, KnownPlug>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeKnownPlug.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapStringTypeUserMeta: FfiConverterRustBuffer<Map<kotlin.String, UserMeta>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, UserMeta> {
         val len = buf.getInt()
@@ -4300,6 +4505,84 @@ public object FfiConverterMapStringTypeUserMeta: FfiConverterRustBuffer<Map<kotl
         value.forEach { (k, v) ->
             FfiConverterString.write(k, buf)
             FfiConverterTypeUserMeta.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringSequenceTypeBranchId: FfiConverterRustBuffer<Map<kotlin.String, List<BranchId>>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, List<BranchId>> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, List<BranchId>>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterSequenceTypeBranchId.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, List<BranchId>>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterSequenceTypeBranchId.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, List<BranchId>>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterSequenceTypeBranchId.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringTypeUrl: FfiConverterRustBuffer<Map<kotlin.String, Url>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, Url> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, Url>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeUrl.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, Url>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeUrl.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, Url>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeUrl.write(v, buf)
         }
     }
 }
@@ -4388,6 +4671,45 @@ public object FfiConverterMapTypeFacetKeyTypeJson: FfiConverterRustBuffer<Map<Fa
 /**
  * @suppress
  */
+public object FfiConverterMapTypeBranchIdTypeBranchDeclaration: FfiConverterRustBuffer<Map<BranchId, BranchDeclaration>> {
+    override fun read(buf: ByteBuffer): Map<BranchId, BranchDeclaration> {
+        val len = buf.getInt()
+        return buildMap<BranchId, BranchDeclaration>(len) {
+            repeat(len) {
+                val k = FfiConverterTypeBranchId.read(buf)
+                val v = FfiConverterTypeBranchDeclaration.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<BranchId, BranchDeclaration>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterTypeBranchId.allocationSize(k) +
+            FfiConverterTypeBranchDeclaration.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<BranchId, BranchDeclaration>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterTypeBranchId.write(k, buf)
+            FfiConverterTypeBranchDeclaration.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapTypeUuidTypeFacetKey: FfiConverterRustBuffer<Map<Uuid, FacetKey>> {
     override fun read(buf: ByteBuffer): Map<Uuid, FacetKey> {
         val len = buf.getInt()
@@ -4420,6 +4742,26 @@ public object FfiConverterMapTypeUuidTypeFacetKey: FfiConverterRustBuffer<Map<Uu
         }
     }
 }
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias AccessSetId = kotlin.String
+public typealias FfiConverterTypeAccessSetId = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias BranchId = kotlin.String
+public typealias FfiConverterTypeBranchId = FfiConverterString
 
 
 

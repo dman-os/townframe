@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::config::ConfigRepo;
-use crate::index::{DocBlobsIndexRepo, DocFacetRefIndexRepo, DocFacetSetIndexRepo};
+use crate::index::{DocFacetRefIndexRepo, DocFacetSetIndexRepo};
 use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
@@ -11,7 +11,6 @@ use crate::repo::RepoCtx;
 use big_repo::SharedPartStore;
 use daybook_types::manifest;
 
-use std::collections::BTreeMap;
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
     types::Component,
@@ -30,7 +29,6 @@ use wflow::{
 
 pub mod dispatch;
 pub mod init;
-pub mod switch;
 pub mod triage;
 pub mod wash_plugin;
 
@@ -71,8 +69,6 @@ pub struct RtConfig {
     pub startup_progress_task_id: Option<String>,
 }
 
-pub use switch::SwitchDocEvent;
-
 pub struct Rt {
     pub config: RtConfig,
     pub rcx: Arc<RepoCtx>,
@@ -92,51 +88,35 @@ pub struct Rt {
     pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
     pub sqlite_plugin: Arc<wash_plugin_sqlite::SqlPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
-    pub blob_pin_worker: Arc<crate::blobs::BlobPinWorker>,
-    pub blob_pins_part_worker: Arc<crate::blobs::BlobPinsPartWorker>,
-    pub doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
-    pub registry: Arc<crate::repos::ListenersRegistry>,
     local_wflow_part_id: String,
-}
-
-impl crate::repos::Repo for Rt {
-    type Event = SwitchDocEvent;
-
-    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
-        &self.registry
-    }
-
-    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
-        &self.cancel_token
-    }
 }
 
 pub struct RtStopToken {
     wflow_part_handle: TokioPartitionWorkerHandle,
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
-    switch_worker: switch::SwitchWorkerHandle,
+    doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: crate::repos::RepoStopToken,
     blob_pins_part_worker_stop: crate::repos::RepoStopToken,
-    doc_blobs_index_stop: crate::repos::RepoStopToken,
-    doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
-    doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
+    doc_facet_set_index_stop: crate::repos::RepoStopToken,
+    plugs_config_consumer_stop: crate::repos::RepoStopToken,
+    plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
+    doc_facet_ref_index_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
     pub async fn stop(self) -> Res<()> {
         self.rt.cancel_token.cancel();
 
-        // Stop triage worker first to prevent new dispatches from being created
-        if let Err(err) = self.switch_worker.stop().await {
-            warn!(
-                ?err,
-                "error stopping switch_worker during shutdown - continuing"
-            );
-        }
+        utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
+            .await?;
+        self.doc_processor_stop.stop().await?;
+
+        self.plugs_manifest_consumer_stop.stop().await?;
+        self.plugs_config_consumer_stop.stop().await?;
 
         if let Err(err) = self.doc_facet_set_index_stop.stop().await {
             warn!(
@@ -149,52 +129,6 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
-            );
-        }
-
-        // FIXME: this is wrong, dispatches are allowed
-        // to resume on reboot
-        //
-        // Wait for all active dispatches to complete
-        // let active_dispatches: Vec<String> = self
-        //     .rt
-        //     .dispatch_repo
-        //     .list()
-        //     .await
-        //     .iter()
-        //     .map(|(id, _)| id.clone())
-        //     .collect();
-        // if !active_dispatches.is_empty() {
-        //     info!(
-        //         count = active_dispatches.len(),
-        //         "waiting for active dispatches to complete"
-        //     );
-        //     for dispatch_id in active_dispatches {
-        //         let _ = self
-        //             .rt
-        //             .wait_for_dispatch_end(&dispatch_id, Duration::from_secs(30))
-        //             .await;
-        //     }
-        // }
-
-        // Stop wflow partition worker
-        if let Err(err) = self.wflow_part_handle.stop().await {
-            warn!(
-                ?err,
-                "error stopping wflow_part_handle during shutdown - continuing"
-            );
-        }
-
-        if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
-            warn!(
-                ?err,
-                "error stopping wash_host during shutdown - continuing"
-            );
-        }
-        if let Err(err) = self.doc_blobs_index_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping doc_blobs_index_repo during shutdown - continuing"
             );
         }
         if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
@@ -210,13 +144,18 @@ impl RtStopToken {
             );
         }
 
-        if let Err(err) =
-            utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
-                .await
-        {
+        // Stop wflow partition worker
+        if let Err(err) = self.wflow_part_handle.stop().await {
             warn!(
                 ?err,
-                "error waiting for partition_watcher during shutdown - continuing"
+                "error stopping wflow_part_handle during shutdown - continuing"
+            );
+        }
+
+        if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
+            warn!(
+                ?err,
+                "error stopping wash_host during shutdown - continuing"
             );
         }
 
@@ -304,6 +243,9 @@ impl Rt {
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let total_started = std::time::Instant::now();
         let startup_progress_task_id = config.startup_progress_task_id.clone();
+        // One cancel token for the whole Rt, created up front so workers
+        // booted before the Rt struct is constructed still share it.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
         crate::repo::ensure_authority_partitions(
             &rcx.part_store,
@@ -336,8 +278,10 @@ impl Rt {
         let stage_started = std::time::Instant::now();
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
             crate::index::DocFacetSetIndexRepo::boot(
-                Arc::clone(&drawer),
                 Arc::clone(&sqlite_local_state_repo),
+                Arc::clone(&drawer),
+                Arc::clone(&rcx.frontier_part_store),
+                cancel_token.clone(),
             )
             .await?;
         Self::emit_startup_progress_status(
@@ -350,33 +294,29 @@ impl Rt {
         )
         .await?;
         let stage_started = std::time::Instant::now();
-        let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
-            Arc::clone(&drawer),
-            Arc::clone(&blobs_repo),
+        let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
+            Arc::clone(&rcx.blob_part_store),
             Arc::clone(&sqlite_local_state_repo),
+            Arc::clone(&drawer),
+            doc_facet_set_index_repo.revision_store(),
+            cancel_token.clone(),
         )
         .await?;
-        let (blob_pins_part_worker, blob_pins_part_worker_stop) =
-            crate::blobs::BlobPinsPartWorker::boot(
-                Arc::clone(&drawer),
-                Arc::clone(&rcx.blob_part_store),
-                Arc::clone(&sqlite_local_state_repo),
-            )
-            .await?;
-        let (blob_pin_worker, blob_pin_worker_stop) = crate::blobs::BlobPinWorker::boot(
+        let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
             Arc::clone(&drawer),
-            Arc::clone(&plugs_repo),
             rcx.sql.clone(),
-            Some(Arc::clone(&blobs_repo)),
             rcx.core_inventory_doc_id,
             rcx.docs_inventory_doc_id,
+            doc_facet_set_index_repo.revision_store(),
+            Arc::clone(&plugs_repo),
+            cancel_token.clone(),
         )
         .await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
             format!(
-                "rt boot: loaded doc-blobs index ({})",
+                "rt boot: blob pin workers started ({})",
                 Self::startup_timing_note(stage_started, total_started)
             ),
         )
@@ -387,6 +327,8 @@ impl Rt {
                 Arc::clone(&drawer),
                 Arc::clone(&plugs_repo),
                 Arc::clone(&sqlite_local_state_repo),
+                doc_facet_set_index_repo.revision_store(),
+                cancel_token.clone(),
             )
             .await?;
         Self::emit_startup_progress_status(
@@ -496,7 +438,7 @@ impl Rt {
         let rt = Arc::new(Self {
             config,
             local_wflow_part_id,
-            cancel_token: default(),
+            cancel_token,
             plugs_repo,
             drawer,
             rcx,
@@ -511,18 +453,35 @@ impl Rt {
             stateless_view_plugin,
             sqlite_plugin,
             blobs_repo,
-            blob_pin_worker: Arc::clone(&blob_pin_worker),
-            blob_pins_part_worker: Arc::clone(&blob_pins_part_worker),
-            doc_blobs_index_repo: Arc::clone(&doc_blobs_index_repo),
             doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
             doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
-            sqlite_local_state_repo,
+            sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
             config_repo,
             wflow_part_state,
-            registry: crate::repos::ListenersRegistry::new(),
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
+        let plugs_config_sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
+            .await?;
+        let plugs_config_consumer_stop = crate::plugs::spawn_plugs_config_consumer(
+            rt.doc_facet_set_index_repo.revision_store(),
+            Arc::clone(&rt.drawer),
+            Arc::clone(&rt.plugs_repo),
+            plugs_config_sql,
+            rt.cancel_token.clone(),
+        )
+        .await?;
+        let plugs_manifest_sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx(crate::plugs::PLUG_MANIFEST_CONSUMER_STATE_ID)
+            .await?;
+        let plugs_manifest_consumer_stop = crate::plugs::spawn_facet_set_plugs_manifest_consumer(
+            rt.doc_facet_set_index_repo.revision_store(),
+            Arc::clone(&rt.plugs_repo),
+            plugs_manifest_sql,
+            rt.cancel_token.clone(),
+        )
+        .await?;
         // Ensure init routines are queued at boot according to each init run mode.
         // ADR 007 §6: boot queues inits for the active set only.
         let mut plug_ids = rt
@@ -552,63 +511,17 @@ impl Rt {
         )
         .await?;
 
-        // Start the DocTriageWorker to automatically queue jobs when docs are added
-        let switch_sinks: BTreeMap<String, Box<dyn crate::rt::switch::SwitchSink + Send + Sync>> =
-            [
-                // FIXME: rename the methods to switch sinks
-                (
-                    "doc_processor".to_string(),
-                    crate::rt::triage::doc_processor_triage_listener(Arc::clone(&rt)),
-                ),
-                ("blob_pins".to_string(), blob_pin_worker.triage_listener()),
-                (
-                    "blob_pins_part".to_string(),
-                    blob_pins_part_worker.triage_listener(),
-                ),
-                (
-                    "doc_blobs".to_string(),
-                    doc_blobs_index_repo.triage_listener(),
-                ),
-                (
-                    "facet_set".to_string(),
-                    doc_facet_set_index_repo.triage_listener(),
-                ),
-                (
-                    "facet_ref".to_string(),
-                    doc_facet_ref_index_repo.triage_listener(),
-                ),
-                (
-                    "plugs".to_string(),
-                    Box::new(crate::plugs::PlugsSwitchSink::new(Arc::clone(
-                        &rt.plugs_repo,
-                    ))),
-                ),
-                (
-                    "plugs_config_store".to_string(),
-                    Box::new(
-                        rt.plugs_repo
-                            .config_store_sink()
-                            .expect("plugs config store must be attached"),
-                    ),
-                ),
-            ]
-            .into();
-        let switch_worker = crate::rt::switch::spawn_switch_worker(
-            Arc::clone(&rt.drawer),
+        let doc_processor_stop = crate::rt::triage::spawn_doc_processor_driver(
+            Arc::clone(&rt),
+            rt.doc_facet_set_index_repo.revision_store(),
             Arc::clone(&rt.plugs_repo),
-            Arc::clone(&rt.config_repo),
-            Arc::clone(&rt.dispatch_repo),
-            Arc::clone(&rt.registry),
-            Arc::clone(&rt.rcx.frontier_part_store),
             rt.cancel_token.clone(),
-            rt.rcx.sql.clone(),
-            switch_sinks,
         )
         .await?;
 
         let partition_watcher = tokio::spawn({
             let repo = Arc::clone(&rt);
-            async move { repo.keep_up_with_partition().await.unwrap_or_log() }
+            async move { repo.keep_up_with_partition().await.unwrap() }
         });
 
         Ok((
@@ -616,11 +529,12 @@ impl Rt {
             RtStopToken {
                 rt,
                 partition_watcher,
-                switch_worker,
+                doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
-                doc_blobs_index_stop,
                 doc_facet_set_index_stop,
+                plugs_config_consumer_stop,
+                plugs_manifest_consumer_stop,
                 doc_facet_ref_index_stop,
                 wflow_part_handle,
             },

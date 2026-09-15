@@ -53,7 +53,7 @@ pub enum BigRepoChangeNotification {
     },
 }
 
-#[expect(clippy::enum_variant_names)]
+/// Local document lifecycle and materialization notifications.
 #[derive(Debug, Clone)]
 pub enum BigRepoLocalNotification {
     DocCreated {
@@ -207,6 +207,7 @@ pub enum OriginFilter {
     Bootstrap,
 }
 
+/// Restricts local document notifications to one document when supplied.
 pub struct LocalFilter {
     pub doc_id: Option<DocIdFilter>,
 }

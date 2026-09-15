@@ -195,6 +195,47 @@ impl<Seed: Clone> Scheduler<Seed> {
         id
     }
 
+    /// Schedule a delayed task using the retry history of a completed task.
+    /// Unlike [`Self::respawn_delayed`], this is for drivers that retire a
+    /// completion before deciding whether to retry it.
+    pub fn spawn_delayed(
+        &mut self,
+        seed: Seed,
+        prev_retry: Retry,
+        min_delay: Duration,
+        now: Instant,
+    ) -> TaskId {
+        let max_backoff = if self.max_backoff.is_zero() {
+            Duration::from_secs(60)
+        } else {
+            self.max_backoff
+        };
+        let backoff = if prev_retry.backoff.is_zero() {
+            min_delay.min(max_backoff)
+        } else {
+            prev_retry
+                .backoff
+                .saturating_mul(2)
+                .max(min_delay)
+                .min(max_backoff)
+        };
+        let retry = Retry {
+            attempt_no: prev_retry.attempt_no + 1,
+            queued_at: now,
+            backoff,
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        self.live.insert(id, retry);
+        self.delayed.insert(id, (seed, now + backoff));
+        id
+    }
+
+    /// The earliest deadline which the driver should pass to [`Self::tick`].
+    pub fn next_due(&self) -> Option<Instant> {
+        self.delayed.values().map(|(_, due_at)| *due_at).min()
+    }
+
     /// Move due delayed tasks onto the spawn queue. Mirrors
     /// `Tasks::enqueue_due_tasks`.
     pub fn tick(&mut self, now: Instant) {
@@ -214,6 +255,14 @@ impl<Seed: Clone> Scheduler<Seed> {
     /// Hand spawned tasks to the driver.
     pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, SpawnedTask<Seed>> {
         self.spawn_queue.drain(..)
+    }
+
+    pub fn spawn_queue_len(&self) -> usize {
+        self.spawn_queue.len()
+    }
+
+    pub fn requeue_spawned(&mut self, tasks: impl IntoIterator<Item = SpawnedTask<Seed>>) {
+        self.spawn_queue.extend(tasks);
     }
 
     /// Hand cancelled task ids to the driver so it can abort running futures.
@@ -297,6 +346,21 @@ where
         self.seed_by_key.insert(key, seed);
         task
     }
+    /// Cancel the current task for `key`.  The task id becomes stale, so a
+    /// completion racing with cancellation cannot be accepted.  The caller
+    /// is responsible for aborting the physical task handle.
+    pub fn cancel(&mut self, key: K) -> Option<TaskId> {
+        let Some(task) = self.active_by_key.remove(&key) else {
+            // A parked key has no active task id, but its retained seed is
+            // still live logical work and must be discarded on cancellation.
+            self.seed_by_key.remove(&key);
+            return None;
+        };
+        self.key_by_task.remove(&task);
+        self.seed_by_key.remove(&key);
+        self.scheduler.cancel(task);
+        Some(task)
+    }
 
     /// Retire a completed task. Returns false for a stale completion from a
     /// task that was replaced or cancelled already.
@@ -318,6 +382,14 @@ where
         self.scheduler.drain_spawn_queue()
     }
 
+    pub fn spawn_queue_len(&self) -> usize {
+        self.scheduler.spawn_queue_len()
+    }
+
+    pub fn requeue_spawned(&mut self, tasks: impl IntoIterator<Item = SpawnedTask<Seed>>) {
+        self.scheduler.requeue_spawned(tasks);
+    }
+
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId> {
         self.scheduler.drain_stop_queue()
     }
@@ -326,8 +398,72 @@ where
         self.scheduler.tick(now);
     }
 
+    pub fn next_due(&self) -> Option<Instant> {
+        self.scheduler.next_due()
+    }
+
+    /// Park a completed task's seed until an external wakeup re-drives it.
+    /// The caller must have retired the task with [`Self::complete`] first.
+    pub fn park(&mut self, key: K, seed: Seed) {
+        assert!(
+            !self.active_by_key.contains_key(&key),
+            "cannot park an active keyed task"
+        );
+        let old = self.seed_by_key.insert(key, seed);
+        assert!(old.is_none(), "key already has parked work");
+    }
+
+    /// Wake a parked key and enqueue its retained seed in the ready queue.
+    ///
+    /// The driver decides when the queued task becomes physically active; this
+    /// transition never bypasses the driver's execution budget.
+    pub fn wake(&mut self, now: Instant, key: K) -> bool {
+        if self.active_by_key.contains_key(&key) {
+            return false;
+        }
+        let Some(seed) = self.seed_by_key.remove(&key) else {
+            return false;
+        };
+        let task = self.scheduler.spawn(now, seed.clone());
+        let old = self.active_by_key.insert(key, task);
+        assert!(old.is_none(), "waking a key left an active task");
+        let old = self.key_by_task.insert(task, key);
+        assert!(old.is_none(), "scheduler task id was reused");
+        self.seed_by_key.insert(key, seed);
+        true
+    }
+
+    /// Schedule a failed completion for a later retry while retaining its key.
+    pub fn retry_delayed(
+        &mut self,
+        now: Instant,
+        key: K,
+        seed: Seed,
+        retry: Retry,
+        min_delay: Duration,
+    ) -> TaskId {
+        assert!(
+            !self.active_by_key.contains_key(&key),
+            "cannot retry an active keyed task"
+        );
+        let task = self
+            .scheduler
+            .spawn_delayed(seed.clone(), retry, min_delay, now);
+        let old = self.active_by_key.insert(key, task);
+        assert!(old.is_none(), "retry left an active task for the key");
+        let old = self.key_by_task.insert(task, key);
+        assert!(old.is_none(), "scheduler task id was reused");
+        self.seed_by_key.insert(key, seed);
+        task
+    }
+
     pub fn active_task(&self, key: K) -> Option<TaskId> {
         self.active_by_key.get(&key).copied()
+    }
+
+    /// Return retry bookkeeping for a current keyed task.
+    pub fn retry_of(&self, task: TaskId) -> Option<Retry> {
+        self.scheduler.retry_of(task)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -363,6 +499,33 @@ mod tests {
         );
         assert!(!scheduler.complete(first));
         assert!(scheduler.complete(second));
+    }
+
+    #[test]
+    fn parked_key_is_ready_only_after_wake() {
+        let now = t(0);
+        let mut scheduler = KeyedScheduler::<u64, Seed>::default();
+        let task = scheduler.replace(now, 1, Seed::Diff);
+        scheduler.drain_spawn_queue();
+        assert!(scheduler.complete(task));
+        scheduler.park(1, Seed::Diff);
+        assert_eq!(scheduler.active_task(1), None);
+        assert!(scheduler.wake(now, 1));
+        // Waking admits the logical task, but leaves physical admission to the
+        // driver.  The seed must remain in the ready queue until it is drained.
+        assert!(scheduler.active_task(1).is_some());
+        assert_eq!(scheduler.counts().spawn_queue, 1);
+        assert_eq!(scheduler.drain_spawn_queue().count(), 1);
+    }
+
+    #[test]
+    fn waking_active_key_is_a_noop() {
+        let now = t(0);
+        let mut scheduler = KeyedScheduler::<u64, Seed>::default();
+        let task = scheduler.replace(now, 1, Seed::Diff);
+        scheduler.drain_spawn_queue();
+        assert!(!scheduler.wake(now, 1));
+        assert!(scheduler.complete(task));
     }
 
     #[test]

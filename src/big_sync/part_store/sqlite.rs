@@ -1,11 +1,17 @@
 use super::HostPartStore;
-use super::sqlite_core::{EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED};
+use super::LocalPartRevisionReader;
+use super::sqlite_core::{EVENT_ADDED, EVENT_REMOVED};
+use super::{PartFrontierKey, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
+use crate::keyed_frontier::open_sqlite_reader;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
 #[cfg(test)]
 use big_sync_core::Byte32Id;
+use big_sync_core::keyed_frontier::{
+    FrontierRead, FrontierReadLimits, KeyedFrontier, KeyedFrontierTransaction,
+};
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
@@ -21,302 +27,100 @@ use future_form::{FutureForm, Sendable};
 use futures::future::BoxFuture;
 use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
+use tokio::sync::Notify;
 #[cfg(test)]
 use uuid::Uuid;
 
-use super::sqlite_core::{PendingSubscription, SUB_FINALIZING, SUB_REPLAYING_CLEAN, encode_access};
-
-struct SqliteSubscription {
-    sender: mpsc::Sender<SubEvent>,
-    principal: PeerId,
-    pending: Arc<PendingSubscription>,
-}
+use super::sqlite_core::encode_access;
 
 struct ReplayCandidate {
     txid: CursorIndex,
     obj_id: ObjId,
-    part_id: Option<PartId>,
     event_type: i64,
     payload: ObjPayload,
-}
-
-#[derive(Default)]
-struct SqliteSubscriptions {
-    by_part: HashMap<PartId, HashSet<Uuid>>,
-    parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
-    by_obj: HashMap<ObjId, HashSet<Uuid>>,
-    objs_by_sub: HashMap<Uuid, HashSet<ObjId>>,
-    pending: HashSet<Uuid>,
-    live: HashSet<Uuid>,
-    subs: HashMap<Uuid, Arc<SqliteSubscription>>,
-}
-
-impl SqliteSubscriptions {
-    fn remove(&mut self, sub_id: Uuid) {
-        self.pending.remove(&sub_id);
-        self.live.remove(&sub_id);
-        self.subs.remove(&sub_id);
-        if let Some(parts) = self.parts_by_sub.remove(&sub_id) {
-            for part_id in parts {
-                if let Some(subs) = self.by_part.get_mut(&part_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-        if let Some(obj_ids) = self.objs_by_sub.remove(&sub_id) {
-            for obj_id in obj_ids {
-                if let Some(subs) = self.by_obj.get_mut(&obj_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-    }
 }
 
 #[derive(Clone)]
 pub struct SqlitePartStore {
     pub(crate) core: SqliteCore,
-    bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
+    pub(crate) frontier: SqlitePartFrontier,
     hidden_parts: Arc<HashSet<PartId>>,
-    live_debouncer: Arc<LiveDebouncer>,
 }
 
-/// Semantic target for debouncing state events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum DebounceTarget {
-    Part(PartId, ObjId),
-    Object(ObjId),
-}
+/// Open a local revision reader over an existing BigSync SQLite schema.
+/// Callers that own a different store facade can supply its read pool, scope,
+/// and commit wakeup without going through the legacy subscription channel.
+pub async fn open_sqlite_local_revision_reader(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    reqs: SubPartsRequest,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    use big_sync_core::rpc::SubscriptionTarget;
 
-impl DebounceTarget {
-    pub(crate) fn obj_id(&self) -> ObjId {
-        match self {
-            Self::Part(_, obj_id) | Self::Object(obj_id) => *obj_id,
-        }
-    }
-
-    pub(crate) fn part_id(&self) -> Option<PartId> {
-        match self {
-            Self::Part(part_id, _) => Some(*part_id),
-            Self::Object(_) => None,
-        }
-    }
-}
-
-fn reduce_sub_event(existing: &mut SubEvent, new: SubEvent) {
-    match (std::mem::replace(existing, SubEvent::ReplayComplete), new) {
-        (SubEvent::Added(mut existing_added), SubEvent::Added(new_added)) => {
-            if new_added.cursor >= existing_added.cursor {
-                existing_added.cursor = new_added.cursor;
-                existing_added.payload = new_added.payload;
-            }
-            *existing = SubEvent::Added(existing_added);
-        }
-        (SubEvent::Added(mut existing_added), SubEvent::Changed(new_changed)) => {
-            // Retain Added variant so receiver adds the object to the partition
-            if new_changed.cursor >= existing_added.cursor {
-                existing_added.cursor = new_changed.cursor;
-                existing_added.payload = new_changed.payload;
-            }
-            *existing = SubEvent::Added(existing_added);
-        }
-        (SubEvent::Added(existing_added), SubEvent::Removed(mut new_removed)) => {
-            new_removed.cursor = new_removed.cursor.max(existing_added.cursor);
-            *existing = SubEvent::Removed(new_removed);
-        }
-        (SubEvent::Changed(mut existing_changed), SubEvent::Changed(new_changed)) => {
-            for part_id in new_changed.part_ids {
-                if !existing_changed.part_ids.contains(&part_id) {
-                    existing_changed.part_ids.push(part_id);
-                }
-            }
-            if new_changed.cursor >= existing_changed.cursor {
-                existing_changed.cursor = new_changed.cursor;
-                existing_changed.payload = new_changed.payload;
-            }
-            existing_changed.part_ids.sort_unstable();
-            *existing = SubEvent::Changed(existing_changed);
-        }
-        (SubEvent::Changed(existing_changed), SubEvent::Removed(mut new_removed)) => {
-            new_removed.cursor = new_removed.cursor.max(existing_changed.cursor);
-            *existing = SubEvent::Removed(new_removed);
-        }
-        (SubEvent::Changed(existing_changed), SubEvent::Added(mut new_added)) => {
-            if new_added.cursor < existing_changed.cursor {
-                new_added.cursor = existing_changed.cursor;
-            }
-            *existing = SubEvent::Added(new_added);
-        }
-        (SubEvent::Removed(mut existing_removed), SubEvent::Removed(new_removed)) => {
-            existing_removed.cursor = existing_removed.cursor.max(new_removed.cursor);
-            *existing = SubEvent::Removed(existing_removed);
-        }
-        (SubEvent::Removed(mut existing_removed), SubEvent::Changed(new_changed)) => {
-            // Stale Changed after Removed: retain Removed, advance cursor
-            existing_removed.cursor = existing_removed.cursor.max(new_changed.cursor);
-            *existing = SubEvent::Removed(existing_removed);
-        }
-        (SubEvent::Removed(existing_removed), SubEvent::Added(mut new_added)) => {
-            if new_added.cursor < existing_removed.cursor {
-                new_added.cursor = existing_removed.cursor;
-            }
-            *existing = SubEvent::Added(new_added);
-        }
-        (_old, new) => {
-            *existing = new;
-        }
-    }
-}
-
-/// Per-store debouncer for live-subscriber state events.
-///
-/// Collapses bursts of state changes to the same (subscriber, target) into a
-/// single delivery using semantic event accumulation.
-struct LiveDebouncer {
-    batcher: std::sync::Mutex<
-        utils_rs::batching::KeyedBatcher<
-            (Uuid, DebounceTarget),
-            SubEvent,
-            utils_rs::batching::DebouncePolicy,
-        >,
-    >,
-    /// Owned separately so the flush task can wait on it without keeping the
-    /// whole debouncer (and therefore the store's shutdown signal) alive.
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl LiveDebouncer {
-    fn new(policy: utils_rs::batching::DebouncePolicy) -> Arc<Self> {
-        Arc::new(Self {
-            batcher: std::sync::Mutex::new(utils_rs::batching::KeyedBatcher::new(
-                policy,
-                |_event: &SubEvent| 0,
-                reduce_sub_event,
-            )),
-            notify: Arc::new(tokio::sync::Notify::new()),
+    let objects = reqs
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+            SubscriptionTarget::Part { .. } => None,
         })
+        .collect::<HashSet<_>>();
+    let parts = reqs
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
+            SubscriptionTarget::Object { .. } => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut selector = SqlitePartSelector::default();
+    for target in reqs.targets {
+        match target {
+            SubscriptionTarget::Part { part_id, cursor } => {
+                selector
+                    .parts
+                    .entry(part_id)
+                    .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
+                    .or_insert(reqs.lower_bound.max(cursor));
+            }
+            SubscriptionTarget::Object { obj_id } => {
+                selector
+                    .objects
+                    .entry(obj_id)
+                    .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
+                    .or_insert(reqs.lower_bound);
+            }
+        }
     }
+    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let reader = open_sqlite_reader(frontier, selector).await?;
+    Ok(Ok(Box::new(super::PartRevisionReader::new(
+        reader, objects, parts,
+    ))))
 }
 
-/// Flush loop for [`LiveDebouncer`]. Runs until the store (the debouncer's
-/// owner) is dropped; the store's own teardown never needs to wait on it.
-async fn flush_live_debouncer(
-    debouncer: std::sync::Weak<LiveDebouncer>,
-    notify: Arc<tokio::sync::Notify>,
-    bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
-    core: SqliteCore,
-) {
-    // When the batcher is empty there is no deadline to sleep for; poll the
-    // owner liveness at this interval so a dropped store stops the loop.
-    const EMPTY_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
-    loop {
-        let deadline = {
-            let Some(debouncer) = debouncer.upgrade() else {
-                break;
-            };
-            debouncer.batcher.lock().expect(ERROR_MUTEX).next_deadline()
-        };
-        let sleep = match deadline {
-            Some(deadline) => {
-                futures::future::Either::Left(tokio::time::sleep_until(deadline.into()))
-            }
-            None => futures::future::Either::Right(tokio::time::sleep(EMPTY_RECHECK)),
-        };
-        tokio::select! {
-            // A push only moves the trailing-edge deadline; delivery happens
-            // when the (recomputed) deadline actually fires. This is what
-            // makes the debounce a true trailing-edge collapse: a burst that
-            // keeps pushing keeps pushing the deadline out, so the whole
-            // burst — however long it spans — merges into one delivery.
-            _ = notify.notified() => {}
-            _ = sleep => {
-                let due = {
-                    let Some(debouncer) = debouncer.upgrade() else {
-                        break;
-                    };
-                    debouncer
-                        .batcher
-                        .lock()
-                        .expect(ERROR_MUTEX)
-                        .take_due(std::time::Instant::now())
-                };
-                if !due.is_empty() {
-                    deliver_due(&bus, &core, due).await;
-                }
-            }
-        }
-    }
-}
-
-/// Deliver a batch of due state events. The subscriber is re-resolved at flush
-/// time (it may have disconnected), and the event is sent lossy (a full or
-/// closed stream drops the subscriber, matching the immediate path).
-async fn deliver_due(
-    bus: &std::sync::RwLock<SqliteSubscriptions>,
-    core: &SqliteCore,
-    due: Vec<((Uuid, DebounceTarget), SubEvent)>,
-) {
-    let mut grouped: Vec<((Uuid, DebounceTarget), SubEvent)> = Vec::with_capacity(due.len());
-    for ((sub_id, target), event) in due {
-        let merge_idx = match &event {
-            SubEvent::Changed(new_changed) => grouped.iter().position(
-                |((candidate_sub_id, candidate_target), candidate_event)| {
-                    *candidate_sub_id == sub_id
-                        && *candidate_target == target
-                        && matches!(
-                            candidate_event,
-                            SubEvent::Changed(existing)
-                                if existing.obj_id == new_changed.obj_id
-                                    && existing.cursor == new_changed.cursor
-                        )
-                },
-            ),
-            _ => None,
-        };
-        if let Some(index) = merge_idx {
-            reduce_sub_event(&mut grouped[index].1, event);
-        } else {
-            grouped.push(((sub_id, target), event));
-        }
-    }
-    let mut drop_subs = HashSet::new();
-    let mut perm_cache: HashMap<(Option<PartId>, ObjId, PeerId), bool> = HashMap::new();
-    for ((sub_id, target), event) in grouped {
-        let (principal, sender) = {
-            let bus = bus.read().expect(ERROR_MUTEX);
-            let Some(sub) = bus.subs.get(&sub_id) else {
-                continue;
-            };
-            (sub.principal, sub.sender.clone())
-        };
-        let key = (target.part_id(), target.obj_id(), principal);
-        let permitted = if let Some(&cached) = perm_cache.get(&key) {
-            cached
-        } else {
-            match event_permitted(core, key.0, key.1, Some(key.2)).await {
-                Ok(is_permitted) => {
-                    perm_cache.insert(key, is_permitted);
-                    is_permitted
-                }
-                Err(err) => {
-                    tracing::warn!(?err, %sub_id, "failed checking event permission during debounce flush");
-                    continue;
-                }
-            }
-        };
-        if !permitted {
-            continue;
-        }
-        if sender.try_send(event).is_err() {
-            drop_subs.insert(sub_id);
-        }
-    }
-    if !drop_subs.is_empty() {
-        let mut bus = bus.write().expect(ERROR_MUTEX);
-        for sub_id in drop_subs {
-            bus.remove(sub_id);
-        }
-    }
+/// Open an unfiltered local revision reader over every part and object in
+/// the scope, including parts created after this call. Callers that own a
+/// different store facade can supply its read pool, scope, and commit
+/// wakeup without going through the legacy subscription channel. `after` is
+/// the replay lower bound (a part-store frontier revision).
+pub async fn open_sqlite_local_revision_reader_all(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    after: CursorIndex,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let reader = open_sqlite_reader(
+        frontier,
+        SqlitePartSelector {
+            all: Some(after),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
 }
 
 use super::sqlite_core::MemberState;
@@ -353,9 +157,6 @@ impl SqlitePartStore {
     fn peer_from_blob(blob: Vec<u8>) -> PeerId {
         SqliteCore::peer_from_blob(blob)
     }
-    async fn next_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res<CursorIndex> {
-        SqliteCore::next_cursor(tx).await
-    }
 }
 
 impl SqlitePartStore {
@@ -371,192 +172,19 @@ impl SqlitePartStore {
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
-        let bus: Arc<std::sync::RwLock<SqliteSubscriptions>> =
-            Arc::new(std::sync::RwLock::new(SqliteSubscriptions::default()));
-
-        // Store-owned debounced delivery for live subscribers. The flush task
-        // stops itself when the store (its owner) drops — no explicit stop
-        // token needed.
-        let live_debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
-            quiet_window: config.debounce_quiet_window,
-            max_latency: config.debounce_max_latency,
-        });
-        tokio::spawn(flush_live_debouncer(
-            Arc::downgrade(&live_debouncer),
-            Arc::clone(&live_debouncer.notify),
-            Arc::clone(&bus),
-            core.clone(),
-        ));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let frontier = SqlitePartFrontier::new(
+            core.sql.read_pool.clone(),
+            core.sql.write_pool.clone(),
+            core.scope_id,
+            changed,
+        );
 
         Ok(Self {
             core,
-            bus,
+            frontier,
             hidden_parts: Arc::new(config.hidden_parts),
-            live_debouncer,
         })
-    }
-    async fn publish(&self, events: Vec<SubEvent>) {
-        let mut dispatch = Vec::new();
-        {
-            let bus = self.bus.read().expect(ERROR_MUTEX);
-            let mut recipients: HashMap<(Uuid, DebounceTarget), SubEvent> = HashMap::new();
-            let push_recipient = |recipients: &mut HashMap<(Uuid, DebounceTarget), SubEvent>,
-                                  sub_id: Uuid,
-                                  target: DebounceTarget,
-                                  event: SubEvent| {
-                recipients
-                    .entry((sub_id, target))
-                    .and_modify(|existing| reduce_sub_event(existing, event.clone()))
-                    .or_insert(event);
-            };
-            for event in events {
-                match event {
-                    SubEvent::Changed(inner) => {
-                        let mut sub_ids = HashSet::new();
-                        for part_id in &inner.part_ids {
-                            if let Some(subs) = bus.by_part.get(part_id) {
-                                sub_ids.extend(subs.iter().copied());
-                            }
-                        }
-                        if let Some(subs) = bus.by_obj.get(&inner.obj_id) {
-                            sub_ids.extend(subs.iter().copied());
-                        }
-                        for sub_id in sub_ids {
-                            let object_match = bus
-                                .objs_by_sub
-                                .get(&sub_id)
-                                .is_some_and(|objects| objects.contains(&inner.obj_id));
-                            let mut part_ids = inner
-                                .part_ids
-                                .iter()
-                                .copied()
-                                .filter(|part_id| {
-                                    bus.parts_by_sub
-                                        .get(&sub_id)
-                                        .is_some_and(|parts| parts.contains(part_id))
-                                })
-                                .collect::<Vec<_>>();
-                            part_ids.sort_unstable();
-                            if object_match {
-                                let mut projected = inner.clone();
-                                projected.part_ids = part_ids;
-                                push_recipient(
-                                    &mut recipients,
-                                    sub_id,
-                                    DebounceTarget::Object(inner.obj_id),
-                                    SubEvent::Changed(projected),
-                                );
-                            } else if part_ids.len() == 1 {
-                                let part_id = part_ids[0];
-                                let mut projected = inner.clone();
-                                projected.part_ids = part_ids;
-                                push_recipient(
-                                    &mut recipients,
-                                    sub_id,
-                                    DebounceTarget::Part(part_id, inner.obj_id),
-                                    SubEvent::Changed(projected),
-                                );
-                            } else {
-                                let merge_into_added = part_ids.iter().all(|part_id| {
-                                    matches!(
-                                        recipients.get(&(
-                                            sub_id,
-                                            DebounceTarget::Part(*part_id, inner.obj_id),
-                                        )),
-                                        Some(SubEvent::Added(_))
-                                    )
-                                });
-                                if merge_into_added {
-                                    for part_id in part_ids {
-                                        let mut projected = inner.clone();
-                                        projected.part_ids = vec![part_id];
-                                        push_recipient(
-                                            &mut recipients,
-                                            sub_id,
-                                            DebounceTarget::Part(part_id, inner.obj_id),
-                                            SubEvent::Changed(projected),
-                                        );
-                                    }
-                                } else {
-                                    let mut projected = inner.clone();
-                                    projected.part_ids = part_ids;
-                                    push_recipient(
-                                        &mut recipients,
-                                        sub_id,
-                                        DebounceTarget::Object(inner.obj_id),
-                                        SubEvent::Changed(projected),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    SubEvent::Added(inner) => {
-                        let part_subs =
-                            bus.by_part.get(&inner.part_id).cloned().unwrap_or_default();
-                        for sub_id in &part_subs {
-                            push_recipient(
-                                &mut recipients,
-                                *sub_id,
-                                DebounceTarget::Part(inner.part_id, inner.obj_id),
-                                SubEvent::Added(inner.clone()),
-                            );
-                        }
-                        if let Some(subs) = bus.by_obj.get(&inner.obj_id) {
-                            for &sub_id in subs {
-                                if !part_subs.contains(&sub_id) {
-                                    push_recipient(
-                                        &mut recipients,
-                                        sub_id,
-                                        DebounceTarget::Object(inner.obj_id),
-                                        SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                                            cursor: inner.cursor,
-                                            part_ids: Vec::new(),
-                                            obj_id: inner.obj_id,
-                                            payload: inner.payload.clone(),
-                                        }),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    SubEvent::Removed(inner) => {
-                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
-                            for &sub_id in subs {
-                                push_recipient(
-                                    &mut recipients,
-                                    sub_id,
-                                    DebounceTarget::Part(inner.part_id, inner.obj_id),
-                                    SubEvent::Removed(inner.clone()),
-                                );
-                            }
-                        }
-                    }
-                    SubEvent::ReplayComplete => {}
-                }
-            }
-            for ((sub_id, target), event) in recipients {
-                let Some(sub) = bus.subs.get(&sub_id) else {
-                    continue;
-                };
-                if bus.pending.contains(&sub_id) {
-                    if sub.pending.mark_dirty() {
-                        dispatch.push((sub_id, target, event));
-                    }
-                    continue;
-                }
-                if bus.live.contains(&sub_id) {
-                    dispatch.push((sub_id, target, event));
-                }
-            }
-        }
-        if !dispatch.is_empty() {
-            let mut batcher = self.live_debouncer.batcher.lock().expect(ERROR_MUTEX);
-            let now = std::time::Instant::now();
-            for (sub_id, target, event) in dispatch {
-                batcher.push(now, (sub_id, target), event);
-            }
-            self.live_debouncer.notify.notify_one();
-        }
     }
 }
 
@@ -573,7 +201,7 @@ impl SqlitePartStore {
             return Ok(Vec::new());
         }
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT m.txid, o.obj_id, p.part_id, m.event_type, o.payload_json
+            "SELECT m.txid, o.obj_id, m.event_type, o.payload_json
              FROM big_sync_members m
              JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
              LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
@@ -629,13 +257,9 @@ impl SqlitePartStore {
                     .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
-                let part_id = row
-                    .try_get::<Option<Vec<u8>>, _>("part_id")?
-                    .map(Self::part_from_blob);
                 Ok(ReplayCandidate {
                     txid: u64::try_from(row.try_get::<i64, _>("txid")?).expect(ERROR_IMPOSSIBLE),
                     obj_id: Self::obj_from_blob(row.try_get("obj_id")?),
-                    part_id,
                     event_type: row.try_get("event_type")?,
                     payload,
                 })
@@ -646,6 +270,14 @@ impl SqlitePartStore {
 
 #[async_trait]
 impl HostPartStore for SqlitePartStore {
+    async fn latest_revision(&self) -> Res<CursorIndex> {
+        let revision: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&self.core.sql.read_pool)
+                .await?;
+        Ok(u64::try_from(revision)?)
+    }
+
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -816,20 +448,24 @@ impl HostPartStore for SqlitePartStore {
 
     async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id).await?;
+        let mut frontier_tx = self.frontier.begin().await?;
+        let cursor = frontier_tx.revision().await?;
+        let tx = frontier_tx.context_mut();
+        let obj_ref = self.core.ensure_obj_ref(tx, obj_id).await?;
         let old_payload_json: Option<String> = sqlx::query_scalar!(
             "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
             obj_ref
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .flatten();
+        sqlx::query!(
+            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
+            payload_json,
+            obj_ref
+        )
+        .execute(&mut **tx)
+        .await?;
         let live_parts = sqlx::query!(
             "SELECT m.maybe_part_ref, p.part_id
              FROM big_sync_members m
@@ -840,7 +476,7 @@ impl HostPartStore for SqlitePartStore {
             obj_ref,
             EVENT_REMOVED
         )
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
         let pending_parts = sqlx::query!(
             "SELECT p.part_ref, p.part_id
@@ -850,27 +486,7 @@ impl HostPartStore for SqlitePartStore {
             self.core.scope_id,
             obj_ref
         )
-        .fetch_all(&mut *tx)
-        .await?;
-        let cursor = Self::next_cursor(&mut tx).await?;
-        sqlx::query!(
-            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
-            &payload_json,
-            obj_ref
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-             VALUES (?1, ?2, 0, ?3, ?4)
-             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                event_type = excluded.event_type, txid = excluded.txid",
-            self.core.scope_id,
-            obj_ref,
-            EVENT_CHANGED,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
         let old_payload: ObjPayload = old_payload_json
             .as_deref()
@@ -880,21 +496,9 @@ impl HostPartStore for SqlitePartStore {
             .unwrap_or(serde_json::Value::Null);
         for part in &live_parts {
             let old_state = MemberState::Live(old_payload.clone());
-            sqlx::query!(
-                "UPDATE big_sync_members
-                 SET event_type = ?1, txid = ?2
-                 WHERE scope_id = ?3 AND obj_ref = ?4 AND maybe_part_ref = ?5",
-                EVENT_CHANGED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                self.core.scope_id,
-                obj_ref,
-                part.maybe_part_ref
-            )
-            .execute(&mut *tx)
-            .await?;
             self.core
                 .apply_bucket_transition(
-                    &mut tx,
+                    &mut *tx,
                     Self::part_from_blob(part.part_id.clone()),
                     obj_id,
                     cursor,
@@ -902,15 +506,6 @@ impl HostPartStore for SqlitePartStore {
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-            sqlx::query!(
-                "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1)
-                 WHERE part_ref = ?2 AND scope_id = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                part.maybe_part_ref,
-                self.core.scope_id
-            )
-            .execute(&mut *tx)
-            .await?;
         }
         let mut events = vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
             cursor,
@@ -921,25 +516,12 @@ impl HostPartStore for SqlitePartStore {
             obj_id,
             payload: payload.clone(),
         })];
-        for part in pending_parts {
-            let part_id = Self::part_from_blob(part.part_id);
+        for part in &pending_parts {
+            let part_id = Self::part_from_blob(part.part_id.clone());
             let part_ref = part.part_ref;
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                    event_type = excluded.event_type, txid = excluded.txid",
-                self.core.scope_id,
-                obj_ref,
-                part_ref,
-                EVENT_ADDED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-            )
-            .execute(&mut *tx)
-            .await?;
             self.core
                 .apply_bucket_transition(
-                    &mut tx,
+                    &mut *tx,
                     part_id,
                     obj_id,
                     cursor,
@@ -948,23 +530,13 @@ impl HostPartStore for SqlitePartStore {
                 )
                 .await?;
             sqlx::query!(
-                "UPDATE big_sync_parts
-                 SET latest_cursor = MAX(latest_cursor, ?1)
-                 WHERE scope_id = ?2 AND part_ref = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                self.core.scope_id,
-                part_ref
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
                 "DELETE FROM big_sync_pending_members
                  WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                 self.core.scope_id,
                 obj_ref,
                 part_ref
             )
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
             events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                 cursor,
@@ -973,8 +545,50 @@ impl HostPartStore for SqlitePartStore {
                 payload: payload.clone(),
             }));
         }
-        tx.commit().await?;
-        self.publish(events).await;
+        if live_parts.is_empty() {
+            frontier_tx
+                .put(
+                    PartFrontierKey::Object(obj_id),
+                    PartEvent::Changed(ObjChanged {
+                        cursor,
+                        part_ids: Vec::new(),
+                        obj_id,
+                        payload: payload.clone(),
+                    }),
+                )
+                .await?;
+        }
+        for part in &live_parts {
+            frontier_tx
+                .put(
+                    PartFrontierKey::Part {
+                        obj_id,
+                        part_id: Self::part_from_blob(part.part_id.clone()),
+                    },
+                    PartEvent::Changed(ObjChanged {
+                        cursor,
+                        part_ids: vec![Self::part_from_blob(part.part_id.clone())],
+                        obj_id,
+                        payload: payload.clone(),
+                    }),
+                )
+                .await?;
+        }
+        for part in &pending_parts {
+            let part_id = Self::part_from_blob(part.part_id.clone());
+            frontier_tx
+                .put(
+                    PartFrontierKey::Part { obj_id, part_id },
+                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        cursor,
+                        part_id,
+                        obj_id,
+                        payload: payload.clone(),
+                    }),
+                )
+                .await?;
+        }
+        frontier_tx.commit().await?;
         Ok(())
     }
 
@@ -1258,23 +872,19 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id).await?;
+        let mut frontier_tx = self.frontier.begin().await?;
+        let tx = frontier_tx.context_mut();
+        let obj_ref = self.core.ensure_obj_ref(tx, obj_id).await?;
         let payload_json: Option<String> = sqlx::query_scalar!(
             "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
             obj_ref
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .flatten();
         let Some(payload_json) = payload_json.filter(|str| !str.is_empty()) else {
             for part_id in parts {
-                let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+                let part_ref = self.core.ensure_part_ref(&mut *tx, part_id).await?;
                 sqlx::query!(
                     "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
                      VALUES (?1, ?2, ?3)",
@@ -1282,40 +892,28 @@ impl HostPartStore for SqlitePartStore {
                     obj_ref,
                     part_ref
                 )
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
-            tx.commit().await?;
+            frontier_tx.commit().await?;
             return Ok(());
         };
         let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
+        let cursor = frontier_tx.revision().await?;
+        let tx = frontier_tx.context_mut();
         let mut events = Vec::new();
-        let cursor = Self::next_cursor(&mut tx).await?;
         for part_id in parts {
-            let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+            let part_ref = self.core.ensure_part_ref(&mut *tx, part_id).await?;
             let old_state = self
                 .core
-                .load_member_state(&mut tx, part_id, obj_id)
+                .load_member_state(&mut *tx, part_id, obj_id)
                 .await?;
             if matches!(old_state, MemberState::Live(_)) {
                 continue;
             }
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                   event_type = excluded.event_type, txid = excluded.txid",
-                self.core.scope_id,
-                obj_ref,
-                part_ref,
-                EVENT_ADDED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-            )
-            .execute(&mut *tx)
-            .await?;
             self.core
                 .apply_bucket_transition(
-                    &mut tx,
+                    &mut *tx,
                     part_id,
                     obj_id,
                     cursor,
@@ -1324,13 +922,9 @@ impl HostPartStore for SqlitePartStore {
                 )
                 .await?;
             sqlx::query!(
-                "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE part_ref = ?2 AND scope_id = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), part_ref, self.core.scope_id
-            ).execute(&mut *tx).await?;
-            sqlx::query!(
                 "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                 self.core.scope_id, obj_ref, part_ref
-            ).execute(&mut *tx).await?;
+            ).execute(&mut **tx).await?;
             events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                 cursor,
                 part_id,
@@ -1338,54 +932,55 @@ impl HostPartStore for SqlitePartStore {
                 payload: payload.clone(),
             }));
         }
-        tx.commit().await?;
-        if !events.is_empty() {
-            self.publish(events).await;
+        for event in &events {
+            if let SubEvent::Added(added) = event {
+                frontier_tx
+                    .put(
+                        PartFrontierKey::Part {
+                            obj_id,
+                            part_id: added.part_id,
+                        },
+                        PartEvent::Added(added.clone()),
+                    )
+                    .await?;
+            }
         }
+        frontier_tx.commit().await?;
         Ok(())
     }
 
     async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let Some(obj_ref) = self.core.find_obj_ref(obj_id).await? else {
-            tx.commit().await?;
+        let mut frontier_tx = self.frontier.begin().await?;
+        let tx = frontier_tx.context_mut();
+        let obj_ref: Option<i64> = sqlx::query_scalar!(
+            "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
+            self.core.scope_id,
+            Self::obj_blob(obj_id)
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(obj_ref) = obj_ref else {
+            frontier_tx.commit().await?;
             return Ok(());
         };
-        let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+        let part_ref = self.core.ensure_part_ref(&mut *tx, part_id).await?;
         sqlx::query!(
             "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
             self.core.scope_id, obj_ref, part_ref
-        ).execute(&mut *tx).await?;
+        ).execute(&mut **tx).await?;
         let old_state = self
             .core
-            .load_member_state(&mut tx, part_id, obj_id)
+            .load_member_state(&mut *tx, part_id, obj_id)
             .await?;
         let MemberState::Live(old_payload) = old_state else {
-            tx.commit().await?;
+            frontier_tx.commit().await?;
             return Ok(());
         };
-        let cursor = Self::next_cursor(&mut tx).await?;
-        sqlx::query!(
-            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-               event_type = excluded.event_type, txid = excluded.txid",
-            self.core.scope_id,
-            obj_ref,
-            part_ref,
-            EVENT_REMOVED,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&mut *tx)
-        .await?;
+        let cursor = frontier_tx.revision().await?;
+        let tx = frontier_tx.context_mut();
         self.core
             .apply_bucket_transition(
-                &mut tx,
+                &mut *tx,
                 part_id,
                 obj_id,
                 cursor,
@@ -1393,36 +988,29 @@ impl HostPartStore for SqlitePartStore {
                 &MemberState::Dead,
             )
             .await?;
-        sqlx::query!(
-            "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3",
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.core.scope_id, part_ref
-        ).execute(&mut *tx).await?;
-        let live_count: i64 = sqlx::query_scalar!(
+        let live_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM big_sync_members
-             WHERE scope_id = ?1 AND obj_ref = ?2 AND maybe_part_ref > 0 AND event_type != ?3",
-            self.core.scope_id,
-            obj_ref,
-            EVENT_REMOVED
+             WHERE scope_id = ? AND obj_ref = ? AND maybe_part_ref > 0
+               AND maybe_part_ref != ? AND event_type != ?",
         )
-        .fetch_one(&mut *tx)
+        .bind(self.core.scope_id)
+        .bind(obj_ref)
+        .bind(part_ref)
+        .bind(EVENT_REMOVED)
+        .fetch_one(&mut **tx)
         .await?;
         if live_count == 0 {
             sqlx::query!(
                 "UPDATE big_sync_objs SET payload_json = NULL WHERE obj_ref = ?1",
                 obj_ref
             )
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
-        tx.commit().await?;
-        self.publish(vec![SubEvent::Removed(
-            big_sync_core::rpc::ObjRemovedFromPart {
-                cursor,
-                part_id,
-                obj_id,
-            },
-        )])
-        .await;
+        frontier_tx
+            .delete(PartFrontierKey::Part { obj_id, part_id })
+            .await?;
+        frontier_tx.commit().await?;
         Ok(())
     }
 
@@ -1473,175 +1061,239 @@ impl HostPartStore for SqlitePartStore {
         subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
-        let parts: HashSet<PartId> = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
-                SubscriptionTarget::Object { .. } => None,
-            })
-            .collect();
-        let objects: HashSet<ObjId> = reqs
+        let mut selector = SqlitePartSelector::default();
+        let mut parts = HashSet::new();
+        let mut objects = HashSet::new();
+        for target in &reqs.targets {
+            match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    parts.insert(*part_id);
+                    selector
+                        .parts
+                        .insert(*part_id, reqs.lower_bound.max(*cursor));
+                }
+                SubscriptionTarget::Object { obj_id } => {
+                    objects.insert(*obj_id);
+                    selector.objects.insert(*obj_id, reqs.lower_bound);
+                }
+            }
+        }
+        if let Err(err) = self.summarize_parts(parts.clone()).await? {
+            return Ok(Err(err));
+        }
+        let (tx, rx) = mpsc::unbounded("SqlitePartStore".into(), "caller".into());
+        let store = self.clone();
+        tokio::spawn(async move {
+            let mut reader = store.frontier.open(selector).await.expect(ERROR_IMPOSSIBLE);
+            let mut replay_complete_sent = false;
+            loop {
+                let read = reader
+                    .next(FrontierReadLimits::default())
+                    .await
+                    .expect(ERROR_IMPOSSIBLE);
+                let FrontierRead::Entries { entries, .. } = read else {
+                    assert!(
+                        !replay_complete_sent,
+                        "frontier emitted ReplayComplete twice"
+                    );
+                    replay_complete_sent = true;
+                    if tx.send(SubEvent::ReplayComplete).await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let mut output: Vec<SubEvent> = Vec::new();
+                for entry in entries {
+                    let key_obj_id = match entry.key {
+                        PartFrontierKey::Object(obj_id) | PartFrontierKey::Part { obj_id, .. } => {
+                            obj_id
+                        }
+                    };
+                    let (part_id, event) = match (entry.key, entry.value) {
+                        (PartFrontierKey::Object(_), None) => continue,
+                        (PartFrontierKey::Object(_), Some(PartEvent::Changed(changed))) => {
+                            (None, SubEvent::Changed(changed))
+                        }
+                        (PartFrontierKey::Object(_), Some(PartEvent::Added(_)))
+                        | (PartFrontierKey::Object(_), Some(PartEvent::Removed(_))) => {
+                            unreachable!("object frontier rows are changed or tombstones")
+                        }
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            None | Some(PartEvent::Removed(_)),
+                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => (
+                            None,
+                            SubEvent::Changed(ObjChanged {
+                                cursor: entry.revision,
+                                part_ids: Vec::new(),
+                                obj_id,
+                                payload: serde_json::Value::Null,
+                            }),
+                        ),
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            Some(PartEvent::Added(added)),
+                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => (
+                            None,
+                            SubEvent::Changed(ObjChanged {
+                                cursor: entry.revision,
+                                part_ids: Vec::new(),
+                                obj_id,
+                                payload: added.payload,
+                            }),
+                        ),
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            Some(PartEvent::Changed(changed)),
+                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => (
+                            None,
+                            SubEvent::Changed(ObjChanged {
+                                cursor: entry.revision,
+                                part_ids: Vec::new(),
+                                obj_id,
+                                payload: changed.payload,
+                            }),
+                        ),
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            None | Some(PartEvent::Removed(_)),
+                        ) => (
+                            Some(part_id),
+                            SubEvent::Removed(ObjRemovedFromPart {
+                                cursor: entry.revision,
+                                part_id,
+                                obj_id,
+                            }),
+                        ),
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            Some(PartEvent::Added(mut added)),
+                        ) => {
+                            added.cursor = entry.revision;
+                            added.part_id = part_id;
+                            added.obj_id = obj_id;
+                            (Some(part_id), SubEvent::Added(added))
+                        }
+                        (
+                            PartFrontierKey::Part { obj_id, part_id },
+                            Some(PartEvent::Changed(mut changed)),
+                        ) => {
+                            changed.cursor = entry.revision;
+                            changed.part_ids = vec![part_id];
+                            changed.obj_id = obj_id;
+                            (Some(part_id), SubEvent::Changed(changed))
+                        }
+                    };
+                    if part_id.is_none() && !objects.contains(&key_obj_id) {
+                        continue;
+                    }
+                    if let Some(part_id) = part_id
+                        && !parts.contains(&part_id)
+                    {
+                        continue;
+                    }
+                    let permitted =
+                        event_permitted(&store.core, part_id, key_obj_id, Some(subscriber))
+                            .await
+                            .expect(ERROR_IMPOSSIBLE);
+                    if !permitted {
+                        continue;
+                    }
+                    match event {
+                        SubEvent::Changed(changed) => {
+                            let entry = output.iter_mut().find_map(|event| match event {
+                                SubEvent::Changed(existing)
+                                    if existing.cursor == changed.cursor
+                                        && existing.obj_id == changed.obj_id =>
+                                {
+                                    Some(existing)
+                                }
+                                _ => None,
+                            });
+                            if let Some(existing) = entry {
+                                for part_id in changed.part_ids {
+                                    if !existing.part_ids.contains(&part_id) {
+                                        existing.part_ids.push(part_id);
+                                    }
+                                }
+                                existing.part_ids.sort_unstable();
+                            } else {
+                                output.push(SubEvent::Changed(changed));
+                            }
+                        }
+                        event => output.push(event),
+                    }
+                }
+                for event in output {
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Ok(rx))
+    }
+
+    async fn open_local_revision_reader(
+        &self,
+        reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let objects = reqs
             .targets
             .iter()
             .filter_map(|target| match target {
                 SubscriptionTarget::Object { obj_id } => Some(*obj_id),
                 SubscriptionTarget::Part { .. } => None,
             })
-            .collect();
-        if let Err(err) = self.summarize_parts(parts.clone()).await? {
-            return Ok(Err(err));
+            .collect::<HashSet<_>>();
+        let parts = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut selector = SqlitePartSelector::default();
+        for target in reqs.targets {
+            match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    selector
+                        .parts
+                        .entry(part_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
+                        .or_insert(reqs.lower_bound.max(cursor));
+                }
+                SubscriptionTarget::Object { obj_id } => {
+                    selector
+                        .objects
+                        .entry(obj_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
+                        .or_insert(reqs.lower_bound);
+                }
+            }
         }
-        let (tx, rx) = mpsc::unbounded("SqlitePartStore".into(), "caller".into());
-        let sub_id = Uuid::new_v4();
-        let sub = Arc::new(SqliteSubscription {
-            sender: tx.clone(),
-            principal: subscriber,
-            pending: PendingSubscription::new(),
-        });
-        {
-            let mut bus = self.bus.write().expect(ERROR_MUTEX);
-            bus.pending.insert(sub_id);
-            bus.subs.insert(sub_id, Arc::clone(&sub));
-            bus.parts_by_sub.insert(sub_id, parts.clone());
-            for part in &parts {
-                bus.by_part.entry(*part).or_default().insert(sub_id);
-            }
-            bus.objs_by_sub.insert(sub_id, objects.clone());
-            for obj in &objects {
-                bus.by_obj.entry(*obj).or_default().insert(sub_id);
-            }
-        }
-        let store = self.clone();
-        tokio::spawn(async move {
-            let mut cursor = reqs.lower_bound;
-            loop {
-                sub.pending
-                    .state
-                    .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let mut candidates = store
-                    .replay_candidates(&parts, &objects, cursor, None, Some(256))
-                    .await
-                    .expect(ERROR_IMPOSSIBLE);
-                if candidates.is_empty() {
-                    if sub.pending.begin_finalization() {
-                        let mut bus = store.bus.write().expect(ERROR_MUTEX);
-                        if sub.pending.state.load(std::sync::atomic::Ordering::Acquire)
-                            != SUB_FINALIZING
-                        {
-                            continue;
-                        }
-                        if tx.try_send(SubEvent::ReplayComplete).is_err() {
-                            bus.remove(sub_id);
-                            return;
-                        }
-                        assert!(
-                            sub.pending.become_ready(),
-                            "subscription finalization state changed while bus was locked"
-                        );
-                        if bus.pending.remove(&sub_id) {
-                            bus.live.insert(sub_id);
-                        }
-                        return;
-                    }
-                    continue;
-                }
-                let last_txid = candidates.last().expect(ERROR_IMPOSSIBLE).txid;
-                let boundary = store
-                    .replay_candidates(&parts, &objects, cursor, Some(last_txid), None)
-                    .await
-                    .expect(ERROR_IMPOSSIBLE);
-                candidates.extend(boundary);
-                candidates
-                    .sort_by_key(|candidate| (candidate.txid, candidate.obj_id, candidate.part_id));
-                candidates.dedup_by(|aa, bb| {
-                    aa.txid == bb.txid
-                        && aa.obj_id == bb.obj_id
-                        && aa.part_id == bb.part_id
-                        && aa.event_type == bb.event_type
-                });
-                let mut output: Vec<SubEvent> = Vec::new();
-                let _has_object_target = !objects.is_empty();
-                for candidate in candidates {
-                    let part_match = candidate.part_id.filter(|part| parts.contains(part));
-                    let object_match = objects.contains(&candidate.obj_id);
-                    if !object_match && part_match.is_none() {
-                        continue;
-                    }
-                    let permitted = HostPartStore::is_event_permitted(
-                        &store,
-                        part_match,
-                        candidate.obj_id,
-                        Some(subscriber),
-                    )
-                    .await
-                    .expect(ERROR_IMPOSSIBLE);
-                    if !permitted {
-                        continue;
-                    }
-                    match candidate.event_type {
-                        EVENT_CHANGED => {
-                            let entry = output.iter_mut().find_map(|event| match event {
-                                SubEvent::Changed(changed)
-                                    if changed.cursor == candidate.txid
-                                        && changed.obj_id == candidate.obj_id =>
-                                {
-                                    Some(changed)
-                                }
-                                _ => None,
-                            });
-                            if let Some(changed) = entry {
-                                if let Some(part) = part_match
-                                    && !changed.part_ids.contains(&part)
-                                {
-                                    changed.part_ids.push(part);
-                                    changed.part_ids.sort_unstable();
-                                }
-                            } else {
-                                output.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                                    cursor: candidate.txid,
-                                    part_ids: part_match.into_iter().collect(),
-                                    obj_id: candidate.obj_id,
-                                    payload: candidate.payload,
-                                }));
-                            }
-                        }
-                        EVENT_ADDED if object_match && part_match.is_none() => {
-                            output.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                                cursor: candidate.txid,
-                                part_ids: Vec::new(),
-                                obj_id: candidate.obj_id,
-                                payload: candidate.payload,
-                            }))
-                        }
-                        EVENT_ADDED if part_match.is_some() => {
-                            output.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                                cursor: candidate.txid,
-                                part_id: part_match.expect(ERROR_IMPOSSIBLE),
-                                obj_id: candidate.obj_id,
-                                payload: candidate.payload,
-                            }))
-                        }
-                        EVENT_REMOVED if part_match.is_some() => {
-                            output.push(SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                                cursor: candidate.txid,
-                                part_id: part_match.expect(ERROR_IMPOSSIBLE),
-                                obj_id: candidate.obj_id,
-                            }))
-                        }
-                        _ => {}
-                    }
-                }
-                for event in output {
-                    if tx.send(event).await.is_err() {
-                        store.bus.write().expect(ERROR_MUTEX).remove(sub_id);
-                        return;
-                    }
-                }
-                cursor = last_txid;
-            }
-        });
-        Ok(Ok(rx))
+        let reader = open_sqlite_reader(self.frontier.clone(), selector).await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new(
+            reader, objects, parts,
+        ))))
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: CursorIndex,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        let reader = open_sqlite_reader(
+            self.frontier.clone(),
+            SqlitePartSelector {
+                all: Some(after),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {
@@ -1746,9 +1398,7 @@ impl HostPartStore for SqlitePartStore {
     }
 }
 
-/// Policy check for delivering an event to a subscriber. Shared by the
-/// immediate publish path and the debounced flush task (which holds only the
-/// core, not the whole store).
+/// Policy check for delivering an event to a remote subscriber.
 async fn event_permitted(
     core: &SqliteCore,
     part_id: Option<PartId>,
@@ -1944,6 +1594,7 @@ impl ObservedStore for SqlitePartStore {
 mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
+    use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
     use big_sync_core::part_store::contract;
 
     async fn test_sql() -> Res<SqlCtx> {
@@ -1963,6 +1614,25 @@ mod tests {
 
     fn test_obj_id(seed: u8) -> ObjId {
         ObjId(Byte32Id::new([seed; 32]))
+    }
+
+    async fn put_frontier_event(
+        store: &SqlitePartStore,
+        key: PartFrontierKey,
+        event: PartEvent,
+    ) -> Res<CursorIndex> {
+        let mut tx = store.frontier.begin().await?;
+        tx.put(key, event).await?;
+        Ok(tx.commit().await?)
+    }
+
+    async fn delete_frontier_key(
+        store: &SqlitePartStore,
+        key: PartFrontierKey,
+    ) -> Res<CursorIndex> {
+        let mut tx = store.frontier.begin().await?;
+        tx.delete(key).await?;
+        Ok(tx.commit().await?)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2282,435 +1952,104 @@ mod tests {
         Ok(())
     }
 
-    /// A burst of state changes to the same (subscriber, target) collapses
-    /// into a single batcher entry carrying the newest payload.
-    #[test]
-    fn debounced_burst_merges_to_latest_wins() {
-        let debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
-            quiet_window: Duration::from_millis(50),
-            max_latency: Duration::from_millis(500),
-        });
-        let key = (
-            Uuid::new_v4(),
-            DebounceTarget::Part(test_part_id(205), test_obj_id(206)),
-        );
-        let mut batcher = debouncer.batcher.lock().expect(ERROR_MUTEX);
-        let now = std::time::Instant::now();
-        for ii in 1..=10u8 {
-            batcher.push(
-                now,
-                key,
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: ii as u64,
-                    part_ids: vec![test_part_id(205)],
-                    obj_id: test_obj_id(206),
-                    payload: serde_json::json!({"phase": ii}),
-                }),
-            );
-        }
-        assert_eq!(batcher.len(), 1, "burst must collapse to one entry");
-        let due = batcher.take_due(now + Duration::from_secs(1));
-        assert_eq!(due.len(), 1, "exactly one delivery");
-        let (due_key, event) = &due[0];
-        assert_eq!(due_key, &key);
-        match event {
-            SubEvent::Changed(inner) => {
-                assert_eq!(inner.payload["phase"], serde_json::json!(10), "latest wins");
-                assert_eq!(inner.cursor, 10);
-            }
-            other => panic!("expected Changed, got {other:?}"),
-        }
-        assert!(batcher.is_empty(), "delivery drains the batcher");
-    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_exact_object_receives_changed() -> Res<()> {
+        use keyhive_core::access::Access;
 
-    #[test]
-    fn reduce_sub_event_added_then_changed_retains_added() {
-        let part = test_part_id(205);
-        let obj = test_obj_id(206);
-        let mut evt = SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-            cursor: 1,
-            part_id: part,
-            obj_id: obj,
-            payload: serde_json::json!({"v": 1}),
-        });
-        reduce_sub_event(
-            &mut evt,
-            SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor: 2,
-                part_ids: vec![part],
-                obj_id: obj,
-                payload: serde_json::json!({"v": 2}),
+        let store = test_store("big-sync-sqlite-test://subscribe-object").await?;
+        let obj_id = test_obj_id(210);
+        let peer = PeerId::new([211; 32]);
+        store
+            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        put_frontier_event(
+            &store,
+            PartFrontierKey::Object(obj_id),
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: Vec::new(),
+                obj_id,
+                payload: serde_json::json!({"value": 1}),
             }),
-        );
-        match evt {
-            SubEvent::Added(inner) => {
-                assert_eq!(inner.cursor, 2);
-                assert_eq!(inner.payload, serde_json::json!({"v": 2}));
-            }
-            other => panic!("expected Added to be retained, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn reduce_sub_event_different_partitions_remain_separate() {
-        let debouncer = LiveDebouncer::new(utils_rs::batching::DebouncePolicy {
-            quiet_window: Duration::from_millis(50),
-            max_latency: Duration::from_millis(500),
-        });
-        let sub = Uuid::new_v4();
-        let part1 = test_part_id(1);
-        let part2 = test_part_id(2);
-        let obj = test_obj_id(10);
-        let mut batcher = debouncer.batcher.lock().expect(ERROR_MUTEX);
-        let now = std::time::Instant::now();
-        batcher.push(
-            now,
-            (sub, DebounceTarget::Part(part1, obj)),
-            SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                cursor: 1,
-                part_id: part1,
-                obj_id: obj,
-                payload: serde_json::json!({"v": 1}),
-            }),
-        );
-        batcher.push(
-            now,
-            (sub, DebounceTarget::Part(part2, obj)),
-            SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                cursor: 2,
-                part_id: part2,
-                obj_id: obj,
-                payload: serde_json::json!({"v": 2}),
-            }),
-        );
-        assert_eq!(batcher.len(), 2, "different partitions must not collapse");
-    }
-
-    /// End-to-end: a live subscriber receives debounced delivery for object
-    /// state changes and removals.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn live_state_event_debounced_delivery() -> Res<()> {
-        use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
-
-        let store = test_store("big-sync-sqlite-test://debounce").await?;
-        let part = PartId(Byte32Id::new([205u8; 32]));
-        let obj = ObjId(Byte32Id::new([206u8; 32]));
-        let peer = PeerId::new([207u8; 32]);
-        store.ensure_part(part).await?;
-        store
-            .set_obj_payload(obj, serde_json::json!({"phase": 0}))
-            .await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
-        store
-            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
-            .await?;
+        )
+        .await?;
 
         let rx = store
             .subscribe(
                 SubPartsRequest {
                     lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
-                        cursor: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id,
                     }]),
                 },
                 peer,
             )
             .await?
             .map_err(eyre::Report::from)?;
-        // Drain through ReplayComplete.
-        loop {
-            match timeout(Duration::from_secs(5), rx.recv()).await? {
-                Ok(SubEvent::ReplayComplete) => break,
-                Ok(_) => continue,
-                Err(_) => {
-                    eyre::bail!("sub channel closed during replay");
-                }
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Changed(changed) => {
+                assert_eq!(changed.cursor, 1);
+                assert_eq!(changed.obj_id, obj_id);
+                assert!(changed.part_ids.is_empty());
+                assert_eq!(changed.payload, serde_json::json!({"value": 1}));
             }
+            event => panic!("expected object Changed, got {event:?}"),
         }
-
-        // A state change is delivered through the debouncer (flush task)
-        // within the max-latency bound.
-        store
-            .set_obj_payload(obj, serde_json::json!({"phase": 1}))
-            .await?;
-        let first = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
-            .await
-            .expect("debounced delivery must arrive")
-            .expect("channel must stay open");
-        match first {
-            SubEvent::Changed(inner) => {
-                assert_eq!(inner.obj_id, obj);
-                assert_eq!(inner.payload["phase"], serde_json::json!(1));
-            }
-            other => panic!("expected Changed, got {other:?}"),
-        }
-
-        // A removal is delivered through the subscriber channel.
-        store.remove_obj_from_part(obj, part).await?;
-        let removed = timeout(utils_rs::scale_timeout(Duration::from_secs(5)), rx.recv())
-            .await
-            .expect("Removed must be delivered")
-            .expect("channel must stay open");
-        assert!(matches!(removed, SubEvent::Removed(_)));
-
-        Ok(())
-    }
-
-    /// End-to-end: Added followed by Changed before flush merges into Added
-    /// with the latest payload and cursor.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn e2e_debounce_added_then_changed_retains_added() -> Res<()> {
-        use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
-
-        let store = test_store("big-sync-sqlite-test://e2e-add-change").await?;
-        let part = PartId(Byte32Id::new([210u8; 32]));
-        let obj = ObjId(Byte32Id::new([211u8; 32]));
-        let peer = PeerId::new([212u8; 32]);
-        store.ensure_part(part).await?;
-        store
-            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        loop {
-            match timeout(Duration::from_secs(5), rx.recv()).await? {
-                Ok(SubEvent::ReplayComplete) => break,
-                Ok(_) => continue,
-                Err(_) => {
-                    eyre::bail!("sub channel closed during replay");
-                }
-            }
-        }
-
-        // Publish Added followed by Changed within the debounce window
-        store
-            .publish(vec![
-                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 1,
-                    part_id: part,
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 1}),
-                }),
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 2,
-                    part_ids: vec![part],
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 2}),
-                }),
-            ])
-            .await;
-
-        let evt = rx.recv().await.expect("channel stay open");
-
-        match evt {
-            SubEvent::Added(inner) => {
-                assert_eq!(inner.part_id, part);
-                assert_eq!(inner.obj_id, obj);
-                assert_eq!(inner.payload, serde_json::json!({"v": 2}));
-                assert_eq!(inner.cursor, 2);
-            }
-            other => panic!("expected Added with latest payload, got {other:?}"),
-        }
-
-        // No stray Changed should follow
-        assert!(
-            timeout(Duration::from_millis(150), rx.recv())
-                .await
-                .is_err(),
-            "Added must not be followed by duplicate Changed",
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
         );
-
         Ok(())
     }
 
-    /// End-to-end: Changed followed by Removed before flush delivers Removed
-    /// and subsumes/cancels the pending Changed.
     #[tokio::test(flavor = "multi_thread")]
-    async fn e2e_debounce_changed_then_removed_delivers_removed() -> Res<()> {
+    async fn sqlite_subscribe_part_targets_have_independent_lower_bounds() -> Res<()> {
         use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
 
-        let store = test_store("big-sync-sqlite-test://e2e-change-remove").await?;
-        let part = PartId(Byte32Id::new([220u8; 32]));
-        let obj = ObjId(Byte32Id::new([221u8; 32]));
-        let peer = PeerId::new([222u8; 32]);
-        store.ensure_part(part).await?;
+        let store = test_store("big-sync-sqlite-test://subscribe-part-cursors").await?;
+        let obj_id = test_obj_id(212);
+        let first_part = test_part_id(213);
+        let second_part = test_part_id(214);
+        let peer = PeerId::new([215; 32]);
+        store.ensure_part(first_part).await?;
+        store.ensure_part(second_part).await?;
         store
-            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
+            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
             .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
-                        cursor: 0,
-                    }]),
+        assert_eq!(
+            put_frontier_event(
+                &store,
+                PartFrontierKey::Part {
+                    obj_id,
+                    part_id: first_part,
                 },
-                peer,
+                PartEvent::Added(ObjAddedToPart {
+                    cursor: 0,
+                    part_id: first_part,
+                    obj_id,
+                    payload: serde_json::json!({"part": 1}),
+                }),
             )
-            .await?
-            .map_err(eyre::Report::from)?;
-        loop {
-            match timeout(Duration::from_secs(5), rx.recv()).await? {
-                Ok(SubEvent::ReplayComplete) => break,
-                Ok(_) => continue,
-                Err(_) => {
-                    eyre::bail!("sub channel closed during replay");
-                }
-            }
-        }
-
-        // Publish Changed followed by Removed within the debounce window
-        store
-            .publish(vec![
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 1,
-                    part_ids: vec![part],
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 2}),
-                }),
-                SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                    cursor: 2,
-                    part_id: part,
-                    obj_id: obj,
-                }),
-            ])
-            .await;
-
-        let evt = rx.recv().await.expect("channel stay open");
-
-        match evt {
-            SubEvent::Removed(inner) => {
-                assert_eq!(inner.part_id, part);
-                assert_eq!(inner.obj_id, obj);
-                assert_eq!(inner.cursor, 2);
-            }
-            other => panic!("expected Removed, got {other:?}"),
-        }
-
-        // Ensure no stale Changed arrives after Removed
-        assert!(
-            timeout(Duration::from_millis(150), rx.recv())
-                .await
-                .is_err(),
-            "no stale Changed must arrive after Removed",
+            .await?,
+            1
         );
-
-        Ok(())
-    }
-
-    /// End-to-end: Removed followed by Changed retains Removed (stale Changed ignored).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn e2e_debounce_removed_then_changed_retains_removed() -> Res<()> {
-        use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
-
-        let store = test_store("big-sync-sqlite-test://e2e-remove-change").await?;
-        let part = PartId(Byte32Id::new([230u8; 32]));
-        let obj = ObjId(Byte32Id::new([231u8; 32]));
-        let peer = PeerId::new([232u8; 32]);
-        store.ensure_part(part).await?;
-        store
-            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
-                        cursor: 0,
-                    }]),
+        assert_eq!(
+            put_frontier_event(
+                &store,
+                PartFrontierKey::Part {
+                    obj_id,
+                    part_id: second_part,
                 },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        loop {
-            match timeout(Duration::from_secs(5), rx.recv()).await? {
-                Ok(SubEvent::ReplayComplete) => break,
-                Ok(_) => continue,
-                Err(_) => {
-                    eyre::bail!("sub channel closed during replay");
-                }
-            }
-        }
-
-        // Publish Removed followed by Changed within the debounce window
-        store
-            .publish(vec![
-                SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                    cursor: 1,
-                    part_id: part,
-                    obj_id: obj,
+                PartEvent::Added(ObjAddedToPart {
+                    cursor: 0,
+                    part_id: second_part,
+                    obj_id,
+                    payload: serde_json::json!({"part": 2}),
                 }),
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 2,
-                    part_ids: vec![part],
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 2}),
-                }),
-            ])
-            .await;
-
-        let evt = rx.recv().await.expect("event must arrive");
-
-        match evt {
-            SubEvent::Removed(inner) => {
-                assert_eq!(inner.part_id, part);
-                assert_eq!(inner.obj_id, obj);
-                assert_eq!(inner.cursor, 2);
-            }
-            other => panic!("expected Removed, got {other:?}"),
-        }
-
-        assert!(
-            timeout(
-                utils_rs::scale_timeout(Duration::from_millis(150)),
-                rx.recv()
             )
-            .await
-            .is_err(),
-            "no stale Changed after Removed",
+            .await?,
+            2
         );
-
-        Ok(())
-    }
-
-    /// End-to-end: One subscriber observing the same object through two partitions.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn e2e_debounce_one_subscriber_two_partitions() -> Res<()> {
-        use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
-
-        let store = test_store("big-sync-sqlite-test://e2e-multi-part").await?;
-        let part1 = PartId(Byte32Id::new([240u8; 32]));
-        let part2 = PartId(Byte32Id::new([241u8; 32]));
-        let obj = ObjId(Byte32Id::new([242u8; 32]));
-        let peer = PeerId::new([243u8; 32]);
-        store.ensure_part(part1).await?;
-        store.ensure_part(part2).await?;
-        store
-            .set_obj_members(obj, std::collections::HashMap::from([(peer, Access::Read)]))
-            .await?;
 
         let rx = store
             .subscribe(
@@ -2718,11 +2057,11 @@ mod tests {
                     lower_bound: 0,
                     targets: HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part1,
-                            cursor: 0,
+                            part_id: first_part,
+                            cursor: 1,
                         },
                         big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part2,
+                            part_id: second_part,
                             cursor: 0,
                         },
                     ]),
@@ -2731,88 +2070,206 @@ mod tests {
             )
             .await?
             .map_err(eyre::Report::from)?;
-        loop {
-            match timeout(Duration::from_secs(5), rx.recv()).await? {
-                Ok(SubEvent::ReplayComplete) => break,
-                Ok(_) => continue,
-                Err(_) => {
-                    eyre::bail!("sub channel closed during replay");
-                }
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Added(added) => {
+                assert_eq!(added.cursor, 2);
+                assert_eq!(added.part_id, second_part);
+                assert_eq!(added.obj_id, obj_id);
             }
+            event => panic!("expected only newer second-part Added, got {event:?}"),
         }
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+        Ok(())
+    }
 
-        // Publish Added for both partitions + Changed for both partitions before flush
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_coalesces_one_revision_across_parts() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://subscribe-coalesce").await?;
+        let obj_id = test_obj_id(216);
+        let first_part = test_part_id(217);
+        let second_part = test_part_id(218);
+        let peer = PeerId::new([219; 32]);
+        store.ensure_part(first_part).await?;
+        store.ensure_part(second_part).await?;
         store
-            .publish(vec![
-                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 1,
-                    part_id: part1,
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 1}),
-                }),
-                SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 2,
-                    part_id: part2,
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 1}),
-                }),
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 3,
-                    part_ids: vec![part1, part2],
-                    obj_id: obj,
-                    payload: serde_json::json!({"v": 2}),
-                }),
-            ])
-            .await;
+            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        let mut tx = store.frontier.begin().await?;
+        tx.put(
+            PartFrontierKey::Part {
+                obj_id,
+                part_id: first_part,
+            },
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: vec![first_part],
+                obj_id,
+                payload: serde_json::json!({"value": 2}),
+            }),
+        )
+        .await?;
+        tx.put(
+            PartFrontierKey::Part {
+                obj_id,
+                part_id: second_part,
+            },
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: vec![second_part],
+                obj_id,
+                payload: serde_json::json!({"value": 2}),
+            }),
+        )
+        .await?;
+        assert_eq!(tx.commit().await?, 1);
 
-        let mut seen_parts = HashSet::new();
-        for _ in 0..2 {
-            let evt = rx.recv().await.expect("event must arrive");
-            match evt {
-                SubEvent::Added(inner) => {
-                    assert_eq!(inner.obj_id, obj);
-                    assert_eq!(inner.payload, serde_json::json!({"v": 2}));
-                    assert_eq!(inner.cursor, 3);
-                    seen_parts.insert(inner.part_id);
-                }
-                other => panic!("expected Added for each partition, got {other:?}"),
-            }
-        }
-        assert_eq!(seen_parts, HashSet::from([part1, part2]));
-
-        // Now publish Changed for both partitions
-        store
-            .publish(vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor: 4,
-                part_ids: vec![part1, part2],
-                obj_id: obj,
-                payload: serde_json::json!({"v": 3}),
-            })])
-            .await;
-
-        let evt = rx.recv().await.expect("event must arrive");
-        match evt {
-            SubEvent::Changed(inner) => {
-                assert_eq!(inner.obj_id, obj);
-                assert_eq!(inner.payload, serde_json::json!({"v": 3}));
-                assert_eq!(inner.cursor, 4);
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: first_part,
+                            cursor: 0,
+                        },
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: second_part,
+                            cursor: 0,
+                        },
+                    ]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Changed(changed) => {
+                assert_eq!(changed.cursor, 1);
+                assert_eq!(changed.obj_id, obj_id);
                 assert_eq!(
-                    inner.part_ids.into_iter().collect::<HashSet<_>>(),
-                    HashSet::from([part1, part2]),
+                    changed.part_ids.iter().copied().collect::<HashSet<_>>(),
+                    HashSet::from([first_part, second_part])
                 );
             }
-            other => panic!("expected one Changed event for both partitions, got {other:?}"),
+            event => panic!("expected coalesced Changed, got {event:?}"),
         }
-        assert!(
-            timeout(
-                utils_rs::scale_timeout(Duration::from_millis(150)),
-                rx.recv()
-            )
-            .await
-            .is_err(),
-            "multi-part change must not emit duplicate logical events",
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
         );
+        Ok(())
+    }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_part_tombstone_is_removed() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://subscribe-tombstone").await?;
+        let obj_id = test_obj_id(220);
+        let part_id = test_part_id(221);
+        let peer = PeerId::new([222; 32]);
+        store.ensure_part(part_id).await?;
+        store
+            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        delete_frontier_key(&store, PartFrontierKey::Part { obj_id, part_id }).await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id,
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::Removed(ObjRemovedFromPart {
+                cursor: 1,
+                part_id,
+                obj_id,
+            })
+        );
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_subscribe_replays_once_then_reads_after_boundary() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let store = test_store("big-sync-sqlite-test://subscribe-boundary").await?;
+        let obj_id = test_obj_id(223);
+        let peer = PeerId::new([224; 32]);
+        store
+            .set_obj_members(obj_id, HashMap::from([(peer, Access::Read)]))
+            .await?;
+        put_frontier_event(
+            &store,
+            PartFrontierKey::Object(obj_id),
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: Vec::new(),
+                obj_id,
+                payload: serde_json::json!({"value": 1}),
+            }),
+        )
+        .await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id,
+                    }]),
+                },
+                peer,
+            )
+            .await?
+            .map_err(eyre::Report::from)?;
+        assert!(matches!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::Changed(ObjChanged { cursor: 1, .. })
+        ));
+
+        put_frontier_event(
+            &store,
+            PartFrontierKey::Object(obj_id),
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: Vec::new(),
+                obj_id,
+                payload: serde_json::json!({"value": 2}),
+            }),
+        )
+        .await?;
+
+        assert_eq!(
+            rx.recv().await.expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+        match rx.recv().await.expect("subscription channel stays open") {
+            SubEvent::Changed(changed) => {
+                assert_eq!(changed.cursor, 2);
+                assert_eq!(changed.obj_id, obj_id);
+                assert_eq!(changed.payload, serde_json::json!({"value": 2}));
+            }
+            event => panic!("expected post-boundary Changed, got {event:?}"),
+        }
         Ok(())
     }
 }

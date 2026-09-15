@@ -392,6 +392,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
     staged_ingest: &StagedAutomergeIngest,
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
+    initial_keys: Vec<(Vec<u8>, [u8; 32])>,
 ) -> Res<(
     Sedimentree,
     Vec<Blob>,
@@ -410,6 +411,15 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
     let kh_doc = keyhive.get_document(kh_doc_id).await.ok_or_else(|| {
         ferr!("keyhive doc not found in local keyhive; only the doc owner can call put_doc")
     })?;
+    // Imported histories are encrypted with keys supplied by the source
+    // document. Seed the new document's local key cache with those keys so
+    // later local child commits can construct causal envelopes for them.
+    if !initial_keys.is_empty() {
+        let mut doc = kh_doc.lock().await;
+        for (reference, key) in &initial_keys {
+            doc.remember_decryption_key(reference.clone(), (*key).into());
+        }
+    }
 
     let mut encrypted_blobs: Vec<Blob> = Vec::with_capacity(staged_ingest.blobs.len());
     let mut new_fragments: Vec<Fragment> = Vec::with_capacity(staged_ingest.fragment_entries.len());
@@ -422,8 +432,10 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
     let mut local_secrets = Vec::new();
 
     // Track content_ref -> SymmetricKey for building ancestor maps
-    let mut key_index: std::collections::HashMap<Vec<u8>, SymmetricKey> =
-        std::collections::HashMap::new();
+    let mut key_index: std::collections::HashMap<Vec<u8>, SymmetricKey> = initial_keys
+        .into_iter()
+        .map(|(reference, bytes)| (reference, bytes.into()))
+        .collect();
 
     // Encrypt fragment blobs
     for (entry, blob) in staged_ingest.fragment_entries.iter().zip(

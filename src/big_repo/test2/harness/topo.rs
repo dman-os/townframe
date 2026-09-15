@@ -83,6 +83,25 @@ impl Node {
         Self::boot_with_config(seed, label, StorageConfig::Memory).await
     }
 
+    /// Boot a node with the keyhive change-notification subscription
+    /// unwired: peers only learn keyhive changes through explicit
+    /// `sync_keyhive_with_peer` rounds, so a peer's membership view stays
+    /// stale by construction (late-keyhive-sync properties).
+    pub(crate) async fn boot_without_keyhive_notifs(
+        seed: u8,
+        label: &'static str,
+    ) -> crate::Res<Self> {
+        Self::boot_with_scopes_impl(
+            seed,
+            label,
+            StorageConfig::Memory,
+            Default::default(),
+            WorkerGroupScope::disabled(),
+            false,
+        )
+        .await
+    }
+
     /// Boot a node with a selectable persistent BigRepo storage configuration.
     pub(crate) async fn boot_with_config(
         seed: u8,
@@ -118,6 +137,17 @@ impl Node {
         hidden_parts: HashSet<big_sync_core::PartId>,
         frontier_scope: WorkerGroupScope,
     ) -> crate::Res<Self> {
+        Self::boot_with_scopes_impl(seed, label, storage, hidden_parts, frontier_scope, true).await
+    }
+
+    async fn boot_with_scopes_impl(
+        seed: u8,
+        label: &'static str,
+        storage: StorageConfig,
+        hidden_parts: HashSet<big_sync_core::PartId>,
+        frontier_scope: WorkerGroupScope,
+        keyhive_change_notifs: bool,
+    ) -> crate::Res<Self> {
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
             StorageConfig::Disk { path } => {
@@ -152,7 +182,16 @@ impl Node {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         store.ensure_part(crate::GLOBAL_PART_ID).await?;
-        Self::boot_with_store(seed, label, storage, store, hidden_parts, frontier_scope).await
+        Self::boot_with_store(
+            seed,
+            label,
+            storage,
+            store,
+            hidden_parts,
+            frontier_scope,
+            keyhive_change_notifs,
+        )
+        .await
     }
 
     async fn boot_with_store(
@@ -162,6 +201,7 @@ impl Node {
         store: Arc<SqliteBigRepoStore>,
         hidden_parts: HashSet<big_sync_core::PartId>,
         frontier_scope: WorkerGroupScope,
+        keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
         let (repo, repo_stop) = BigRepo::boot_with_store(
             Config {
@@ -179,6 +219,7 @@ impl Node {
                 automerge_frontier_group_scope: frontier_scope.clone(),
                 causal_checkpoint_group_scope: Default::default(),
                 group_part_group_scope: Default::default(),
+                keyhive_change_notifs,
             },
             (*store).clone(),
         )
@@ -249,8 +290,16 @@ impl Node {
         let restarted = if let Some(store) = retained_memory_store {
             // Memory restarts intentionally retain the store for tests that
             // isolate Keyhive loss from part-store persistence.
-            Self::boot_with_store(seed[0], label, storage, store, hidden_parts, frontier_scope)
-                .await?
+            Self::boot_with_store(
+                seed[0],
+                label,
+                storage,
+                store,
+                hidden_parts,
+                frontier_scope,
+                true,
+            )
+            .await?
         } else {
             // Disk restarts reopen the SQLite file, modeling a new process
             // rather than reusing the old pool/Arc. Keep the hidden-parts
@@ -412,10 +461,27 @@ impl ShutdownGuard {
     }
 
     /// Boot N disconnected nodes managed under this RAII shutdown guard.
+    #[expect(unused)]
     pub(crate) async fn boot(specs: &[(u8, &'static str)]) -> crate::Res<Self> {
         let mut nodes = Vec::with_capacity(specs.len());
         for &(seed, label) in specs {
             nodes.push(Node::boot(seed, label).await?);
+        }
+        Ok(Self { nodes })
+    }
+
+    /// Boot N nodes with per-node control over the keyhive change-notification
+    /// subscription. Nodes booted with `false` only learn keyhive changes
+    /// through explicit `sync_keyhive_with_peer` rounds, so their membership
+    /// view is stale by construction until a test explicitly syncs.
+    pub(crate) async fn boot_mixed(specs: &[(u8, &'static str, bool)]) -> crate::Res<Self> {
+        let mut nodes = Vec::with_capacity(specs.len());
+        for &(seed, label, keyhive_change_notifs) in specs {
+            nodes.push(if keyhive_change_notifs {
+                Node::boot(seed, label).await?
+            } else {
+                Node::boot_without_keyhive_notifs(seed, label).await?
+            });
         }
         Ok(Self { nodes })
     }
@@ -491,6 +557,36 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         })
+    }
+
+    /// Boot a connected pair whose nodes have the keyhive change-notification
+    /// subscription unwired: membership views only move on explicit
+    /// `sync_keyhive_with_peer` rounds, so late-keyhive-sync tests are
+    /// deterministic instead of racing the notification fan-out.
+    pub(crate) async fn boot_without_keyhive_notifs(
+        left_seed: u8,
+        right_seed: u8,
+        left_label: &'static str,
+        right_label: &'static str,
+    ) -> crate::Res<Self> {
+        let left = Node::boot_without_keyhive_notifs(left_seed, left_label).await?;
+        let mut guard = ShutdownGuard::from(vec![left]);
+        let right = Node::boot_without_keyhive_notifs(right_seed, right_label).await?;
+        guard.nodes.push(right);
+        let mut pair = Self {
+            guard,
+            left_idx: 0,
+            right_idx: 1,
+            left_conn: None,
+            right_conn: None,
+        };
+        pair.connect().await?;
+        // The contact-card exchange rides the first keyhive protocol round;
+        // with the notification subscription unwired nothing starts one
+        // automatically, so run one round per direction up front.
+        pair.left_conn().sync_keyhive_with_peer().await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
+        Ok(pair)
     }
 
     /// Boot a connected pair with persistent per-node BigRepo storage.

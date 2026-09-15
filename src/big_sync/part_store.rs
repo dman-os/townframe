@@ -1,15 +1,232 @@
 use crate::interlude::*;
 
+use big_sync_core::keyed_frontier::{FrontierRead, FrontierRevision, KeyedFrontierReader};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::rpc::{
     BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
+    LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
+    PartSummary, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{BuckId, Byte32Id, ObjId, PartId, PeerId, mpsc};
+
+/// The logical object and part routes represented by the part-store frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PartFrontierKey {
+    Object(ObjId),
+    Part { obj_id: ObjId, part_id: PartId },
+}
+
+pub(crate) use sqlite_frontier::SqlitePartFrontier;
+pub(crate) use sqlite_read::SqlitePartSelector;
+
+mod sqlite_frontier;
+mod sqlite_read;
+mod sqlite_write;
 
 pub mod memory;
 pub mod sqlite;
 pub mod sqlite_core;
+
+/// Local, already-authorized revision stream for part-store consumers.
+#[async_trait]
+pub trait LocalPartRevisionReader: Send {
+    async fn next(
+        &mut self,
+        limits: RevisionReadLimits,
+    ) -> Res<RevisionRead<FrontierRevision, SubEvent>>;
+}
+
+pub(crate) struct PartRevisionReader {
+    inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
+    /// `true` selects every object and part (the `All` local scope).
+    all: bool,
+    objects: HashSet<ObjId>,
+    parts: HashSet<PartId>,
+    pending: std::collections::VecDeque<RevisionRead<FrontierRevision, SubEvent>>,
+    pending_replay_complete: Option<FrontierRevision>,
+    last_revision: FrontierRevision,
+    replay_complete_seen: bool,
+}
+
+impl PartRevisionReader {
+    pub(crate) fn new(
+        inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>,
+        objects: HashSet<ObjId>,
+        parts: HashSet<PartId>,
+    ) -> Self {
+        Self {
+            inner,
+            all: false,
+            objects,
+            parts,
+            pending: std::collections::VecDeque::new(),
+            pending_replay_complete: None,
+            last_revision: 0,
+            replay_complete_seen: false,
+        }
+    }
+
+    /// An unfiltered reader: every object and part event in the scope is
+    /// projected, including events for parts created after this reader was
+    /// opened.
+    pub(crate) fn new_all(inner: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>>) -> Self {
+        Self {
+            all: true,
+            ..Self::new(inner, HashSet::new(), HashSet::new())
+        }
+    }
+
+    fn project(
+        &self,
+        key: PartFrontierKey,
+        value: Option<PartEvent>,
+        revision: FrontierRevision,
+    ) -> Option<SubEvent> {
+        match (key, value) {
+            (PartFrontierKey::Object(_), None) => None,
+            (PartFrontierKey::Object(_), Some(PartEvent::Changed(mut event))) => {
+                event.cursor = revision;
+                Some(SubEvent::Changed(event))
+            }
+            (PartFrontierKey::Part { obj_id, part_id }, value)
+                if self.selects_object(&obj_id) && !self.selects_part(&part_id) =>
+            {
+                let payload = match value {
+                    Some(PartEvent::Added(event)) => event.payload,
+                    Some(PartEvent::Changed(event)) => event.payload,
+                    Some(PartEvent::Removed(_)) | None => serde_json::Value::Null,
+                };
+                Some(SubEvent::Changed(ObjChanged {
+                    cursor: revision,
+                    part_ids: Vec::new(),
+                    obj_id,
+                    payload,
+                }))
+            }
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Added(mut event)))
+                if self.selects_part(&part_id) =>
+            {
+                event.cursor = revision;
+                event.obj_id = obj_id;
+                event.part_id = part_id;
+                Some(SubEvent::Added(event))
+            }
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Changed(mut event)))
+                if self.selects_part(&part_id) =>
+            {
+                event.cursor = revision;
+                event.obj_id = obj_id;
+                event.part_ids = vec![part_id];
+                Some(SubEvent::Changed(event))
+            }
+            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Removed(_)) | None)
+                if self.selects_part(&part_id) =>
+            {
+                Some(SubEvent::Removed(ObjRemovedFromPart {
+                    cursor: revision,
+                    part_id,
+                    obj_id,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    fn selects_object(&self, obj_id: &ObjId) -> bool {
+        self.all || self.objects.contains(obj_id)
+    }
+
+    fn selects_part(&self, part_id: &PartId) -> bool {
+        self.all || self.parts.contains(part_id)
+    }
+
+    fn merge_changed(events: &mut Vec<SubEvent>, event: SubEvent) {
+        if let SubEvent::Changed(changed) = &event
+            && let Some(SubEvent::Changed(existing)) = events.iter_mut().find(|candidate| {
+                matches!(candidate, SubEvent::Changed(candidate)
+                    if candidate.cursor == changed.cursor && candidate.obj_id == changed.obj_id)
+            })
+        {
+            for part_id in &changed.part_ids {
+                if !existing.part_ids.contains(part_id) {
+                    existing.part_ids.push(*part_id);
+                }
+            }
+            existing.part_ids.sort_unstable();
+            existing.payload = changed.payload.clone();
+        } else {
+            events.push(event);
+        }
+    }
+}
+
+#[async_trait]
+impl LocalPartRevisionReader for PartRevisionReader {
+    async fn next(
+        &mut self,
+        limits: RevisionReadLimits,
+    ) -> Res<RevisionRead<FrontierRevision, SubEvent>> {
+        if let Some(read) = self.pending.pop_front() {
+            return Ok(read);
+        }
+        if let Some(through) = self.pending_replay_complete.take() {
+            return Ok(RevisionRead::ReplayComplete { through });
+        }
+        match self
+            .inner
+            .next(big_sync_core::keyed_frontier::FrontierReadLimits {
+                max_entries: limits.max_entries,
+            })
+            .await
+            .map_err(|error| ferr!("{error}"))?
+        {
+            FrontierRead::ReplayComplete { through } => {
+                if self.replay_complete_seen {
+                    return Err(ferr!("frontier emitted ReplayComplete twice"));
+                }
+                self.replay_complete_seen = true;
+                if through > self.last_revision {
+                    self.last_revision = through;
+                    self.pending_replay_complete = Some(through);
+                    return Ok(RevisionRead::Entries {
+                        revision: through,
+                        entries: Vec::new(),
+                    });
+                }
+                Ok(RevisionRead::ReplayComplete { through })
+            }
+            FrontierRead::Entries { entries, through } => {
+                self.last_revision = self.last_revision.max(through);
+                let mut grouped = BTreeMap::<FrontierRevision, Vec<SubEvent>>::new();
+                for entry in entries {
+                    if let Some(event) = self.project(entry.key, entry.value, entry.revision) {
+                        Self::merge_changed(grouped.entry(entry.revision).or_default(), event);
+                    }
+                }
+                if grouped.is_empty() {
+                    return Ok(RevisionRead::Entries {
+                        revision: through,
+                        entries: Vec::new(),
+                    });
+                }
+                let last = *grouped.keys().next_back().expect(ERROR_IMPOSSIBLE);
+                self.pending.extend(
+                    grouped
+                        .into_iter()
+                        .map(|(revision, entries)| RevisionRead::Entries { revision, entries }),
+                );
+                if through > last {
+                    self.pending.push_back(RevisionRead::Entries {
+                        revision: through,
+                        entries: Vec::new(),
+                    });
+                }
+                Ok(self.pending.pop_front().expect(ERROR_IMPOSSIBLE))
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HostPartStoreConfig {
@@ -39,6 +256,7 @@ impl Default for HostPartStoreConfig {
 
 #[async_trait]
 pub trait HostPartStore: Send + Sync {
+    async fn latest_revision(&self) -> Res<CursorIndex>;
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -110,9 +328,56 @@ pub trait HostPartStore: Send + Sync {
     /// Stores that do not provide a local mirror return an error.
     async fn subscribe_local(
         &self,
-        _reqs: SubPartsRequest,
+        reqs: SubPartsRequest,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        Err(ferr!("local subscription mirror is not available"))
+        let mut reader = self.open_local_revision_reader(reqs).await??;
+        let (tx, rx) = mpsc::unbounded("HostPartStore".into(), "local-revision-reader".into());
+        tokio::spawn(async move {
+            loop {
+                match reader
+                    .next(RevisionReadLimits::default())
+                    .await
+                    .expect(ERROR_IMPOSSIBLE)
+                {
+                    RevisionRead::Entries { entries, .. } => {
+                        for event in entries {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    RevisionRead::ReplayComplete { .. } => {
+                        if tx.send(SubEvent::ReplayComplete).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Ok(rx))
+    }
+
+    /// Open a trusted local revision reader. This boundary intentionally has
+    /// no remote authorization or hidden-part filtering.
+    async fn open_local_revision_reader(
+        &self,
+        _reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+        Err(ferr!("local revision reader is not available"))
+    }
+
+    /// Open a trusted local revision reader over every part and object in the
+    /// scope, including parts created after this call. This is the `All`
+    /// worker scope: the part set is resolved by the store at read time, so
+    /// no enumeration is frozen into the reader. `after` is the replay lower
+    /// bound (a part-store frontier revision).
+    /// This boundary intentionally has no remote authorization or
+    /// hidden-part filtering.
+    async fn open_local_revision_reader_all(
+        &self,
+        _after: CursorIndex,
+    ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+        Err(ferr!("local revision reader is not available"))
     }
     async fn ensure_part(&self, part_id: PartId) -> Res<()>;
 
@@ -578,6 +843,245 @@ pub mod host_contract {
         assert_obj_occupancy_contract(harness).await?;
         assert_remove_obj_advances_latest_cursor_contract(harness).await?;
         assert_list_events_next_cursor_exactness_contract(harness).await?;
+        assert_local_revision_reader_contract(harness).await?;
+        assert_local_revision_reader_all_contract(harness).await?;
+        Ok(())
+    }
+
+    /// The `All` local scope: the reader resolves the part set at read time,
+    /// so parts and objects created after the reader was opened are still
+    /// observed, and a non-zero `after` skips the replayed prefix.
+    pub async fn assert_local_revision_reader_all_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let latest = store.latest_revision().await?;
+
+        // Opened before any part or object exists.
+        let mut reader = store.open_local_revision_reader_all(latest).await??;
+        while let RevisionRead::Entries { entries, .. } = reader
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
+            assert!(entries.is_empty(), "an empty scope replays nothing");
+        }
+
+        let part = test_part(220);
+        let obj = test_obj(221);
+        store.ensure_part(part).await?;
+        seed_live_obj(store, obj, payload("revision-all", 1), &[part]).await?;
+        store
+            .set_obj_payload(obj, payload("revision-all", 2))
+            .await?;
+
+        let mut saw_membership_event = false;
+        while let RevisionRead::Entries { revision, entries } =
+            reader.next(RevisionReadLimits::default()).await?
+        {
+            assert!(revision > latest);
+            saw_membership_event |= entries.iter().any(|entry| match entry {
+                SubEvent::Added(added) => added.obj_id == obj && added.part_id == part,
+                SubEvent::Changed(changed) => {
+                    changed.obj_id == obj && changed.part_ids.contains(&part)
+                }
+                _ => false,
+            });
+            if saw_membership_event {
+                break;
+            }
+        }
+        assert!(
+            saw_membership_event,
+            "events for a part created after the reader was opened must be observed"
+        );
+
+        // A reader opened after the writes replays nothing.
+        let after = store.latest_revision().await?;
+        let mut bounded = store.open_local_revision_reader_all(after).await??;
+        while let RevisionRead::Entries { entries, .. } = bounded
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
+            assert!(entries.is_empty(), "the after bound must skip the prefix");
+        }
+        Ok(())
+    }
+
+    pub async fn assert_local_revision_reader_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_a = test_part(201);
+        let part_b = test_part(202);
+        let obj = test_obj(203);
+        store.ensure_part(part_a).await?;
+        store.ensure_part(part_b).await?;
+        seed_live_obj(store, obj, payload("revision-1", 1), &[]).await?;
+        store.add_obj_to_parts(obj, vec![part_a, part_b]).await?;
+        store.set_obj_payload(obj, payload("revision-2", 2)).await?;
+
+        let mut reader = store
+            .open_local_revision_reader(SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([
+                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj },
+                    big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part_a,
+                        cursor: 0,
+                    },
+                    big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part_b,
+                        cursor: 0,
+                    },
+                ]),
+            })
+            .await??;
+        let mut last_revision = 0;
+        let mut grouped_revision = None;
+        let replay_through = loop {
+            match reader
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?
+            {
+                RevisionRead::Entries { revision, entries } => {
+                    assert!(
+                        revision > last_revision,
+                        "local revisions must strictly increase: previous={last_revision}, next={revision}"
+                    );
+                    last_revision = revision;
+                    if let Some(changed) = entries.iter().find_map(|entry| match entry {
+                        SubEvent::Changed(changed)
+                            if changed.obj_id == obj
+                                && changed.part_ids == vec![part_a, part_b] =>
+                        {
+                            Some(changed)
+                        }
+                        _ => None,
+                    }) {
+                        assert_eq!(entries.len(), 1, "same-revision changes must be grouped");
+                        grouped_revision = Some(revision);
+                        assert_eq!(changed.obj_id, obj);
+                        assert_eq!(changed.part_ids, vec![part_a, part_b]);
+                    }
+                }
+                RevisionRead::ReplayComplete { through } => {
+                    assert!(through >= last_revision);
+                    break through;
+                }
+            }
+        };
+        let grouped_revision = grouped_revision.expect("replay must contain grouped change");
+
+        store.remove_obj_from_part(obj, part_a).await?;
+        let removed_revision = match reader.next(RevisionReadLimits::default()).await? {
+            RevisionRead::Entries { revision, entries } => {
+                assert!(revision > replay_through);
+                assert!(
+                    matches!(entries.as_slice(), [SubEvent::Removed(removed)] if removed.obj_id == obj && removed.part_id == part_a)
+                );
+                revision
+            }
+            other => panic!("expected tombstone revision, got {other:?}"),
+        };
+
+        let missing_obj = test_obj(204);
+        let mut filtered = store
+            .open_local_revision_reader(SubPartsRequest {
+                lower_bound: replay_through,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
+                    obj_id: missing_obj,
+                }]),
+            })
+            .await??;
+        let filtered_through = match filtered
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
+            RevisionRead::Entries { revision, entries } => {
+                assert!(revision >= replay_through);
+                assert!(entries.is_empty());
+                revision
+            }
+            other => panic!("expected empty filtered progress, got {other:?}"),
+        };
+        assert!(matches!(
+            filtered
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
+            RevisionRead::ReplayComplete { through } if through == filtered_through
+        ));
+
+        let mut bounded = store
+            .open_local_revision_reader(SubPartsRequest {
+                lower_bound: replay_through,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_b,
+                    cursor: grouped_revision,
+                }]),
+            })
+            .await??;
+        let bounded_through = match bounded
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
+            RevisionRead::Entries { revision, entries } => {
+                assert!(revision >= replay_through);
+                assert!(entries.is_empty());
+                revision
+            }
+            other => panic!("expected empty bounded progress, got {other:?}"),
+        };
+        assert!(matches!(
+            bounded
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
+            RevisionRead::ReplayComplete { through } if through == bounded_through
+        ));
+
+        let unrelated_obj = test_obj(205);
+        store
+            .set_obj_payload(unrelated_obj, payload("revision-filtered", 5))
+            .await?;
+        assert!(matches!(
+            filtered
+                .next(RevisionReadLimits {
+                    max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+                })
+                .await?,
+            RevisionRead::Entries {
+                revision,
+                entries
+            } if entries.is_empty() && revision > filtered_through
+        ));
+
+        store
+            .set_obj_payload(obj, payload("revision-live", 6))
+            .await?;
+        match reader.next(RevisionReadLimits::default()).await? {
+            RevisionRead::Entries { revision, entries } => {
+                assert!(revision > removed_revision);
+                assert!(
+                    matches!(entries.as_slice(), [SubEvent::Changed(changed)] if changed.obj_id == obj)
+                );
+            }
+            other => panic!("expected live revision, got {other:?}"),
+        }
         Ok(())
     }
 

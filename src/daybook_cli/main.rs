@@ -329,7 +329,6 @@ mod tests {
     use daybook_core::blobs::BlobsRepo;
     use daybook_core::config::ConfigRepo;
     use daybook_core::drawer::DrawerRepo;
-    use daybook_core::index::DocBlobsIndexRepo;
     use daybook_core::local_state::SqliteLocalStateRepo;
     use daybook_core::plugs::PlugsRepo;
     use daybook_core::progress::ProgressRepo;
@@ -348,7 +347,6 @@ mod tests {
         plugs_stop: daybook_core::repos::RepoStopToken,
         drawer_stop: daybook_core::repos::RepoStopToken,
         config_stop: daybook_core::repos::RepoStopToken,
-        doc_blobs_index_stop: daybook_core::repos::RepoStopToken,
         sqlite_local_state_stop: RepoStopToken,
     }
 
@@ -363,13 +361,11 @@ mod tests {
                 plugs_stop,
                 drawer_stop,
                 config_stop,
-                doc_blobs_index_stop,
                 sqlite_local_state_stop,
             } = self;
             sync_stop.stop().await?;
             drop(sync_repo);
             progress_stop.stop().await?;
-            doc_blobs_index_stop.stop().await?;
             sqlite_local_state_stop.stop().await?;
             config_stop.stop().await?;
             drawer_stop.stop().await?;
@@ -393,11 +389,14 @@ mod tests {
         .await?;
         let blobs_repo =
             BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
             ctx.doc_app.document_id(),
             daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
+            Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
@@ -424,20 +423,11 @@ mod tests {
             ctx.sql.clone(),
         )
         .await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
-        let (doc_blobs_index_repo, doc_blobs_index_stop) = DocBlobsIndexRepo::boot(
-            Arc::clone(&drawer_repo),
-            Arc::clone(&blobs_repo),
-            Arc::clone(&sqlite_local_state_repo),
-        )
-        .await?;
         let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&ctx),
             Arc::clone(&config_repo),
             Arc::clone(&blobs_repo),
-            Arc::clone(&doc_blobs_index_repo),
             Some(Arc::clone(&progress_repo)),
         )
         .await?;
@@ -451,7 +441,6 @@ mod tests {
             plugs_stop,
             drawer_stop,
             config_stop,
-            doc_blobs_index_stop,
             sqlite_local_state_stop,
         })
     }

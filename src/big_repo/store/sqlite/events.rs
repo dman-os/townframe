@@ -148,6 +148,7 @@ impl SqliteBigRepoStore {
         )
         .fetch_one(&mut *tx)
         .await?;
+        let mut next_seq = head + 1;
         for chunk in missing.chunks(160) {
             // Dynamic IN-list cardinality requires runtime SQL checking here.
             // Dynamic IN-list cardinality requires runtime SQL checking here.
@@ -162,7 +163,7 @@ impl SqliteBigRepoStore {
                     .push("(")
                     .push_bind(self.scope().id())
                     .push(", ")
-                    .push_bind(head + i64::try_from(offset).expect(ERROR_IMPOSSIBLE) + 1)
+                    .push_bind(next_seq + i64::try_from(offset).expect(ERROR_IMPOSSIBLE))
                     .push(", ")
                     .push_bind(hash.as_bytes().as_slice())
                     .push(", ")
@@ -171,6 +172,7 @@ impl SqliteBigRepoStore {
             }
             query.push(" ON CONFLICT(scope_id, event_hash) DO NOTHING");
             query.build().execute(&mut *tx).await?;
+            next_seq += i64::try_from(chunk.len()).expect(ERROR_IMPOSSIBLE);
         }
         tx.commit().await?;
         Ok(Self::u64_from_db(

@@ -393,13 +393,9 @@ async fn pull_required_partitions_via_big_sync_worker(
     if !ready.initial {
         eyre::bail!("clone Keyhive subscription did not send its readiness event");
     }
-    tokio::time::timeout(timeout, async {
-        big_repo.sync_keyhive_with_peer(peer_id).await?;
-        big_repo.wait_for_keyhive_reconciliation().await?;
-        eyre::Ok(())
-    })
-    .await
-    .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
+    tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id))
+        .await
+        .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
     let big_sync_rpc_client =
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
     let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
@@ -446,11 +442,22 @@ async fn pull_required_partitions_via_big_sync_worker(
             .wait_for_full_sync(vec![peer_id], required_partitions)
             .await?;
 
-        for doc_id in [bootstrap.app_doc_id, bootstrap.drawer_doc_id]
-            .into_iter()
-            .chain(bootstrap.config_doc_id)
-        {
-            big_repo.sync_doc_with_peer(doc_id, peer_id).await?;
+        let mut bootstrap_docs = vec![
+            ("app", bootstrap.app_doc_id),
+            ("drawer", bootstrap.drawer_doc_id),
+        ];
+        if let Some(config_doc_id) = bootstrap.config_doc_id {
+            bootstrap_docs.push(("config", config_doc_id));
+        }
+        for (role, doc_id) in bootstrap_docs {
+            tracing::info!(%doc_id, role, "clone bootstrap document sync begin");
+            big_repo
+                .sync_doc_with_peer(doc_id, peer_id)
+                .await
+                .wrap_err_with(|| {
+                    format!("clone bootstrap failed syncing {role} document {doc_id}")
+                })?;
+            tracing::info!(%doc_id, role, "clone bootstrap document sync complete");
         }
         Ok(())
     })
@@ -513,6 +520,8 @@ pub async fn clone_repo_init_from_url(
         let local_public = local_secret.public();
         let sqlite_path = staging.join("sqlite.db");
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(staging.join("local_state")).await?;
         let checkout_id = {
             let id = Uuid::new_v4();
             let id = utils_rs::hash::encode_base58_multibase(id);
@@ -633,6 +642,8 @@ pub async fn clone_repo_init_from_url(
             lock_guard,
             options: options.repo_options.clone(),
             sql: sql.clone(),
+            sqlite_local_state_repo,
+            sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),

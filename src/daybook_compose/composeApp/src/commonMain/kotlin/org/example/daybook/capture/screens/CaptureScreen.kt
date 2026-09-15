@@ -53,7 +53,6 @@ import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.RtFfi
-import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
@@ -204,7 +203,6 @@ class CaptureScreenViewModel(
     // Registration handle to auto-unregister
     private var registerJob: Job? = null
     private var drawerRegistration: ListenerRegistration? = null
-    private var rtRegistration: ListenerRegistration? = null
 
     // Listener instance implemented on Kotlin side
     private val drawerListener =
@@ -226,17 +224,6 @@ class CaptureScreenViewModel(
             }
         }
 
-    private val switchDocListener =
-        object : SwitchDocEventListener {
-            override fun onSwitchDocEvent(event: SwitchDocEvent) {
-                viewModelScope.launch {
-                    if (event.docId == _currentDocId.value) {
-                        loadDoc(event.docId)
-                    }
-                }
-            }
-        }
-
     init {
         if (initialDocId != null) {
             loadDoc(initialDocId)
@@ -246,14 +233,11 @@ class CaptureScreenViewModel(
         registerJob =
             viewModelScope.launch {
                 val dReg = drawerRepo.ffiRegisterListener(drawerListener)
-                val rReg = rt?.ffiRegisterListener(switchDocListener)
                 if (!isActive) {
                     dReg.unregister()
-                    rReg?.unregister()
                     return@launch
                 }
                 drawerRegistration = dReg
-                rtRegistration = rReg
             }
 
         // Initialize mode from current window
@@ -281,7 +265,6 @@ class CaptureScreenViewModel(
     override fun onCleared() {
         registerJob?.cancel()
         drawerRegistration?.unregister()
-        rtRegistration?.unregister()
         super.onCleared()
     }
 }

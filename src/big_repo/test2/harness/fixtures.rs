@@ -202,8 +202,17 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
     for node in nodes {
         loop {
             let event_tail = node.store.admission_head().await?;
-            if node.store.keyhive_group_part_cursor().await? >= event_tail {
+            let group_cursor = node.store.keyhive_group_part_cursor().await?;
+            if group_cursor >= event_tail {
                 break;
+            }
+            if std::env::var_os("DAYB_REST_DIAG").is_some() {
+                tracing::warn!(
+                    node = %node.repo.local_peer_id(),
+                    admission_head = event_tail,
+                    group_part_cursor = group_cursor,
+                    "network-rest: group-part cursor behind admission head"
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
@@ -231,8 +240,19 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
         for node in nodes {
             while {
                 let event_tail = node.store.admission_head().await?;
-                node.store.keyhive_group_part_cursor().await? < event_tail
-                    || node.store.causal_checkpoint_cursor().await? < event_tail
+                let group_cursor = node.store.keyhive_group_part_cursor().await?;
+                let causal_cursor = node.store.causal_checkpoint_cursor().await?;
+                let behind = group_cursor < event_tail || causal_cursor < event_tail;
+                if behind && std::env::var_os("DAYB_REST_DIAG").is_some() {
+                    tracing::warn!(
+                        node = %node.repo.local_peer_id(),
+                        admission_head = event_tail,
+                        group_part_cursor = group_cursor,
+                        causal_checkpoint_cursor = causal_cursor,
+                        "network-rest: worker cursors behind admission head"
+                    );
+                }
+                behind
             } {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }

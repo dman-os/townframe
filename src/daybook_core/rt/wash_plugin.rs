@@ -174,6 +174,12 @@ mod binds_guest {
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 })
             }
+            root_doc::WellKnownFacet::Branch(val) => {
+                wit_doc::WellKnownFacet::Branch(serde_json::to_string(&val).expect(ERROR_JSON))
+            }
+            root_doc::WellKnownFacet::Branches(val) => {
+                wit_doc::WellKnownFacet::Branches(serde_json::to_string(&val).expect(ERROR_JSON))
+            }
         }
     }
 
@@ -348,6 +354,12 @@ mod binds_guest {
                         .collect::<Result<_, eyre::Report>>()?,
                     plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 })
+            }
+            wit_doc::WellKnownFacet::Branch(json) => {
+                root_doc::WellKnownFacet::Branch(serde_json::from_str(&json)?)
+            }
+            wit_doc::WellKnownFacet::Branches(json) => {
+                root_doc::WellKnownFacet::Branches(serde_json::from_str(&json)?)
             }
         })
     }

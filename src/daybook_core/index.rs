@@ -1,11 +1,8 @@
-pub mod doc_blobs;
+pub(crate) mod doc_delta_store;
+pub(crate) mod facet_delta;
 pub mod facet_ref;
 pub mod facet_set;
 
-pub use doc_blobs::{DocBlobMembership, DocBlobsIndexEvent, DocBlobsIndexRepo};
-pub use facet_ref::{
-    DocFacetRefEdge, DocFacetRefIndexEvent, DocFacetRefIndexRepo, DocFacetRefIndexStopToken,
-};
-pub use facet_set::{
-    DocFacetSetIndexEvent, DocFacetSetIndexRepo, DocFacetSetIndexStopToken, DocFacetTagMembership,
-};
+pub(crate) use facet_delta::FacetRouteKey;
+pub use facet_ref::{DocFacetRefEdge, DocFacetRefIndexRepo};
+pub use facet_set::{DocFacetMembership, DocFacetSetIndexRepo, DocFacetTagMembership};

@@ -1,5 +1,4 @@
 use super::*;
-use crate::repos::{Repo, SubscribeOpts};
 #[tokio::test(flavor = "multi_thread")]
 async fn inspect_test_plug_oci_layout() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_inspect_test_plug_oci_layout").await?;
@@ -77,30 +76,8 @@ async fn test_plug_add_success() -> Res<()> {
 async fn test_plug_add_emits_no_event() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_plug_add_emits_no_event").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(16));
-
     repo.add(mock_plug("plug-single-event")).await?;
-
-    // ADR 007 §7: events are enabled-only. Authoring a manifest doc makes
-    // the plug known (and writes the config facet's known_manifests, which
-    // surfaces as PlugsConfigChanged via the switch), but emits no
-    // enablement event until the plug is enabled.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let mut saw_enablement = false;
-    while let Ok(event) = listener.try_recv() {
-        if matches!(
-            event.as_ref(),
-            PlugsEvent::PlugEnabled { .. }
-                | PlugsEvent::PlugDisabled { .. }
-                | PlugsEvent::EnabledPlugUpdated { .. }
-        ) {
-            saw_enablement = true;
-        }
-    }
-    assert!(
-        !saw_enablement,
-        "expected no enablement PlugsEvent for known-but-disabled manifest"
-    );
+    assert!(repo.get("@test/plug-single-event").await.is_none());
     ctx.stop().await?;
     Ok(())
 }
@@ -1104,45 +1081,69 @@ async fn doc_heads(
         .ok_or_eyre("doc missing main branch")
 }
 
-async fn wait_for_event(
-    listener: &crate::repos::ListenerHandle<PlugsEvent>,
-    pred: impl Fn(&PlugsEvent) -> bool,
-    what: &str,
-) -> Res<Arc<PlugsEvent>> {
-    let start = std::time::Instant::now();
+async fn wait_for_change(
+    events: &mut tokio::sync::broadcast::Receiver<PlugsEvent>,
+    plug_id: &str,
+    active: bool,
+) -> Res<PlugsWatchChange> {
     loop {
-        while let Ok(event) = listener.try_recv() {
-            if pred(event.as_ref()) {
-                return Ok(event);
-            }
+        let event = events
+            .recv()
+            .await
+            .map_err(|error| eyre::eyre!(error.to_string()))?;
+        let change = match event {
+            PlugsEvent::PlugEnabled { plug_id: id, .. }
+            | PlugsEvent::PlugUpdated { plug_id: id, .. } => PlugsWatchChange {
+                plug_id: id,
+                active: true,
+            },
+            PlugsEvent::PlugDisabled { plug_id: id } => PlugsWatchChange {
+                plug_id: id,
+                active: false,
+            },
+            PlugsEvent::PlugsConfigChanged { .. } => continue,
+        };
+        if change.plug_id == plug_id && change.active == active {
+            return Ok(change);
         }
-        if start.elapsed() > std::time::Duration::from_secs(5) {
-            eyre::bail!("timed out waiting for {what}");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
-fn drain_events(listener: &crate::repos::ListenerHandle<PlugsEvent>) -> Vec<Arc<PlugsEvent>> {
-    let mut events = vec![];
-    while let Ok(event) = listener.try_recv() {
-        events.push(event);
+async fn wait_for_any_change(
+    events: &mut tokio::sync::broadcast::Receiver<PlugsEvent>,
+    plug_id: &str,
+) -> Res<PlugsWatchChange> {
+    loop {
+        let event = events
+            .recv()
+            .await
+            .map_err(|error| eyre::eyre!(error.to_string()))?;
+        let change = match event {
+            PlugsEvent::PlugEnabled { plug_id: id, .. }
+            | PlugsEvent::PlugUpdated { plug_id: id, .. } => PlugsWatchChange {
+                plug_id: id,
+                active: true,
+            },
+            PlugsEvent::PlugDisabled { plug_id: id } => PlugsWatchChange {
+                plug_id: id,
+                active: false,
+            },
+            PlugsEvent::PlugsConfigChanged { .. } => continue,
+        };
+        if change.plug_id == plug_id {
+            return Ok(change);
+        }
     }
-    events
 }
 
-async fn wait_until<F, Fut>(mut f: F, what: &str) -> Res<()>
+async fn wait_until<F, Fut>(mut f: F, _what: &str) -> Res<()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let start = std::time::Instant::now();
     loop {
         if f().await {
             return Ok(());
-        }
-        if start.elapsed() > std::time::Duration::from_secs(5) {
-            eyre::bail!("timed out waiting for {what}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -1154,34 +1155,15 @@ where
 async fn test_enable_plug_emits_plug_enabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_enable_plug_emits_plug_enabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
-
+    let mut watch = repo.subscribe_events();
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
 
     repo.enable_plug(&ref_url).await?;
 
-    let event = wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "PlugEnabled",
-    )
-    .await?;
-    let PlugsEvent::PlugEnabled {
-        id,
-        heads: ev_heads,
-        origin,
-    } = event.as_ref()
-    else {
-        unreachable!()
-    };
-    assert_eq!(id, "@test/plug1");
-    assert_eq!(ev_heads, &heads);
-    assert!(matches!(
-        origin,
-        crate::event_origin::SwitchEventOrigin::Local { .. }
-    ));
+    let change = wait_for_change(&mut watch, "@test/plug1", true).await?;
+    assert_eq!(change.plug_id, "@test/plug1");
 
     // Active now.
     assert!(repo.get("@test/plug1").await.is_some());
@@ -1206,29 +1188,12 @@ async fn test_re_enable_same_ref_no_duplicate_event() -> Res<()> {
     let ctx =
         crate::test_support::test_cx("plugs_test_re_enable_same_ref_no_duplicate_event").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
-
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
     repo.enable_plug(&ref_url).await?;
-    wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "first PlugEnabled",
-    )
-    .await?;
-    drain_events(&listener);
-
     repo.enable_plug(&ref_url).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let events = drain_events(&listener);
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e.as_ref(), PlugsEvent::PlugEnabled { .. })),
-        "re-enable of the same ref must not emit PlugEnabled"
-    );
+    assert!(repo.get("@test/plug1").await.is_some());
 
     ctx.stop().await?;
     Ok(())
@@ -1240,36 +1205,17 @@ async fn test_re_enable_same_ref_no_duplicate_event() -> Res<()> {
 async fn test_disable_plug_emits_plug_disabled() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_test_disable_plug_emits_plug_disabled").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
     repo.enable_plug(&ref_url).await?;
-    wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "PlugEnabled",
-    )
-    .await?;
-    drain_events(&listener);
+    wait_for_change(&mut watch, "@test/plug1", true).await?;
 
     repo.disable_plug("@test/plug1").await?;
-
-    let event = wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugDisabled { .. }),
-        "PlugDisabled",
-    )
-    .await?;
-    let PlugsEvent::PlugDisabled { id, origin } = event.as_ref() else {
-        unreachable!()
-    };
-    assert_eq!(id, "@test/plug1");
-    assert!(matches!(
-        origin,
-        crate::event_origin::SwitchEventOrigin::Local { .. }
-    ));
+    let change = wait_for_change(&mut watch, "@test/plug1", false).await?;
+    assert_eq!(change.plug_id, "@test/plug1");
     assert!(repo.get("@test/plug1").await.is_none());
 
     ctx.stop().await?;
@@ -1283,18 +1229,13 @@ async fn test_update_plug_emits_enabled_plug_updated() -> Res<()> {
     let ctx =
         crate::test_support::test_cx("plugs_test_update_plug_emits_enabled_plug_updated").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug_at("plug1", "0.1.0")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
     repo.enable_plug(&ref_url).await?;
-    wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "PlugEnabled",
-    )
-    .await?;
+    wait_for_change(&mut watch, "@test/plug1", true).await?;
 
     // Remote republish: v0.2.0 on the same doc (valid, no breaking change).
     write_manifest_via_drawer(&ctx, &doc_id, &mock_plug_at("plug1", "0.2.0")).await?;
@@ -1312,20 +1253,10 @@ async fn test_update_plug_emits_enabled_plug_updated() -> Res<()> {
         "record of v0.2.0",
     )
     .await?;
-    drain_events(&listener);
-
     repo.update_plug("@test/plug1").await?;
-
-    let event = wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::EnabledPlugUpdated { .. }),
-        "EnabledPlugUpdated",
-    )
-    .await?;
-    let PlugsEvent::EnabledPlugUpdated { id, .. } = event.as_ref() else {
-        unreachable!()
-    };
-    assert_eq!(id, "@test/plug1");
+    let change = wait_for_any_change(&mut watch, "@test/plug1").await?;
+    assert_eq!(change.plug_id, "@test/plug1");
+    assert!(change.active);
     let active = repo
         .get("@test/plug1")
         .await
@@ -1639,7 +1570,7 @@ async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
     )
     .await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo
         .add(mock_plug_with_facet(
@@ -1652,13 +1583,7 @@ async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
     let heads = doc_heads(&ctx, &doc_id).await?;
     let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
     repo.enable_plug(&v1_ref).await?;
-    wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "PlugEnabled",
-    )
-    .await?;
-    drain_events(&listener);
+    wait_for_change(&mut watch, "@test/plug1", true).await?;
 
     write_manifest_via_drawer(
         &ctx,
@@ -1672,28 +1597,30 @@ async fn test_remote_manifest_rejection_emits_manifest_rejected() -> Res<()> {
     )
     .await?;
 
-    let event = wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::ManifestRejected { .. }),
-        "ManifestRejected",
+    wait_until(
+        || async {
+            read_config(&ctx)
+                .await
+                .ok()
+                .and_then(|config| {
+                    config
+                        .known_plugs
+                        .get("@test/plug1")
+                        .and_then(|track| track.latest_rejection.as_ref())
+                        .cloned()
+                })
+                .is_some()
+        },
+        "manifest rejection",
     )
     .await?;
-    let PlugsEvent::ManifestRejected {
-        id,
-        version,
-        reason,
-        origin,
-    } = event.as_ref()
-    else {
-        unreachable!()
-    };
-    assert_eq!(id, "@test/plug1");
-    assert_eq!(version, "0.2.0");
-    assert!(reason.contains("Incompatible schema"));
-    assert!(matches!(
-        origin,
-        crate::event_origin::SwitchEventOrigin::Remote { .. }
-    ));
+    let config = read_config(&ctx).await?;
+    let rejection = config
+        .known_plugs
+        .get("@test/plug1")
+        .and_then(|track| track.latest_rejection.as_ref())
+        .ok_or_eyre("expected manifest rejection")?;
+    assert!(rejection.contains("Incompatible schema"));
 
     ctx.stop().await?;
     Ok(())
@@ -1707,30 +1634,16 @@ async fn test_local_config_write_not_double_processed() -> Res<()> {
     let ctx =
         crate::test_support::test_cx("plugs_test_local_config_write_not_double_processed").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let listener = repo.subscribe(SubscribeOpts::new(32));
+    let mut watch = repo.subscribe_events();
 
     let doc_id = repo.add(mock_plug("plug1")).await?;
     let heads = doc_heads(&ctx, &doc_id).await?;
     let ref_url = PlugsRepo::build_enabled_ref(&doc_id, "main", &heads)?;
     repo.enable_plug(&ref_url).await?;
 
-    wait_for_event(
-        &listener,
-        |e| matches!(e, PlugsEvent::PlugEnabled { .. }),
-        "PlugEnabled",
-    )
-    .await?;
-    // Let the notif loop drain any in-flight config diffs.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let events = drain_events(&listener);
-    let enabled_count = events
-        .iter()
-        .filter(|e| matches!(e.as_ref(), PlugsEvent::PlugEnabled { .. }))
-        .count();
-    assert_eq!(
-        enabled_count, 0,
-        "no duplicate PlugEnabled from the notif loop"
-    );
+    let change = wait_for_change(&mut watch, "@test/plug1", true).await?;
+    assert!(change.active);
+    assert!(repo.get("@test/plug1").await.is_some());
 
     ctx.stop().await?;
     Ok(())

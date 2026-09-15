@@ -755,6 +755,7 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
         .with_document_read(|doc| {
             serde_json::json!({
                 "heads": am_utils_rs::serialize_commit_heads(&doc.get_heads()),
+                "causal_epoch": reader_doc.current_causal_epoch(),
             })
         })
         .await;

@@ -1,5 +1,9 @@
 use crate::interlude::*;
 
+use big_sync_core::keyed_frontier::{
+    FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision, KeyedFrontierReader,
+    KeyedFrontierResult,
+};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
@@ -9,25 +13,18 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{BuckId, Fingerprint, ObjId, PartId, PeerId, mpsc};
 
+use super::PartFrontierKey;
 use super::{HostPartStore, obj_id_bounds_for_bucket};
+use crate::keyed_frontier::{
+    MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
+    MemoryKeyedFrontierView, open_memory_keyed_frontier,
+};
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use super::sqlite_core::{PendingSubscription, SUB_REPLAYING_CLEAN};
-
-enum MemorySubscription {
-    Pending {
-        sender: big_sync_core::mpsc::Sender<SubEvent>,
-        principal: PeerId,
-        state: Arc<PendingSubscription>,
-    },
-    Live {
-        sender: big_sync_core::mpsc::Sender<SubEvent>,
-        principal: PeerId,
-    },
-}
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 structstruck::strike! {
     pub struct MemoryPartStore {
@@ -56,17 +53,10 @@ structstruck::strike! {
                         bucket_stats: BTreeMap<BuckId, BucketSummaryState>,
                     }
                 >,
-                events: BTreeMap<CursorIndex, Vec<PartEvent>>,
-                event_cursors_by_obj: HashMap<ObjId, BTreeSet<CursorIndex>>,
+                event_frontier: MemoryKeyedFrontierTable<PartFrontierKey, PartEvent>,
                 bus: struct MemorySubsBus {
                     #![derive(Default)]
-                    buf: Vec<PartEvent>,
-                    subs_to_drop: Vec<Uuid>,
-                    subs_by_part: HashMap<PartId, HashSet<Uuid>>,
-                    part_by_sub: HashMap<Uuid, HashSet<PartId>>,
-                    subs_by_obj: HashMap<ObjId, HashSet<Uuid>>,
-                    objs_by_sub: HashMap<Uuid, HashSet<ObjId>>,
-                    subs: HashMap<Uuid, MemorySubscription>
+                    buf: Vec<PartEvent>
                 },
                 objs: HashMap<
                     ObjId,
@@ -82,6 +72,59 @@ structstruck::strike! {
             }
         >>,
         hidden_parts: Arc<HashSet<PartId>>,
+    }
+}
+
+#[derive(Clone)]
+struct MemoryPartEventSource {
+    state: Arc<surelock::mutex::Mutex<MemoryPartStoreScopeState>>,
+}
+
+#[async_trait]
+impl MemoryKeyedFrontierSource<PartFrontierKey, PartEvent> for MemoryPartEventSource {
+    async fn view(
+        &self,
+    ) -> KeyedFrontierResult<MemoryKeyedFrontierView<PartFrontierKey, PartEvent>> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.state);
+            guard.event_frontier.view()
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct MemoryPartEventSelector {
+    /// `Some(after)` selects every key in the scope (the `All` local scope),
+    /// emitting revisions newer than `after` and ignoring the per-part and
+    /// per-object bounds below.
+    all: Option<CursorIndex>,
+    part_cursors: HashMap<PartId, CursorIndex>,
+    objects: HashSet<ObjId>,
+    object_bounds: HashMap<ObjId, CursorIndex>,
+}
+
+impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
+    fn lower_bound(&self, key: &PartFrontierKey) -> Option<FrontierRevision> {
+        if let Some(after) = self.all {
+            return Some(after);
+        }
+        match key {
+            PartFrontierKey::Object(obj_id) => self.object_bounds.get(obj_id).copied(),
+            PartFrontierKey::Part { obj_id, part_id } => {
+                match (
+                    self.object_bounds.get(obj_id).copied(),
+                    self.part_cursors.get(part_id).copied(),
+                ) {
+                    (Some(object_bound), Some(part_bound)) => Some(object_bound.min(part_bound)),
+                    (Some(bound), None) | (None, Some(bound)) => Some(bound),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    fn emit_empty_progress(&self) -> bool {
+        true
     }
 }
 
@@ -213,6 +256,68 @@ fn is_permitted_members(
         .map_or(!members.contains_key(&obj_id), |access| access.is_fetcher())
 }
 
+fn project_part_event(
+    state: &MemoryPartStoreScopeState,
+    event: PartEvent,
+    selector: &MemoryPartEventSelector,
+    subscriber: PeerId,
+) -> Option<SubEvent> {
+    let obj_id = match &event {
+        PartEvent::Changed(inner) => inner.obj_id,
+        PartEvent::Added(inner) => inner.obj_id,
+        PartEvent::Removed(inner) => inner.obj_id,
+    };
+    let permitted_parts = match &event {
+        PartEvent::Changed(inner) => inner
+            .part_ids
+            .iter()
+            .copied()
+            .filter(|part_id| {
+                selector.part_cursors.contains_key(part_id)
+                    && state.is_event_permitted(Some(*part_id), obj_id, Some(subscriber))
+            })
+            .collect::<Vec<_>>(),
+        PartEvent::Added(inner) => (selector.part_cursors.contains_key(&inner.part_id)
+            && state.is_event_permitted(Some(inner.part_id), obj_id, Some(subscriber)))
+        .then_some(inner.part_id)
+        .into_iter()
+        .collect(),
+        PartEvent::Removed(inner) => selector
+            .part_cursors
+            .contains_key(&inner.part_id)
+            .then_some(inner.part_id)
+            .into_iter()
+            .collect(),
+    };
+    let object_permitted = selector.objects.contains(&obj_id)
+        && state.is_event_permitted(None, obj_id, Some(subscriber));
+    match event {
+        PartEvent::Changed(mut inner) if !permitted_parts.is_empty() || object_permitted => {
+            inner.part_ids = permitted_parts;
+            Some(SubEvent::Changed(inner))
+        }
+        PartEvent::Added(inner) if !permitted_parts.is_empty() => Some(SubEvent::Added(inner)),
+        PartEvent::Added(inner) if object_permitted => {
+            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor: inner.cursor,
+                part_ids: Vec::new(),
+                obj_id: inner.obj_id,
+                payload: inner.payload,
+            }))
+        }
+        PartEvent::Removed(inner) if !permitted_parts.is_empty() => Some(SubEvent::Removed(inner)),
+        PartEvent::Removed(inner) if object_permitted => {
+            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor: inner.cursor,
+                part_ids: Vec::new(),
+                obj_id: inner.obj_id,
+                payload: serde_json::Value::Null,
+            }))
+        }
+        _ => None,
+    }
+}
+
 impl MemoryPartStoreScopeState {
     fn is_event_permitted(
         &self,
@@ -225,196 +330,66 @@ impl MemoryPartStoreScopeState {
 
     fn flush(&mut self) {
         let pending_events = std::mem::take(&mut self.bus.buf);
+        if pending_events.is_empty() {
+            return;
+        }
+        let revision = pending_events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(inner) => inner.cursor,
+                PartEvent::Added(inner) => inner.cursor,
+                PartEvent::Removed(inner) => inner.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        assert!(pending_events.iter().all(|event| match event {
+            PartEvent::Changed(inner) => inner.cursor == revision,
+            PartEvent::Added(inner) => inner.cursor == revision,
+            PartEvent::Removed(inner) => inner.cursor == revision,
+        }));
+        let mut frontier_mutations = Vec::new();
         for evt in pending_events {
-            let (evt_parts, cursor, evt_obj_id) = match &evt {
-                PartEvent::Changed(inner) => (inner.part_ids.clone(), inner.cursor, inner.obj_id),
-                PartEvent::Added(inner) => (vec![inner.part_id], inner.cursor, inner.obj_id),
-                PartEvent::Removed(inner) => (vec![inner.part_id], inner.cursor, inner.obj_id),
+            let (evt_parts, evt_obj_id) = match &evt {
+                PartEvent::Changed(inner) => (inner.part_ids.clone(), inner.obj_id),
+                PartEvent::Added(inner) => (vec![inner.part_id], inner.obj_id),
+                PartEvent::Removed(inner) => (vec![inner.part_id], inner.obj_id),
             };
-            let prior_cursors = self
-                .event_cursors_by_obj
-                .get(&evt_obj_id)
-                .cloned()
-                .unwrap_or_default();
-            for event_cursor in &prior_cursors {
-                let Some(events_at_cursor) = self.events.get_mut(event_cursor) else {
-                    continue;
-                };
-                let prior_events = std::mem::take(events_at_cursor);
-                let mut retained = Vec::with_capacity(prior_events.len());
-                for prior in prior_events {
-                    let (prior_obj, prior_parts) = match &prior {
-                        PartEvent::Changed(inner) => (inner.obj_id, inner.part_ids.as_slice()),
-                        PartEvent::Added(inner) => {
-                            (inner.obj_id, std::slice::from_ref(&inner.part_id))
-                        }
-                        PartEvent::Removed(inner) => {
-                            (inner.obj_id, std::slice::from_ref(&inner.part_id))
-                        }
-                    };
-                    if prior_obj != evt_obj_id
-                        || (!evt_parts.is_empty()
-                            && !prior_parts.is_empty()
-                            && !prior_parts.iter().any(|part| evt_parts.contains(part)))
-                    {
-                        retained.push(prior);
-                        continue;
-                    }
-
-                    if let PartEvent::Changed(mut inner) = prior {
-                        inner.part_ids.retain(|part| !evt_parts.contains(part));
-                        if !inner.part_ids.is_empty() {
-                            retained.push(PartEvent::Changed(inner));
-                        }
-                    }
-                }
-                *events_at_cursor = retained;
-            }
-            for event_cursor in &prior_cursors {
-                if self.events.get(event_cursor).is_some_and(Vec::is_empty) {
-                    self.events.remove(event_cursor);
-                }
-            }
-            let retained_cursors = prior_cursors
-                .into_iter()
-                .filter(|event_cursor| {
-                    self.events.get(event_cursor).is_some_and(|events| {
-                        events.iter().any(|prior| match prior {
-                            PartEvent::Changed(inner) => inner.obj_id == evt_obj_id,
-                            PartEvent::Added(inner) => inner.obj_id == evt_obj_id,
-                            PartEvent::Removed(inner) => inner.obj_id == evt_obj_id,
-                        })
-                    })
-                })
-                .collect::<BTreeSet<_>>();
-            if retained_cursors.is_empty() {
-                self.event_cursors_by_obj.remove(&evt_obj_id);
+            if evt_parts.is_empty() {
+                frontier_mutations.push(FrontierMutation::Put {
+                    key: PartFrontierKey::Object(evt_obj_id),
+                    value: evt.clone(),
+                });
             } else {
-                self.event_cursors_by_obj
-                    .insert(evt_obj_id, retained_cursors);
-            }
-            self.events.entry(cursor).or_default().push(evt.clone());
-            self.event_cursors_by_obj
-                .entry(evt_obj_id)
-                .or_default()
-                .insert(cursor);
-            let mut sub_ids = HashSet::new();
-            for part_id in &evt_parts {
-                if let Some(subs) = self.bus.subs_by_part.get(part_id) {
-                    sub_ids.extend(subs.iter().copied());
-                }
-            }
-            if let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
-                sub_ids.extend(subs.iter().copied());
-            }
-            let mut recipients = Vec::new();
-            for sub_id in sub_ids {
-                let principal = match self.bus.subs.get(&sub_id).expect(ERROR_IMPOSSIBLE) {
-                    MemorySubscription::Pending { principal, .. }
-                    | MemorySubscription::Live { principal, .. } => *principal,
-                };
-                let part_targets = self.bus.part_by_sub.get(&sub_id);
-                let object_target = self
-                    .bus
-                    .objs_by_sub
-                    .get(&sub_id)
-                    .is_some_and(|objects| objects.contains(&evt_obj_id));
-                let permitted_parts = evt_parts
-                    .iter()
-                    .copied()
-                    .filter(|part_id| {
-                        part_targets.is_some_and(|parts| parts.contains(part_id))
-                            && is_permitted_members(
-                                &self.members,
-                                Some(*part_id),
-                                evt_obj_id,
-                                Some(principal),
-                            )
-                    })
-                    .collect::<Vec<_>>();
-                let object_permitted = object_target
-                    && is_permitted_members(&self.members, None, evt_obj_id, Some(principal));
-                let projected = match &evt {
-                    PartEvent::Changed(inner)
-                        if !permitted_parts.is_empty() || object_permitted =>
-                    {
-                        let mut inner = inner.clone();
-                        inner.part_ids = permitted_parts;
-                        Some(SubEvent::Changed(inner))
-                    }
-                    PartEvent::Added(inner) if !permitted_parts.is_empty() => {
-                        Some(SubEvent::Added(inner.clone()))
-                    }
-                    PartEvent::Added(inner) if object_permitted => {
-                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: inner.cursor,
-                            part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
-                            payload: inner.payload.clone(),
-                        }))
-                    }
-                    PartEvent::Removed(inner) if !permitted_parts.is_empty() => {
-                        Some(SubEvent::Removed(inner.clone()))
-                    }
-                    PartEvent::Removed(inner) if object_permitted => {
-                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: inner.cursor,
-                            part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
-                            payload: serde_json::Value::Null,
-                        }))
-                    }
-                    _ => None,
-                };
-                if let Some(projected) = projected {
-                    recipients.push((sub_id, projected));
-                }
-            }
-            for (sub_id, sub_evt) in recipients {
-                let Some(sub) = self.bus.subs.remove(&sub_id) else {
-                    continue;
-                };
-                let mut should_drop = false;
-                let sub = match sub {
-                    MemorySubscription::Pending {
-                        sender,
-                        principal,
-                        state,
-                    } => {
-                        if state.mark_dirty() {
-                            if sender.try_send(sub_evt.clone()).is_err() {
-                                should_drop = true;
-                            }
-                            MemorySubscription::Live { sender, principal }
-                        } else {
-                            MemorySubscription::Pending {
-                                sender,
-                                principal,
-                                state,
-                            }
+                for part_id in &evt_parts {
+                    let key = PartFrontierKey::Part {
+                        obj_id: evt_obj_id,
+                        part_id: *part_id,
+                    };
+                    match &evt {
+                        PartEvent::Removed(_) => {
+                            frontier_mutations.push(FrontierMutation::Delete { key });
+                        }
+                        PartEvent::Changed(inner) => {
+                            let mut inner = inner.clone();
+                            inner.part_ids = vec![*part_id];
+                            frontier_mutations.push(FrontierMutation::Put {
+                                key,
+                                value: PartEvent::Changed(inner),
+                            });
+                        }
+                        PartEvent::Added(_) => {
+                            frontier_mutations.push(FrontierMutation::Put {
+                                key,
+                                value: evt.clone(),
+                            });
                         }
                     }
-                    MemorySubscription::Live { sender, principal } => {
-                        if sender.try_send(sub_evt).is_err() {
-                            should_drop = true;
-                        }
-                        MemorySubscription::Live { sender, principal }
-                    }
-                };
-                if should_drop {
-                    self.bus.subs_to_drop.push(sub_id);
-                } else {
-                    self.bus.subs.insert(sub_id, sub);
                 }
-            }
-            self.bus.subs_to_drop.sort_unstable();
-            self.bus.subs_to_drop.dedup();
-            self.bus.subs_to_drop.reverse();
-            let subs_to_drop = std::mem::take(&mut self.bus.subs_to_drop);
-            for sub_id in subs_to_drop {
-                self.bus.remove_subscription(sub_id);
             }
         }
+        self.event_frontier
+            .apply_at(revision, frontier_mutations)
+            .expect("part events must advance the keyed frontier revision");
     }
 }
 
@@ -422,26 +397,9 @@ impl MemorySubsBus {
     fn queue_evt(&mut self, evt: PartEvent) {
         self.buf.push(evt);
     }
-    fn remove_subscription(&mut self, sub_id: Uuid) {
-        self.subs.remove(&sub_id);
-        if let Some(parts) = self.part_by_sub.remove(&sub_id) {
-            for part_id in parts {
-                if let Some(subs) = self.subs_by_part.get_mut(&part_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-        if let Some(obj_ids) = self.objs_by_sub.remove(&sub_id) {
-            for obj_id in obj_ids {
-                if let Some(subs) = self.subs_by_obj.get_mut(&obj_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-    }
 }
 impl GlobalCursor {
-    fn get(&mut self) -> CursorIndex {
+    fn get(&self) -> CursorIndex {
         self.counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1
@@ -450,6 +408,13 @@ impl GlobalCursor {
 
 #[async_trait]
 impl HostPartStore for MemoryPartStore {
+    async fn latest_revision(&self) -> Res<CursorIndex> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard.global_cursor.get()
+        }))
+    }
+
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -962,7 +927,9 @@ impl HostPartStore for MemoryPartStore {
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, cursor } => Some((*part_id, *cursor)),
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    Some((*part_id, reqs.lower_bound.max(*cursor)))
+                }
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect();
@@ -990,198 +957,59 @@ impl HostPartStore for MemoryPartStore {
             }));
         }
 
-        let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
+        let selector = MemoryPartEventSelector {
+            all: None,
+            part_cursors,
+            objects,
+            object_bounds: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Object { obj_id } => Some((*obj_id, reqs.lower_bound)),
+                    SubscriptionTarget::Part { .. } => None,
+                })
+                .collect(),
+        };
+        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
+            Arc::new(MemoryPartEventSource {
+                state: Arc::clone(&self.inner),
+            });
+        let mut reader: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>> =
+            open_memory_keyed_frontier(source, selector.clone()).await?;
         let state = Arc::clone(&self.inner);
-        let sub_id = Uuid::new_v4();
-        let pending = PendingSubscription::new();
-        let pending_for_replay = Arc::clone(&pending);
-        surelock::key::lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.inner);
-            guard.bus.subs.insert(
-                sub_id,
-                MemorySubscription::Pending {
-                    sender: tx.clone(),
-                    principal: subscriber,
-                    state: pending,
-                },
-            );
-            let parts: HashSet<_> = part_cursors.keys().copied().collect();
-            guard.bus.part_by_sub.insert(sub_id, parts.clone());
-            for part_id in parts {
-                guard
-                    .bus
-                    .subs_by_part
-                    .entry(part_id)
-                    .or_default()
-                    .insert(sub_id);
-            }
-            guard.bus.objs_by_sub.insert(sub_id, objects.clone());
-            for obj_id in &objects {
-                guard
-                    .bus
-                    .subs_by_obj
-                    .entry(*obj_id)
-                    .or_default()
-                    .insert(sub_id);
-            }
-        });
-
+        let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
         tokio::spawn(async move {
-            let mut cursor = reqs.lower_bound;
             loop {
-                pending_for_replay
-                    .state
-                    .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let mut replay = Vec::new();
-                let mut next_cursor = cursor;
-                surelock::key::lock_scope(|key| {
-                    let (guard, _key) = key.lock(&state);
-                    let mut latest: HashMap<(ObjId, Option<PartId>), (CursorIndex, PartEvent)> =
-                        HashMap::new();
-                    for (&event_cursor, events) in guard.events.range(cursor.saturating_add(1)..) {
-                        next_cursor = event_cursor;
-                        for event in events {
-                            let obj_id = match event {
-                                PartEvent::Changed(inner) => inner.obj_id,
-                                PartEvent::Added(inner) => inner.obj_id,
-                                PartEvent::Removed(inner) => inner.obj_id,
-                            };
-                            match event {
-                                PartEvent::Changed(inner) if inner.part_ids.is_empty() => {
-                                    if objects.contains(&obj_id) {
-                                        latest
-                                            .insert((obj_id, None), (event_cursor, event.clone()));
-                                    }
-                                }
-                                PartEvent::Changed(inner) => {
-                                    for &part_id in &inner.part_ids {
-                                        if part_cursors.contains_key(&part_id)
-                                            || objects.contains(&obj_id)
-                                        {
-                                            latest.insert(
-                                                (obj_id, Some(part_id)),
-                                                (event_cursor, event.clone()),
-                                            );
-                                        }
-                                    }
-                                }
-                                PartEvent::Added(inner) => {
-                                    if part_cursors.contains_key(&inner.part_id)
-                                        || objects.contains(&obj_id)
-                                    {
-                                        latest.insert(
-                                            (obj_id, Some(inner.part_id)),
-                                            (event_cursor, event.clone()),
-                                        );
-                                    }
-                                }
-                                PartEvent::Removed(inner) => {
-                                    if part_cursors.contains_key(&inner.part_id)
-                                        || objects.contains(&obj_id)
-                                    {
-                                        latest.insert(
-                                            (obj_id, Some(inner.part_id)),
-                                            (event_cursor, event.clone()),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let mut values = latest.into_values().collect::<Vec<_>>();
-                    values.sort_by_key(|(event_cursor, _)| *event_cursor);
-                    for (event_cursor, event) in values {
-                        let obj_id = match &event {
-                            PartEvent::Changed(inner) => inner.obj_id,
-                            PartEvent::Added(inner) => inner.obj_id,
-                            PartEvent::Removed(inner) => inner.obj_id,
-                        };
-                        let permitted_parts = match &event {
-                            PartEvent::Changed(inner) => inner
-                                .part_ids
-                                .iter()
-                                .copied()
-                                .filter(|part_id| {
-                                    part_cursors.contains_key(part_id)
-                                        && event_cursor > part_cursors[part_id]
-                                        && guard.is_event_permitted(
-                                            Some(*part_id),
+                match reader.next(FrontierReadLimits::default()).await.unwrap() {
+                    FrontierRead::Entries { entries, .. } => {
+                        let events = surelock::key::lock_scope(|key| {
+                            let (guard, _key) = key.lock(&state);
+                            let mut projected = Vec::new();
+                            for entry in entries {
+                                let event = match (entry.key, entry.value) {
+                                    (PartFrontierKey::Object(_), None) => continue,
+                                    (PartFrontierKey::Part { obj_id, part_id }, None) => {
+                                        PartEvent::Removed(ObjRemovedFromPart {
+                                            cursor: entry.revision,
+                                            part_id,
                                             obj_id,
-                                            Some(subscriber),
-                                        )
-                                })
-                                .collect::<Vec<_>>(),
-                            PartEvent::Added(inner) => {
-                                if part_cursors
-                                    .get(&inner.part_id)
-                                    .is_some_and(|value| event_cursor > *value)
-                                    && guard.is_event_permitted(
-                                        Some(inner.part_id),
-                                        obj_id,
-                                        Some(subscriber),
-                                    )
+                                        })
+                                    }
+                                    (_, Some(event)) => event,
+                                };
+                                let Some(event) =
+                                    project_part_event(&guard, event, &selector, subscriber)
+                                else {
+                                    continue;
+                                };
+                                if let SubEvent::Changed(changed) = &event
+                                    && let Some(SubEvent::Changed(existing)) =
+                                        projected.iter_mut().find(|candidate| {
+                                            matches!(candidate, SubEvent::Changed(candidate)
+                                                if candidate.cursor == changed.cursor
+                                                    && candidate.obj_id == changed.obj_id)
+                                        })
                                 {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
-                                }
-                            }
-                            PartEvent::Removed(inner) => {
-                                if part_cursors
-                                    .get(&inner.part_id)
-                                    .is_some_and(|value| event_cursor > *value)
-                                    && guard.is_event_permitted(
-                                        Some(inner.part_id),
-                                        obj_id,
-                                        Some(subscriber),
-                                    )
-                                {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
-                                }
-                            }
-                        };
-                        let object_permitted = objects.contains(&obj_id)
-                            && guard.is_event_permitted(None, obj_id, Some(subscriber));
-                        let projected = match event {
-                            PartEvent::Changed(inner)
-                                if !permitted_parts.is_empty() || object_permitted =>
-                            {
-                                let mut inner = inner;
-                                inner.part_ids = permitted_parts;
-                                Some(SubEvent::Changed(inner))
-                            }
-                            PartEvent::Added(inner) if !permitted_parts.is_empty() => {
-                                Some(SubEvent::Added(inner))
-                            }
-                            PartEvent::Added(inner) if object_permitted => {
-                                Some(SubEvent::Changed(ObjChanged {
-                                    cursor: inner.cursor,
-                                    part_ids: Vec::new(),
-                                    obj_id: inner.obj_id,
-                                    payload: inner.payload,
-                                }))
-                            }
-                            PartEvent::Removed(inner) if !permitted_parts.is_empty() => {
-                                Some(SubEvent::Removed(inner))
-                            }
-                            PartEvent::Removed(inner) if object_permitted => {
-                                Some(SubEvent::Changed(ObjChanged {
-                                    cursor: inner.cursor,
-                                    part_ids: Vec::new(),
-                                    obj_id: inner.obj_id,
-                                    payload: serde_json::Value::Null,
-                                }))
-                            }
-                            _ => None,
-                        };
-                        if let Some(projected) = projected {
-                            if let SubEvent::Changed(changed) = &projected
-                                && let Some(SubEvent::Changed(existing)) = replay.iter_mut().find(|candidate| {
-                                    matches!(candidate, SubEvent::Changed(candidate)
-                                        if candidate.cursor == changed.cursor && candidate.obj_id == changed.obj_id)
-                                }) {
                                     for part_id in &changed.part_ids {
                                         if !existing.part_ids.contains(part_id) {
                                             existing.part_ids.push(*part_id);
@@ -1190,56 +1018,104 @@ impl HostPartStore for MemoryPartStore {
                                     existing.payload = changed.payload.clone();
                                     continue;
                                 }
-                            replay.push(projected);
+                                projected.push(event);
+                            }
+                            projected
+                        });
+                        for event in events {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
                         }
                     }
-                });
-                let had_replay = !replay.is_empty();
-                for event in replay {
-                    if tx.send(event).await.is_err() {
-                        return;
-                    }
-                }
-                cursor = next_cursor;
-                if had_replay {
-                    continue;
-                }
-                if pending_for_replay.begin_finalization() {
-                    if tx.send(SubEvent::ReplayComplete).await.is_err() {
-                        surelock::key::lock_scope(|key| {
-                            let (mut guard, _key) = key.lock(&state);
-                            guard.bus.remove_subscription(sub_id);
-                        });
-                        return;
-                    }
-                    if pending_for_replay.become_ready() {
-                        surelock::key::lock_scope(|key| {
-                            let (mut guard, _key) = key.lock(&state);
-                            let Some(sub) = guard.bus.subs.remove(&sub_id) else {
-                                return;
-                            };
-                            match sub {
-                                MemorySubscription::Pending {
-                                    sender,
-                                    principal,
-                                    state: _,
-                                } => {
-                                    guard.bus.subs.insert(
-                                        sub_id,
-                                        MemorySubscription::Live { sender, principal },
-                                    );
-                                }
-                                live @ MemorySubscription::Live { .. } => {
-                                    guard.bus.subs.insert(sub_id, live);
-                                }
-                            }
-                        });
-                        return;
+                    FrontierRead::ReplayComplete { .. } => {
+                        if tx.send(SubEvent::ReplayComplete).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
         });
         Ok(Ok(rx))
+    }
+
+    async fn open_local_revision_reader(
+        &self,
+        reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let part_cursors = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    Some((*part_id, reqs.lower_bound.max(*cursor)))
+                }
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let parts = part_cursors.keys().copied().collect::<HashSet<_>>();
+        let objects = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+                SubscriptionTarget::Part { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let unknown_parts = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            part_cursors
+                .keys()
+                .filter(|part_id| !guard.parts.contains_key(part_id))
+                .copied()
+                .collect::<Vec<_>>()
+        });
+        if !unknown_parts.is_empty() {
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: unknown_parts,
+            }));
+        }
+        let selector = MemoryPartEventSelector {
+            all: None,
+            part_cursors,
+            objects: objects.clone(),
+            object_bounds: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Object { obj_id } => Some((*obj_id, reqs.lower_bound)),
+                    SubscriptionTarget::Part { .. } => None,
+                })
+                .collect(),
+        };
+        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
+            Arc::new(MemoryPartEventSource {
+                state: Arc::clone(&self.inner),
+            });
+        let reader = crate::keyed_frontier::open_memory_keyed_frontier(source, selector).await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new(
+            reader, objects, parts,
+        ))))
+    }
+
+    async fn open_local_revision_reader_all(
+        &self,
+        after: CursorIndex,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        let selector = MemoryPartEventSelector {
+            all: Some(after),
+            part_cursors: HashMap::new(),
+            objects: HashSet::new(),
+            object_bounds: HashMap::new(),
+        };
+        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
+            Arc::new(MemoryPartEventSource {
+                state: Arc::clone(&self.inner),
+            });
+        let reader = crate::keyed_frontier::open_memory_keyed_frontier(source, selector).await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
     }
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()> {

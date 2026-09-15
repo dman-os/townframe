@@ -10,7 +10,7 @@ use crate::repos::plugs::PlugsRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 use crate::repos::sqlite_local_state::SqliteLocalStateRepoFfi;
 
-use daybook_core::rt::{Rt, RtConfig, RtStopToken, SwitchDocEvent};
+use daybook_core::rt::{Rt, RtConfig, RtStopToken};
 use daybook_types::manifest::ViewRef;
 use daybook_types::view::ViewSpec;
 
@@ -34,20 +34,6 @@ pub struct RtFfi {
     _init_repo: Arc<InitRepoFfi>,
     _sqlite_ls_repo: Arc<SqliteLocalStateRepoFfi>,
 }
-
-impl daybook_core::repos::Repo for RtFfi {
-    type Event = SwitchDocEvent;
-
-    fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
-        &self.rt.registry
-    }
-
-    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
-        &self.rt.cancel_token
-    }
-}
-
-crate::uniffi_repo_listeners!(RtFfi, SwitchDocEvent);
 
 #[uniffi::export]
 impl RtFfi {
@@ -95,7 +81,7 @@ impl RtFfi {
                 Arc::clone(&blobs_repo.repo),
                 Arc::clone(&config_repo.repo),
                 Arc::clone(&init_repo.repo),
-                Arc::clone(&sqlite_ls_repo.repo),
+                Arc::clone(&fcx.rcx.sqlite_local_state_repo),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

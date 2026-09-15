@@ -60,14 +60,13 @@ import org.example.daybook.uniffi.core.FfiConverterTypeKnownRepoEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypeLocalStateEvent
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
-import org.example.daybook.uniffi.core.FfiConverterTypePlugsEvent
+import org.example.daybook.uniffi.core.FfiConverterTypePlugsWatchChange
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressRetentionPolicy
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressTask
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressUpdate
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressUpdateEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeRepoConfig
-import org.example.daybook.uniffi.core.FfiConverterTypeSwitchDocEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTab
 import org.example.daybook.uniffi.core.FfiConverterTypeTable
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
@@ -79,14 +78,13 @@ import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.LocalStateEvent
 import org.example.daybook.uniffi.core.Panel
-import org.example.daybook.uniffi.core.PlugsEvent
+import org.example.daybook.uniffi.core.PlugsWatchChange
 import org.example.daybook.uniffi.core.ProgressEvent
 import org.example.daybook.uniffi.core.ProgressRetentionPolicy
 import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressUpdate
 import org.example.daybook.uniffi.core.ProgressUpdateEntry
 import org.example.daybook.uniffi.core.RepoConfig
-import org.example.daybook.uniffi.core.SwitchDocEvent
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
@@ -117,14 +115,13 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferKnownRepoEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferLocalStateEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferPlugsEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferPlugsWatchChange
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressRetentionPolicy
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressTask
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressUpdate
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressUpdateEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferRepoConfig
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferSwitchDocEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
@@ -743,8 +740,8 @@ internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.j
 internal interface UniffiCallbackInterfaceInitEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferInitEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-internal interface UniffiCallbackInterfacePlugsEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+internal interface UniffiCallbackInterfacePlugsWatchChangeListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsWatchChange.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceProgressEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferProgressEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -754,9 +751,6 @@ internal interface UniffiCallbackInterfaceLocalStateEventListenerMethod0 : com.s
 }
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceSwitchDocEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBufferSwitchDocEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onCameraPreviewFrame")
 internal open class UniffiVTableCallbackInterfaceCameraPreviewFrameListener(
@@ -878,22 +872,22 @@ internal open class UniffiVTableCallbackInterfaceInitEventListener(
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onPlugsEvent")
-internal open class UniffiVTableCallbackInterfacePlugsEventListener(
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onPlugsWatchChange")
+internal open class UniffiVTableCallbackInterfacePlugsWatchChangeListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0? = null,
+    @JvmField internal var `onPlugsWatchChange`: UniffiCallbackInterfacePlugsWatchChangeListenerMethod0? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0? = null,
-    ): UniffiVTableCallbackInterfacePlugsEventListener(`uniffiFree`,`uniffiClone`,`onPlugsEvent`,), Structure.ByValue
+        `onPlugsWatchChange`: UniffiCallbackInterfacePlugsWatchChangeListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfacePlugsWatchChangeListener(`uniffiFree`,`uniffiClone`,`onPlugsWatchChange`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePlugsEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePlugsWatchChangeListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
-        `onPlugsEvent` = other.`onPlugsEvent`
+        `onPlugsWatchChange` = other.`onPlugsWatchChange`
     }
 
 }
@@ -954,25 +948,6 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onSwitchDocEvent")
-internal open class UniffiVTableCallbackInterfaceSwitchDocEventListener(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `onSwitchDocEvent`: UniffiCallbackInterfaceSwitchDocEventListenerMethod0? = null,
-) : Structure() {
-    class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `onSwitchDocEvent`: UniffiCallbackInterfaceSwitchDocEventListenerMethod0? = null,
-    ): UniffiVTableCallbackInterfaceSwitchDocEventListener(`uniffiFree`,`uniffiClone`,`onSwitchDocEvent`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceSwitchDocEventListener) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
-        `onSwitchDocEvent` = other.`onSwitchDocEvent`
-    }
-
-}
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
@@ -997,251 +972,249 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
     external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url(
-): Short
+): Int
+external fun uniffi_daybook_ffi_checksum_method_ffictx_stop(
+): Int
 external fun uniffi_daybook_ffi_checksum_method_ffierror_message(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
-): Short
-external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_or_init_plug_config_doc_id(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_initrepoffi_stop(
-): Short
-external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
-): Short
+): Int
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_enable_known_plug(
+): Int
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_inspect_oci_layout(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
-): Short
+): Int
+external fun uniffi_daybook_ffi_checksum_method_plugswatchchangelistener_on_plugs_watch_change(
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
-): Short
-external fun uniffi_daybook_ffi_checksum_method_rtffi_ffi_register_listener(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
-): Short
-external fun uniffi_daybook_ffi_checksum_method_switchdoceventlistener_on_switch_doc_event(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_appffictx_init(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_ffictx_init(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_initrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
-): Short
+): Int
 external fun uniffi_daybook_ffi_checksum_constructor_rtffi_load(
-): Short
+): Int
 external fun ffi_daybook_ffi_uniffi_contract_version(
 ): Int
 
@@ -1265,9 +1238,8 @@ internal object UniffiLib {
         uniffiCallbackInterfaceDrawerEventListener.register(this)
         uniffiCallbackInterfaceInitEventListener.register(this)
         uniffiCallbackInterfaceLocalStateEventListener.register(this)
-        uniffiCallbackInterfacePlugsEventListener.register(this)
+        uniffiCallbackInterfacePlugsWatchChangeListener.register(this)
         uniffiCallbackInterfaceProgressEventListener.register(this)
-        uniffiCallbackInterfaceSwitchDocEventListener.register(this)
         uniffiCallbackInterfaceTablesEventListener.register(this)
         org.example.daybook.uniffi.core.uniffiEnsureInitialized()
         org.example.daybook.uniffi.types.uniffiEnsureInitialized()
@@ -1356,6 +1328,8 @@ external fun uniffi_daybook_ffi_fn_clone_ffictx(`handle`: Long,uniffi_out_err: U
 external fun uniffi_daybook_ffi_fn_free_ffictx(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_ffictx_init(`repoRoot`: RustBuffer.ByValue,`acx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_ffictx_stop(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_clone_ffierror(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1451,8 +1425,6 @@ external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(`ptr`: Long,`
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(`ptr`: Long,`id`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_or_init_plug_config_doc_id(`ptr`: Long,`plugId`: RustBuffer.ByValue,
-): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(`ptr`: Long,
@@ -1479,19 +1451,13 @@ external fun uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(`ptr
 ): Long
 external fun uniffi_daybook_ffi_fn_method_initrepoffi_stop(`ptr`: Long,
 ): Long
-external fun uniffi_daybook_ffi_fn_clone_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_daybook_ffi_fn_free_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(`vtable`: UniffiVTableCallbackInterfacePlugsEventListener,
-): Unit
-external fun uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(`ptr`: Long,`event`: RustBufferPlugsEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_daybook_ffi_fn_clone_plugsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_free_plugsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long,`blobsRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_enable_known_plug(`ptr`: Long,`plugId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1503,6 +1469,14 @@ external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_list_plugs(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Long,
 ): Long
+external fun uniffi_daybook_ffi_fn_clone_plugswatchchangelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_plugswatchchangelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_plugswatchchangelistener(`vtable`: UniffiVTableCallbackInterfacePlugsWatchChangeListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_plugswatchchangelistener_on_plugs_watch_change(`ptr`: Long,`event`: RustBufferPlugsWatchChange.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_daybook_ffi_fn_clone_progresseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_free_progresseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1563,7 +1537,7 @@ external fun uniffi_daybook_ffi_fn_clone_syncrepoffi(`handle`: Long,uniffi_out_e
 ): Long
 external fun uniffi_daybook_ffi_fn_free_syncrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(`fcx`: Long,`configRepo`: Long,`blobsRepo`: Long,`drawerRepo`: Long,`progressRepo`: Long,
+external fun uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(`fcx`: Long,`configRepo`: Long,`blobsRepo`: Long,`progressRepo`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_known_devices_once(`ptr`: Long,
 ): Long
@@ -1635,20 +1609,10 @@ external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: Uni
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`initRepo`: Long,`sqliteLsRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_daybook_ffi_fn_method_rtffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_render_facet_view(`ptr`: Long,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,`facetKey`: RustBuffer.ByValue,`requestedView`: RustBuffer.ByValue,`uiStateJson`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_stop(`ptr`: Long,
 ): Long
-external fun uniffi_daybook_ffi_fn_clone_switchdoceventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_daybook_ffi_fn_free_switchdoceventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_daybook_ffi_fn_init_callback_vtable_switchdoceventlistener(`vtable`: UniffiVTableCallbackInterfaceSwitchDocEventListener,
-): Unit
-external fun uniffi_daybook_ffi_fn_method_switchdoceventlistener_on_switch_doc_event(`ptr`: Long,`event`: RustBufferSwitchDocEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun ffi_daybook_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_daybook_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1664,7 +1628,7 @@ external fun ffi_daybook_ffi_rust_future_cancel_u8(`handle`: Long,
 external fun ffi_daybook_ffi_rust_future_free_u8(`handle`: Long,
 ): Unit
 external fun ffi_daybook_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
+): Int
 external fun ffi_daybook_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
 external fun ffi_daybook_ffi_rust_future_cancel_i8(`handle`: Long,
@@ -1680,7 +1644,7 @@ external fun ffi_daybook_ffi_rust_future_cancel_u16(`handle`: Long,
 external fun ffi_daybook_ffi_rust_future_free_u16(`handle`: Long,
 ): Unit
 external fun ffi_daybook_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
+): Int
 external fun ffi_daybook_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
 ): Unit
 external fun ffi_daybook_ffi_rust_future_cancel_i16(`handle`: Long,
@@ -1768,373 +1732,370 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener() != 24531.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener() != 24531) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame() != 62738.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame() != 62738) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices() != 49134.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices() != 49134) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled() != 9103.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled() != 9103) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener() != 15689.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener() != 15689) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream() != 54772.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream() != 54772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream() != 38889.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream() != 38889) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis() != 32047.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis() != 32047) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame() != 63251.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame() != 63251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame() != 54052.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame() != 54052) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener() != 45119.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener() != 45119) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener() != 16442.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener() != 16442) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame() != 36663.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame() != 36663) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated() != 1239.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated() != 1239) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected() != 65532.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected() != 65532) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error() != 46292.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error() != 46292) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination() != 63936.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination() != 63936) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url() != 10123.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url() != 10123) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir() != 60883.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir() != 60883) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo() != 17093.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo() != 17093) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config() != 30826.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config() != 30826) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable() != 21175.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable() != 21175) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path() != 49011.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path() != 49011) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url() != 43700.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url() != 43700) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 61441.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_ffictx_stop() != 19465) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path() != 43520.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 61441) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_blobsrepoffi_put() != 12349.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path() != 43520) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event() != 2763.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_blobsrepoffi_put() != 12349) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 12494.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event() != 2763) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint() != 1644.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 12494) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json() != 36447.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint() != 1644) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 60117.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json() != 36447) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools() != 36327.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 60117) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint() != 8753.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools() != 36327) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json() != 35501.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint() != 8753) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_stop() != 42921.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json() != 35501) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event() != 5326.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_stop() != 42921) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener() != 57721.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event() != 5326) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list() != 38781.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener() != 57721) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop() != 34345.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list() != 38781) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 33569.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop() != 34345) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 51475.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event() != 33569) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add() != 38639.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_add() != 51475) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 52435.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add() != 38639) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener() != 35670.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_del() != 52435) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 37722.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener() != 35670) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle() != 25690.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get() != 37722) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry() != 8189.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle() != 25690) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_or_init_plug_config_doc_id() != 15565.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry() != 8189) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 44053.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 44053) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop() != 30008.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop() != 30008) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update() != 55647.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update() != 55647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 32707.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 32707) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event() != 3703.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event() != 3703) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener() != 34459.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener() != 34459) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_stop() != 18178.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_stop() != 18178) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event() != 23122.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_enable_known_plug() != 48573) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener() != 42144.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener() != 47353) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout() != 34199.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout() != 34199) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_inspect_oci_layout() != 39088.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_inspect_oci_layout() != 39088) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs() != 20893.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs() != 20893) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop() != 16868.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop() != 16868) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event() != 13451.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_plugswatchchangelistener_on_plugs_watch_change() != 15990) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update() != 18382.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event() != 13451) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed() != 12325.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update() != 18382) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss() != 26190.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed() != 12325) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener() != 41661.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss() != 26190) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_get() != 58400.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener() != 41661) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list() != 40222.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_get() != 58400) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix() != 32341.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list() != 40222) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates() != 48318.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix() != 32341) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed() != 14385.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates() != 48318) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override() != 53529.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed() != 14385) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_stop() != 7397.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override() != 53529) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task() != 16899.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_stop() != 7397) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event() != 14945.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task() != 16899) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener() != 28883.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event() != 14945) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop() != 49596.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener() != 28883) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once() != 2255.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop() != 49596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url() != 41796.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once() != 2255) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png() != 4719.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url() != 41796) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url() != 44496.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png() != 4719) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png() != 53043.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url() != 44496) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_stop() != 4650.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png() != 53043) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 16910.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_stop() != 4650) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab() != 54906.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event() != 16910) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table() != 53194.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab() != 54906) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener() != 16706.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table() != 53194) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel() != 24234.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener() != 16706) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table() != 14569.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel() != 24234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab() != 50172.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table() != 14569) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table() != 8956.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab() != 50172) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window() != 14781.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table() != 8956) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels() != 44115.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window() != 14781) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables() != 55374.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels() != 44115) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs() != 8846.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables() != 55374) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows() != 16706.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs() != 8846) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab() != 36124.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows() != 16706) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel() != 42245.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab() != 36124) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab() != 27428.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel() != 42245) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table() != 44601.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab() != 27428) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window() != 29468.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table() != 44601) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop() != 37116.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window() != 29468) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 6945.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop() != 37116) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_ffi_register_listener() != 8879.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 6945) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view() != 40691.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view() != 40691) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_stop() != 24290.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_stop() != 24290) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_switchdoceventlistener_on_switch_doc_event() != 6274.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load() != 30437) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load() != 30437.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load() != 58924) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load() != 58924.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_appffictx_init() != 50017) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_appffictx_init() != 50017.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_init() != 30974) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_ffictx_init() != 30974.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load() != 24145) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load() != 24145.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 11344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_configrepoffi_load() != 11344.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load() != 17588) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load() != 17588.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 49207) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 49207.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_initrepoffi_load() != 54114) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_initrepoffi_load() != 54114.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load() != 22500) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load() != 22500.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load() != 4008) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load() != 4008.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load() != 56346) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load() != 56346.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load() != 39424) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load() != 47066.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 40277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 40277.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 31565.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 31565) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -6378,8 +6339,6 @@ public interface DrawerRepoFfiInterface {
     
     suspend fun `getEntry`(`id`: kotlin.String): DocEntry?
     
-    suspend fun `getOrInitPlugConfigDocId`(`plugId`: kotlin.String): kotlin.String
-    
     suspend fun `list`(): List<DocNBranches>
     
     suspend fun `stop`()
@@ -6627,27 +6586,6 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
     }
 
     
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getOrInitPlugConfigDocId`(`plugId`: kotlin.String) : kotlin.String {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_or_init_plug_config_doc_id(
-                uniffiHandle,
-                FfiConverterString.lower(`plugId`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterString.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `list`() : List<DocNBranches> {
         return uniffiRustCallAsync(
@@ -6883,6 +6821,8 @@ public object FfiConverterTypeDrawerRepoFfi: FfiConverter<DrawerRepoFfi, Long> {
 
 public interface FfiCtxInterface {
     
+    suspend fun `stop`()
+    
     companion object
 }
 
@@ -6980,6 +6920,28 @@ open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
         return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_ffictx(handle, status)
         }
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_ffictx_stop(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
     }
 
     
@@ -8285,314 +8247,11 @@ public object FfiConverterTypeLocalStateEventListener: FfiConverter<LocalStateEv
 //
 
 
-public interface PlugsEventListener {
-    
-    fun `onPlugsEvent`(`event`: PlugsEvent)
-    
-    companion object
-}
-
-open class PlugsEventListenerImpl: Disposable, AutoCloseable, PlugsEventListener
-{
-
-    @Suppress("UNUSED_PARAMETER")
-    /**
-     * @suppress
-     */
-    constructor(withHandle: UniffiWithHandle, handle: Long) {
-        this.handle = handle
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
-    }
-
-    /**
-     * @suppress
-     *
-     * This constructor can be used to instantiate a fake object. Only used for tests. Any
-     * attempt to actually use an object constructed this way will fail as there is no
-     * connected Rust object.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    constructor(noHandle: NoHandle) {
-        this.handle = 0
-        this.cleanable = null
-    }
-
-    protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable?
-
-    private val wasDestroyed = AtomicBoolean(false)
-    private val callCounter = AtomicLong(1)
-
-    override fun destroy() {
-        // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
-        if (this.wasDestroyed.compareAndSet(false, true)) {
-            // This decrement always matches the initial count of 1 given at creation time.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
-            }
-        }
-    }
-
-    @Synchronized
-    override fun close() {
-        this.destroy()
-    }
-
-    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
-        // Check and increment the call counter, to keep the object alive.
-        // This needs a compare-and-set retry loop in case of concurrent updates.
-        do {
-            val c = this.callCounter.get()
-            if (c == 0L) {
-                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
-            }
-            if (c == Long.MAX_VALUE) {
-                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
-            }
-        } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the handle being freed concurrently.
-        try {
-            return block(this.uniffiCloneHandle())
-        } finally {
-            // This decrement always matches the increment we performed above.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
-            }
-        }
-    }
-
-    // Use a static inner class instead of a closure so as not to accidentally
-    // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val handle: Long) : Runnable {
-        override fun run() {
-            if (handle == 0.toLong()) {
-                // Fake object created with `NoHandle`, don't try to free.
-                return;
-            }
-            uniffiRustCall { status ->
-                UniffiLib.uniffi_daybook_ffi_fn_free_plugseventlistener(handle, status)
-            }
-        }
-    }
-
-    /**
-     * @suppress
-     */
-    fun uniffiCloneHandle(): Long {
-        if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object");
-        }
-        return uniffiRustCall() { status ->
-            UniffiLib.uniffi_daybook_ffi_fn_clone_plugseventlistener(handle, status)
-        }
-    }
-
-    override fun `onPlugsEvent`(`event`: PlugsEvent)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(
-        it,
-        FfiConverterTypePlugsEvent.lower(`event`),_status)
-}
-    }
-    
-    
-
-    
-
-    
-
-
-    
-    
-    /**
-     * @suppress
-     */
-    companion object
-    
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfacePlugsEventListener {
-    internal object `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypePlugsEventListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onPlugsEvent`(
-                    FfiConverterTypePlugsEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypePlugsEventListener.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypePlugsEventListener.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfacePlugsEventListener.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `onPlugsEvent`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(vtable)
-    }
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePlugsEventListener: FfiConverter<PlugsEventListener, Long> {
-    internal val handleMap = UniffiHandleMap<PlugsEventListener>()
-
-    override fun lower(value: PlugsEventListener): Long {
-        if (value is PlugsEventListenerImpl) {
-             // Rust-implemented object.  Clone the handle and return it
-            return value.uniffiCloneHandle()
-         } else {
-            // Kotlin object, generate a new vtable handle and return that.
-            return handleMap.insert(value)
-         }
-    }
-
-    override fun lift(value: Long): PlugsEventListener {
-        if ((value and 1.toLong()) == 0.toLong()) {
-            // Rust-generated handle, construct a new class that uses the handle to implement the
-            // interface
-            return PlugsEventListenerImpl(UniffiWithHandle, value)
-        } else {
-            // Kotlin-generated handle, get the object from the handle map
-            return handleMap.remove(value)
-        }
-    }
-
-    override fun read(buf: ByteBuffer): PlugsEventListener {
-        return lift(buf.getLong())
-    }
-
-    override fun allocationSize(value: PlugsEventListener) = 8UL
-
-    override fun write(value: PlugsEventListener, buf: ByteBuffer) {
-        buf.putLong(lower(value))
-    }
-}
-
-
-// This template implements a class for working with a Rust struct via a handle
-// to the live Rust struct on the other side of the FFI.
-//
-// There's some subtlety here, because we have to be careful not to operate on a Rust
-// struct after it has been dropped, and because we must expose a public API for freeing
-// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
-//
-//   * Each instance holds an opaque handle to the underlying Rust struct.
-//     Method calls need to read this handle from the object's state and pass it in to
-//     the Rust FFI.
-//
-//   * When an instance is no longer needed, its handle should be passed to a
-//     special destructor function provided by the Rust FFI, which will drop the
-//     underlying Rust struct.
-//
-//   * Given an instance, calling code is expected to call the special
-//     `destroy` method in order to free it after use, either by calling it explicitly
-//     or by using a higher-level helper like the `use` method. Failing to do so risks
-//     leaking the underlying Rust struct.
-//
-//   * We can't assume that calling code will do the right thing, and must be prepared
-//     to handle Kotlin method calls executing concurrently with or even after a call to
-//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
-//
-//   * We must never allow Rust code to operate on the underlying Rust struct after
-//     the destructor has been called, and must never call the destructor more than once.
-//     Doing so may trigger memory unsafety.
-//
-//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
-//     is implemented to call the destructor when the Kotlin object becomes unreachable.
-//     This is done in a background thread. This is not a panacea, and client code should be aware that
-//      1. the thread may starve if some there are objects that have poorly performing
-//     `drop` methods or do significant work in their `drop` methods.
-//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
-//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
-//
-// If we try to implement this with mutual exclusion on access to the handle, there is the
-// possibility of a race between a method call and a concurrent call to `destroy`:
-//
-//    * Thread A starts a method call, reads the value of the handle, but is interrupted
-//      before it can pass the handle over the FFI to Rust.
-//    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read handle value to Rust and triggering
-//      a use-after-free.
-//
-// One possible solution would be to use a `ReadWriteLock`, with each method call taking
-// a read lock (and thus allowed to run concurrently) and the special `destroy` method
-// taking a write lock (and thus blocking on live method calls). However, we aim not to
-// generate methods with any hidden blocking semantics, and a `destroy` method that might
-// block if called incorrectly seems to meet that bar.
-//
-// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
-// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
-// has been called. These are updated according to the following rules:
-//
-//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
-//      The initial value for the flag is false.
-//
-//    * At the start of each method call, we atomically check the counter.
-//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
-//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
-//
-//    * At the end of each method call, we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-//    * When `destroy` is called, we atomically flip the flag from false to true.
-//      If the flag was already true we silently fail.
-//      Otherwise we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
-// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
-//
-// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
-// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
-// of the underlying Rust code.
-//
-// This makes a cleaner a better alternative to _not_ calling `destroy()` as
-// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
-// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
-// thread may be starved, and the app will leak memory.
-//
-// In this case, `destroy`ing manually may be a better solution.
-//
-// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
-// with Rust peers are reclaimed:
-//
-// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
-// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
-// 3. The memory is reclaimed when the process terminates.
-//
-// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
-//
-
-
 public interface PlugsRepoFfiInterface {
     
-    fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration
+    suspend fun `enableKnownPlug`(`plugId`: kotlin.String)
+    
+    fun `ffiRegisterListener`(`listener`: PlugsWatchChangeListener): ListenerRegistration
     
     suspend fun `importFromOciLayout`(`path`: kotlin.String)
     
@@ -8701,13 +8360,35 @@ open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration {
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `enableKnownPlug`(`plugId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_enable_known_plug(
+                uniffiHandle,
+                FfiConverterString.lower(`plugId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    override fun `ffiRegisterListener`(`listener`: PlugsWatchChangeListener): ListenerRegistration {
             return FfiConverterTypeListenerRegistration.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(
         it,
-        FfiConverterTypePlugsEventListener.lower(`listener`),_status)
+        FfiConverterTypePlugsWatchChangeListener.lower(`listener`),_status)
 }
     }
     )
@@ -8847,6 +8528,311 @@ public object FfiConverterTypePlugsRepoFfi: FfiConverter<PlugsRepoFfi, Long> {
     override fun allocationSize(value: PlugsRepoFfi) = 8UL
 
     override fun write(value: PlugsRepoFfi, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface PlugsWatchChangeListener {
+    
+    fun `onPlugsWatchChange`(`event`: PlugsWatchChange)
+    
+    companion object
+}
+
+open class PlugsWatchChangeListenerImpl: Disposable, AutoCloseable, PlugsWatchChangeListener
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_ffi_fn_free_plugswatchchangelistener(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_daybook_ffi_fn_clone_plugswatchchangelistener(handle, status)
+        }
+    }
+
+    override fun `onPlugsWatchChange`(`event`: PlugsWatchChange)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_plugswatchchangelistener_on_plugs_watch_change(
+        it,
+        FfiConverterTypePlugsWatchChange.lower(`event`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfacePlugsWatchChangeListener {
+    internal object `onPlugsWatchChange`: UniffiCallbackInterfacePlugsWatchChangeListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsWatchChange.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypePlugsWatchChangeListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onPlugsWatchChange`(
+                    FfiConverterTypePlugsWatchChange.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypePlugsWatchChangeListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypePlugsWatchChangeListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfacePlugsWatchChangeListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onPlugsWatchChange`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_plugswatchchangelistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlugsWatchChangeListener: FfiConverter<PlugsWatchChangeListener, Long> {
+    internal val handleMap = UniffiHandleMap<PlugsWatchChangeListener>()
+
+    override fun lower(value: PlugsWatchChangeListener): Long {
+        if (value is PlugsWatchChangeListenerImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): PlugsWatchChangeListener {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return PlugsWatchChangeListenerImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): PlugsWatchChangeListener {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: PlugsWatchChangeListener) = 8UL
+
+    override fun write(value: PlugsWatchChangeListener, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -9777,8 +9763,6 @@ public object FfiConverterTypeProgressRepoFfi: FfiConverter<ProgressRepoFfi, Lon
 
 public interface RtFfiInterface {
     
-    fun `ffiRegisterListener`(`listener`: SwitchDocEventListener): ListenerRegistration
-    
     suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?): RenderedFacetView
     
     suspend fun `stop`()
@@ -9881,19 +9865,6 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
             UniffiLib.uniffi_daybook_ffi_fn_clone_rtffi(handle, status)
         }
     }
-
-    override fun `ffiRegisterListener`(`listener`: SwitchDocEventListener): ListenerRegistration {
-            return FfiConverterTypeListenerRegistration.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_ffi_register_listener(
-        it,
-        FfiConverterTypeSwitchDocEventListener.lower(`listener`),_status)
-}
-    }
-    )
-    }
-    
 
     
     @Throws(FfiException::class)
@@ -10374,311 +10345,6 @@ public object FfiConverterTypeSqliteLocalStateRepoFfi: FfiConverter<SqliteLocalS
 //
 
 
-public interface SwitchDocEventListener {
-    
-    fun `onSwitchDocEvent`(`event`: SwitchDocEvent)
-    
-    companion object
-}
-
-open class SwitchDocEventListenerImpl: Disposable, AutoCloseable, SwitchDocEventListener
-{
-
-    @Suppress("UNUSED_PARAMETER")
-    /**
-     * @suppress
-     */
-    constructor(withHandle: UniffiWithHandle, handle: Long) {
-        this.handle = handle
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
-    }
-
-    /**
-     * @suppress
-     *
-     * This constructor can be used to instantiate a fake object. Only used for tests. Any
-     * attempt to actually use an object constructed this way will fail as there is no
-     * connected Rust object.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    constructor(noHandle: NoHandle) {
-        this.handle = 0
-        this.cleanable = null
-    }
-
-    protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable?
-
-    private val wasDestroyed = AtomicBoolean(false)
-    private val callCounter = AtomicLong(1)
-
-    override fun destroy() {
-        // Only allow a single call to this method.
-        // TODO: maybe we should log a warning if called more than once?
-        if (this.wasDestroyed.compareAndSet(false, true)) {
-            // This decrement always matches the initial count of 1 given at creation time.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
-            }
-        }
-    }
-
-    @Synchronized
-    override fun close() {
-        this.destroy()
-    }
-
-    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
-        // Check and increment the call counter, to keep the object alive.
-        // This needs a compare-and-set retry loop in case of concurrent updates.
-        do {
-            val c = this.callCounter.get()
-            if (c == 0L) {
-                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
-            }
-            if (c == Long.MAX_VALUE) {
-                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
-            }
-        } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the handle being freed concurrently.
-        try {
-            return block(this.uniffiCloneHandle())
-        } finally {
-            // This decrement always matches the increment we performed above.
-            if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
-            }
-        }
-    }
-
-    // Use a static inner class instead of a closure so as not to accidentally
-    // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val handle: Long) : Runnable {
-        override fun run() {
-            if (handle == 0.toLong()) {
-                // Fake object created with `NoHandle`, don't try to free.
-                return;
-            }
-            uniffiRustCall { status ->
-                UniffiLib.uniffi_daybook_ffi_fn_free_switchdoceventlistener(handle, status)
-            }
-        }
-    }
-
-    /**
-     * @suppress
-     */
-    fun uniffiCloneHandle(): Long {
-        if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object");
-        }
-        return uniffiRustCall() { status ->
-            UniffiLib.uniffi_daybook_ffi_fn_clone_switchdoceventlistener(handle, status)
-        }
-    }
-
-    override fun `onSwitchDocEvent`(`event`: SwitchDocEvent)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_daybook_ffi_fn_method_switchdoceventlistener_on_switch_doc_event(
-        it,
-        FfiConverterTypeSwitchDocEvent.lower(`event`),_status)
-}
-    }
-    
-    
-
-    
-
-    
-
-
-    
-    
-    /**
-     * @suppress
-     */
-    companion object
-    
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceSwitchDocEventListener {
-    internal object `onSwitchDocEvent`: UniffiCallbackInterfaceSwitchDocEventListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBufferSwitchDocEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeSwitchDocEventListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onSwitchDocEvent`(
-                    FfiConverterTypeSwitchDocEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypeSwitchDocEventListener.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeSwitchDocEventListener.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfaceSwitchDocEventListener.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `onSwitchDocEvent`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_daybook_ffi_fn_init_callback_vtable_switchdoceventlistener(vtable)
-    }
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSwitchDocEventListener: FfiConverter<SwitchDocEventListener, Long> {
-    internal val handleMap = UniffiHandleMap<SwitchDocEventListener>()
-
-    override fun lower(value: SwitchDocEventListener): Long {
-        if (value is SwitchDocEventListenerImpl) {
-             // Rust-implemented object.  Clone the handle and return it
-            return value.uniffiCloneHandle()
-         } else {
-            // Kotlin object, generate a new vtable handle and return that.
-            return handleMap.insert(value)
-         }
-    }
-
-    override fun lift(value: Long): SwitchDocEventListener {
-        if ((value and 1.toLong()) == 0.toLong()) {
-            // Rust-generated handle, construct a new class that uses the handle to implement the
-            // interface
-            return SwitchDocEventListenerImpl(UniffiWithHandle, value)
-        } else {
-            // Kotlin-generated handle, get the object from the handle map
-            return handleMap.remove(value)
-        }
-    }
-
-    override fun read(buf: ByteBuffer): SwitchDocEventListener {
-        return lift(buf.getLong())
-    }
-
-    override fun allocationSize(value: SwitchDocEventListener) = 8UL
-
-    override fun write(value: SwitchDocEventListener, buf: ByteBuffer) {
-        buf.putLong(lower(value))
-    }
-}
-
-
-// This template implements a class for working with a Rust struct via a handle
-// to the live Rust struct on the other side of the FFI.
-//
-// There's some subtlety here, because we have to be careful not to operate on a Rust
-// struct after it has been dropped, and because we must expose a public API for freeing
-// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
-//
-//   * Each instance holds an opaque handle to the underlying Rust struct.
-//     Method calls need to read this handle from the object's state and pass it in to
-//     the Rust FFI.
-//
-//   * When an instance is no longer needed, its handle should be passed to a
-//     special destructor function provided by the Rust FFI, which will drop the
-//     underlying Rust struct.
-//
-//   * Given an instance, calling code is expected to call the special
-//     `destroy` method in order to free it after use, either by calling it explicitly
-//     or by using a higher-level helper like the `use` method. Failing to do so risks
-//     leaking the underlying Rust struct.
-//
-//   * We can't assume that calling code will do the right thing, and must be prepared
-//     to handle Kotlin method calls executing concurrently with or even after a call to
-//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
-//
-//   * We must never allow Rust code to operate on the underlying Rust struct after
-//     the destructor has been called, and must never call the destructor more than once.
-//     Doing so may trigger memory unsafety.
-//
-//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
-//     is implemented to call the destructor when the Kotlin object becomes unreachable.
-//     This is done in a background thread. This is not a panacea, and client code should be aware that
-//      1. the thread may starve if some there are objects that have poorly performing
-//     `drop` methods or do significant work in their `drop` methods.
-//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
-//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
-//
-// If we try to implement this with mutual exclusion on access to the handle, there is the
-// possibility of a race between a method call and a concurrent call to `destroy`:
-//
-//    * Thread A starts a method call, reads the value of the handle, but is interrupted
-//      before it can pass the handle over the FFI to Rust.
-//    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read handle value to Rust and triggering
-//      a use-after-free.
-//
-// One possible solution would be to use a `ReadWriteLock`, with each method call taking
-// a read lock (and thus allowed to run concurrently) and the special `destroy` method
-// taking a write lock (and thus blocking on live method calls). However, we aim not to
-// generate methods with any hidden blocking semantics, and a `destroy` method that might
-// block if called incorrectly seems to meet that bar.
-//
-// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
-// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
-// has been called. These are updated according to the following rules:
-//
-//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
-//      The initial value for the flag is false.
-//
-//    * At the start of each method call, we atomically check the counter.
-//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
-//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
-//
-//    * At the end of each method call, we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-//    * When `destroy` is called, we atomically flip the flag from false to true.
-//      If the flag was already true we silently fail.
-//      Otherwise we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
-//
-// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
-// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
-//
-// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
-// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
-// of the underlying Rust code.
-//
-// This makes a cleaner a better alternative to _not_ calling `destroy()` as
-// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
-// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
-// thread may be starved, and the app will leak memory.
-//
-// In this case, `destroy`ing manually may be a better solution.
-//
-// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
-// with Rust peers are reclaimed:
-//
-// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
-// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
-// 3. The memory is reclaimed when the process terminates.
-//
-// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
-//
-
-
 public interface SyncRepoFfiInterface {
     
     suspend fun `connectKnownDevicesOnce`()
@@ -10931,9 +10597,9 @@ open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `load`(`fcx`: FfiCtx, `configRepo`: ConfigRepoFfi, `blobsRepo`: BlobsRepoFfi, `drawerRepo`: DrawerRepoFfi, `progressRepo`: ProgressRepoFfi) : SyncRepoFfi {
+     suspend fun `load`(`fcx`: FfiCtx, `configRepo`: ConfigRepoFfi, `blobsRepo`: BlobsRepoFfi, `progressRepo`: ProgressRepoFfi) : SyncRepoFfi {
         return uniffiRustCallAsync(
-        UniffiLib.uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),),
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),),
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
@@ -13554,8 +13220,6 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
 
 
 

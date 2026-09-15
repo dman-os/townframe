@@ -30,13 +30,18 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 
 mod runtime2;
+pub use runtime2::doc_revision_store::{
+    AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
+    AutomergeFrontierTarget,
+};
 pub use runtime2::types::{
-    CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
-    SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt, WorkerGroupScope,
+    CreateDocError, DocLookup, GetDocError, GroupScopeController, GroupScopeHandle,
+    KeyhiveSyncCancelled, PutDocError, SyncDocError, SyncDocOutcome, SyncDocPolicyError,
+    SyncDocReceipt, WorkerGroupScope,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 mod store;
-pub use runtime2::{automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id};
+pub use runtime2::{automerge_doc_obj_id, automerge_obj_to_doc_id};
 #[cfg(feature = "test-support")]
 pub use store::sqlite::BigSyncStoreSnapshot;
 pub use store::sqlite::SqliteBigRepoStore;
@@ -73,10 +78,13 @@ pub use keyhive_core;
 
 pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 pub use changes::{
-    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeNotification, BigRepoChangeOrigin, BigRepoLocalNotification,
+    ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
     DomainListenerRegistration as BigRepoDomainListenerRegistration,
+    LocalFilter as BigRepoLocalFilter,
+    LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
 
@@ -109,6 +117,13 @@ pub struct Config {
     pub causal_checkpoint_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents and group parts the group-part worker manages.
     pub group_part_group_scope: WorkerGroupScope,
+    /// Test-only: unwire the per-connection `SubscribeKeyhiveChanges`
+    /// subscription so peers only learn keyhive changes through explicit
+    /// `sync_keyhive_with_peer` rounds. Lets tests pin late-keyhive-sync
+    /// semantics with a membership view that is stale by construction.
+    /// Production nodes always wire the subscription.
+    #[cfg(test)]
+    pub keyhive_change_notifs: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +139,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
-    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     keyhive_storage: BigRepoKeyhiveStorage,
     #[educe(Debug(ignore))]
     sync_policy: runtime2::types::BigRepoSyncPolicy,
@@ -133,7 +147,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     frontier_store: SharedPartStore,
     #[educe(Debug(ignore))]
-    #[cfg_attr(all(not(test), not(feature = "test-support")), expect(dead_code))]
     sqlite_store: SqliteBigRepoStore,
     #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
@@ -149,6 +162,8 @@ pub struct BigRepo {
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
     #[educe(Debug(ignore))]
     connection_tasks: Arc<utils_rs::AbortableJoinSet>,
+    #[educe(Debug(ignore))]
+    automerge_frontier_group_scope: GroupScopeController,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -162,6 +177,8 @@ impl BigRepo {
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        #[cfg(test)]
+        let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
             node_identity_seed,
             storage,
@@ -170,6 +187,7 @@ impl BigRepo {
             automerge_frontier_group_scope,
             causal_checkpoint_group_scope,
             group_part_group_scope,
+            ..
         } = config;
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
@@ -200,6 +218,8 @@ impl BigRepo {
                 automerge_frontier_group_scope,
                 causal_checkpoint_group_scope,
                 group_part_group_scope,
+                #[cfg(test)]
+                keyhive_change_notifs,
             },
             store,
         )
@@ -258,6 +278,10 @@ impl BigRepo {
         config: Config,
         store: SqliteBigRepoStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        #[cfg(test)]
+        let keyhive_change_notifs = config.keyhive_change_notifs;
+        #[cfg(not(test))]
+        let keyhive_change_notifs = true;
         let Config {
             node_identity_seed,
             storage,
@@ -266,6 +290,7 @@ impl BigRepo {
             automerge_frontier_group_scope,
             causal_checkpoint_group_scope,
             group_part_group_scope,
+            ..
         } = config;
         let big_sync_store: SharedPartStore = Arc::new(store.clone());
         // Frontier payloads live in their own storage scope so the raw doc_id
@@ -325,6 +350,12 @@ impl BigRepo {
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
+        // The embedder-facing scope controller: workers read the live scope
+        // through a handle, so a relay can grow/shrink its document set at
+        // runtime without restarting the worker.
+        let automerge_frontier_group_scope_controller =
+            GroupScopeController::new(automerge_frontier_group_scope);
+
         let (runtime, ephemeral, keyhive_protocol, keyhive_dispatcher, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
                 signer,
@@ -338,9 +369,10 @@ impl BigRepo {
                 Arc::clone(&change_manager),
                 evt_tx,
                 evt_rx,
-                automerge_frontier_group_scope,
+                automerge_frontier_group_scope_controller.handle(),
                 causal_checkpoint_group_scope,
                 group_part_group_scope,
+                keyhive_change_notifs,
             )
             .await?;
 
@@ -360,6 +392,7 @@ impl BigRepo {
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
             connection_tasks: Arc::clone(&connection_tasks),
+            automerge_frontier_group_scope: automerge_frontier_group_scope_controller,
         });
 
         let change_manager_stop = out
@@ -381,6 +414,22 @@ impl BigRepo {
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Update the Automerge frontier worker's group scope at runtime.
+    ///
+    /// Daybook sync nodes keep [`WorkerGroupScope::All`]; relays constrain
+    /// this to the (dynamic) set of group-part ids backing the documents they
+    /// use to communicate with their clients. Workers rescan on change: newly
+    /// eligible docs gain frontier state, docs that left the scope lose their
+    /// frontier mirror.
+    pub fn set_automerge_frontier_group_scope(&self, scope: WorkerGroupScope) {
+        self.automerge_frontier_group_scope.set(scope);
+    }
+
+    /// The current live Automerge frontier worker scope.
+    pub fn automerge_frontier_group_scope(&self) -> WorkerGroupScope {
+        self.automerge_frontier_group_scope.get()
     }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
@@ -483,8 +532,7 @@ impl BigRepo {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
+    pub async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
         self.runtime.inspect_stored_doc_blobs(doc_id).await
     }
 }
@@ -589,6 +637,85 @@ impl BigRepo {
     /// Whether the repository currently stores a sedimentree with `doc_id`.
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> Res<bool> {
         self.runtime.contains_sedimentree_id(doc_id).await
+    }
+
+    /// Return the documents currently administered by `group`.
+    pub async fn documents_in_group(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
+        self.keyhive.group_document_ids(group).await
+    }
+
+    /// List document IDs with a durable reservation but no Keyhive document
+    /// yet (or whose reservation cleanup is pending). These are the crash-
+    /// recovery candidates between ID allocation and finalization.
+    pub async fn reserved_doc_ids(&self) -> Res<Vec<DocumentId>> {
+        let reservations = self
+            .keyhive_storage
+            .list_doc_reservations()
+            .await
+            .map_err(|err| ferr!("failed listing document reservations: {err}"))?;
+        Ok(reservations
+            .into_iter()
+            .map(|reservation| DocumentId::new(reservation.doc_id))
+            .collect())
+    }
+
+    pub async fn recover_allocated_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        pending_group: BigKeyhiveGroup,
+    ) -> Result<bool, CreateDocError> {
+        let Some((bytes, initial_keys)) = self
+            .keyhive_storage
+            .staged_doc_content(doc_id.into_bytes())
+            .await
+            .map_err(|err| {
+                CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
+            })?
+        else {
+            return Ok(false);
+        };
+        let content = automerge::Automerge::load(&bytes).map_err(|err| {
+            CreateDocError::from(eyre::eyre!(
+                "failed decoding staged document content: {err}"
+            ))
+        })?;
+        self.finalize_allocated_doc_with_keys(doc_id, content, pending_group, initial_keys)
+            .await?;
+        Ok(true)
+    }
+
+    pub async fn allocate_doc(
+        self: &Arc<Self>,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Result<DocumentId, CreateDocError> {
+        Ok(self.runtime.allocate_doc(parents).await?)
+    }
+
+    pub async fn finalize_allocated_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, Vec::new())
+            .await
+    }
+
+    pub async fn finalize_allocated_doc_with_keys(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let bundle = self
+            .runtime
+            .finalize_allocated_doc(doc_id, initial_content, pending_group, initial_keys)
+            .await?;
+        Ok(BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        })
     }
 
     pub async fn create_doc(
@@ -910,6 +1037,22 @@ impl BigRepoConnection {
 
 // change listeners
 impl BigRepo {
+    /// Subscribe to local document lifecycle and materialization notifications.
+    ///
+    /// The returned registration must be retained for as long as the receiver
+    /// is needed; dropping it unregisters the listener. Consumers should use
+    /// these notifications as wakeups and re-read durable state rather than as
+    /// a source of projection data.
+    pub async fn subscribe_local_listener(
+        self: &Arc<Self>,
+        filter: BigRepoLocalFilter,
+    ) -> Res<(
+        BigRepoLocalListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+    )> {
+        self.change_manager.subscribe_local_listener(filter).await
+    }
+
     pub async fn subscribe_change_listener(
         self: &Arc<Self>,
         filter: BigRepoChangeFilter,
@@ -980,13 +1123,42 @@ impl std::fmt::Debug for BigDocHandle {
     }
 }
 
+impl BigRepo {
+    /// Finalize a new branch while retaining the source document's encrypted
+    /// causal history. The keys remain inside BigRepo.
+    pub async fn finalize_allocated_doc_from_parent(
+        self: &Arc<BigRepo>,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+        pending_group: BigKeyhiveGroup,
+        source: &BigDocHandle,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let initial_keys = source.content_keys().await?;
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, initial_keys)
+            .await
+    }
+}
+
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
         self.bundle.doc_id
     }
+
+    pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
+        self.repo
+            .keyhive
+            .document_content_keys(self.document_id())
+            .await
+    }
+
     /// Whether this live handle is missing one or more decryption keys.
     pub fn is_partially_decrypted(&self) -> bool {
         self.bundle.is_partially_decrypted()
+    }
+
+    /// The current BeeKEM/PCS epoch observed by this document handle.
+    pub fn current_causal_epoch(&self) -> Option<[u8; 32]> {
+        self.bundle.current_causal_epoch()
     }
 
     pub async fn with_document_read<F, R>(&self, operation: F) -> R

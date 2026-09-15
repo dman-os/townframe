@@ -210,6 +210,12 @@ impl FfiCtx {
 
         Ok(Arc::new(Self { rcx, acx, rt }))
     }
+
+    async fn stop(&self) -> Result<(), FfiError> {
+        let rcx = Arc::clone(&self.rcx);
+        self.do_on_rt(async move { rcx.shutdown().await.map_err(Into::into) })
+            .await
+    }
 }
 
 async fn do_on_rt<O, F>(rt: &tokio::runtime::Runtime, future: F) -> O

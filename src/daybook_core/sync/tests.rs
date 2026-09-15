@@ -4,7 +4,6 @@ mod stress;
 
 use crate::blobs::{BlobId, BlobsRepo};
 use crate::drawer::DrawerRepo;
-use crate::index::DocBlobsIndexRepo;
 use crate::local_state::SqliteLocalStateRepo;
 use crate::plugs::PlugsRepo;
 use crate::progress::ProgressRepo;
@@ -14,12 +13,30 @@ use daybook_types::doc::{
     AddDocArgs, BlobPin, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
 
+async fn facet_set_hash_rows(
+    sql: &sqlx::SqlitePool,
+    doc_id: &DocId,
+    facet_tag: &str,
+) -> Res<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT facet_id
+          FROM facet_set_doc_facets
+         WHERE document_id = ?1
+           AND facet_tag = ?2
+        "#,
+    )
+    .bind(doc_id)
+    .bind(facet_tag)
+    .fetch_all(sql)
+    .await?)
+}
+
 struct SyncTestNode {
     ctx: Arc<RepoCtx>,
     rt: Arc<crate::rt::Rt>,
     drawer: Arc<DrawerRepo>,
     blobs_repo: Arc<BlobsRepo>,
-    doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Arc<ProgressRepo>,
     plugs_repo: Arc<PlugsRepo>,
     sync_repo: Arc<IrohSyncRepo>,
@@ -41,7 +58,6 @@ impl SyncTestNode {
             rt: _rt,
             blobs_repo: _blobs_repo,
             drawer: _drawer,
-            doc_blobs_index_repo: _doc_blobs_index_repo,
             progress_repo: _progress_repo,
             plugs_repo: _plugs_repo,
             sync_repo,
@@ -393,51 +409,67 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
-    let mut args_batch = Vec::new();
-    for idx in 0..100usize {
-        let payload = format!("blob-payload-{idx:03}").into_bytes();
-        let hash = node_a.blobs_repo.put(&payload).await?;
-        let hash = crate::blobs::blob_id_to_digest_str(hash);
-        args_batch.push(AddDocArgs {
-            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-            facets: [(
-                FacetKey::from(WellKnownFacetTag::Blob),
-                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
-                    mime: "application/octet-stream".to_string(),
-                    length_octets: payload.len() as u64,
-                    digest: hash.clone(),
-                    inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
-                })),
-            )]
-            .into(),
-            user_path: Some(daybook_types::doc::UserPathBuf::from(
-                node_a.ctx.local_user_path.clone(),
-            )),
-        });
+        let mut args_batch = Vec::new();
+        for idx in 0..100usize {
+            let payload = format!("blob-payload-{idx:03}").into_bytes();
+            let hash = node_a.blobs_repo.put(&payload).await?;
+            let hash = crate::blobs::blob_id_to_digest_str(hash);
+            args_batch.push(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: payload.len() as u64,
+                        digest: hash.clone(),
+                        inline: None,
+                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                    })),
+                )]
+                .into(),
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
+                    node_a.ctx.local_user_path.clone(),
+                )),
+            });
+        }
+        let created = node_a.drawer.batch_add(args_batch).await?;
+        assert_eq!(created.len(), 100);
+
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+
+        let ids_a = list_doc_ids(&node_a.drawer).await?;
+        let ids_b = list_doc_ids(&node_b.drawer).await?;
+        assert_eq!(
+            ids_a, ids_b,
+            "doc sets are not equal after 100-doc clone sync"
+        );
+
+        node_b.stop().await?;
+        node_a.stop().await?;
+        eyre::Ok(())
+    };
+    // TEMP-HUNT: catch panics too — a panic would otherwise unwind past the
+    // leak and the repos would be cleaned up.
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
+    if outcome.is_err() || matches!(&outcome, Ok(Err(_))) {
+        let keep = temp_root.keep();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
     }
-    let created = node_a.drawer.batch_add(args_batch).await?;
-    assert_eq!(created.len(), 100);
-
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
-
-    let ids_a = list_doc_ids(&node_a.drawer).await?;
-    let ids_b = list_doc_ids(&node_b.drawer).await?;
-    assert_eq!(
-        ids_a, ids_b,
-        "doc sets are not equal after 100-doc clone sync"
-    );
-
-    node_b.stop().await?;
-    node_a.stop().await?;
     Ok(())
 }
 
@@ -519,13 +551,26 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        eyre::Ok((node_a, node_b))
+    };
+    let Ok((node_a, node_b)) = run.await else {
+        let keep = temp_root.keep();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
+    };
 
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
@@ -572,13 +617,26 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+    // TEMP-HUNT: with DAYB_KEYHIVE_DIAG set, leak the repo dirs on failure so
+    // the failing state can be opened post-mortem.
+    let run = async {
+        init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        let node_a = open_sync_node(&repo_a_path).await?;
+        let node_b = open_sync_node(&repo_b_path).await?;
+        let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+        eyre::Ok((node_a, node_b))
+    };
+    let Ok((node_a, node_b)) = run.await else {
+        let keep = temp_root.keep();
+        tracing::warn!(path = %keep.display(), "HUNT-HACK: failing repos preserved on disk");
+        eyre::bail!(
+            "clone sync test failed; repos preserved at {}",
+            keep.display()
+        );
+    };
 
     let payload_1 = b"blob-pin-sync-payload-1".to_vec();
     let payload_2 = b"blob-pin-sync-payload-2".to_vec();
@@ -639,40 +697,21 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     assert!(doc_b.facets.contains_key(&key_pin_1));
     assert!(doc_b.facets.contains_key(&key_pin_2));
 
-    // 2. Verify node_b's DocBlobsIndexRepo has indexed the hashes in SQLite doc_blob_refs
+    // 2. Verify node_b's facet-set index has settled the doc's BlobPin
+    // facet routes (the projection the retired doc-blobs index derived from).
+    let facet_set_sql = node_b.rt.doc_facet_set_index_repo.sql().clone();
+    let blob_pin_tag = daybook_types::doc::WellKnownFacetTag::BlobPin.as_str();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = node_b
-            .doc_blobs_index_repo
-            .list_hashes_for_doc(&doc_id)
-            .await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
         if hashes.contains(&hash_1) && hashes.contains(&hash_2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_b = node_b
-        .doc_blobs_index_repo
-        .list_hashes_for_doc(&doc_id)
-        .await?;
+    let hashes_b = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
     assert!(hashes_b.contains(&hash_1));
     assert!(hashes_b.contains(&hash_2));
-
-    let blob_refs_b = node_b
-        .doc_blobs_index_repo
-        .list_blob_refs_for_doc(&doc_id)
-        .await?;
-    assert_eq!(blob_refs_b.len(), 2);
-    assert!(
-        blob_refs_b
-            .iter()
-            .any(|r| r.blob_hash == hash_1 && r.length_octets == payload_1.len() as u64)
-    );
-    assert!(
-        blob_refs_b
-            .iter()
-            .any(|r| r.blob_hash == hash_2 && r.length_octets == payload_2.len() as u64)
-    );
 
     // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
     let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, None).await?;
@@ -713,19 +752,13 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = node_b
-            .doc_blobs_index_repo
-            .list_hashes_for_doc(&doc_id)
-            .await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
         if hashes.len() == 1 && hashes.contains(&hash_1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_after = node_b
-        .doc_blobs_index_repo
-        .list_hashes_for_doc(&doc_id)
-        .await?;
+    let hashes_after = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
     assert_eq!(hashes_after, vec![hash_1.clone()]);
 
     node_b.stop().await?;
@@ -867,29 +900,8 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SyncNodeOptions {
-    #[expect(dead_code)]
-    enable_switch: bool,
-}
-
-impl Default for SyncNodeOptions {
-    fn default() -> Self {
-        Self {
-            enable_switch: true,
-        }
-    }
-}
-
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    open_sync_node_with_options(repo_root, SyncNodeOptions::default()).await
-}
-
-async fn open_sync_node_with_options(
-    repo_root: &std::path::Path,
-    options: SyncNodeOptions,
-) -> Res<SyncTestNode> {
-    info!(repo_root = %repo_root.display(), ?options, "opening sync test node");
+    info!(repo_root = %repo_root.display(), "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {
@@ -903,8 +915,9 @@ async fn open_sync_node_with_options(
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&rtx.big_repo),
         Arc::clone(&blobs_repo),
-        rtx.doc_app.document_id(),
+        rtx.doc_config.document_id(),
         daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
+        Arc::clone(&rtx.sqlite_local_state_repo),
     )
     .await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
@@ -972,7 +985,6 @@ async fn open_sync_node_with_options(
         Arc::clone(&rtx),
         Arc::clone(&config_repo),
         Arc::clone(&blobs_repo),
-        Arc::clone(&rt.doc_blobs_index_repo),
         Some(Arc::clone(&progress_repo)),
     )
     .await?;
@@ -981,7 +993,6 @@ async fn open_sync_node_with_options(
         ctx: rtx,
         drawer: Arc::clone(&rt.drawer),
         blobs_repo: Arc::clone(&rt.blobs_repo),
-        doc_blobs_index_repo: Arc::clone(&rt.doc_blobs_index_repo),
         progress_repo: Arc::clone(&rt.progress_repo),
         plugs_repo: Arc::clone(&rt.plugs_repo),
         rt,
@@ -1250,7 +1261,7 @@ async fn wait_for_doc_head_parity(
     tokio::time::timeout(timeout, async {
         let mut last_heartbeat = std::time::Instant::now();
         loop {
-            let (_left_facets, left_facet_keys, left_facet_values, left_heads) = left
+            let (left_doc, left_facet_keys, left_facet_values, left_heads) = left
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
@@ -1261,7 +1272,7 @@ async fn wait_for_doc_head_parity(
                     (doc, keys, debug_val, heads)
                 })
                 .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
-            let (_right_facets, right_facet_keys, right_facet_values, right_heads) = right
+            let (right_doc, right_facet_keys, right_facet_values, right_heads) = right
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
@@ -1282,7 +1293,10 @@ async fn wait_for_doc_head_parity(
             right_heads.sort_unstable();
             last_left = Some(left_heads);
             last_right = Some(right_heads);
-            if last_left == last_right && left_facet_keys == right_facet_keys && left_facet_values == right_facet_values {
+            if last_left == last_right
+                && left_facet_keys == right_facet_keys
+                && left_doc.facets == right_doc.facets
+            {
                 break eyre::Ok(());
             }
             let now = std::time::Instant::now();

@@ -14,10 +14,8 @@ import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.RtFfi
-import org.example.daybook.uniffi.SwitchDocEventListener
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
-import org.example.daybook.uniffi.core.SwitchDocEvent
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
@@ -41,7 +39,6 @@ class DocEditorStoreViewModel(
     val selectedController = _selectedController.asStateFlow()
 
     private var drawerRegistration: ListenerRegistration? = null
-    private var switchDocRegistration: ListenerRegistration? = null
     private var registerJob: Job? = null
     private val evictionTtlMs = 10.minutes.inWholeMilliseconds
 
@@ -56,17 +53,7 @@ class DocEditorStoreViewModel(
                             _selectedController.value = null
                         }
                     }
-
                     is DrawerEvent.DocAdded -> {}
-                }
-            }
-        }
-
-    private val switchDocListener =
-        object : SwitchDocEventListener {
-            override fun onSwitchDocEvent(event: SwitchDocEvent) {
-                if (sessions.containsKey(event.docId)) {
-                    viewModelScope.launch { refreshDoc(event.docId) }
                 }
             }
         }
@@ -75,14 +62,11 @@ class DocEditorStoreViewModel(
         registerJob =
             viewModelScope.launch {
                 val dReg = drawerRepo.ffiRegisterListener(drawerListener)
-                val sReg = rt?.ffiRegisterListener(switchDocListener)
                 if (!isActive) {
                     dReg.unregister()
-                    sReg?.unregister()
                     return@launch
                 }
                 drawerRegistration = dReg
-                switchDocRegistration = sReg
             }
         viewModelScope.launch {
             while (true) {
@@ -161,7 +145,6 @@ class DocEditorStoreViewModel(
     override fun onCleared() {
         registerJob?.cancel()
         drawerRegistration?.unregister()
-        switchDocRegistration?.unregister()
         super.onCleared()
     }
 }

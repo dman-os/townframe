@@ -59,29 +59,29 @@ pub fn resolve_origin_from_vtag_actor(
     local_actor_id: &automerge::ActorId,
     vtag_actor_id: &automerge::ActorId,
     live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-) -> crate::event_origin::SwitchEventOrigin {
+) -> crate::event_origin::EventOrigin {
     match live_origin {
         Some(big_repo::BigRepoChangeOrigin::Bootstrap)
         | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
-            crate::event_origin::SwitchEventOrigin::Bootstrap
+            crate::event_origin::EventOrigin::Bootstrap
         }
         Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-            crate::event_origin::SwitchEventOrigin::Remote {
+            crate::event_origin::EventOrigin::Remote {
                 peer_id: peer_id.to_string(),
             }
         }
         Some(big_repo::BigRepoChangeOrigin::Local) => {
             if vtag_actor_id == local_actor_id {
-                crate::event_origin::SwitchEventOrigin::Local {
+                crate::event_origin::EventOrigin::Local {
                     actor_id: vtag_actor_id.to_string(),
                 }
             } else {
-                crate::event_origin::SwitchEventOrigin::Remote {
+                crate::event_origin::EventOrigin::Remote {
                     peer_id: "unknown".to_string(),
                 }
             }
         }
-        None => crate::event_origin::SwitchEventOrigin::Remote {
+        None => crate::event_origin::EventOrigin::Remote {
             peer_id: "unknown".to_string(),
         },
     }
@@ -95,35 +95,33 @@ pub fn resolve_origin_for_delete(
     local_actor_id: &automerge::ActorId,
     live_origin: Option<&big_repo::BigRepoChangeOrigin>,
     tombstone_actor_id: Option<&automerge::ActorId>,
-) -> crate::event_origin::SwitchEventOrigin {
+) -> crate::event_origin::EventOrigin {
     match live_origin {
-        Some(big_repo::BigRepoChangeOrigin::Local) => {
-            crate::event_origin::SwitchEventOrigin::Local {
-                actor_id: local_actor_id.to_string(),
-            }
-        }
+        Some(big_repo::BigRepoChangeOrigin::Local) => crate::event_origin::EventOrigin::Local {
+            actor_id: local_actor_id.to_string(),
+        },
         Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-            crate::event_origin::SwitchEventOrigin::Remote {
+            crate::event_origin::EventOrigin::Remote {
                 peer_id: peer_id.to_string(),
             }
         }
         Some(big_repo::BigRepoChangeOrigin::Bootstrap)
         | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
-            crate::event_origin::SwitchEventOrigin::Bootstrap
+            crate::event_origin::EventOrigin::Bootstrap
         }
         None => {
             if let Some(actor_id) = tombstone_actor_id {
                 if actor_id == local_actor_id {
-                    crate::event_origin::SwitchEventOrigin::Local {
+                    crate::event_origin::EventOrigin::Local {
                         actor_id: actor_id.to_string(),
                     }
                 } else {
-                    crate::event_origin::SwitchEventOrigin::Remote {
+                    crate::event_origin::EventOrigin::Remote {
                         peer_id: "unknown".to_string(),
                     }
                 }
             } else {
-                crate::event_origin::SwitchEventOrigin::Remote {
+                crate::event_origin::EventOrigin::Remote {
                     peer_id: "unknown".to_string(),
                 }
             }
@@ -738,7 +736,7 @@ mod origin_tests {
             resolve_origin_from_vtag_actor(&actor, &actor, Some(&BigRepoChangeOrigin::Bootstrap));
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Bootstrap
+            crate::event_origin::EventOrigin::Bootstrap
         ));
     }
 
@@ -748,7 +746,7 @@ mod origin_tests {
         let origin = resolve_origin_from_vtag_actor(&actor, &actor, None);
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "unknown"
+            crate::event_origin::EventOrigin::Remote { peer_id } if peer_id == "unknown"
         ));
     }
 
@@ -759,7 +757,7 @@ mod origin_tests {
             resolve_origin_from_vtag_actor(&actor, &actor, Some(&BigRepoChangeOrigin::Local));
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Local { actor_id } if actor_id == actor.to_string()
+            crate::event_origin::EventOrigin::Local { actor_id } if actor_id == actor.to_string()
         ));
     }
 
@@ -777,7 +775,7 @@ mod origin_tests {
         );
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == remote_peer_id.to_string()
+            crate::event_origin::EventOrigin::Remote { peer_id } if peer_id == remote_peer_id.to_string()
         ));
     }
 
@@ -792,7 +790,7 @@ mod origin_tests {
         );
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "unknown"
+            crate::event_origin::EventOrigin::Remote { peer_id } if peer_id == "unknown"
         ));
     }
 }

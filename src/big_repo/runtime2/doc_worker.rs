@@ -46,6 +46,7 @@ where
         state: DocState::Unloaded,
         partially_decrypted: false,
         latest_keyhive_seq: 0,
+        causal_epoch: None,
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
         io,
@@ -148,6 +149,8 @@ struct DocWorker2<F: FutureForm> {
     /// Latest durable Keyhive admission incorporated into this worker's
     /// materialized document state.
     latest_keyhive_seq: u64,
+    /// Current BeeKEM/PCS epoch observed by the worker's materialized state.
+    causal_epoch: Option<[u8; 32]>,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -317,9 +320,10 @@ impl<F: FutureForm> DocWorker2<F> {
         match msg {
             DocWorkerMsg::PutDoc {
                 initial_content,
+                initial_keys,
                 resp,
                 _lease: _,
-            } => self.put_doc(initial_content, resp).await,
+            } => self.put_doc(initial_content, initial_keys, resp).await,
             DocWorkerMsg::AcquireHandle { resp, _lease: _ } => self.acquire_handle(resp).await,
             DocWorkerMsg::CommitDelta {
                 bundle_id,
@@ -412,6 +416,7 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn put_doc(
         &mut self,
         initial_content: Box<automerge::Automerge>,
+        initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp: futures::channel::oneshot::Sender<eyre::Result<Arc<LiveDocBundle>>>,
     ) -> eyre::Result<()> {
         if !matches!(self.state, DocState::Unloaded)
@@ -430,9 +435,10 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let staged = stage_automerge_ingest(&initial_content);
         self.io
-            .persist_initial_document(self.sed_id, staged)
+            .persist_initial_document(self.sed_id, staged, initial_keys)
             .await?;
 
+        self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
@@ -445,6 +451,7 @@ impl<F: FutureForm> DocWorker2<F> {
             ),
             false,
             self.latest_keyhive_seq,
+            self.causal_epoch,
         ));
 
         self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -453,6 +460,8 @@ impl<F: FutureForm> DocWorker2<F> {
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager
             .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
+        self.change_manager
+            .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
 
         self.register_bundle_lease().await?;
 
@@ -497,6 +506,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 else {
                     unreachable!();
                 };
+                self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
@@ -507,6 +517,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     ),
                     self.partially_decrypted,
                     self.latest_keyhive_seq,
+                    self.causal_epoch,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -639,6 +650,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
             DocState::Transient(doc) => {
+                self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
                     self.doc_id,
                     *doc,
@@ -649,6 +661,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     ),
                     self.partially_decrypted,
                     self.latest_keyhive_seq,
+                    self.causal_epoch,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -668,6 +681,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.blocked_refs = blocked_refs.into_iter().collect();
                         self.causal_checkpoints.extend(causal_checkpoints);
                         self.sync_partial_state().await?;
+                        self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                         let bundle = Arc::new(LiveDocBundle::new(
                             self.doc_id,
                             doc,
@@ -678,6 +692,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             ),
                             partially_decrypted,
                             self.latest_keyhive_seq,
+                            self.causal_epoch,
                         ));
                         self.state = DocState::Live(Arc::downgrade(&bundle));
                         self.register_bundle_lease().await?;
@@ -878,6 +893,10 @@ impl<F: FutureForm> DocWorker2<F> {
             .notify_sedimentree_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
+        if matches!(&origin, BigRepoChangeOrigin::Local) {
+            self.change_manager
+                .notify_local_doc_heads_updated(self.doc_id, Arc::clone(&heads))?;
+        }
 
         // Fire patches even if heads didn't change (delta can have content
         // changes within the same head set — e.g. tombstone compaction).
@@ -1161,6 +1180,14 @@ impl<F: FutureForm> DocWorker2<F> {
                 // keys/deps may unlock content from an earlier session. Precise
                 // retry of the held set; no coarse full-tree rewalk.
                 self.retry_blocked_refs(&bundle, &origin).await?;
+                if self.blocked_refs.is_empty() {
+                    let heads = surelock::key::lock_scope(|key| {
+                        let (doc, _key) = key.lock(&bundle.doc);
+                        Arc::from(doc.get_heads())
+                    });
+                    self.change_manager
+                        .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                }
             }
 
             // No eager rematerialization here: without a live handle, received
@@ -1741,6 +1768,8 @@ impl<F: FutureForm> DocWorker2<F> {
             if advanced {
                 tracing::debug!(%self.doc_id, "live precise retry advanced doc heads");
             }
+            self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
+            bundle.update_causal_epoch(self.causal_epoch);
             let partially_decrypted = !self.blocked_refs.is_empty();
             return Ok(MaterializationStatus::Ready {
                 partially_decrypted,

@@ -35,15 +35,27 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
     info!(seed, "starting four-node sync stress test");
 
     // DAYB_STRESS_KEEP_ROOT=1 preserves the cluster temp root for post-mortem
-    // inspection (keyhive sqlite stores) after the run exits.
+    // inspection (keyhive sqlite stores) after the run exits. Enabling the
+    // diagnostic timeout implies preservation: deleting the evidence on the
+    // failure path would defeat the diagnostic.
+    let diagnostic_timeout = std::env::var("DAYB_STRESS_DIAGNOSTIC_TIMEOUT_SECS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map(Duration::from_secs)
+                .wrap_err("DAYB_STRESS_DIAGNOSTIC_TIMEOUT_SECS must be an integer")
+        })
+        .transpose()?;
     let temp_dir = tempfile::Builder::new()
         .prefix("daybook-stress")
         .tempdir()?;
-    let temp_root = if std::env::var_os("DAYB_STRESS_KEEP_ROOT").is_some() {
-        temp_dir.keep()
-    } else {
-        temp_dir.path().to_path_buf()
-    };
+    let temp_root =
+        if std::env::var_os("DAYB_STRESS_KEEP_ROOT").is_some() || diagnostic_timeout.is_some() {
+            temp_dir.keep()
+        } else {
+            temp_dir.path().to_path_buf()
+        };
     info!(path = %temp_root.display(), "initialized stress test cluster temp root");
     let repo_paths = init_and_copy_repo_cluster(&temp_root).await?;
     for (idx, path) in repo_paths.iter().enumerate() {
@@ -51,10 +63,23 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
     }
     let mut nodes = open_cluster_nodes(&repo_paths).await?;
     let result = async {
-        let topology_1 = generate_connected_edges(&mut rng);
+        let topology_1 = if std::env::var_os("DAYB_STRESS_FULL_MESH").is_some() {
+            (0..NODE_COUNT)
+                .flat_map(|left| ((left + 1)..NODE_COUNT).map(move |right| (left, right)))
+                .collect()
+        } else {
+            generate_connected_edges(&mut rng)
+        };
         info!(?topology_1, "phase-1 topology");
         let mut endpoints = connect_topology(&nodes, &topology_1).await?;
-        wait_network_rest(&nodes, &endpoints).await?;
+        settle_stress_phase(
+            &nodes,
+            &endpoints,
+            diagnostic_timeout,
+            &temp_root,
+            "initial-topology",
+        )
+        .await?;
 
         let mut applied = Vec::new();
         for idx in 0..EVENT_COUNT {
@@ -71,7 +96,14 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             sample = ?applied.iter().take(12).collect::<Vec<_>>(),
             "phase-1 events applied"
         );
-        wait_network_rest(&nodes, &endpoints).await?;
+        settle_stress_phase(
+            &nodes,
+            &endpoints,
+            diagnostic_timeout,
+            &temp_root,
+            "post-phase-1-mutations",
+        )
+        .await?;
 
         let leaving_idx = rng.random_range(0..NODE_COUNT);
         info!(leaving_idx, "transfer phase: leaving node");
@@ -121,7 +153,18 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
         }
         info!(?full_mesh_topology, "phase-2 full mesh topology");
         endpoints = connect_topology(&nodes, &full_mesh_topology).await?;
-        wait_network_rest(&nodes, &endpoints).await
+        if std::env::var_os("DAYB_STRESS_STOP_AFTER_KEYHIVE_PROBE").is_some() {
+            report_keyhive_document_registration(&nodes).await?;
+            return Ok(());
+        }
+        settle_stress_phase(
+            &nodes,
+            &endpoints,
+            diagnostic_timeout,
+            &temp_root,
+            "final-offline-reopen",
+        )
+        .await
     }
     .await;
     let stop_results = futures::stream::iter(
@@ -322,10 +365,363 @@ async fn connect_topology(
     Ok(endpoint_sets)
 }
 
+#[derive(Debug)]
+struct DiagnosticReport {
+    stuck_docs: BTreeSet<DocumentId>,
+    known_good_sources: BTreeMap<DocumentId, usize>,
+}
+
+async fn settle_stress_phase(
+    nodes: &[Option<SyncTestNode>],
+    peers_set: &[HashSet<PeerId>],
+    diagnostic_timeout: Option<Duration>,
+    temp_root: &std::path::Path,
+    phase: &'static str,
+) -> Res<()> {
+    if let Some(timeout) = diagnostic_timeout {
+        diagnostic_phase_settlement(nodes, peers_set, timeout, temp_root, phase).await
+    } else {
+        wait_network_rest(nodes, peers_set).await
+    }
+}
+
+async fn bounded_phase_settlement(
+    nodes: &[Option<SyncTestNode>],
+    peers_set: &[HashSet<PeerId>],
+    timeout: Duration,
+    phase: &'static str,
+    stage: &'static str,
+) -> Res<bool> {
+    info!(
+        phase,
+        stage,
+        ?timeout,
+        "diagnostic settlement attempt begin"
+    );
+    match tokio::time::timeout(timeout, wait_network_rest(nodes, peers_set)).await {
+        Ok(result) => {
+            result?;
+            info!(
+                phase,
+                stage, "diagnostic settlement attempt healed convergence"
+            );
+            Ok(true)
+        }
+        Err(_) => {
+            warn!(
+                phase,
+                stage,
+                ?timeout,
+                "diagnostic settlement attempt timed out"
+            );
+            Ok(false)
+        }
+    }
+}
+
+async fn collect_diagnostic_report(
+    nodes: &[Option<SyncTestNode>],
+    phase: &'static str,
+) -> Res<DiagnosticReport> {
+    use big_repo::keyhive_core::principal::identifier::Identifier;
+
+    let active = nodes.iter().flatten().collect::<Vec<_>>();
+    let all_doc_ids = discover_stress_doc_ids(&active).await;
+    let mut signatures = BTreeMap::<DocumentId, Vec<String>>::new();
+    let mut known_good_sources = BTreeMap::new();
+
+    for (node_index, node) in active.iter().enumerate() {
+        let worker = node.sync_repo.big_sync_worker.snapshot().await?;
+        let recent_objects = worker
+            .last_object_syncs
+            .iter()
+            .rev()
+            .take(8)
+            .map(|(peer, part, object, _)| format!("peer={peer} part={part} object={object}"))
+            .collect::<Vec<_>>();
+        warn!(
+            phase,
+            node = node_index,
+            ?worker.task_counts,
+            active_machine_tasks = worker.active_machine_tasks,
+            active_sync_tasks = worker.active_sync_tasks,
+            zombie_tasks = worker.zombie_tasks,
+            full_sync_waiters = worker.full_sync_waiters.len(),
+            peer_part_flags = ?worker.peer_part_sync_flags,
+            ?recent_objects,
+            "diagnostic BigSync worker snapshot"
+        );
+
+        let store = node
+            .sync_repo
+            .rcx
+            .big_repo
+            .big_sync_store_snapshot()
+            .await?;
+        warn!(
+            phase,
+            node = node_index,
+            objects = store.objects.len(),
+            memberships = store.memberships.len(),
+            pending_memberships = store.pending_memberships.len(),
+            keyhive_event_count = store.keyhive_event_count,
+            keyhive_event_bytes = store.keyhive_event_bytes,
+            local_cgka_secret_count = store.local_cgka_secret_count,
+            local_prekey_secret_count = store.local_prekey_secret_count,
+            sedimentree_item_count = store.sedimentree_item_count,
+            sedimentree_blob_bytes = store.sedimentree_blob_bytes,
+            "diagnostic durable store summary"
+        );
+
+        let local_agent = Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(
+                node.sync_repo.router.endpoint().id().as_bytes(),
+            )
+            .expect("stress peer id must be a verifying key"),
+        );
+        for doc_id in &all_doc_ids {
+            let identifier = Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+                    .expect("stress document id must be a verifying key"),
+            );
+            let registered = !node
+                .sync_repo
+                .rcx
+                .big_repo
+                .keyhive()
+                .agents_for_membered(identifier)
+                .await
+                .is_empty();
+            let access = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .keyhive()
+                .agent_access_on(&local_agent, identifier)
+                .await;
+            let state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let signature = format!(
+                "registered={registered} access={access:?} state={:?} sedimentree={:?} materialized={:?}",
+                state.state, state.sedimentree_heads, state.materialized_heads
+            );
+            warn!(phase, node = node_index, %doc_id, %signature, "diagnostic document state");
+            if state.materialized_heads.is_some() {
+                known_good_sources.entry(*doc_id).or_insert(node_index);
+            }
+            signatures.entry(*doc_id).or_default().push(signature);
+        }
+
+        // TEMP-FORENSICS: compare per-node stored commit/fragment blobs for
+        // every known doc so a missing ciphertext is attributable to a node.
+        for doc_id in &all_doc_ids {
+            let Ok(blobs) = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .inspect_stored_doc_blobs(*doc_id)
+                .await
+            else {
+                warn!(phase, node = node_index, %doc_id, "blob forensics: inspect failed");
+                continue;
+            };
+            let mut hashes = blobs
+                .iter()
+                .map(|blob| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    blob.hash(&mut hasher);
+                    format!("{:016x}", hasher.finish())
+                })
+                .collect::<Vec<_>>();
+            hashes.sort();
+            hashes.dedup();
+            warn!(
+                phase,
+                node = node_index,
+                %doc_id,
+                blobs = hashes.len(),
+                blob_hashes = ?hashes,
+                "blob forensics"
+            );
+        }
+    }
+
+    let stuck_docs = signatures
+        .into_iter()
+        .filter_map(|(doc_id, states)| {
+            let first = states.first()?;
+            let differs = states.iter().any(|state| state != first);
+            let non_materialized = states
+                .iter()
+                .any(|state| state.contains("state=Missing") || state.contains("state=Pending"));
+            (differs || non_materialized).then_some(doc_id)
+        })
+        .collect::<BTreeSet<_>>();
+    warn!(
+        phase,
+        ?stuck_docs,
+        "diagnostic differing or non-materialized documents"
+    );
+    Ok(DiagnosticReport {
+        stuck_docs,
+        known_good_sources,
+    })
+}
+
+async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId> {
+    let mut all_doc_ids = BTreeSet::new();
+    for node in nodes {
+        all_doc_ids.extend([
+            node.ctx.doc_app.document_id(),
+            node.ctx.doc_drawer.document_id(),
+            node.ctx.doc_config.document_id(),
+        ]);
+        if let Ok((_, ids)) = node.drawer.list_just_ids().await {
+            for id in ids {
+                if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
+                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
+                }
+            }
+        }
+    }
+    all_doc_ids
+}
+
+async fn diagnostic_phase_settlement(
+    nodes: &[Option<SyncTestNode>],
+    peers_set: &[HashSet<PeerId>],
+    timeout: Duration,
+    temp_root: &std::path::Path,
+    phase: &'static str,
+) -> Res<()> {
+    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "natural").await? {
+        return Ok(());
+    }
+    warn!(phase, path = %temp_root.display(), "settlement timed out; preserving diagnostic repositories");
+
+    // Stage 1: authority only. Do not touch document handles or content sync.
+    let active = nodes.iter().flatten().collect::<Vec<_>>();
+    let keyhive_intervention = async {
+        for (node_index, node) in active.iter().enumerate() {
+            for (peer_index, peer) in active.iter().enumerate() {
+                if node_index != peer_index {
+                    let peer_id = PeerId::new(*peer.sync_repo.router.endpoint().id().as_bytes());
+                    node.sync_repo
+                        .rcx
+                        .big_repo
+                        .sync_keyhive_with_peer(peer_id)
+                        .await?;
+                }
+            }
+        }
+        Res::<()>::Ok(())
+    };
+    match tokio::time::timeout(timeout, keyhive_intervention).await {
+        Ok(result) => result?,
+        Err(_) => warn!(
+            ?timeout,
+            "diagnostic explicit Keyhive intervention timed out"
+        ),
+    }
+    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "explicit-keyhive").await? {
+        return Ok(());
+    }
+    let mut report = collect_diagnostic_report(nodes, phase).await?;
+
+    // Stage 2: ask only differing/non-materialized documents to acquire a
+    // handle. This deliberately measures whether lazy materialization is the
+    // missing wake-up; querying every document would obscure that result.
+    let get_doc_intervention = async {
+        for (node_index, node) in active.iter().enumerate() {
+            for doc_id in &report.stuck_docs {
+                let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
+                    big_repo::DocLookup::Ready(handle) => {
+                        let mut heads = handle
+                            .with_document_read(|document| document.get_heads())
+                            .await;
+                        heads.sort_unstable();
+                        format!("ready:{heads:?}")
+                    }
+                    big_repo::DocLookup::PendingMaterialization => "pending".to_owned(),
+                    big_repo::DocLookup::Missing => "missing".to_owned(),
+                };
+                warn!(node = node_index, %doc_id, %lookup, "diagnostic forced get_doc result");
+            }
+        }
+        Res::<()>::Ok(())
+    };
+    match tokio::time::timeout(timeout, get_doc_intervention).await {
+        Ok(result) => result?,
+        Err(_) => warn!(?timeout, "diagnostic forced get_doc intervention timed out"),
+    }
+    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "forced-get-doc").await? {
+        return Ok(());
+    }
+    report = collect_diagnostic_report(nodes, phase).await?;
+
+    // Stage 3: content only, from a node that already reported materialized
+    // heads. Creator provenance is not exposed by the public runtime API, so a
+    // known-good materializer is the narrowest honest source available here.
+    let content_intervention = async {
+        for doc_id in &report.stuck_docs {
+            let Some(&source_index) = report.known_good_sources.get(doc_id) else {
+                warn!(%doc_id, "diagnostic content sync skipped: no known-good materializer");
+                continue;
+            };
+            let source_peer = PeerId::new(
+                *active[source_index]
+                    .sync_repo
+                    .router
+                    .endpoint()
+                    .id()
+                    .as_bytes(),
+            );
+            for (target_index, target) in active.iter().enumerate() {
+                if target_index == source_index {
+                    continue;
+                }
+                match target
+                    .sync_repo
+                    .rcx
+                    .big_repo
+                    .sync_doc_with_peer(*doc_id, source_peer)
+                    .await
+                {
+                    Ok(receipt) => {
+                        warn!(%doc_id, source_index, target_index, ?receipt.outcome, "diagnostic explicit document sync completed")
+                    }
+                    Err(error) => {
+                        warn!(%doc_id, source_index, target_index, ?error, "diagnostic explicit document sync failed")
+                    }
+                }
+            }
+        }
+        Res::<()>::Ok(())
+    };
+    match tokio::time::timeout(timeout, content_intervention).await {
+        Ok(result) => result?,
+        Err(_) => warn!(
+            ?timeout,
+            "diagnostic explicit document intervention timed out"
+        ),
+    }
+    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "explicit-stuck-doc-sync").await?
+    {
+        return Ok(());
+    }
+    let final_report = collect_diagnostic_report(nodes, phase).await?;
+    eyre::bail!(
+        "diagnostic intervention ladder exhausted; repositories preserved at {}; remaining stuck docs: {:?}",
+        temp_root.display(),
+        final_report.stuck_docs
+    )
+}
+
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
     peers_set: &[HashSet<PeerId>],
 ) -> Res<()> {
+    info!(barrier = "network-rest", "stress barrier begin");
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
         node.as_ref().map(|node| async move {
             let parts = node
@@ -333,21 +729,32 @@ async fn wait_network_rest(
                 .peer_partition_ids("", true)
                 .into_keys()
                 .collect::<Vec<_>>();
-            node.sync_repo
-                .wait_for_network_rest(
-                    &peers_set[index].iter().copied().collect::<Vec<_>>(),
-                    &parts,
-                )
-                .await
+            let peers = peers_set[index].iter().copied().collect::<Vec<_>>();
+            info!(
+                barrier = "network-rest",
+                node = index,
+                peer_count = peers.len(),
+                part_count = parts.len(),
+                "stress node barrier begin"
+            );
+            let result = node.sync_repo.wait_for_network_rest(&peers, &parts).await;
+            info!(
+                barrier = "network-rest",
+                node = index,
+                "stress node barrier complete"
+            );
+            result
         })
     });
     for result in futures::future::join_all(fixed_points).await {
         result?;
     }
+    info!(barrier = "network-rest", "stress barrier complete");
 
     // Pin every runtime at the same quiescent boundary. Notifications admitted
     // just after a plain quiescence snapshot remain queued behind the freeze;
     // reopening and settling again makes that drift observable before parity.
+    info!(barrier = "quiescence-freeze", "stress barrier begin");
     let frozen = futures::future::join_all(
         nodes
             .iter()
@@ -358,6 +765,7 @@ async fn wait_network_rest(
 
     // Always reopen every runtime, including when one freeze timed out, so a
     // diagnostic failure cannot strand shutdown commands behind the barrier.
+    info!(barrier = "quiescence-unfreeze", "stress barrier begin");
     let unfrozen = futures::future::join_all(
         nodes
             .iter()
@@ -371,7 +779,10 @@ async fn wait_network_rest(
     for result in unfrozen {
         result?;
     }
+    info!(barrier = "quiescence-freeze", "stress barrier complete");
+    info!(barrier = "quiescence-unfreeze", "stress barrier complete");
 
+    info!(barrier = "quiescence-settle", "stress barrier begin");
     let settled = nodes
         .iter()
         .flatten()
@@ -379,6 +790,7 @@ async fn wait_network_rest(
     for result in futures::future::join_all(settled).await {
         result?;
     }
+    info!(barrier = "quiescence-settle", "stress barrier complete");
 
     let active = nodes.iter().flatten().collect::<Vec<_>>();
 
@@ -387,15 +799,107 @@ async fn wait_network_rest(
         for j in (i + 1)..active.len() {
             let left = active[i];
             let right = active[j];
+            info!(
+                barrier = "drawer-doc-set-parity",
+                left = i,
+                right = j,
+                "stress barrier begin"
+            );
             wait_for_doc_set_parity(&left.drawer, &right.drawer, None).await?;
+            info!(
+                barrier = "drawer-doc-set-parity",
+                left = i,
+                right = j,
+                "stress barrier complete"
+            );
+            info!(
+                barrier = "drawer-head-parity",
+                left = i,
+                right = j,
+                "stress barrier begin"
+            );
             wait_for_doc_head_parity(left, right).await?;
+            info!(
+                barrier = "drawer-head-parity",
+                left = i,
+                right = j,
+                "stress barrier complete"
+            );
         }
     }
 
     // STEP 2: Verify BigRepo sedimentree head parity across all active nodes.
+    info!(
+        barrier = "big-repo-sedimentree-parity",
+        "stress barrier begin"
+    );
     wait_for_big_repo_sedimentree_parity(&active).await?;
+    info!(
+        barrier = "big-repo-sedimentree-parity",
+        "stress barrier complete"
+    );
 
+    info!(barrier = "blob-parity", "stress barrier begin");
     assert_blob_parity(nodes).await?;
+    info!(barrier = "blob-parity", "stress barrier complete");
+    Ok(())
+}
+
+async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) -> Res<()> {
+    use big_repo::keyhive_core::principal::identifier::Identifier;
+
+    let active = nodes.iter().flatten().collect::<Vec<_>>();
+    let all_doc_ids = discover_stress_doc_ids(&active).await;
+
+    println!(
+        "KEYHIVE-PROBE after explicit bidirectional full-mesh sync: docs={}",
+        all_doc_ids.len()
+    );
+    for (node_index, node) in active.iter().enumerate() {
+        let local_agent = Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(
+                node.sync_repo.router.endpoint().id().as_bytes(),
+            )
+            .expect("stress peer id must be a verifying key"),
+        );
+        for doc_id in &all_doc_ids {
+            let identifier = Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+                    .expect("stress document id must be a verifying key"),
+            );
+            let registered = !node
+                .sync_repo
+                .rcx
+                .big_repo
+                .keyhive()
+                .agents_for_membered(identifier)
+                .await
+                .is_empty();
+            let access = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .keyhive()
+                .agent_access_on(&local_agent, identifier)
+                .await;
+            let head_state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
+                big_repo::DocLookup::Ready(handle) => {
+                    let mut heads = handle
+                        .with_document_read(|document| document.get_heads())
+                        .await;
+                    heads.sort_unstable();
+                    format!("ready:{heads:?}")
+                }
+                big_repo::DocLookup::PendingMaterialization => "pending".to_owned(),
+                big_repo::DocLookup::Missing => "missing".to_owned(),
+            };
+            println!(
+                "KEYHIVE-PROBE node={node_index} doc={doc_id} registered={registered} access={access:?} state={:?} sedimentree_heads={:?} materialized_heads={:?} lookup={lookup}",
+                head_state.state, head_state.sedimentree_heads, head_state.materialized_heads,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1132,107 +1636,4 @@ async fn pick_doc_and_non_main_branch(
         )));
     }
     Ok(None)
-}
-
-// ─── TEMPORARY post-mortem diagnostic (remove after flake root-cause) ───────
-//
-/// Loads a preserved stress-test cluster (DAYB_STRESS_KEEP_ROOT=1) without
-/// connecting the nodes, and prints each node's keyhive view of a stuck
-/// document: document registration, transitive member access, and per-node
-/// presence of the creator's keyhive events.
-///
-/// Env:
-/// - `DAYB_STRESS_INSPECT_ROOT`: preserved cluster temp root (required)
-/// - `DAYB_STRESS_INSPECT_DOC`:  base58 doc id to inspect (optional; falls
-///   back to listing recently created docs from the log)
-#[tokio::test(flavor = "multi_thread")]
-async fn diag_inspect_preserved_stress_cluster() -> Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let Some(root) = std::env::var_os("DAYB_STRESS_INSPECT_ROOT") else {
-        eprintln!("diag_inspect_preserved_stress_cluster: DAYB_STRESS_INSPECT_ROOT not set; no-op");
-        return Ok(());
-    };
-    let root = std::path::PathBuf::from(root);
-    let nodes = open_cluster_nodes(&[
-        root.join("repo-0"),
-        root.join("repo-1"),
-        root.join("repo-2"),
-        root.join("repo-3"),
-    ])
-    .await?;
-
-    let doc_id: Option<big_repo::DocumentId> =
-        std::env::var("DAYB_STRESS_INSPECT_DOC").ok().map(|s| {
-            const ALPH: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-            // 34-byte little-endian bignum; doc ids are 32 bytes so this
-            // cannot overflow.
-            let mut num = vec![0_u8; 34];
-            for c in s.trim().bytes() {
-                let d = ALPH.iter().position(|a| *a == c).expect("bad base58");
-                let mut carry = d as u16;
-                for byte in &mut num {
-                    carry += (*byte as u16) * 58;
-                    *byte = carry as u8;
-                    carry /= 256;
-                }
-                assert_eq!(carry, 0, "base58 id overflows 34 bytes");
-            }
-            while num.len() > 32 {
-                assert_eq!(num.pop(), Some(0), "base58 id overflows 32 bytes");
-            }
-            num.reverse();
-            let mut bytes = [0_u8; 32];
-            bytes.copy_from_slice(&num);
-            big_repo::DocumentId::new(bytes)
-        });
-
-    for (idx, node) in nodes.iter().enumerate() {
-        let Some(node) = node else { continue };
-        let peer_id = node.sync_repo.router.endpoint().id();
-        println!("── repo-{idx} peer={peer_id}");
-        let keyhive = node.sync_repo.rcx.big_repo.keyhive();
-        if let Some(doc_id) = doc_id {
-            use big_repo::keyhive_core::principal::identifier::Identifier;
-            let ident = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-                    .expect("doc id must be a verifying key"),
-            );
-            let members = keyhive.agents_for_membered(ident).await;
-            println!(
-                "   doc registered & transitive members with access: {}",
-                members.len()
-            );
-            for (agent_bytes, access) in &members {
-                println!("     agent={agent_bytes:?} access={access:?}");
-            }
-            for (agent_bytes, access) in &members {
-                println!("     agent={agent_bytes:?} access={access:?}");
-            }
-
-            // TEMP-INSTRUMENTATION: resolution-chain probe — exactly what the
-            // parity poll exercises for a branch doc id.
-            let lookup = node.sync_repo.rcx.big_repo.get_doc(&doc_id).await?;
-            let lookup_kind = match &lookup {
-                big_repo::DocLookup::Ready(_) => "Ready",
-                big_repo::DocLookup::PendingMaterialization => "PendingMaterialization",
-                big_repo::DocLookup::Missing => "Missing",
-            };
-            println!("   big_repo.get_doc: {lookup_kind}");
-            drop(lookup);
-            let handle = node.drawer.get_handle_by_branch_doc_id(doc_id).await?;
-            println!(
-                "   drawer.get_handle_by_branch_doc_id: {}",
-                handle.is_some()
-            );
-            let heads = node.drawer.get_branch_heads_by_doc_id(doc_id).await?;
-            println!(
-                "   drawer.get_branch_heads_by_doc_id: {} heads",
-                heads.as_ref().map(|h| h.0.len()).unwrap_or(0)
-            );
-        }
-    }
-    for node in nodes.into_iter().flatten() {
-        node.stop().await?;
-    }
-    Ok(())
 }

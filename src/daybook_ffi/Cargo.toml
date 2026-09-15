@@ -30,6 +30,7 @@ utils_rs = { workspace = true, features = ["hash"] }
 am_utils_rs = { workspace = true }
 daybook_core = { workspace = true, features = ["uniffi"] }
 daybook_types = { workspace = true, features = ["uniffi"] }
+big_sync_core = { workspace = true, features = ["uniffi"] }
 mltools = { workspace = true, features = ["hf_hub"] }
 
 #

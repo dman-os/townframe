@@ -27,7 +27,8 @@
 
 - Top
   - [ ] Built in updater
-  - [ ] Per sink switch/index rebuild
+  - [x] Per sink switch/index rebuild
+  - [ ] Some std::mem::take sites can be a drain()
 
 - [ ] ~Replace sqlx with seaorm~ use sqlx query macros (compile times?)
 - [ ] Plugs

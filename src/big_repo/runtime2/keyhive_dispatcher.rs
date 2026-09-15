@@ -5,7 +5,7 @@
 //! ([`SqliteBigRepoStore::admission_events_after`]), tailed with an in-memory
 //! cursor: every incorporated event is classified and fanned out exactly
 //! once, in order, regardless of channel races or restarts. The live change
-//! wake-up notifier whose loss costs latency bounded by [`ADMISSION_IDLE_POLL`].
+//! wake-up notifier; the shared reader bounds recovery by its polling interval.
 //!
 //! Each admitted batch is classified once against the published visibility
 //! cache and enqueued per destination peer in a [`KeyedBatcher`] with a
@@ -21,20 +21,19 @@
 use crate::handler::BigRepoKeyhiveProtocol;
 use crate::interlude::*;
 use crate::rpc::KeyhiveChangedRpcEvent;
+use crate::runtime2::{Timer, keyhive_admission};
 use crate::store::sqlite::SqliteBigRepoStore;
-use std::time::{Duration, Instant};
+use big_sync_core::revisioned_store::{
+    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
+};
+use std::time::Instant;
 use subduction_keyhive::{KeyhivePeerId, message::EventHash};
 use utils_rs::batching::{DebouncePolicy, KeyedBatcher};
 use uuid::Uuid;
 
-/// Ceiling on how long the admission log can go unpolled when all live hints
-/// are lost. Hints make steady-state latency negligible; this only bounds the
-/// recovery window. Kept tight because several consumers (stress bootstrap
-/// membership propagation) are notification-driven.
-const ADMISSION_IDLE_POLL: Duration = Duration::from_millis(250);
-
-/// Maximum admission rows classified per poll.
-const ADMISSION_BATCH: u32 = 256;
+/// Maximum admission rows classified per reader call.
+const ADMISSION_BATCH: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(256).expect("literal is non-zero");
 
 #[derive(Clone)]
 pub(crate) struct SubscriptionEntry {
@@ -129,6 +128,13 @@ pub(crate) struct SpawnedKeyhiveDispatcher<F: FutureForm> {
     pub(crate) run: F::Future<'static, eyre::Result<()>>,
 }
 
+/// TEMP-DIAGNOSTIC: `DAYB_KEYHIVE_DIAG` gates the dispatcher's per-batch
+/// instrumentation warns (classification outcome, dropped notifications).
+fn dispatch_diag() -> bool {
+    static DIAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DIAG.get_or_init(|| std::env::var_os("DAYB_KEYHIVE_DIAG").is_some())
+}
+
 /// Spawn the dispatcher task.
 ///
 /// The caller creates the events channel and passes both ends. The protocol's
@@ -138,6 +144,7 @@ pub(crate) struct SpawnedKeyhiveDispatcher<F: FutureForm> {
 pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
+    timer: Arc<dyn Timer<Sendable>>,
     notify: Arc<tokio::sync::Notify>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
@@ -147,7 +154,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     };
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
-        let fut = run_dispatcher(notify, protocol, store, subscriptions, policy);
+        let fut = run_dispatcher(notify, protocol, store, timer, subscriptions, policy);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -168,43 +175,46 @@ async fn run_dispatcher(
     notify: Arc<tokio::sync::Notify>,
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
+    timer: Arc<dyn Timer<Sendable>>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> Res<()> {
     let mut batcher: KeyedBatcher<PeerId, (), DebouncePolicy> =
         KeyedBatcher::new(policy, |_: &()| 0, |(), ()| {});
     // Boot at the current head: pre-boot incorporations are covered by each
-    // subscriber's initial pull, same as before the admission tail existed.
-    // Storage failures propagate: the dispatcher must not silently skip rows,
-    // and the spawned task unwraps the result so they crash the process.
-    let mut cursor = store.admission_head().await?;
+    // subscriber's initial pull. The shared reader owns replay-boundary and
+    // live-tail cursor mechanics; this worker owns only classification and
+    // peer delivery.
+    let source = keyhive_admission::Store {
+        store: store.clone(),
+        timer,
+    };
+    let mut reader = source.open((), store.admission_head().await?).await?;
     loop {
-        loop {
-            let rows = store
-                .admission_events_after(cursor, ADMISSION_BATCH)
-                .await?;
-            if rows.is_empty() {
-                break;
-            }
-            classify_rows(&mut batcher, &protocol, &subscriptions, &rows).await?;
-            cursor = rows.last().map(|row| row.seq).unwrap_or(cursor);
-            if rows.len() < ADMISSION_BATCH as usize {
-                break;
-            }
-        }
-        let deadline = tokio::time::Instant::from_std(
-            batcher
-                .next_deadline()
-                .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))
-                .min(Instant::now() + ADMISSION_IDLE_POLL),
-        );
+        let deadline = batcher.next_deadline().map(tokio::time::Instant::from_std);
         tokio::select! {
-            _ = notify.notified() => {}
-            _ = tokio::time::sleep_until(deadline) => {
+            read = reader.next(RevisionReadLimits { max_entries: ADMISSION_BATCH }) => {
+                match read? {
+                    RevisionRead::ReplayComplete { .. } => {}
+                    RevisionRead::Entries { entries, .. } => {
+                        classify_rows(&mut batcher, &protocol, &subscriptions, &entries).await?;
+                    }
+                }
+            }
+            _ = notify.notified() => {
                 let due = batcher.take_due(Instant::now());
                 deliver(&subscriptions, due).await;
             }
+            _ = async {
+                if let Some(deadline) = deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
         }
+        let due = batcher.take_due(Instant::now());
+        deliver(&subscriptions, due).await;
     }
 }
 
@@ -222,7 +232,7 @@ async fn classify_rows(
     batcher: &mut KeyedBatcher<PeerId, (), DebouncePolicy>,
     protocol: &BigRepoKeyhiveProtocol,
     subscriptions: &SubscriptionMap,
-    rows: &[crate::store::sqlite::AdmissionEventRow],
+    rows: &[keyhive_admission::AdmittedRow],
 ) -> Res<()> {
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
@@ -231,6 +241,12 @@ async fn classify_rows(
             .collect()
     });
     if connected.is_empty() {
+        if dispatch_diag() {
+            tracing::warn!(
+                rows = rows.len(),
+                "KEYHIVE_DISPATCH_DIAG classify skipped: no connected subscribers"
+            );
+        }
         return Ok(());
     }
 
@@ -247,18 +263,138 @@ async fn classify_rows(
 
     let now = Instant::now();
     for (source, changed) in grouped {
-        let targets = protocol
+        let cached_started = Instant::now();
+        let mut targets = protocol
             .notification_targets(subduction_keyhive::VisibilityBatch {
                 connected: &connected,
                 changed: &changed,
             })
             .await?;
+        let cached_elapsed = cached_started.elapsed();
+        if dispatch_diag() {
+            let direct_started = Instant::now();
+            let direct = protocol.all_agent_events(&BTreeSet::new()).await?;
+            let direct_elapsed = direct_started.elapsed();
+            let public_peer =
+                KeyhivePeerId::from_identifier(&keyhive_core::principal::public::Public.id());
+            let public_hit = direct
+                .agent_hashes
+                .get(&public_peer)
+                .is_some_and(|visible| visible.intersection(&changed).next().is_some());
+            let mut direct_peers = BTreeSet::new();
+            if public_hit {
+                direct_peers.extend(connected.iter().cloned());
+            } else {
+                for peer in &connected {
+                    if direct
+                        .agent_hashes
+                        .get(peer)
+                        .is_some_and(|visible| visible.intersection(&changed).next().is_some())
+                    {
+                        direct_peers.insert(peer.clone());
+                    }
+                }
+            }
+            let local_visible = direct.agent_hashes.get(&protocol.peer_id());
+            let direct_unclassified = changed
+                .iter()
+                .filter(|hash| {
+                    !direct
+                        .agent_hashes
+                        .get(&public_peer)
+                        .is_some_and(|visible| visible.contains(*hash))
+                        && !local_visible.is_some_and(|visible| visible.contains(*hash))
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let after = protocol
+                .notification_targets(subduction_keyhive::VisibilityBatch {
+                    connected: &connected,
+                    changed: &changed,
+                })
+                .await?;
+            tracing::warn!(
+                stable = targets.published_generation == after.published_generation,
+                generation = after.published_generation,
+                cached_peers = after.peers.len(),
+                direct_peers = direct_peers.len(),
+                cached_unclassified = after.unclassified.len(),
+                direct_unclassified = direct_unclassified.len(),
+                peers_equal = after.peers == direct_peers,
+                unclassified_equal = after.unclassified == direct_unclassified,
+                cached_elapsed_micros = cached_elapsed.as_micros(),
+                direct_elapsed_micros = direct_elapsed.as_micros(),
+                "KEYHIVE_DISPATCH_DIAG cache/direct comparison"
+            );
+            targets = after;
+        }
         // Unattributable hashes (prekey/contact-card ops) wake everyone:
         // the visibility projection has no narrower audience for them.
         let unattributed = !targets.unclassified.is_empty();
+        let changed_prefixes = changed
+            .iter()
+            .map(|hash| {
+                format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    hash[0], hash[1], hash[2], hash[3]
+                )
+            })
+            .collect::<Vec<_>>();
+        let unclassified_prefixes = targets
+            .unclassified
+            .iter()
+            .map(|hash| {
+                format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    hash[0], hash[1], hash[2], hash[3]
+                )
+            })
+            .collect::<Vec<_>>();
+        if dispatch_diag() {
+            tracing::warn!(
+                source = ?source,
+                changed = changed.len(),
+                ?changed_prefixes,
+                peers = targets.peers.len(),
+                unclassified = targets.unclassified.len(),
+                ?unclassified_prefixes,
+                connected = connected.len(),
+                generation = targets.published_generation,
+                "KEYHIVE_DISPATCH_DIAG classify group"
+            );
+        }
         for peer in &connected {
             let is_source = Some(peer) == source.as_ref();
-            let selected = targets.peers.contains(peer) || (unattributed && !is_source);
+            let visibility_selected = targets.peers.contains(peer);
+            let source_suppressed = is_source && unattributed && !visibility_selected;
+            let fallback_selected = unattributed && !is_source;
+            let selected = visibility_selected || fallback_selected;
+            if dispatch_diag() {
+                let reason = if source_suppressed {
+                    "source_suppressed"
+                } else if visibility_selected {
+                    "visible_hash"
+                } else if fallback_selected {
+                    "unclassified_fallback"
+                } else {
+                    "not_visible"
+                };
+                tracing::warn!(
+                    source = ?source,
+                    peer = ?peer,
+                    selected,
+                    is_source,
+                    source_suppressed,
+                    visibility_selected,
+                    fallback_selected,
+                    reason,
+                    generation = targets.published_generation,
+                    changed = changed.len(),
+                    ?changed_prefixes,
+                    ?unclassified_prefixes,
+                    "KEYHIVE_DISPATCH_DIAG fanout decision"
+                );
+            }
             if selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
@@ -273,27 +409,54 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
     if due.is_empty() {
         return;
     }
+    if dispatch_diag() {
+        let due_peers: Vec<String> = due.iter().map(|(peer, ())| peer.to_string()).collect();
+        tracing::warn!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
+    }
     let targets: Vec<(
         PeerId,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
-    )> = surelock::key::lock_scope(|key| {
-        let (subs, _key) = key.lock(subscriptions);
-        due.into_iter()
+    )> =
+        surelock::key::lock_scope(|key| {
+            let (subs, _key) = key.lock(subscriptions);
+            due.into_iter()
             .filter_map(|(peer_id, ())| {
-                subs.get(&peer_id)
-                    .map(|entry| (peer_id, entry.id, entry.tx.clone()))
+                let found = subs.get(&peer_id).map(|entry| (peer_id, entry.id, entry.tx.clone()));
+                if dispatch_diag() && found.is_none() {
+                    tracing::warn!(
+                        peer = %peer_id,
+                        "KEYHIVE_DISPATCH_DIAG due peer has no subscription; notification dropped"
+                    );
+                }
+                found
             })
             .collect()
-    });
+        });
     let delivery_futures = targets.into_iter().map(|(peer_id, sub_id, tx)| async move {
         if tx
             .send(KeyhiveChangedRpcEvent { initial: false })
             .await
             .is_err()
         {
+            if dispatch_diag() {
+                tracing::warn!(
+                    %peer_id,
+                    sub_id = ?sub_id,
+                    outcome = "send_error",
+                    "KEYHIVE_DISPATCH_DIAG notification delivery"
+                );
+            }
             Some((peer_id, sub_id))
         } else {
+            if dispatch_diag() {
+                tracing::warn!(
+                    %peer_id,
+                    sub_id = ?sub_id,
+                    outcome = "delivered",
+                    "KEYHIVE_DISPATCH_DIAG notification delivery"
+                );
+            }
             tracing::debug!(%peer_id, "keyhive change notification delivered");
             None
         }

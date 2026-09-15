@@ -115,6 +115,10 @@ fun wellKnownFacetTagCanonicalString(tag: org.example.daybook.uniffi.types.WellK
     org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imageMetadata"
     org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrResult"
     org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.PLUG_MANIFEST -> "org.example.daybook.plugManifest"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.PLUGS_CONFIG -> "org.example.daybook.plugsConfig"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.BRANCH -> "org.example.daybook.branch"
+    org.example.daybook.uniffi.types.WellKnownFacetTag.BRANCHES -> "org.example.daybook.branches"
 }
 
 fun buildSelfFacetRefUrl(key: FacetKey): String {
