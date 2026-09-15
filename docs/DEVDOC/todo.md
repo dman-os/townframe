@@ -53,9 +53,6 @@
     - [ ] RPC api versioning scheme
   - [ ] Big Sync
     - [ ] Use cursor epoch uuids for the event log
-- [ ] Compose
-  - [ ] Migrate to new Compose architecture
-  - [ ] Check out BoltFFI
 - [ ] UI
   - [ ] DocEditor
     - [ ]
@@ -76,7 +73,7 @@
     - [ ] Redo
 - [ ] CI
   - [ ] Fix the builds
-    - [ ] Android APK is invalid
+    - [x] Android APK is invalid
     - [ ] Windows MSI is valid
     - [ ] Test MacOS builds
   - [x] Prune dependencies
@@ -95,6 +92,7 @@
   - [ ] Good and local document classification
     - [ ] Receipt parsing
     - [ ] Collators
+- [ ] Relay
 - [ ] Bugs
   - [ ] App open blocked on locked repo with no feedback
   - [ ] `WflowNotFound`
@@ -125,7 +123,6 @@
   - [ ] Modern floating UI
 - [ ] Telegram
   - [ ] Export channel
-- [ ] Migrate to annoter Compose navigation lib
 - [ ] Considering using https://en.wikipedia.org/wiki/International_Atomic_Time?
   - This is going to be a pain in the ass in the public surfacing programming interface
 - [ ] Remove all async Mutexes and dashmap
@@ -153,7 +150,6 @@
   - [ ] Consider futures-signals
 - [ ] Tutorial
 - [ ] CI/CD
-  - [x] Kotlin tests
   - [ ] Version tagging and releases
   - [x] Continuius builds on push to main
   - [ ] Publish
@@ -223,6 +219,7 @@
   - [ ] Handlers
   - [x] Processors
   - [ ] OCI
+  - [ ] Tools
 - [ ] File lock on repo
 - [ ] daybook_cli
     - [ ] `daybook fset docId facetKeyId value`
@@ -268,8 +265,6 @@
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
 - [ ] WYSIWYG editor
-- [ ] FUSE
-  - [ ] Make it feature complete
 - [ ] PgLite
   - [ ] Get parametrized queries to work
   - [ ] It should accept engine from outside
@@ -280,14 +275,13 @@
     - [ ] Fork with context generic programming?
     - So I've implemented ThroughJson as a solution for this
 - [ ] Lints and pre-commit hooks
-  - [x] Kotlin formats & lints
   - [ ] Triple X comment detector
 - [ ] UI tests
 - [ ] Cross-platform testing
   - [ ] iOS
   - [ ] Windows
   - [ ] macOS
-- [ ] GraalVM for Linux
+- [ ] plug_wirehead
 
 ### The Big Lifts
 

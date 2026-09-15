@@ -124,7 +124,7 @@ We use the blob facet to manage references to this.
     ],
   },
   "org.example.daybook.imagemetadata/main": {
-    facetRef: "db+facet://self/org.example.daybook.blob/main",
+    facetRef: "db+facet:///self/org.example.daybook.blob/main",
     refHeads: [],
   }
 }

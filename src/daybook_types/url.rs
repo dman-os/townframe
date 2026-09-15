@@ -19,9 +19,11 @@ pub fn build_facet_ref(doc_id: &str, facet_key: &FacetKey) -> Res<Url> {
     if doc_id.contains('/') {
         eyre::bail!("facet-ref doc id cannot contain '/'");
     }
-    if facet_key.id.contains('/') {
-        eyre::bail!("facet-ref facet id cannot contain '/'");
-    }
+    // A key id may contain '/', and does for dpath facets: FDR 001's key is
+    // `<tag>//<dpath>`, so the id is everything after the tag and starts with the
+    // dpath's own leading '/'. Addressing a *field inside* a facet
+    // (doc/facet-key/facet-id/field) is a URL-design question we are not settling
+    // here; today a trailing path is the id and nothing else.
     let url = format!(
         "{FACET_SCHEME}:///{doc_id}/{tag}/{id}",
         tag = facet_key.tag,
@@ -40,14 +42,16 @@ pub fn parse_facet_ref(url: &Url) -> Res<FacetRef> {
 
     let mut parts = url
         .path_segments()
-        .ok_or_eyre("facet url path is malformed")?
-        .filter(|segment| !segment.is_empty());
+        .ok_or_eyre("facet url path is malformed")?;
 
     let doc_id = parts.next().ok_or_eyre("facet url missing doc id")?;
     let tag = parts.next().ok_or_eyre("facet url missing facet tag")?;
-    let id = parts.next().ok_or_eyre("facet url missing facet id")?;
-    if parts.next().is_some() {
-        eyre::bail!("facet url has unexpected extra path segments");
+    // The id is *everything* after the tag, empty segments included. A dpath's
+    // leading '/' sits in exactly that position, and dropping empty segments
+    // would round-trip `/photos/cat.jpg` as the different key `photos/cat.jpg`.
+    let id = parts.collect::<Vec<_>>().join("/");
+    if id.is_empty() {
+        eyre::bail!("facet url missing facet id");
     }
 
     // ADR 007 §3: pins ride in the query string; unknown params stay ignored.
@@ -122,6 +126,39 @@ mod tests {
         )
         .unwrap();
         assert!(!is_note);
+    }
+
+    #[test]
+    fn round_trips_a_facet_key_id_that_contains_slashes() {
+        // FDR 001: a dpath facet's key is `<tag>//<dpath>`, so its id starts with
+        // the dpath's own '/'. The url has to carry that in both directions.
+        let key = FacetKey::from("org.example.daybook.dpath//photos/2024/cat.jpg");
+        assert_eq!(key.id, "/photos/2024/cat.jpg");
+
+        let url = build_facet_ref(FACET_SELF_DOC_ID, &key).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "db+facet:///self/org.example.daybook.dpath//photos/2024/cat.jpg"
+        );
+        assert_eq!(parse_facet_ref(&url).unwrap().facet_key, key);
+
+        // The root dpath is a key id of exactly "/", which leaves the url with a
+        // trailing slash and no segment to read it from.
+        let root = FacetKey::from("org.example.daybook.dpath//");
+        assert_eq!(root.id, "/");
+        let url = build_facet_ref(FACET_SELF_DOC_ID, &root).unwrap();
+        assert_eq!(url.as_str(), "db+facet:///self/org.example.daybook.dpath//");
+        assert_eq!(parse_facet_ref(&url).unwrap().facet_key, root);
+    }
+
+    #[test]
+    fn refuses_a_facet_ref_without_a_key() {
+        let error = parse_facet_ref_str("db+facet:///self/org.example.daybook.note")
+            .expect_err("a url with no facet id names no facet");
+        assert!(
+            error.to_string().contains("missing facet id"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

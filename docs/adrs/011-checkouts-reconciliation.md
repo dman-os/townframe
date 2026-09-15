@@ -76,6 +76,15 @@ design dependency.
   being an entry; the rep folds the removal like any other delta. What the
   deletion *means* downstream is not vtree business (per review: `/trash/`
   is daybook semantics).
+- **What may be removed on a target, and in what order**: only a path whose
+  recorded entry carries a **claim** — the record saying who put the path here,
+  so a doc dropping it licenses the removal. A path with no claim is the
+  checkout's own (a user's file, another checkout's, a backend's bookkeeping)
+  and no pass deletes it, whatever the two records say (ADR 010 §8.7). The core
+  stores a claim opaquely and hands the question to the backend; daybook's claim
+  is its doc identity, and a mirror policy would claim with the source's name. Removals land **deepest first**,
+  which is what makes a directory empty by the time it is removed — so `remove`
+  never recurses and can never delete a path the pass did not know about.
 - **Daybook semantics layer**: the lens maps fs-side removal of a
   doc-backed file to the trash dpath operation (FDR 003 §6: move doc to
   `/trash/…`; checkouts default-exclude `/trash/`); permanent deletion
@@ -100,7 +109,7 @@ exactly FDR 003 §3's branch-on-conflict scope: validation-failure-only.
 Policy for now — simple, refine later:
 
 ```rust
-fn on_validation_bounce(cx: &mut Cx, bounce: Bounce) -> Res<()> {
+fn on_validation_bounce(cx: &mut Cx, bounce: Bounce) -> Result<()> {
     // the bounced change lives on a device-local /tmp/conflicts/<facet-id>
     // branch (FDR 003 §3); the checkout keeps rendering the last-good state
     let br = cx.daybook.create_conflict_branch(&bounce, "/tmp/conflicts/")?;
@@ -147,14 +156,13 @@ entries in canonical order, one cursor, resumable.
 
 ## 7. GC (expectations)
 
-- **vtree node GC**: unreferenced nodes (no rep points at them or their
-  subtree) are dropped opportunistically — after rep updates, or on store
-  open. No reference counting, no urgency: nodes are small, and correctness
-  never depends on GC timing.
+- **vtree GC**: none needed (ADR 010 rev. 2): a rep is a row set updated in
+  place, so there are no orphan trees or nodes to sweep. Dropping a rep's
+  rows (`ON DELETE CASCADE`) is the whole story.
 - **Trash GC**: emptying trash is a daybook-backend operation (FDR 003 §6)
   that *produces* deletions the vtree folds like any other delta.
 - **Blob GC**: ADR 013's problem entirely — 011 only requires that the
-  vtree's `ContentRef`s stay resolvable for as long as 013 says they will
+  vtree's origins/tokens stay resolvable for as long as 013 says they will
   be, and that stubs are the honest representation when they are not.
 
 ## 8. Crash & concurrency expectations
@@ -181,3 +189,15 @@ entries in canonical order, one cursor, resumable.
 3. ~~`db sync` ↔ checkout latency~~ — resolved per review: **no**; no
    checkout needs sub-second upstream wakeup without its own watcher
    (heads-poll in §3 suffices for v1).
+4. **Does an ingest pass *claim* a path the doc does not know?** The bridge
+   hands `Added` paths to the target in both directions, so a file created in a
+   checkout reaches the doc backend, which may absorb it as a new facet. Against
+   that: a file's presence is not a dpath claim (FDR 001 — a facet is), and
+   importing is an explicit act (FDR 004 §3, "track-only until import").
+
+   **Resolved by the interface, still open as policy.** The target answers
+   `accept` per path (ADR 010 §4.5), so a doc backend that does not import on
+   sight answers "current" for a path it does not hold, and nothing is claimed —
+   no pass has to know which way it is running, and the deployment's `.dtree`
+   spec owns the policy. What remains open is the default for each backend and
+   where it is configured. _Blocks: the default import policy._

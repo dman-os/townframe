@@ -715,6 +715,90 @@ async fn run_facet_set_delta_task(
     Ok(FacetSetTaskOutput::Applied)
 }
 
+/// One facet instance under a subtree root: the facet's own id travels with the
+/// membership, because a subtree answer is a claim set and two facets of one
+/// document under a root are two claims (FDR 001 §3).
+#[derive(Debug, Clone)]
+pub struct DocFacetKeyMembership {
+    pub doc_id: DocId,
+    pub branch_id: BranchId,
+    pub facet_id: String,
+    pub origin_heads: ChangeHashSet,
+}
+
+/// Byte bounds for a facet-id subtree lookup.
+struct FacetSubtreeBounds {
+    /// The root id itself: a root is inside its own subtree.
+    exact: String,
+    /// Inclusive lower bound of the descendant range.
+    first: String,
+    /// Exclusive upper bound of the descendant range.
+    last: String,
+}
+
+impl FacetSubtreeBounds {
+    /// Facet ids are path-shaped ([`FacetKey::TAG_ID_SEPARATOR`]) and compared
+    /// byte-exactly, so a subtree is a half-open byte range: every id that
+    /// continues the separator-terminated root sorts inside it, and no other id
+    /// does. That exclusion is the point — `/dcim.old` is a sibling of `/dcim`,
+    /// not a descendant — and the byte-increment successor is what keeps the two
+    /// apart without a `LIKE` pattern that would have to escape its own input.
+    fn of(root_id: &str) -> Self {
+        let mut first = String::with_capacity(root_id.len() + 1);
+        first.push_str(root_id);
+        if !root_id.ends_with(FacetKey::TAG_ID_SEPARATOR) {
+            first.push(FacetKey::TAG_ID_SEPARATOR);
+        }
+
+        // The prefix-range property: for byte strings, everything carrying
+        // `first` as a prefix — and only that — sorts below `first`'s
+        // byte-increment successor.
+        let mut last = first.clone();
+        let separator = last
+            .pop()
+            .expect("a separator-terminated bound is non-empty");
+        last.push(
+            char::from_u32(u32::from(separator) + 1)
+                .expect("the facet-id separator has a successor"),
+        );
+
+        Self {
+            exact: root_id.to_string(),
+            first,
+            last,
+        }
+    }
+}
+
+/// The subtree lookup, kept as one string so the plan test explains the text the
+/// query method actually runs.
+///
+/// Two arms rather than one `facet_id = ?2 OR facet_id >= ?3` predicate: SQLite
+/// turns the union's arms into index bounds and merges them in facet-id order,
+/// while the `OR` form leaves `facet_id` as a residual filter — it then walks
+/// every entry of the tag (the node's whole claim set) to answer one subtree.
+const SELECT_FACET_SUBTREE: &str = r#"
+            SELECT document_id
+                 , branch_id
+                 , facet_id
+                 , branch_heads_json
+              FROM facet_set_doc_facets
+             WHERE facet_tag = ?1
+               AND facet_id = ?2
+            UNION ALL
+            SELECT document_id
+                 , branch_id
+                 , facet_id
+                 , branch_heads_json
+              FROM facet_set_doc_facets
+             WHERE facet_tag = ?1
+               AND facet_id >= ?3
+               AND facet_id < ?4
+             ORDER BY facet_id ASC
+                    , document_id ASC
+                    , branch_id ASC
+            "#;
+
 impl DocFacetSetIndexRepo {
     /// The keyed doc delta machine: a `ConcurrentDeltaWalker` over the doc
     /// delta store, keyed by branch, with per-key projection tasks. The
@@ -1051,6 +1135,42 @@ impl DocFacetSetIndexRepo {
             .collect()
     }
 
+    /// Every facet of `facet_tag` whose id is `root_id` or a descendant of it,
+    /// with the facet ids themselves: the claim set under one root.
+    ///
+    /// Facet ids are path-shaped ([`FacetKey::TAG_ID_SEPARATOR`]), so this answers
+    /// "which documents claim something under this root" — a dpath subtree (FDR
+    /// 001 §3), a reserved surface, `/trash/` — as a byte-range seek into the
+    /// `(facet_tag, facet_id, …)` route index, instead of loading every document
+    /// holding the tag and filtering in memory. Rows come back in index order:
+    /// facet id, then document, then branch.
+    pub async fn list_docs_for_facet_subtree(
+        &self,
+        facet_tag: &str,
+        root_id: &str,
+    ) -> Res<Vec<DocFacetKeyMembership>> {
+        let bounds = FacetSubtreeBounds::of(root_id);
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(SELECT_FACET_SUBTREE)
+            .bind(facet_tag)
+            .bind(&bounds.exact)
+            .bind(&bounds.first)
+            .bind(&bounds.last)
+            .fetch_all(&self.sql.read_pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|(doc_id, branch_id, facet_id, branch_heads)| {
+                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+                Ok(DocFacetKeyMembership {
+                    doc_id,
+                    branch_id: BranchId(branch_id),
+                    facet_id,
+                    origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
+                })
+            })
+            .collect()
+    }
+
     pub async fn has_tag(&self, doc_id: &DocId, facet_tag: &str) -> Res<bool> {
         let exists: Option<i64> = sqlx::query_scalar(
             r#"
@@ -1075,6 +1195,7 @@ mod tests {
     use crate::test_support::test_cx;
     use big_sync_core::revisioned_store::RevisionReadLimits;
     use daybook_types::doc::{AddDocArgs, BranchPathBuf, FacetKey, FacetRaw, WellKnownFacet};
+    use daybook_types::dpath::DPATH_FACET_TAG;
     use std::collections::VecDeque;
 
     struct ScriptedFrontierReader {
@@ -1312,6 +1433,177 @@ mod tests {
             branch_id: BranchId(content_doc_id.clone()),
             facet_key: FacetKey::from(WellKnownFacetTag::Note),
         }));
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// Membership in a facet-id subtree, as the range bounds express it: the root
+    /// itself, everything that continues it through the separator, and nothing
+    /// that merely shares a byte prefix with it.
+    fn in_subtree(bounds: &FacetSubtreeBounds, id: &str) -> bool {
+        id == bounds.exact || (id >= bounds.first.as_str() && id < bounds.last.as_str())
+    }
+
+    #[test]
+    fn subtree_bounds_hold_the_root_and_its_descendants_only() {
+        let bounds = FacetSubtreeBounds::of("/dcim");
+        assert_eq!(bounds.exact, "/dcim");
+        assert_eq!(bounds.first, "/dcim/");
+        assert_eq!(bounds.last, "/dcim0");
+
+        for descendant in ["/dcim", "/dcim/a.jpg", "/dcim/sub/b.mp4"] {
+            assert!(
+                in_subtree(&bounds, descendant),
+                "{descendant} is in the subtree"
+            );
+        }
+        for sibling in ["/dcim.old", "/dcimx.jpg", "/dc", "/", "/other.json"] {
+            assert!(
+                !in_subtree(&bounds, sibling),
+                "{sibling} is outside the subtree"
+            );
+        }
+
+        // The root dpath and an empty root both hold every id of the tag.
+        for root in ["/", ""] {
+            let bounds = FacetSubtreeBounds::of(root);
+            assert_eq!(bounds.first, "/");
+            assert_eq!(bounds.last, "0");
+        }
+        // A separator-terminated root does not double the separator.
+        assert_eq!(FacetSubtreeBounds::of("/dcim/").first, "/dcim/");
+    }
+
+    /// Seed projection rows directly: the query under test reads the projection,
+    /// not the machine that fills it.
+    async fn insert_claims(
+        repo: &DocFacetSetIndexRepo,
+        facet_tag: &str,
+        claims: &[(&str, &str)],
+    ) -> Res<()> {
+        let desired = claims
+            .iter()
+            .map(|(doc_id, facet_id)| {
+                (
+                    FacetRouteKey {
+                        document_id: DocId::from(*doc_id),
+                        branch_id: BranchId(format!("{doc_id}-branch")),
+                        facet_key: FacetKey {
+                            tag: facet_tag.to_string().into(),
+                            id: (*facet_id).to_string(),
+                        },
+                    },
+                    FacetSnapshot {
+                        branch_heads: ChangeHashSet(Vec::new().into()),
+                        facet_heads: ChangeHashSet(Vec::new().into()),
+                        actor_id: automerge::ActorId::from([1_u8; 16]),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut tx = repo.sql().write_pool.begin().await?;
+        insert_routes(&mut tx, &desired).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Subtree membership over real projection rows: the root and its descendants
+    /// come back with their facet ids (one document may claim several), while a
+    /// sibling that merely shares a byte prefix stays out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subtree_lookup_returns_the_claim_set_under_one_root() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let repo = Arc::clone(&test_context.rt.doc_facet_set_index_repo);
+
+        insert_claims(
+            &repo,
+            DPATH_FACET_TAG,
+            &[
+                ("doc-a", "/dcim"),
+                ("doc-a", "/dcim/a.jpg"),
+                ("doc-b", "/dcim/sub/b.mp4"),
+                ("doc-c", "/dcim.old"),
+                ("doc-d", "/dcimx.jpg"),
+                ("doc-e", "/other.json"),
+            ],
+        )
+        .await?;
+
+        let claims = |rows: Vec<DocFacetKeyMembership>| {
+            rows.into_iter()
+                .map(|row| (row.doc_id.to_string(), row.facet_id))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            claims(
+                repo.list_docs_for_facet_subtree(DPATH_FACET_TAG, "/dcim")
+                    .await?
+            ),
+            vec![
+                ("doc-a".to_string(), "/dcim".to_string()),
+                ("doc-a".to_string(), "/dcim/a.jpg".to_string()),
+                ("doc-b".to_string(), "/dcim/sub/b.mp4".to_string()),
+            ],
+            "the subtree is the root and its descendants, in index order",
+        );
+        assert_eq!(
+            claims(
+                repo.list_docs_for_facet_subtree(DPATH_FACET_TAG, "/")
+                    .await?
+            )
+            .len(),
+            6,
+            "the root dpath holds every claim of the tag",
+        );
+        assert_eq!(
+            claims(
+                repo.list_docs_for_facet_subtree(DPATH_FACET_TAG, "/dcimx.jpg")
+                    .await?
+            ),
+            vec![("doc-d".to_string(), "/dcimx.jpg".to_string())],
+            "a leaf root holds itself and nothing else",
+        );
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// The subtree read is a seek into the route index, not a scan of the
+    /// projection with a filter over it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_subtree_lookup_seeks_the_route_index() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let repo = Arc::clone(&test_context.rt.doc_facet_set_index_repo);
+        let bounds = FacetSubtreeBounds::of("/dcim");
+
+        // Audited dynamic SQL: the only interpolated value is a private const
+        // holding the statement above, so there is no runtime data in it.
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {SELECT_FACET_SUBTREE}"
+        )))
+        .bind(DPATH_FACET_TAG)
+        .bind(&bounds.exact)
+        .bind(&bounds.first)
+        .bind(&bounds.last)
+        .fetch_all(&repo.sql().read_pool)
+        .await?;
+        let plan = rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            plan.contains("idx_facet_set_doc_facets_route") && plan.contains("facet_id"),
+            "the subtree read must take facet-id bounds on the route index, got: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN facet_set_doc_facets"),
+            "the subtree read must not scan the projection, got: {plan}"
+        );
 
         test_context.stop().await?;
         Ok(())

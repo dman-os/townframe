@@ -1,439 +1,110 @@
-#![expect(unused)]
-/*
-
-Rough ideas
-- ppfuse manages bidirection change application across file trees
-- use a in store only vrtual tree to track the managed application of state
-    - diff it with the other trees to detect changes
-    - store full diff history for a jj op log like experience
-- watch mode
-    - fast track tree changes resolution across trees
-- late materilization
-    - abstractions that allow trees to defer materilization of a previous version on demand
-- git livetree
-    - trees
-        - daybook tree
-        - last applied tree
-        - real file tree
-- wasi plugin tree
-    - trees
-        - daybook tree
-        - wasi tree
-- operations
-    - get_diff
-    - pull changes from tree to store
-    - apply changes to tree
-- usecases
-    - git checkout
-        - pull changes from daybook
-        - pull changes from fs
-        - assert fs empty
-        - create empty vtree
-        - apply change from daybook to (fs, vtree)
-    - git commit
-        - pull changes from fs
-        - apply change from fs to (daybook, vtree)
-        - apply change from daybook to vtree
-     - obsidian sync
-        - pull changes from fs
-        - apply changes from fs to (daybook, vtree)
-        - apply change from daybook to vtree
-*/
+//! Pauperfuse: the vtree bridge core.
+//!
+//! This crate implements the core of `docs/adrs/010-vtree-store.md`: a bridge
+//! that observes N **backends**, records each one's latest-known state as a
+//! **rep** (rows keyed by path), and brokers transfers between them.
+//!
+//! Three ideas hold it together.
+//!
+//! **Identity is provenance, and it is the backend's to name.** An entry
+//! carries a [`Token`]: a scheme tag and some bytes, whose owner promises the
+//! token is a deterministic function of the content. A blob store names bytes by
+//! hash; a checkout by digest, or by a stat-derived marker where it declines to
+//! read a large file; a deployment that *produces* content by the recipe it would
+//! produce from. Nothing has to be rendered, hashed, or read in order to say that
+//! something changed, which is what keeps a doc edit from costing a full render
+//! and what keeps a photo library from being read to notice an mtime moved.
+//!
+//! **The core never answers "are these the same bytes".** Two identities that
+//! differ might stand for the same content, and the same disagreement means
+//! "nothing to do" for one pair of backends and "produce it again" for another.
+//! Only the backend holding the path can tell those apart, so it is asked
+//! ([`Backend::accept`]); the bridge orders work and writes down what was
+//! written.
+//!
+//! **Order is the substrate.** Every rep is a path-ordered row set, so a walk is
+//! an index scan, a comparison is a merge join, and bulk work resumes at a path
+//! cursor. There is no tree hash, no path copying, and nothing to garbage
+//! collect: a rep is a state, not a version.
+//!
+//! Deliberately **not** here (ADR 010 §5): history, an op log, VCS semantics,
+//! blob bytes, lenses, the reconcile policy, and any reading of an identity's
+//! bytes. Backends own their own truth;
+//! reps are caches; recovery is a fresh change report.
+//!
+//! Errors are **one concrete type** ([`Error`], ADR 010 §4.6): both traits are
+//! implemented by embedders, so the error type has to be nameable by everyone.
+//! Its variants separate the environment's failures from the caller's input,
+//! from a recorded row that cannot be read back, from an implementor's own
+//! error, which is boxed with its source chain kept.
+//!
+//! ```
+//! use pauperfuse::prelude::*;
+//! use utils_rs::prelude::futures;
+//!
+//! let roundtrip = async {
+//!     let store: std::sync::Arc<dyn VtreeStore> = std::sync::Arc::new(MemVtreeStore::new());
+//!     let rep = BackendId::new("fs");
+//!     assert_eq!(store.generation(&rep).await?, None);
+//!
+//!     let path = RelPath::try_new(vec!["a.txt".into()])?;
+//!     store.put_entry(&rep, &path, &Entry::dir(None)).await?;
+//!     assert_eq!(store.generation(&rep).await?, Some(1));
+//!     assert_eq!(store.entry(&rep, &path).await?, Some(Entry::dir(None)));
+//!     Ok::<(), Error>(())
+//! };
+//! futures::executor::block_on(roundtrip).expect("the store round trips");
+//! ```
 
 mod interlude {
+    pub use std::cmp::Ordering;
     pub use std::collections::{BTreeMap, VecDeque};
+    pub use std::ffi::{OsStr, OsString};
+    pub use std::fmt;
+    pub use std::ops::{Bound, Range};
     pub use std::path::{Path, PathBuf};
+    pub use std::sync::{Arc, RwLock};
+    pub use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     pub use utils_rs::prelude::*;
+
+    pub use crate::error::{Error, FsOp, Result};
 }
 
-mod livetree;
+/// The stored row encoding. A store needs it; nothing else does.
+#[cfg(feature = "sqlite")]
+mod codec;
 
-use futures::future::BoxFuture;
-use surelock::{key::lock_scope, mutex::Mutex};
+pub mod backend;
+pub mod bridge;
+pub mod delta;
+pub mod entry;
+pub mod error;
+pub mod fs;
+pub mod path;
+pub mod store;
 
-use crate::interlude::*;
+#[cfg(test)]
+mod e2e;
 
-#[tokio::test]
-async fn smoke() -> Res<()> {
-    let dir = tempfile::tempdir()?;
-    let config = Config {
-        managed_dir: dir.path().to_path_buf(),
-        metastore_dir_path: dir.path().join(".db"),
+#[cfg(test)]
+mod test_support;
+
+/// The commonly needed names of this crate.
+pub mod prelude {
+    pub use crate::backend::{Accepted, Backend, BackendId, Capabilities, DeltaSink, Report};
+    pub use crate::bridge::{Outcome, reconcile};
+    pub use crate::delta::{Delta, DiffWalk};
+    pub use crate::entry::{
+        Avail, Entry, Kind, Payload, StatFingerprint, TimeStamp, Token, TokenScheme,
     };
-    let store = ErasedVtreeStore::new(Arc::new(MemVtreeStore {
-        trees: Arc::new(surelock::mutex::Mutex::new(default())),
-    }));
-    let ctx = Ctx {
-        store: Arc::clone(&store),
-        trees: default(),
-    };
-
-    struct TestSource {}
-    struct FsTarget {}
-    let src = TestSource {};
-    let tar = FsTarget {};
-    pull_changes_to_store(&store).await;
-
-    Ok(())
-}
-
-pub struct Config {
-    managed_dir: PathBuf,
-    metastore_dir_path: PathBuf,
-}
-
-pub struct Ctx {
-    store: Arc<ErasedVtreeStore>,
-    trees: HashMap<TreeId, Arc<dyn Tree>>,
-}
-
-impl Ctx {
-    fn new() {}
-}
-
-trait VtreeStore: Send + Sync {
-    type Txn: Send + Sync + 'static;
-    async fn start_txn(&self) -> Self::Txn;
-    async fn commit_txn(&self, txn: Self::Txn);
-    async fn update_file(&self, txn: &Self::Txn, tid: TreeId, fid: FileId, meta: FileMeta);
-    async fn remove_file(&self, txn: &Self::Txn, tid: TreeId, fid: FileId);
-    async fn diff(&self, from: TreeId, to: TreeId);
-}
-
-struct ErasedVtreeStore {
-    start_txn_cb: Box<dyn Fn() -> BoxFuture<'static, ErasedTxn> + Send + Sync>,
-    commit_txn_cb: Box<dyn Fn(ErasedTxn) -> BoxFuture<'static, ()> + Send + Sync>,
-    update_file_cb:
-        Box<dyn Fn(&ErasedTxn, TreeId, FileId, FileMeta) -> BoxFuture<'static, ()> + Send + Sync>,
-    remove_file_cb: Box<dyn Fn(&ErasedTxn, TreeId, FileId) -> BoxFuture<'static, ()> + Send + Sync>,
-    diff_cb: Box<dyn Fn(TreeId, TreeId) -> BoxFuture<'static, ()> + Send + Sync>,
-}
-struct ErasedTxn(Arc<dyn std::any::Any + Send + Sync>);
-
-impl ErasedVtreeStore {
-    fn new<S, T>(store: Arc<S>) -> Arc<Self>
-    where
-        S: VtreeStore<Txn = T>,
-        T: std::any::Any + Send + Sync,
-    {
-        Arc::new(Self {
-            start_txn_cb: {
-                let store = store.clone();
-                Box::new(|| {
-                    async move {
-                        let txn = store.start_txn().await;
-                        ErasedTxn(Arc::new(txn) as _)
-                    }
-                    .boxed()
-                })
-            },
-            commit_txn_cb: {
-                let store = store.clone();
-                Box::new(|txn| {
-                    async move {
-                        let txn = Arc::try_unwrap(txn.0).expect(ERROR_IMPOSSIBLE);
-                        store.commit_txn(txn).await;
-                    }
-                    .boxed()
-                })
-            },
-            update_file_cb: {
-                let store = store.clone();
-                Box::new(|txn, tid, fid, meta| {
-                    async move {
-                        let txn = Arc::downcast(Arc::clone(&txn.0)).expect("wrong txn");
-                        store.update_file(&txn, tid, fid, meta).await;
-                    }
-                    .boxed()
-                })
-            },
-            remove_file_cb: {
-                let store = store.clone();
-                Box::new(|txn, tid, fid| {
-                    async move {
-                        let txn = Arc::downcast(Arc::clone(&txn.0)).expect("wrong txn");
-                        store.remove_file(&txn, tid, fid).await;
-                    }
-                    .boxed()
-                })
-            },
-            diff_cb: {
-                let store = store.clone();
-                Box::new(|from, to| {
-                    async move {
-                        store.diff(from, to).await;
-                    }
-                    .boxed()
-                })
-            },
-        })
-    }
-    async fn start_txn(&self) -> ErasedTxn {
-        (self.start_txn_cb)().await
-    }
-    async fn commit_txn(&self, txn: ErasedTxn) {
-        (self.commit_txn_cb)(txn).await
-    }
-    async fn update_file(&self, txn: &ErasedTxn, tid: TreeId, fid: FileId, meta: FileMeta) {
-        (self.update_file_cb)(txn, tid, fid, meta).await
-    }
-    async fn remove_file(&self, txn: &ErasedTxn, tid: TreeId, fid: FileId) {
-        (self.remove_file_cb)(txn, tid, fid).await
-    }
-    async fn diff(&self, from: TreeId, to: TreeId) {
-        (self.diff_cb)(from, to).await
-    }
-}
-
-strike! {
-    pub struct TreeEvent {
-        fid: FileId,
-        cursor: CursorIndex,
-        deets: enum TreeEventDeets {
-            FileCreated { meta: FileMeta },
-            FileChanged { meta: FileMeta },
-            FileRemoved
-        }
-    }
-}
-
-type ArcTree = Arc<dyn Tree>;
-#[async_trait]
-pub trait Tree: Send + Sync {
-    async fn get_updates(&self) -> Vec<TreeEvent>;
-}
-
-async fn pull_changes_to_store(store: &ErasedVtreeStore, tid: TreeId, tree: ArcTree) {
-    let txn = store.start_txn().await;
-    for evt in tree.get_updates().await {
-        match evt.deets {
-            TreeEventDeets::FileChanged { meta } | TreeEventDeets::FileCreated { meta } => {
-                store.update_file(&txn, tid, evt.fid, meta).await
-            }
-            TreeEventDeets::FileRemoved => store.remove_file(&txn, tid, evt.fid).await,
-        }
-    }
-}
-
-// async fn update_stores(ctx: &Ctx) {
-//     use futures_buffered::BufferedStreamExt;
-//     futures::stream::iter(ctx.trees.iter().map({
-//         |(&tid, tree)| {
-//             let store = Arc::clone(&ctx.store);
-//             async move {}
-//         }
-//     }))
-//     .buffered_unordered(16)
-//     .collect::<Vec<()>>()
-//     .await;
-// }
-
-strike! {
-    struct MemVtreeStore {
-        trees: Arc<Mutex<
-            HashMap<
-                TreeId,
-                Arc<Mutex<
-                    struct MemVtreeState {
-                        #![derive(Default)]
-
-                        files: HashMap<
-                            FileId,
-                            FileMeta,
-                        >
-                    }
-                >>
-            >
-        >>
-    }
-}
-
-impl MemVtreeStore {
-    fn get_tree(&self, tid: TreeId) -> Arc<Mutex<MemVtreeState>> {
-        lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.trees);
-            guard
-                .entry(tid)
-                .or_insert_with(|| Arc::new(Mutex::new(default())))
-                .clone()
-        })
-    }
-}
-
-impl VtreeStore for MemVtreeStore {
-    type Txn = ();
-    async fn start_txn(&self) -> Self::Txn {
-        // no op
-    }
-    async fn commit_txn(&self, _txn: Self::Txn) {
-        // no op
-    }
-    async fn update_file(&self, _txn: &Self::Txn, tid: TreeId, fid: FileId, meta: FileMeta) {
-        let tree = self.get_tree(tid);
-        lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&tree);
-            guard.files.insert(fid, meta);
-        })
-    }
-
-    async fn remove_file(&self, _txn: &Self::Txn, tid: TreeId, fid: FileId) {
-        let tree = self.get_tree(tid);
-        lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&tree);
-            guard.files.remove(&fid);
-        })
-    }
-
-    async fn diff(&self, from: TreeId, to: TreeId) {
-        let from = self.get_tree(from);
-        let to = self.get_tree(to);
-        let lock_set = surelock::set::LockSet::new((&from, &to));
-        lock_scope(|key| {
-            let ((mut from, mut to), _key) = key.lock(&lock_set);
-            let mut diff = HashMap::new();
-            for (fid, from_meta) in &from.files {
-                let Some(to_meta) = to.files.get(&fid) else {
-                    diff.insert(
-                        fid,
-                        VtreeFileDiff {
-                            from: Some(from_meta.clone()),
-                            to: None,
-                        },
-                    );
-                    continue;
-                };
-                diff.insert(
-                    fid,
-                    VtreeFileDiff {
-                        from: Some(from_meta.clone()),
-                        to: Some(to_meta.clone()),
-                    },
-                );
-            }
-            for (fid, to_meta) in &to.files {
-                if diff.contains_key(&fid) {
-                    continue;
-                }
-                diff.insert(
-                    fid,
-                    VtreeFileDiff {
-                        from: None,
-                        to: Some(to_meta.clone()),
-                    },
-                );
-            }
-        })
-    }
-}
-
-struct VtreeFileDiff {
-    from: Option<FileMeta>,
-    to: Option<FileMeta>,
-}
-
-pub async fn get_diff(ctx: &Ctx) {}
-pub async fn update_source() {}
-pub async fn update_target() {}
-
-async fn tick() {
-    let src_store = MemorySourceStore::default();
-    let sid = 0;
-    let src_prov = TestSourceProvider {};
-    let tgt_backend = FsTargetBackend {};
-    // collect the changes from the provider and store them
-    // in the index
-    {
-        let mut last_cursor = src_store.get_cursor(sid).await;
-        loop {
-            let src_events = src_prov.get_new_events(last_cursor.clone()).await;
-            for evt in src_events {
-                match evt {
-                    SourceProviderEvent::FileCreated { id, file }
-                    | SourceProviderEvent::FileChanged { id, file } => {
-                        src_store.update_vfile(sid, id, file).await
-                    }
-                    SourceProviderEvent::FileRemoved { id } => {
-                        src_store.delmark_vfile(sid, id).await
-                    }
-                }
-            }
-        }
-    }
-    {}
-}
-
-type FileId = Uuid;
-
-#[derive(Clone)]
-struct FileMeta {}
-type TreeId = Uuid;
-
-type CursorIndex = u64;
-
-trait IndexStore {}
-
-use source::*;
-mod source {
-    use crate::interlude::*;
-
-    use crate::*;
-
-    pub type SourceId = u32;
-
-    pub enum SourceProviderEvent {
-        FileCreated { id: FileId, file: FileMeta },
-        FileChanged { id: FileId, file: FileMeta },
-        FileRemoved { id: FileId },
-    }
-
-    pub trait SourceProvider {
-        async fn get_new_events(&self, cursor: Option<CursorIndex>) -> Vec<SourceProviderEvent>;
-    }
-
-    #[derive(Default)]
-    pub struct TestSourceProvider {}
-
-    pub trait SourceStore {
-        async fn get_cursor(&self, id: SourceId) -> Option<CursorIndex>;
-        async fn update_vfile(&self, sid: SourceId, fid: FileId, file: FileMeta);
-        async fn delmark_vfile(&self, sid: SourceId, fid: FileId);
-        async fn remove_provider_vfile(&self, sid: SourceId, fid: FileId);
-    }
-
-    #[derive(Default)]
-    pub struct MemorySourceStore {
-        provider_cursors: HashMap<SourceId, CursorIndex>,
-    }
-
-    impl SourceStore for MemorySourceStore {
-        async fn get_cursor(&self, id: SourceId) -> Option<CursorIndex> {
-            self.provider_cursors.get(&id).cloned()
-        }
-    }
-
-    impl SourceProvider for TestSourceProvider {
-        async fn get_new_events(&self, cursor: Option<CursorIndex>) -> Vec<SourceProviderEvent> {
-            todo!()
-        }
-    }
-}
-
-use target::*;
-mod target {
-    use crate::interlude::*;
-
-    use crate::*;
-
-    enum TargetBackendEvent {
-        FileCreated { id: FileId, file: FileMeta },
-        FileChanged { id: FileId, file: FileMeta },
-        FileRemoved { id: FileId },
-    }
-
-    pub trait TargetBackend {
-        fn get_backend_changes() -> Vec<TargetBackendEvent>;
-    }
-
-    pub struct FsTargetBackend {}
-    impl TargetBackend for FsTargetBackend {}
+    #[cfg(feature = "sqlite")]
+    pub use crate::error::StoredError;
+    pub use crate::error::{Error, FsOp, Result};
+    pub use crate::fs::TokioFs;
+    pub use crate::path::{PathError, RelPath};
+    pub use crate::store::mem::MemVtreeStore;
+    #[cfg(feature = "sqlite")]
+    pub use crate::store::sqlite::SqliteVtreeStore;
+    pub use crate::store::{RepScan, VtreeStore};
 }
