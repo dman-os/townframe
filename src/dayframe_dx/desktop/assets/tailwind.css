@@ -159,9 +159,6 @@
   }
 }
 @layer utilities {
-  .collapse {
-    visibility: collapse;
-  }
   .visible {
     visibility: visible;
   }
@@ -176,6 +173,24 @@
   }
   .static {
     position: static;
+  }
+  .container {
+    width: 100%;
+    @media (width >= 40rem) {
+      max-width: 40rem;
+    }
+    @media (width >= 48rem) {
+      max-width: 48rem;
+    }
+    @media (width >= 64rem) {
+      max-width: 64rem;
+    }
+    @media (width >= 80rem) {
+      max-width: 80rem;
+    }
+    @media (width >= 96rem) {
+      max-width: 96rem;
+    }
   }
   .flex {
     display: flex;
@@ -220,13 +235,6 @@
     outline-style: var(--tw-outline-style);
     outline-width: 1px;
   }
-  .invert {
-    --tw-invert: invert(100%);
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
-  }
-  .filter {
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
-  }
   .transition {
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, visibility, content-visibility, overlay, pointer-events;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
@@ -245,41 +253,93 @@
     outline: 2px solid #60a5fa;
     outline-offset: 4px;
   }
-  .tile-expand {
-    flex: 0 0 48px;
-    width: 48px;
-    height: 48px;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: #9ca3af;
-    font-size: 24px;
-    cursor: pointer;
-    pointer-events: none;
-    transition: opacity 150ms ease, color 150ms ease;
+  .tile-line-group.surface-1:hover, .tile-widget-group.surface-1:hover {
+    background: rgba(129, 140, 248, 0.17);
   }
-  .tile-line-group:hover .tile-expand, .tile-expand:focus-visible {
-    opacity: 1;
-    pointer-events: auto;
+  .tile-line-group.surface-2:hover, .tile-widget-group.surface-2:hover {
+    background: rgba(52, 211, 153, 0.17);
   }
-  .tile-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .tile-line-group.surface-3:hover, .tile-widget-group.surface-3:hover {
+    background: rgba(251, 191, 36, 0.17);
+  }
+  .tile-strip {
+    display: flex;
     gap: 24px;
-    align-items: start;
+    align-items: flex-start;
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
   }
   .tile-column {
+    flex: 1 1 0;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 74vh;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.022);
   }
-  @media (max-width: 900px) {
-    .tile-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+  .tile-column.column-nested {
+    margin-left: -24px;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
   }
-  @media (max-width: 620px) {
-    .tile-grid {
-      grid-template-columns: minmax(0, 1fr);
-    }
+  .tile-column.column-spawns {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .surface-1 {
+    background: rgba(129, 140, 248, 0.10);
+  }
+  .surface-2 {
+    background: rgba(52, 211, 153, 0.10);
+  }
+  .surface-3 {
+    background: rgba(251, 191, 36, 0.10);
+  }
+  .strip-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 8px;
+    color: #9ca3af;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .strip-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .strip-count {
+    flex: none;
+    color: #4b5563;
+    font-variant-numeric: tabular-nums;
+  }
+  .strip-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 8px 12px;
+  }
+  .path-back {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    padding: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #9ca3af;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .path-back:hover, .path-back:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f3f4f6;
   }
   .column-navigation {
     width: 100%;
@@ -327,51 +387,6 @@
     background: rgba(255,255,255,0.08);
     color: #f3f4f6;
   }
-  .column-arrow:disabled {
-    opacity: 0.3;
-    cursor: default;
-  }
-  @media (min-width:901px) {
-    .tile-grid .tile-column {
-      display: block;
-    }
-    .column-navigation {
-      display: none;
-    }
-    .column-pager .column-dot {
-      width: 12px;
-      background: #f3f4f6;
-    }
-    .column-navigation .column-arrow {
-      visibility: hidden;
-      pointer-events: none;
-    }
-  }
-  @media (max-width:900px) {
-    .tile-grid.column-set-0 .tile-column:nth-child(3), .tile-grid.column-set-1 .tile-column:nth-child(1), .tile-grid.column-set-2 .tile-column:nth-child(1) {
-      display: none;
-    }
-    .column-pager.column-set-0 .column-dot:nth-child(-n+2), .column-pager.column-set-1 .column-dot:nth-child(n+2), .column-pager.column-set-2 .column-dot:nth-child(n+2) {
-      width: 18px;
-      background: #f3f4f6;
-    }
-  }
-  @media (max-width:620px) {
-    .column-pager.column-set-0 .column-dot:nth-child(n), .column-pager.column-set-1 .column-dot:nth-child(n), .column-pager.column-set-2 .column-dot:nth-child(n) {
-      width: 10px;
-      background: #4b5563;
-    }
-    .tile-grid.column-set-0 .tile-column:nth-child(n+2), .tile-grid.column-set-1 .tile-column:nth-child(-n+1), .tile-grid.column-set-1 .tile-column:nth-child(n+3), .tile-grid.column-set-2 .tile-column:nth-child(-n+2) {
-      display: none;
-    }
-    .column-pager .column-dot[aria-current="true"] {
-      width: 12px;
-    }
-    .column-pager.column-set-0 .column-dot:nth-child(1), .column-pager.column-set-1 .column-dot:nth-child(2), .column-pager.column-set-2 .column-dot:nth-child(3) {
-      width: 18px;
-      background: #f3f4f6;
-    }
-  }
 }
 @property --tw-rotate-x {
   syntax: "*";
@@ -403,59 +418,6 @@
   inherits: false;
   initial-value: solid;
 }
-@property --tw-blur {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-brightness {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-contrast {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-grayscale {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-hue-rotate {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-invert {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-opacity {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-saturate {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-sepia {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow-color {
-  syntax: "*";
-  inherits: false;
-}
-@property --tw-drop-shadow-alpha {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 100%;
-}
-@property --tw-drop-shadow-size {
-  syntax: "*";
-  inherits: false;
-}
 @layer properties {
   @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) {
     *, ::before, ::after, ::backdrop {
@@ -466,19 +428,6 @@
       --tw-skew-y: initial;
       --tw-border-style: solid;
       --tw-outline-style: solid;
-      --tw-blur: initial;
-      --tw-brightness: initial;
-      --tw-contrast: initial;
-      --tw-grayscale: initial;
-      --tw-hue-rotate: initial;
-      --tw-invert: initial;
-      --tw-opacity: initial;
-      --tw-saturate: initial;
-      --tw-sepia: initial;
-      --tw-drop-shadow: initial;
-      --tw-drop-shadow-color: initial;
-      --tw-drop-shadow-alpha: 100%;
-      --tw-drop-shadow-size: initial;
     }
   }
 }
