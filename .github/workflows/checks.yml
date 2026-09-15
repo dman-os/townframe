@@ -188,6 +188,17 @@ jobs:
           NEXTEST_EXPERIMENTAL_RECORD: 1
           NEXTEST_STATE_DIR: ${{ github.workspace }}/nextest-state
 
+      # `big_willow`'s SQLite backend and its test-vector conformance suite sit behind
+      # non-default features, so the workspace run above does not build them. They get their own
+      # invocation, on the default nextest profile so that its junit output cannot overwrite the
+      # workspace run's. The vectors are fetched rather than vendored and the conformance checks
+      # fail without them, which is the point: a missing corpus must not look like a pass.
+      - name: rust tests (big_willow, all features)
+        run: |
+          nix develop .#ci-rust --command deno run -A ./x/willow-vectors.ts
+          nix develop .#ci-rust --command cargo nextest run --color=always -p big_willow --all-features
+        env:
+          RUST_BACKTRACE: 1
       - uses: actions/upload-artifact@v6
         if: always()
         with:

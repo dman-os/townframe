@@ -10,6 +10,14 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'test(/long_af_test/)'
 slow-timeout = { period = "60s", terminate-after = 16 }
 
+[[profile.default.overrides]]
+# The `store_pruning` conformance suite replays all 866 vectors through a fresh store: 16087
+# entry decodes plus one insert each, and the SQLite backend pays a transaction per insert.
+# That is minutes rather than seconds in a debug build, and CI runners are slower than a dev
+# machine, so the cap is generous. Nothing here is latency-sensitive.
+filter = 'test(/store_pruning/)'
+slow-timeout = { period = "300s", terminate-after = 8 }
+
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }

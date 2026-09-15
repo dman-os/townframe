@@ -5,6 +5,7 @@ members = [
   "./src/api_utils_rs",
   "./src/big_sync/",
   "./src/big_sync_core/",
+  "./src/big_willow/",
   "./src/big_repo/",
   "./src/btress_sysadmin/",
   "./src/daybook_cli",
@@ -59,7 +60,17 @@ wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = fal
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_sync = { path = "./src/big_sync/" }
+big_willow = { path = "./src/big_willow/", default-features = false }
 big_repo = { path = "./src/big_repo/" }
+
+#
+# willow
+#
+# Local path dependency: big_willow owns its store rather than wrapping the upstream
+# stores, and we expect to modify willow25 while the integration settles.
+willow25 = { path = "../willow_rs/willow25" }
+bab_rs = "0.8.1"
+ufotofu = { version = "0.12.6", default-features = false, features = ["alloc"] }
 
 #
 # meta
