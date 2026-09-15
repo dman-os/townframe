@@ -28,7 +28,8 @@ pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-p
 /// Spawn the blob-pin worker and its two machines:
 ///
 /// - the facet machine: blob facet deltas -> docs inventory (full-branch
-///   state per delta);
+///   state per delta) and, from `cipherBlob` facet deltas, the encrypted
+///   representations they name -> the encryption inventory;
 /// - the plug-events machine: typed `PlugsEvent`s from the plugs config
 ///   rev store -> core inventory pin maintenance, enablement-driven.
 ///
@@ -47,19 +48,31 @@ pub(crate) async fn spawn_blob_pin_worker(
     sql: SqlCtx,
     core_inventory_doc_id: DocumentId,
     docs_inventory_doc_id: DocumentId,
+    encryption_inventory_doc_id: Option<DocumentId>,
+    blobs_repo: Arc<crate::blobs::BlobsRepo>,
     facet_set_store: Arc<FacetSetRevisionStore>,
     plugs_repo: Arc<crate::plugs::PlugsRepo>,
     parent_cancel_token: CancellationToken,
 ) -> Res<RepoStopToken> {
     Ctx::ensure_schema(&sql).await?;
 
-    let core_doc_id = Ctx::resolve_doc_id_for_branch(&drawer_repo, core_inventory_doc_id).await?;
-    let docs_doc_id = Ctx::resolve_doc_id_for_branch(&drawer_repo, docs_inventory_doc_id).await?;
+    let core_doc_id = drawer_repo
+        .resolve_doc_id_for_branch_doc_id(core_inventory_doc_id)
+        .await?;
+    let docs_doc_id = drawer_repo
+        .resolve_doc_id_for_branch_doc_id(docs_inventory_doc_id)
+        .await?;
+    let encryption_doc_id = match encryption_inventory_doc_id {
+        Some(doc_id) => Some(drawer_repo.resolve_doc_id_for_branch_doc_id(doc_id).await?),
+        None => None,
+    };
     let ctx = Arc::new(Ctx {
         drawer_repo,
         sql,
         core_inventory_doc_id: core_doc_id,
         docs_inventory_doc_id: docs_doc_id,
+        encryption_inventory_doc_id: encryption_doc_id,
+        store: blobs_repo.iroh_store(),
         inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
     let event_store = Arc::new(crate::plugs::PlugsConfigEventStore::new(
@@ -100,6 +113,15 @@ struct Ctx {
     sql: SqlCtx,
     core_inventory_doc_id: DocId,
     docs_inventory_doc_id: DocId,
+    /// The encrypted-representation inventory: ciphertext pins only. Absent on
+    /// a repo created before it existed (ADR 003 §13), in which case ciphertext
+    /// pins are not derived at all rather than mixed into a plaintext
+    /// inventory.
+    encryption_inventory_doc_id: Option<DocId>,
+    /// The blob store, for the pair tags the release path deletes. Named tags
+    /// are the only GC roots, so releasing a pair is a store write, not just an
+    /// inventory edit.
+    store: iroh_blobs::api::Store,
     /// One lock shared by both machines: plug-pin upserts and facet-driven
     /// inventory diffs must not interleave.
     inventory_lock: Arc<tokio::sync::Mutex<()>>,
@@ -129,28 +151,20 @@ impl std::ops::Deref for Worker {
 struct PreparedDocBranch {
     doc_id: DocId,
     branch_id: BranchId,
-    pins: Option<HashMap<String, u64>>,
+    pins: Option<DocPins>,
+}
+
+/// One branch's derived pin sets: plaintext digests from its `Blob` facets and
+/// ciphertext digests from its `cipherBlob` facets. They are derived together
+/// because both come from the branch's one hydrated facet set, and each has its
+/// own inventory (`pins.plain` -> docs inventory, `pins.cipher` -> encryption
+/// inventory).
+#[derive(Debug, Clone, Default)]
+struct DocPins {
+    plain: HashMap<String, u64>,
+    cipher: HashMap<String, u64>,
 }
 impl Ctx {
-    async fn resolve_doc_id_for_branch(
-        drawer_repo: &DrawerRepo,
-        branch_doc_id: DocumentId,
-    ) -> Res<DocId> {
-        let (_, doc_ids) = drawer_repo.list_just_ids().await?;
-        for id_str in doc_ids {
-            let doc_id = DocId::from(id_str);
-            if let Some(entry) = drawer_repo.get_entry(&doc_id).await?
-                && entry
-                    .branches
-                    .values()
-                    .any(|branch| branch.branch_doc_id == branch_doc_id)
-            {
-                return Ok(doc_id);
-            }
-        }
-        Ok(DocId::from(branch_doc_id.to_string()))
-    }
-
     async fn ensure_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
@@ -170,6 +184,15 @@ impl Ctx {
                 PRIMARY KEY (plug_id, blob_hash)
             );
             CREATE INDEX IF NOT EXISTS idx_blob_pin_plug_state_hash ON blob_pin_plug_state(blob_hash);
+
+            CREATE TABLE IF NOT EXISTS blob_pin_cipher_doc_state (
+                doc_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL,
+                cipher_hash TEXT NOT NULL,
+                length_octets INTEGER NOT NULL,
+                PRIMARY KEY (doc_id, branch_id, cipher_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_blob_pin_cipher_doc_state_hash ON blob_pin_cipher_doc_state(cipher_hash);
             "#,
         )
         .execute(&sql.write_pool)
@@ -239,12 +262,14 @@ impl Ctx {
         out
     }
 
-    async fn hydrate_blob_pins(
+    /// Derive one branch's pin sets at `heads`: plaintext digests from its
+    /// `Blob` facets, ciphertext digests from its `cipherBlob` facets.
+    async fn hydrate_pins(
         drawer: &DrawerRepo,
         physical_branch_id: &BranchId,
         document_id: &DocId,
         heads: ChangeHashSet,
-    ) -> Res<Option<HashMap<String, u64>>> {
+    ) -> Res<Option<DocPins>> {
         let physical_id = physical_branch_id.0.parse::<big_repo::DocumentId>()?;
         let Some(facets) = drawer
             .hydrate_physical_doc_at_heads(physical_id, heads)
@@ -270,7 +295,7 @@ impl Ctx {
         // stream), not doc presence. Exclude them from the docs-inventory
         // path so a replicated manifest does not pin its blobs on every peer.
         if facets.contains_key(&FacetKey::from(WellKnownFacetTag::PlugManifest)) {
-            return Ok(Some(HashMap::new()));
+            return Ok(Some(DocPins::default()));
         }
         let dmeta = match WellKnownFacet::from_json(
             facets
@@ -285,21 +310,47 @@ impl Ctx {
         if dmeta.id != *document_id {
             return Err(ferr!("dmeta document id does not match Branch facet"));
         }
-        let mut current_pins = HashMap::new();
+        let mut current_pins = DocPins::default();
         for (facet_key, meta) in dmeta.facets {
-            if facet_key.tag != WellKnownFacetTag::Blob.into() || !meta.deleted_at.is_empty() {
+            if !meta.deleted_at.is_empty() {
                 continue;
             }
-            let Some(facet_raw) = facets.get(&facet_key) else {
-                return Err(ferr!("active Blob facet is missing its value"));
-            };
-            let WellKnownFacet::Blob(blob) =
-                WellKnownFacet::from_json(facet_raw.clone(), WellKnownFacetTag::Blob)?
-            else {
-                unreachable!("Blob facet decoded to another well-known variant");
-            };
-            for (hash, length) in Self::blob_pins_from_facet_value(&blob) {
-                current_pins.insert(hash, length);
+            let tag = &facet_key.tag;
+            if *tag == WellKnownFacetTag::Blob.into() {
+                let Some(facet_raw) = facets.get(&facet_key) else {
+                    return Err(ferr!("active Blob facet is missing its value"));
+                };
+                let WellKnownFacet::Blob(blob) =
+                    WellKnownFacet::from_json(facet_raw.clone(), WellKnownFacetTag::Blob)?
+                else {
+                    unreachable!("Blob facet decoded to another well-known variant");
+                };
+                for (hash, length) in Self::blob_pins_from_facet_value(&blob) {
+                    current_pins.plain.insert(hash, length);
+                }
+            } else if *tag == WellKnownFacetTag::CipherBlob.into() {
+                // ADR 003 §13: the encrypted representation's digest is what a
+                // relay is asked to hold, so it is a pin - routed to the
+                // encryption inventory, never to a plaintext one.
+                let Some(facet_raw) = facets.get(&facet_key) else {
+                    return Err(ferr!("active CipherBlob facet is missing its value"));
+                };
+                let WellKnownFacet::CipherBlob(cipher) =
+                    WellKnownFacet::from_json(facet_raw.clone(), WellKnownFacetTag::CipherBlob)?
+                else {
+                    unreachable!("CipherBlob facet decoded to another well-known variant");
+                };
+                let digest = &cipher.representation.digest;
+                // A pin is only useful if it names a blob id this repo's
+                // stores can key on. Accept either digest spelling: ADR 003 §3
+                // makes the multihash form canonical and it is the *only*
+                // carrier a cipherBlob facet has, whereas a `Blob` facet also
+                // carries `db+blob:///` URLs in the bare form.
+                if crate::blobs::digest_str_to_blob_id_lenient(digest).is_some() {
+                    current_pins
+                        .cipher
+                        .insert(digest.clone(), cipher.representation.length_octets);
+                }
             }
         }
         Ok(Some(current_pins))
@@ -369,11 +420,32 @@ impl Ctx {
         Ok(pins)
     }
 
+    /// The encrypted representations the facets currently name, globally:
+    /// the encryption inventory's desired set.
+    async fn desired_cipher_pins(&self) -> Res<HashMap<String, BlobPin>> {
+        let rows = sqlx::query(
+            "SELECT cipher_hash, MAX(length_octets) AS length_octets
+               FROM blob_pin_cipher_doc_state
+              GROUP BY cipher_hash",
+        )
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        let mut pins = HashMap::new();
+        for row in rows {
+            let hash: String = row.try_get("cipher_hash")?;
+            let length_octets = u64::try_from(row.try_get::<i64, _>("length_octets")?)?;
+            pins.insert(hash, BlobPin { length_octets });
+        }
+        Ok(pins)
+    }
+
+    /// Reconcile one inventory doc against a desired set, returning the hashes
+    /// that were removed from it.
     async fn apply_inventory_diff(
         &self,
         inventory_doc_id: &DocId,
         desired: &HashMap<String, BlobPin>,
-    ) -> Res<()> {
+    ) -> Res<Vec<String>> {
         let current = self.list_pins_from_doc_id(inventory_doc_id).await?;
         let mut facets_set = HashMap::new();
         for (hash, pin) in desired {
@@ -390,9 +462,13 @@ impl Ctx {
                 );
             }
         }
-        let mut facets_remove = current
+        let removed = current
             .keys()
             .filter(|hash| !desired.contains_key(*hash))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut facets_remove = removed
+            .iter()
             .map(|hash| FacetKey {
                 tag: WellKnownFacetTag::BlobPin.into(),
                 id: hash.clone(),
@@ -400,7 +476,7 @@ impl Ctx {
             .collect::<Vec<_>>();
         facets_remove.sort_by(|left, right| left.id.cmp(&right.id));
         if facets_set.is_empty() && facets_remove.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         self.drawer_repo
             .update_at_heads(
@@ -414,6 +490,59 @@ impl Ctx {
                 None,
             )
             .await?;
+        Ok(removed)
+    }
+
+    /// Release the pairs whose ciphertext pins just left the encrypted-
+    /// representation inventory.
+    ///
+    /// That inventory is the only record a pair exists, so a hash leaving it
+    /// means the facets that named it are gone: a retired representation, a
+    /// removed domain, or a document that left the encryption-eligibility
+    /// group. The `ct:`/`pt:` tags are the store-level GC roots for the
+    /// ciphertext's outboard and for the plaintext that serves it, so this is
+    /// where both become collectable again (ADR 003 §13/§19). Driven by the same
+    /// diff that removed the pin: reconciled, never incidental, and never a
+    /// separate sweep.
+    async fn release_pairs(&self, removed: &[String]) -> Res<()> {
+        for hash in removed {
+            // The hash is a digest string a facet supplied, so it may use
+            // either spelling (the same rule hydration applied). A panic here
+            // would take the process down over facet-authored data, so a bad
+            // value is a loud error instead.
+            let Some(blob_id) = crate::blobs::digest_str_to_blob_id_lenient(hash) else {
+                eyre::bail!("cannot release a pair for {hash}: not a blob digest");
+            };
+            crate::blobs::encrypt::drop_pair_tags(
+                &self.store,
+                crate::blobs::blob_id_to_iroh_hash(blob_id),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Apply one branch's derived pin sets: replace its rows, then reconcile
+    /// both inventories from the global desired sets.
+    ///
+    /// A plaintext pin leaving the docs inventory is not a release: the
+    /// `pt:<C>` tag is keyed by ciphertext, and a `P` that stops being pinned by
+    /// one document may still serve a live `C` there. Only the ciphertext
+    /// inventory drives releases.
+    async fn apply_branch_pins(&self, branch: PreparedDocBranch) -> Res<()> {
+        let _guard = self.inventory_lock.lock().await;
+        self.replace_doc_branch_state(std::slice::from_ref(&branch))
+            .await?;
+        let docs = self.desired_pins().await?;
+        self.apply_inventory_diff(&self.docs_inventory_doc_id, &docs)
+            .await?;
+        if let Some(encryption_inventory_doc_id) = &self.encryption_inventory_doc_id {
+            let cipher = self.desired_cipher_pins().await?;
+            let removed = self
+                .apply_inventory_diff(encryption_inventory_doc_id, &cipher)
+                .await?;
+            self.release_pairs(&removed).await?;
+        }
         Ok(())
     }
 
@@ -428,26 +557,36 @@ impl Ctx {
                 .bind(&branch.branch_id.0)
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query("DELETE FROM blob_pin_cipher_doc_state WHERE doc_id = ? AND branch_id = ?")
+                .bind(&branch.doc_id)
+                .bind(&branch.branch_id.0)
+                .execute(&mut *tx)
+                .await?;
             let Some(pins) = &branch.pins else {
                 continue;
             };
-            if pins.is_empty() {
-                continue;
+            for (table, hash_column, pins) in [
+                ("blob_pin_doc_state", "blob_hash", &pins.plain),
+                ("blob_pin_cipher_doc_state", "cipher_hash", &pins.cipher),
+            ] {
+                if pins.is_empty() {
+                    continue;
+                }
+                let mut query = sqlx::QueryBuilder::<Sqlite>::new(format!(
+                    "INSERT INTO {table}(doc_id, branch_id, {hash_column}, length_octets) "
+                ));
+                let rows = pins
+                    .iter()
+                    .map(|(hash, length)| Ok((hash.as_str(), i64::try_from(*length)?)))
+                    .collect::<Res<Vec<_>>>()?;
+                query.push_values(rows.iter(), |mut row, (hash, length)| {
+                    row.push_bind(&branch.doc_id)
+                        .push_bind(&branch.branch_id.0)
+                        .push_bind(hash)
+                        .push_bind(*length);
+                });
+                query.build().execute(&mut *tx).await?;
             }
-            let mut query = sqlx::QueryBuilder::<Sqlite>::new(
-                "INSERT INTO blob_pin_doc_state(doc_id, branch_id, blob_hash, length_octets) ",
-            );
-            let rows = pins
-                .iter()
-                .map(|(hash, length)| Ok((hash.as_str(), i64::try_from(*length)?)))
-                .collect::<Res<Vec<_>>>()?;
-            query.push_values(rows.iter(), |mut row, (hash, length)| {
-                row.push_bind(&branch.doc_id)
-                    .push_bind(&branch.branch_id.0)
-                    .push_bind(hash)
-                    .push_bind(*length);
-            });
-            query.build().execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -649,21 +788,18 @@ enum BlobPinTaskOutput {
     Applied,
 }
 
-async fn run_blob_pin_task(
-    task: BlobPinTask,
-    ctx: Arc<Ctx>,
-    inventory_lock: Arc<tokio::sync::Mutex<()>>,
-) -> Res<BlobPinTaskOutput> {
+async fn run_blob_pin_task(task: BlobPinTask, ctx: Arc<Ctx>) -> Res<BlobPinTaskOutput> {
     let delta = task.delta;
-    if delta.key.facet_key.tag != WellKnownFacetTag::Blob.into() {
+    let tag = delta.key.facet_key.tag;
+    // Both facet kinds feed one per-branch recompute: `hydrate_pins` derives the
+    // branch's whole pin state (plaintext and ciphertext) at the delta's heads,
+    // so any other facet tag is not a pin source.
+    if tag != WellKnownFacetTag::Blob.into() && tag != WellKnownFacetTag::CipherBlob.into() {
         return Ok(BlobPinTaskOutput::Applied);
     }
-    // All hydration completes before the inventory section opens; the
-    // state write and the inventory diff are then serialized so their
-    // global recomputes cannot interleave.
     let pins = match &delta.current_branch_heads {
         Some(heads) => {
-            match Ctx::hydrate_blob_pins(
+            match Ctx::hydrate_pins(
                 &ctx.drawer_repo,
                 &delta.key.branch_id,
                 &delta.key.document_id,
@@ -679,32 +815,26 @@ async fn run_blob_pin_task(
             }
         }
         None => {
-            // Tombstone: the branch was removed; its pin rows go with it.
-            let branch = PreparedDocBranch {
+            // Tombstone: the branch was removed; its pin rows go with it, which
+            // also releases any ciphertext pair the branch was holding.
+            ctx.apply_branch_pins(PreparedDocBranch {
                 doc_id: delta.key.document_id,
                 branch_id: delta.key.branch_id,
                 pins: None,
-            };
-            let _guard = inventory_lock.lock().await;
-            ctx.replace_doc_branch_state(std::slice::from_ref(&branch))
-                .await?;
-            let docs = ctx.desired_pins().await?;
-            ctx.apply_inventory_diff(&ctx.docs_inventory_doc_id, &docs)
-                .await?;
+            })
+            .await?;
             return Ok(BlobPinTaskOutput::Applied);
         }
     };
-    let branch = PreparedDocBranch {
+    // All hydration completes before the inventory section opens; the state
+    // write and the inventory diffs are then serialized so their global
+    // recomputes cannot interleave.
+    ctx.apply_branch_pins(PreparedDocBranch {
         doc_id: delta.key.document_id,
         branch_id: delta.key.branch_id,
         pins: Some(pins),
-    };
-    let _guard = inventory_lock.lock().await;
-    ctx.replace_doc_branch_state(std::slice::from_ref(&branch))
-        .await?;
-    let docs = ctx.desired_pins().await?;
-    ctx.apply_inventory_diff(&ctx.docs_inventory_doc_id, &docs)
-        .await?;
+    })
+    .await?;
     Ok(BlobPinTaskOutput::Applied)
 }
 
@@ -733,7 +863,8 @@ enum PlugPinTaskOutput {
 
 impl Worker {
     /// The blob-pin facet machine: a `ConcurrentDeltaWalker` over the facet-set
-    /// source (Blob tag), keyed by branch, with per-branch inventory tasks.
+    /// source (the `Blob` and `CipherBlob` tags), keyed by branch, with
+    /// per-branch inventory tasks.
     /// Mutable machine state lives as stack locals here.
     #[tracing::instrument(
         level = "debug",
@@ -756,7 +887,13 @@ impl Worker {
         .map_err(|error| ferr!("initializing blob-pin FacetSet walker state: {error}"))?;
         let durable = facet_state.progress().await?.upstream_revision;
         let reader = facet_set_store
-            .open(FacetSetSelector::Tag(WellKnownFacetTag::Blob), durable)
+            .open(
+                FacetSetSelector::Tags(vec![
+                    WellKnownFacetTag::Blob,
+                    WellKnownFacetTag::CipherBlob,
+                ]),
+                durable,
+            )
             .await
             .map_err(|error| ferr!("opening blob-pin FacetSet reader: {error}"))?;
         let mut facet_walker =
@@ -868,11 +1005,7 @@ impl Worker {
         tasks: &mut TokioKeyedScheduler<BlobPinKey, BlobPinTask, BlobPinTaskOutput>,
         task: BlobPinTask,
     ) -> Res<()> {
-        let future = run_blob_pin_task(
-            task.clone(),
-            Arc::clone(&self.ctx),
-            Arc::clone(&self.ctx.inventory_lock),
-        );
+        let future = run_blob_pin_task(task.clone(), Arc::clone(&self.ctx));
         tasks.replace(task.key, task.clone(), future)?;
         Ok(())
     }
@@ -1194,6 +1327,29 @@ mod tests {
         Ok(pins)
     }
 
+    /// Boot the production pin worker for the duration of a test.
+    ///
+    /// The harness no longer spawns blob workers, and these lifecycle tests
+    /// observe the pins the worker derives instead of driving it: the pin
+    /// pipeline *is* the subject. Booting it here keeps the writer and the
+    /// assertions in the same test.
+    async fn spawn_pin_worker_for_test(
+        test_context: &crate::test_support::DaybookTestContext,
+    ) -> Res<crate::repos::RepoStopToken> {
+        crate::blobs::spawn_blob_pin_worker(
+            Arc::clone(&test_context.rt.drawer),
+            test_context.rt.rcx.sql.clone(),
+            test_context.rt.rcx.core_inventory_doc_id.clone(),
+            test_context.rt.rcx.docs_inventory_doc_id.clone(),
+            test_context.rt.rcx.encryption_inventory_doc_id.clone(),
+            Arc::clone(&test_context.rt.blobs_repo),
+            test_context.rt.doc_facet_set_index_repo.revision_store(),
+            Arc::clone(&test_context.rt.plugs_repo),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
     async fn wait_for_pin_presence(
         drawer: &DrawerRepo,
         inventory_doc_id: &DocId,
@@ -1223,6 +1379,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_blob_pin_worker_doc_lifecycle() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
         let drawer = &test_context.drawer_repo;
         let docs_inventory_doc_id = test_context.rt.rcx.docs_inventory_doc_id.to_string();
         let sql = test_context.rt.rcx.sql.clone();
@@ -1406,6 +1563,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_blob_pin_worker_plug_lifecycle() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
         let drawer = &test_context.drawer_repo;
         let core_inventory_doc_id = test_context.rt.rcx.core_inventory_doc_id.to_string();
         let docs_inventory_doc_id = test_context.rt.rcx.docs_inventory_doc_id.to_string();
@@ -1482,6 +1640,11 @@ mod tests {
         let test_context = test_cx(utils_rs::function_full!()).await?;
         let drawer = &test_context.drawer_repo;
         let docs_inventory_doc_id = test_context.rt.rcx.docs_inventory_doc_id.to_string();
+        // The worker these assertions observe: main's harness booted it ambiently;
+        // ADR 003's fork regime spawns it explicitly. The pin worker's spawn owns
+        // both machines the test reads (the facet machine and the plug-events
+        // machine), so one spawn covers the pin derivations below.
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
         let reserved = "/etc/daybook-escape".to_string();
 
         let control_blob_id = test_context
@@ -1581,21 +1744,27 @@ mod tests {
         let drawer_repo = Arc::clone(&test_context.drawer_repo);
         // The same resolution the worker does at spawn, so this context writes
         // the facet to the document the running machine writes to.
-        let core_inventory_doc_id = Ctx::resolve_doc_id_for_branch(
-            &drawer_repo,
-            test_context.rt.rcx.core_inventory_doc_id.clone(),
-        )
-        .await?;
-        let docs_inventory_doc_id = Ctx::resolve_doc_id_for_branch(
-            &drawer_repo,
-            test_context.rt.rcx.docs_inventory_doc_id.clone(),
-        )
-        .await?;
+        let core_inventory_doc_id = drawer_repo
+            .resolve_doc_id_for_branch_doc_id(test_context.rt.rcx.core_inventory_doc_id.clone())
+            .await?;
+        let docs_inventory_doc_id = drawer_repo
+            .resolve_doc_id_for_branch_doc_id(test_context.rt.rcx.docs_inventory_doc_id.clone())
+            .await?;
+        let encryption_inventory_doc_id =
+            match test_context.rt.rcx.encryption_inventory_doc_id.clone() {
+                Some(doc_id) => Some(drawer_repo.resolve_doc_id_for_branch_doc_id(doc_id).await?),
+                None => None,
+            };
+        // The hand-built context bypasses the spawn path, so it owes the schema
+        // the spawn owns (Ctx::ensure_schema at :57) itself.
+        Ctx::ensure_schema(&test_context.rt.rcx.sql).await?;
         let ctx = Ctx {
             drawer_repo: Arc::clone(&drawer_repo),
             sql: test_context.rt.rcx.sql.clone(),
             core_inventory_doc_id: core_inventory_doc_id.clone(),
-            docs_inventory_doc_id,
+            docs_inventory_doc_id: docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id,
+            store: test_context.rt.blobs_repo.iroh_store(),
             inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let watched_doc_id = core_inventory_doc_id.clone();
@@ -1668,6 +1837,10 @@ mod tests {
         let sql = test_context.rt.rcx.sql.clone();
         let core_inventory_doc_id = test_context.rt.rcx.core_inventory_doc_id.to_string();
         let drawer = &test_context.drawer_repo;
+        // The plug-events machine lives inside the pin worker's spawn (both
+        // machines join in spawn_blob_pin_worker), so the test owes it like the
+        // other pin-derivation tests do.
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
 
         let blob_id = test_context
             .rt
@@ -1768,6 +1941,237 @@ mod tests {
             durable_row,
             "a restart of the walker resumes at its own progress row"
         );
+        Ok(())
+    }
+
+    /// The tag name `encrypt.rs` writes for a pair: named from the ciphertext
+    /// `Hash`, whose `Display` is hex - not from the daybook `BlobId`, which is
+    /// bs58. Both readings of "the pair tag" must use this, or a test asserts
+    /// against names nothing ever writes.
+    fn pair_tag_name(prefix: &str, cipher: &crate::blobs::BlobId) -> String {
+        format!(
+            "{prefix}{}",
+            iroh_blobs::Hash::from_bytes(cipher.to_bytes32())
+        )
+    }
+
+    /// Stage a pair the way `CipherBlobProvider::register_pair` leaves it: both
+    /// durable tags present, so the pair is rooted.
+    async fn root_pair_tags(
+        store: &iroh_blobs::api::Store,
+        cipher: crate::blobs::BlobId,
+        plaintext: crate::blobs::BlobId,
+    ) -> Res<()> {
+        // Production (`set_pair_tags`, encrypt.rs) names BOTH tags from the
+        // ciphertext hash; the pt tag's *value* names the plaintext.
+        for (prefix, named, valued) in [
+            (
+                crate::blobs::encrypt::TAG_CT_PREFIX,
+                cipher.clone(),
+                cipher.clone(),
+            ),
+            (
+                crate::blobs::encrypt::TAG_PT_PREFIX,
+                cipher.clone(),
+                plaintext.clone(),
+            ),
+        ] {
+            store
+                .tags()
+                .set(
+                    pair_tag_name(prefix, &named),
+                    iroh_blobs::HashAndFormat {
+                        hash: crate::blobs::blob_id_to_iroh_hash(valued),
+                        format: iroh_blobs::BlobFormat::Raw,
+                    },
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn pair_tags_present(
+        store: &iroh_blobs::api::Store,
+        cipher: &crate::blobs::BlobId,
+    ) -> Res<bool> {
+        let ct = store
+            .tags()
+            .get(pair_tag_name(crate::blobs::encrypt::TAG_CT_PREFIX, cipher))
+            .await?;
+        let pt = store
+            .tags()
+            .get(pair_tag_name(crate::blobs::encrypt::TAG_PT_PREFIX, cipher))
+            .await?;
+        Ok(ct.is_some() && pt.is_some())
+    }
+
+    async fn wait_for_pair_tags_absent(
+        store: &iroh_blobs::api::Store,
+        cipher: &crate::blobs::BlobId,
+    ) -> Res<()> {
+        loop {
+            if !pair_tags_present(store, cipher).await? {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    fn cipher_blob_facet(
+        digest: &str,
+        length_octets: u64,
+        key_ref: &str,
+        key_ref_heads: ChangeHashSet,
+    ) -> Res<FacetRaw> {
+        Ok(FacetRaw::from(WellKnownFacet::CipherBlob(
+            daybook_types::doc::CipherBlob {
+                representation: daybook_types::doc::Representation {
+                    digest: digest.to_string(),
+                    length_octets,
+                },
+                content_encoding: "aes128gcm".to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads,
+                encoding_parameters: serde_json::json!({
+                    "recordSize": 65_536,
+                    "padding": "record",
+                }),
+            },
+        )))
+    }
+
+    /// A `cipherBlob` facet is a pin source, but only for the encrypted-
+    /// representation inventory: the digest is what a relay is asked to hold and
+    /// what the pair tags are named from. Removing the facet releases the pair -
+    /// the pin leaves the inventory and both `ct:`/`pt:` tags go with it, which
+    /// is the only thing that makes the ciphertext's outboard and the plaintext
+    /// serving it collectable again (ADR 003 §13/§19).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_blob_pin_worker_cipher_inventory_lifecycle() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
+        let drawer = &test_context.drawer_repo;
+        let docs_inventory_doc_id = drawer
+            .resolve_doc_id_for_branch_doc_id(test_context.rt.rcx.docs_inventory_doc_id.clone())
+            .await?;
+        let encryption_inventory_doc_id = drawer
+            .resolve_doc_id_for_branch_doc_id(
+                test_context
+                    .rt
+                    .rcx
+                    .encryption_inventory_doc_id
+                    .clone()
+                    .expect("test repos always create the encrypted-representation inventory"),
+            )
+            .await?;
+        let store = test_context.rt.blobs_repo.iroh_store();
+
+        let plaintext = test_context
+            .rt
+            .blobs_repo
+            .put(b"pin worker cipher source")
+            .await?;
+        let cipher = test_context
+            .rt
+            .blobs_repo
+            .put(b"pin worker cipher representation")
+            .await?;
+        let plaintext_hash = plaintext.to_string();
+        // ADR 003 §3 spells a representation digest as a multihash, and that is
+        // the only carrier a cipherBlob facet has, so the fixture uses it.
+        let cipher_hash = crate::blobs::blob_id_to_digest_str(cipher.clone());
+        root_pair_tags(&store, cipher.clone(), plaintext).await?;
+
+        let doc_id = drawer
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: 1234,
+                        digest: "bafakedigest".to_string(),
+                        inline: None,
+                        urls: Some(vec![format!(
+                            "{}:///{plaintext_hash}",
+                            crate::blobs::BLOB_SCHEME
+                        )]),
+                    })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        // The facet is system-managed, so it takes the scope the encryption
+        // worker will write it with rather than an ordinary user write.
+        let (key_doc_id, key_heads) =
+            crate::test_support::stage_key_doc(drawer, &crate::blobs::encrypt::MasterKey::random())
+                .await?;
+        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let cipher_facet_key = FacetKey::from(WellKnownFacetTag::CipherBlob);
+        drawer
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        cipher_facet_key.clone(),
+                        cipher_blob_facet(&cipher_hash, 4096, &key_ref, key_heads)?,
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+                crate::drawer::FacetWriteScope::System,
+            )
+            .await?;
+
+        wait_for_pin_presence(drawer, &encryption_inventory_doc_id, &cipher_hash, true).await?;
+        let cipher_pins = inventory_blob_pins(drawer, &encryption_inventory_doc_id).await?;
+        assert_eq!(cipher_pins.get(&cipher_hash).unwrap().length_octets, 4096);
+        assert!(
+            pair_tags_present(&store, &cipher).await?,
+            "the pair is still rooted while the facet names it"
+        );
+
+        // The plaintext pin still lands in the docs inventory, and the
+        // ciphertext digest must not be there. A plaintext inventory is read by
+        // peers that only hold plaintext.
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &plaintext_hash, true).await?;
+        assert!(
+            !inventory_blob_pins(drawer, &docs_inventory_doc_id)
+                .await?
+                .contains_key(&cipher_hash),
+            "a ciphertext digest must never enter a plaintext inventory"
+        );
+
+        // Removing the facet releases the pair.
+        drawer
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: default(),
+                    facets_remove: vec![cipher_facet_key],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+                crate::drawer::FacetWriteScope::System,
+            )
+            .await?;
+
+        wait_for_pin_presence(drawer, &encryption_inventory_doc_id, &cipher_hash, false).await?;
+        wait_for_pair_tags_absent(&store, &cipher).await?;
+        assert!(
+            inventory_blob_pins(drawer, &docs_inventory_doc_id)
+                .await?
+                .contains_key(&plaintext_hash),
+            "releasing the ciphertext must not disturb the plaintext pin"
+        );
+
+        test_context.stop().await?;
         Ok(())
     }
 }

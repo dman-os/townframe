@@ -43,6 +43,7 @@ impl DrawerRepo {
             .allocate_doc(vec![
                 self.pending_documents_group.clone().into(),
                 self.content_docs_group.clone().into(),
+                self.encrypted_blob_docs_group.clone().into(),
                 self.drawer_group.clone().into(),
             ])
             .await
@@ -299,6 +300,12 @@ impl DrawerRepo {
             .add_admin_member_to_doc(branch_doc_id.clone(), self.content_docs_group.clone())
             .await?;
         self.big_repo
+            .add_admin_member_to_doc(
+                branch_doc_id.clone(),
+                self.encrypted_blob_docs_group.clone(),
+            )
+            .await?;
+        self.big_repo
             .add_admin_member_to_doc(branch_doc_id.clone(), self.drawer_group.clone())
             .await?;
         let entry = DocEntry {
@@ -429,7 +436,12 @@ impl DrawerRepo {
             .await
     }
 
-    async fn update_at_heads_with_scope(
+    /// System-scope writes bypass the "ordinary writes cannot modify a
+    /// system-managed facet" rule (drawer.rs `validate_facet_write_scope`).
+    /// The maintenance workers that own those facets (the encryption worker's
+    /// cipherBlob/JWK writes) need this seam; tests of anything downstream of
+    /// such a facet need it to stage the facet at all.
+    pub(crate) async fn update_at_heads_with_scope(
         &self,
         patch: DocPatch,
         branch_path: &daybook_types::doc::BranchPath,
@@ -698,6 +710,7 @@ impl DrawerRepo {
         let mut allocation_parents = vec![
             self.pending_documents_group.clone().into(),
             self.content_docs_group.clone().into(),
+            self.encrypted_blob_docs_group.clone().into(),
         ];
         if branch_kind == BranchKind::Replicated {
             allocation_parents.push(self.drawer_group.clone().into());

@@ -79,7 +79,7 @@ A cipherBlob facet describes exactly one encrypted physical representation:
 
 ```json
 {
-  "org.example.daybook.cipherblob/relay": {
+  "org.example.daybook.cipherBlob/relay": {
     "representation": {
       "digest": "<ciphertext-representation-digest>",
       "lengthOctets": 125337
@@ -87,7 +87,8 @@ A cipherBlob facet describes exactly one encrypted physical representation:
 
     "contentEncoding": "aes128gcm",
 
-    "keyRef": "db+facet:///self/org.example.daybook.jwk/relay",
+    "keyRef": "db+facet:///<doc-id|self>/org.example.daybook.jwk/relay",
+    "keyRefHeads": ["<change-hash>", "..."],
 
     "encodingParameters": {
       "recordSize": 65536,
@@ -111,9 +112,11 @@ Those belong to other layers.
 
 `representation.digest` and the plaintext content digest are multihash-encoded self-describing digests per ADR 001 (BLAKE3 today, algorithm-agile). `representation.digest` is computed over the complete RFC 8188 encoded body (header + records), and `representation.lengthOctets` is the length of that same body including padding and authentication tags. When a representation is served through iroh-blobs, the multihash decodes to the raw BLAKE3 digest iroh-blobs addresses internally; this is an impl detail of the transport, not a facet-level constraint.
 
-`contentEncoding` is the algorithm pivot: its value is an HTTP content-coding token (e.g. `aes128gcm`), and the schema of `encodingParameters` is defined by `contentEncoding`. A future encryption scheme is a new `contentEncoding` value with its own `encodingParameters` shape; existing `aes128gcm` cipherBlobs remain decryptable without migration. Daybook deliberately does not reify RFC 8188's binary header as a standalone opaque field, because that would bake one scheme's wire format into the abstraction and hurt agility.
+`contentEncoding` is the algorithm pivot: its value is an HTTP content-coding token (e.g. `aes128gcm`), and the schema of `encodingParameters` is defined by `contentEncoding`. A codec therefore reads the two as a pair: a token it does not implement is rejected outright rather than interpreted against another scheme's parameter shape, and the parameters it does read are validated against what the wire format can express (the record size is a four-octet header field and must leave room for a record payload). A future encryption scheme is a new `contentEncoding` value with its own `encodingParameters` shape; existing `aes128gcm` cipherBlobs remain decryptable without migration. Daybook deliberately does not reify RFC 8188's binary header as a standalone opaque field, because that would bake one scheme's wire format into the abstraction and hurt agility.
 
-For `aes128gcm`, `encodingParameters` carries the per-scheme reproduction inputs that are not derivable from elsewhere: `recordSize` (the RFC 8188 `rs`) and `padding` (the deterministic padding policy, see §17). The RFC 8188 `salt` header field is deliberately absent from the facet: it is derived at encryption and serving time as a pure function of the referenced JWK secret and the plaintext content digest (see §9). The RFC 8188 `keyid` is always empty (see §8) and therefore omitted from the facet.
+For `aes128gcm`, `encodingParameters` carries the per-scheme reproduction inputs that are not derivable from elsewhere: `recordSize` (the RFC 8188 `rs`) and `padding` (the deterministic padding policy, see §17). The RFC 8188 `salt` header field is deliberately absent from the facet: it is derived at encryption and serving time as a pure function of the referenced JWK secret and the plaintext content digest (see §9). `keyRef` is a facet reference in the ordinary URL form (docs/dict.md, "URLs"): `self` names a facet in the same document, and any other first path segment is the id of another document. `keyRefHeads` is the change-hash set that reference was resolved at, and it is load-bearing rather than decorative. A JWK facet is mutable: rotation writes a new key into it, and §15 requires existing representations to stay decryptable. Pinning the heads is what makes that true - an existing cipherBlob keeps naming the JWK *state* it was encrypted under while a new cipherBlob names the new state. The empty-heads convention (meaning "the same change hash as the facet holding the reference") cannot express a cross-document reference at all, so a `keyRef` into another document must pin its heads. Declared to the drawer as a facet reference of kind `urlStringSplit`, a change that pointed `keyRef` at the wrong facet tag, or dropped or contradicted the heads, is rejected rather than stored.
+
+The RFC 8188 `keyid` is always empty (see §8) and therefore omitted from the facet.
 
 ### 4. Blob → cipherBlob resolution
 
@@ -174,7 +177,7 @@ For blob encryption:
 }
 ```
 
-The facet value SHOULD remain a valid JWK rather than wrapping it inside a Daybook-specific key structure.
+The facet value SHOULD remain a valid JWK rather than wrapping it inside a Daybook-specific key structure. The schema requires `kty` and carries every other member verbatim, so a key type Daybook never interprets still round-trips unchanged. Requiring `kty` is not cosmetic: facets are also read by untagged deserialization in some paths, where a variant accepting a bare JSON value would match any payload at all and answer for facets it has no relation to.
 
 For RFC 8188 `aes128gcm`, the JWK secret is used as the Input Keying Material (IKM). Daybook derives the representation salt from `(IKM, plaintext content digest)` (see §9); the AEAD content-encryption key and nonce base are then derived by RFC 8188's own HKDF-SHA256 from `(salt, IKM)`, so Daybook performs no additional key schedule beyond that derivation. Because the salt depends on both the secret and the plaintext digest, reusing one JWK across many cipherBlobs yields a different content-encryption key per representation and does not correlate their ciphertexts — with no per-representation random state to create, store, or coordinate across devices.
 
@@ -461,6 +464,10 @@ C3
 
 A relay therefore only learns the physical representations selected for its retention domain.
 
+Inventories are keyed per encryption domain and derived from the cipherBlob
+facets readable in that domain's groups; no component authors a representation
+pin that no facet entails. See §19.
+
 It does not need to know:
 
 * their plaintext digests;
@@ -615,6 +622,207 @@ No cipherBlob or JWK is required.
 
 cipherBlob therefore never needs a special plaintext mode.
 
+### 19. Encryption and pin maintenance
+
+§14 describes the steps that create a representation. This section fixes who
+performs them, what the metadata is keyed by, and the order the steps must
+happen in, because none of these are derivable from §14 alone.
+
+#### Domains are named, and the facet key is the name
+
+A facet key names the encryption domain a representation belongs to:
+
+```json
+{
+  "org.example.daybook.cipherBlob/relay": { ... }
+}
+```
+
+Daybook declares its domains; it does not discover them. A domain named for a
+Keyhive group uses a derived facet key:
+
+```text
+grp:<base58(multibase(group_id))>
+```
+
+using the same internal base58-multibase convention as the rest of the repo.
+Facet-key prefixes other than `grp:` are reserved for domains that are not
+Keyhive groups, so a reader can always tell which kind of authority governs a
+domain without resolving it.
+
+A domain is therefore not a schema object: it is a facet key in a document that
+some group can read. Membership in the group is what grants access to the
+cipherBlob metadata, and the document's own access control bounds who may learn
+that the domain exists.
+
+The same-access rule bounds what the facet key may encode. A cipherBlob
+facet key may embed the sibling `Blob` facet's own id, and a `Blob.urls`
+`?via=` entry may embed the facet key, because both travel inside the
+content document: any reader who can see them already holds the plaintext
+digest from the `Blob` facet itself. The facet *body* never names the
+plaintext digest, and the inventory pins a domain reads carry only the
+ciphertext digest. A cipherBlob that names a blob facet in another document
+has no sibling to lean on and must use a keyid scheme that does not derive
+from that document's readership - an open shape, deferred to cross-document
+keyRef (Deferred Decisions).
+#### JWK and cipherBlob are placed in different documents, deliberately
+
+`keyRef` names the JWK facet that holds the encryption key, addressing a
+document explicitly: `self` for one in the same document, or a document id
+(docs/dict.md, "URLs"). The two facets do not travel together:
+
+```text
+content document                      key document
+  Blob facet                            JWK facet
+  cipherBlob facet                       (readable by decryptors)
+   (readable by anyone who
+    may serve the blob)
+```
+
+The cipherBlob lives beside the Blob facet, because anyone who may serve a
+representation must know which representation to serve. The JWK lives in a key
+document granted to the *decryptor* group, which is normally `repo_agents`. A
+retention domain can therefore be given the cipherBlob - enough to store and
+serve the ciphertext - without ever being given the key.
+
+This is the structural form of the rule that encryption keys are never shared
+with mere storers or readers of the ciphertext. It is not enforced by omitting
+a field: it is enforced by the facets living in documents with different
+readers.
+
+#### `keyScope` chooses how many key documents a domain has
+
+A domain's configuration carries:
+
+```text
+keyScope: Domain | Document
+```
+
+`Domain` gives each (group, domain) pair one key document for all blobs in that
+domain. `Document` gives each (group, domain, content document) pair its own
+key document.
+
+The default is `Document`, for two reasons. First, rotation: rotating the key
+for one document is a local act, while rotating a domain-wide key re-encrypts
+every representation in the library, and nobody wants to rotate an entire photo
+archive in one step. Second, and less obviously, equality leaks: RFC 8188
+encryption here is deterministic in (key, salt, plaintext) and the salt is
+derived from the plaintext digest (§9), so two documents holding identical
+plaintext produce identical representation digests *within one domain*. With
+`keyScope: Domain` that identity is visible across the whole library; with
+`keyScope: Document` it is visible only within one document. Narrowing the
+scope narrows the leak.
+
+The facet key stays `grp:<group_id>` under both settings, because `keyRef`
+already names a document and therefore already distinguishes the keys.
+
+#### Pins are derived from facets, never authored
+
+The set of representations a peer sponsors is a function of the cipherBlob
+facets it can read, in the groups it serves:
+
+```text
+declared domain + group docs
+        ↓
+live cipherBlob facets
+        ↓
+set of representation digests C
+        ↓
+BlobPins for that domain
+```
+
+No component writes a representation pin that no facet entails, and no
+component infers a facet from a pin. A pin that outlives its facet is not a
+stale-cache annoyance: it is the mechanism by which a representation is
+retained, so it is also the mechanism by which a deleted representation keeps
+occupying a relay forever (see the release path below).
+
+The store-level roots are the `ct:`/`pt:` tags written when a pair is
+registered (§12). These are ordinary named tags, and named tags are what the
+store's garbage collector treats as roots, so they are sufficient to keep both
+the representation and the plaintext it is served from alive.
+
+#### Ordering, and the commit point
+
+Cross-document steps cannot share an Automerge transaction, so order is the
+only atomicity available, and it has to be chosen so that every prefix of the
+sequence is safe to be crashed in:
+
+```text
+1. §11 pass over P: compute C, install the virtual entry, register the pair
+2. write the JWK facet
+3. write the cipherBlob facet              <- C becomes nameable
+4. derive and write the pin for C
+5. write Blob.urls resolution through the cipherBlob   <- commit point
+```
+
+The representation is fully servable before anything points at it, and the
+resolution that lets a reader reach C is written last. A crash before step 5
+leaves unreferenced artifacts that a later reconciliation pass can resume or
+collect; a crash after it leaves a reader that can resolve, fetch and decrypt.
+
+A pin is written only after the representation is servable, per §14. That is
+the same ordering constraint expressed from the other side: servability is
+established at step 1, and step 4 is the first moment that fact may be
+published.
+
+#### The release path is deliberate
+
+Because `ct:`/`pt:` are named tags and named tags are GC roots, nothing removes
+them incidentally. Releasing a representation is an explicit act:
+
+```text
+remove cipherBlob facet
+        ↓
+derived pin disappears
+        ↓
+delete ct:/pt: tags
+```
+
+A domain that skips the last step leaks both the representation's outboard and
+its plaintext permanently. Release therefore belongs to the same component that
+derives pins, and is reconciled the same way - from facets, towards the store -
+rather than being a side effect of deleting a document.
+This release is deliberately reactive, with no positive-evidence scan in
+front of it: the diff that drives it is computed from pin rows that only
+legitimate facet deltas touch - a branch tombstone, or a per-branch
+rehydrate at current heads - and a transient unreadability leaves the
+desired set untouched (the unmaterialized-heads read errors out and the
+keyed scheduler retries rather than writing a shrink). A pin therefore
+cannot be removed and re-created by anything except a real facet removal
+followed by a real re-add, and because the salt is deterministic both
+representations re-derive byte-identically and `register_pair` re-roots
+the pair, so even that window is self-healing as long as the re-encryption
+run happens before a GC collects the unrooted bytes.
+
+#### One worker per group, using the existing group machinery
+
+Maintenance is per group and reuses the existing worker scope and part worker
+templates:
+
+* `WorkerGroupScope::Groups(HashSet<PartId>)` selects exactly the documents
+  belonging to at least one served group authority, evaluated against live
+  keyhive state when the event is handled - never against group-part
+  assignment. A relay's domain can therefore grow and shrink without racing the
+  group-part worker.
+* The part worker owns its dependency graph: every derived task retains the
+  source admission row that caused it, and that row is acknowledged only after
+  the derived work has completed successfully.
+
+The encryption worker's two facet kinds are handled as two explicit branches
+(Blob facet, cipherBlob facet) rather than behind a schema-level accessor. The
+only shared helper answers the narrower question a branch actually needs: does
+this facet name a blob that is stored outside the document, whether by urls or
+inline.
+
+### 20. Random-access decryption
+
+Records are keyed by sequence number and authenticated independently, so plaintext is addressable rather than sequential: reading a plaintext range decrypts only the records that range overlaps, and memory is bounded by the range instead of by the file.
+
+Framing for such a read comes from the ciphertext's own authenticated header, not from the facet - `rs` is on the wire, so a reader never has to be told it. The plaintext length is the one thing the wire cannot supply: RFC 8188 does not encode it, and under `Padding::Record` the padded tail deliberately hides it (§17). A reader therefore takes the length from its own metadata (the Blob facet's `lengthOctets`) and checks it against the ciphertext in both directions - the body bounds it from below, and the final record's real extent bounds it from above, so a length that is too small fails rather than silently truncating what is read.
+
+This is what makes a large encrypted video playable from a byte range on a device that has the ciphertext: start playing without decrypting, downloading, or buffering the whole file. It is also the exact mirror of §12 - the same framing facts serve ciphertext derived from plaintext and plaintext derived from ciphertext.
+
 ## Layering
 
 The resulting model is:
@@ -692,10 +900,15 @@ Rejected because it bakes one scheme's wire format into the cipherBlob abstracti
 Separate ADRs will define:
 
 * exact `db+blob` URI and resolution-hint syntax;
+* cross-document `keyRef` addressing, so a key document may serve several
+  content documents rather than one (§19 places the JWK and cipherBlob in
+  different documents; `keyRef` currently resolves within one);
 * BlobPin/inventory schemas and relay completion receipts;
 * virtual encrypted iroh-blobs integration;
 * ciphertext caching policy;
-* default RFC 8188 record size;
+* the default RFC 8188 record size for new representations (the codec reads
+  whatever an existing representation declares, so this is now only a policy
+  choice, not a wire-format commitment);
 * stronger padding profiles (powers-of-two, fixed-size buckets);
 * multi-key/keyring optimization;
 * garbage collection of stale cipherBlobs, JWKs, and representations;

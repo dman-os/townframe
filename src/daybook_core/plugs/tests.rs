@@ -1039,6 +1039,37 @@ async fn read_config(ctx: &crate::test_support::DaybookTestContext) -> Res<Plugs
     Ok(serde_json::from_value(raw.clone())?)
 }
 
+/// Revise a manifest doc beside its manifest: write a second instance of a
+/// facet tag the plug declares. The document gains a revision while the
+/// `PlugManifest` facet itself is untouched — what any writer adding a sibling
+/// facet to a manifest doc does (in production: the encryption worker's
+/// cipherBlob write).
+async fn write_sibling_facet_via_drawer(
+    ctx: &crate::test_support::DaybookTestContext,
+    doc_id: &daybook_types::doc::DocId,
+    tag: &str,
+    value: serde_json::Value,
+) -> Res<()> {
+    let key = daybook_types::doc::FacetKey {
+        tag: daybook_types::doc::FacetTag::Any(tag.to_string()),
+        id: "prop2".to_string(),
+    };
+    ctx.rt
+        .drawer
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(key, value)].into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+        )
+        .await?;
+    Ok(())
+}
+
 /// Simulate a remote manifest change: write a new manifest version to an
 /// existing manifest doc through the drawer.
 async fn write_manifest_via_drawer(
@@ -1556,6 +1587,111 @@ async fn test_known_plugs_track_fields() -> Res<()> {
     assert_eq!(track.last_valid, v1_ref);
     assert_eq!(track.last_valid_version, "0.1.0");
     assert_eq!(track.last_enabled_version.as_deref(), Some("0.1.0"));
+
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// A document revision that leaves the manifest facet untouched is not a
+/// republish: the manifest doc gains heads while its manifest content stays put
+/// (a sibling facet written beside it — in production the encryption worker's
+/// cipherBlob), so the recording gate must advance the track to the new revision
+/// and leave the version activatable, while a manifest genuinely mutated at the
+/// same version stays rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_manifest_revision_without_manifest_change_advances_track() -> Res<()> {
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_manifest_revision_without_manifest_change_advances_track",
+    )
+    .await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let manifest = mock_plug_with_facet(
+        "plug1",
+        "0.1.0",
+        "org.test.prop1",
+        schemars::schema_for!(String),
+    );
+    let doc_id = repo.add(manifest).await?;
+    let v1_heads = doc_heads(&ctx, &doc_id).await?;
+    let v1_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v1_heads)?;
+    // The plug must be enabled for a facet tag it declares to be writable.
+    repo.enable_plug(&v1_ref).await?;
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.latest, v1_ref);
+    assert_eq!(track.latest_version, "0.1.0");
+    assert_eq!(track.latest_rejection, None);
+
+    // Revise the doc without touching the manifest facet. The manifest consumer
+    // only walks manifest-facet deltas, but those deltas carry the document's
+    // current heads, so the gate is reached with heads newer than the manifest
+    // content — the same call with the same shape.
+    write_sibling_facet_via_drawer(
+        &ctx,
+        &doc_id,
+        "org.test.prop1",
+        serde_json::json!("second property"),
+    )
+    .await?;
+    let v2_heads = doc_heads(&ctx, &doc_id).await?;
+    let v2_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v2_heads)?;
+    assert_ne!(v1_ref, v2_ref, "the sibling facet must add a revision");
+
+    let outcome = repo.record_known_manifest_doc(&doc_id, &v2_heads).await?;
+    assert!(
+        matches!(outcome, mutations::RecordKnownOutcome::Recorded),
+        "a revision with an unchanged manifest must be recorded, not rejected"
+    );
+    let config = read_config(&ctx).await?;
+    let track = config
+        .known_plugs
+        .get("@test/plug1")
+        .ok_or_eyre("track missing")?;
+    assert_eq!(track.latest, v2_ref);
+    assert_eq!(track.latest_version, "0.1.0");
+    assert_eq!(track.latest_rejection, None);
+    assert_eq!(track.last_valid, v2_ref);
+
+    // ... and the same version at those new heads is still activatable.
+    repo.enable_plug(&v2_ref).await?;
+    assert!(repo.get("@test/plug1").await.is_some());
+
+    // Control: a manifest mutated at the same version is still a republish, and
+    // is still refused on record and on activation alike.
+    let mut mutated = mock_plug_with_facet(
+        "plug1",
+        "0.1.0",
+        "org.test.prop1",
+        schemars::schema_for!(String),
+    );
+    mutated.title = "A retitled plug".into();
+    write_manifest_via_drawer(&ctx, &doc_id, &mutated).await?;
+    let v3_heads = doc_heads(&ctx, &doc_id).await?;
+    let v3_ref = PlugsRepo::build_enabled_ref(&doc_id, "main", &v3_heads)?;
+    let outcome = repo.record_known_manifest_doc(&doc_id, &v3_heads).await?;
+    let mutations::RecordKnownOutcome::Rejected { reason } = outcome else {
+        eyre::bail!("a mutated manifest at the same version must be rejected");
+    };
+    // Re-observing that same rejected revision reports the rejection again rather
+    // than "already recorded". The consumer can reach these heads first, and a
+    // caller reading that as success would add a manifest the gate refused.
+    let replay = repo.record_known_manifest_doc(&doc_id, &v3_heads).await?;
+    assert!(
+        matches!(replay, mutations::RecordKnownOutcome::Rejected { .. }),
+        "re-observing a rejected revision must stay rejected"
+    );
+    assert!(
+        reason.contains("version must be greater than the latest version (0.1.0)"),
+        "unexpected rejection reason: {reason}"
+    );
+    assert!(
+        repo.enable_plug(&v3_ref).await.is_err(),
+        "activating the mutated republish must stay blocked"
+    );
 
     ctx.stop().await?;
     Ok(())

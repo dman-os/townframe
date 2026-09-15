@@ -116,6 +116,9 @@ pub struct RepoCtx {
     pub doc_config: BigDocHandle,
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
+    /// The encrypted-representation inventory: ciphertext (`C`) pins only.
+    /// `None` for a repo created before it existed (ADR 003 §13).
+    pub encryption_inventory_doc_id: Option<DocumentId>,
 
     pub local_peer_key: PeerId,
     pub local_actor_id: automerge::ActorId,
@@ -184,6 +187,7 @@ impl RepoCtx {
         doc_config: BigDocHandle,
         core_inventory_doc_id: DocumentId,
         docs_inventory_doc_id: DocumentId,
+        encryption_inventory_doc_id: Option<DocumentId>,
     ) -> Arc<Self> {
         Arc::new(Self {
             secret_store: parts.secret_store,
@@ -206,6 +210,7 @@ impl RepoCtx {
             doc_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
+            encryption_inventory_doc_id,
             local_actor_id: parts.local_actor_id,
             local_user_path: parts.local_user_path,
             repo_id: parts.repo_id,
@@ -415,45 +420,81 @@ impl RepoCtx {
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
-        let (doc_app, doc_drawer, doc_config, core_inventory_doc_id, docs_inventory_doc_id) =
-            if initialize_repo {
-                let (doc_app, doc_drawer, doc_config) =
-                    init_core_docs(&big_repo, &authority).await?;
-                info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
-                let (core_id, docs_id) = Self::run_repo_init_dance(
-                    &big_repo,
-                    &part_store,
-                    &blob_part_store,
-                    &doc_app,
-                    &doc_drawer,
-                    &doc_config,
-                    &authority,
-                    &local_user_path,
-                    &sqlite_local_state_repo,
-                    &sql,
-                    layout.blobs_root.clone(),
-                )
-                .await?;
-                mark_repo_initialized(&layout.repo_root).await?;
-                info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
-                (doc_app, doc_drawer, doc_config, core_id, docs_id)
-            } else {
-                let (doc_app, doc_drawer, doc_config, core_id, docs_id) =
-                    load_core_docs(&big_repo, &sql).await?;
-                crate::authority::grant_docs_admin(
-                    &big_repo,
-                    &authority.core_docs,
-                    [
-                        doc_app.document_id(),
-                        doc_drawer.document_id(),
-                        doc_config.document_id(),
-                        core_id.clone(),
-                        docs_id.clone(),
-                    ],
-                )
-                .await?;
-                (doc_app, doc_drawer, doc_config, core_id, docs_id)
-            };
+        let (
+            doc_app,
+            doc_drawer,
+            doc_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ) = if initialize_repo {
+            let (doc_app, doc_drawer, doc_config) = init_core_docs(&big_repo, &authority).await?;
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
+            let (core_id, docs_id, encryption_id) = Self::run_repo_init_dance(
+                &big_repo,
+                &part_store,
+                &blob_part_store,
+                &doc_app,
+                &doc_drawer,
+                &doc_config,
+                &authority,
+                &local_user_path,
+                &sqlite_local_state_repo,
+                &sql,
+                layout.blobs_root.clone(),
+            )
+            .await?;
+            mark_repo_initialized(&layout.repo_root).await?;
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
+            (
+                doc_app,
+                doc_drawer,
+                doc_config,
+                core_id,
+                docs_id,
+                Some(encryption_id),
+            )
+        } else {
+            let (doc_app, doc_drawer, doc_config, core_id, docs_id, encryption_id) =
+                load_core_docs(&big_repo, &sql).await?;
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.core_docs,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                    core_id.clone(),
+                    docs_id.clone(),
+                ]
+                .into_iter()
+                .chain(encryption_id.clone()),
+            )
+            .await?;
+            // The core docs are encrypted like content and plug docs
+            // (ADR 003 §19). The inventories are deliberately NOT: the
+            // encrypted-representation inventory is what a relay reads to
+            // learn which ciphertext digests to hold, so encrypting it
+            // would make the advertisement unreadable to its audience.
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.encrypted_blob_docs,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                ],
+            )
+            .await?;
+            (
+                doc_app,
+                doc_drawer,
+                doc_config,
+                core_id,
+                docs_id,
+                encryption_id,
+            )
+        };
         info!(
             repo_root = %layout.repo_root.display(),
             doc_app_id = %doc_app.document_id(),
@@ -461,6 +502,7 @@ impl RepoCtx {
             doc_config_id = %doc_config.document_id(),
             core_inventory_doc_id = %core_inventory_doc_id,
             docs_inventory_doc_id = %docs_inventory_doc_id,
+            encryption_inventory_doc_id = ?encryption_inventory_doc_id,
             "repo open_inner: core docs ready"
         );
 
@@ -475,6 +517,7 @@ impl RepoCtx {
             &blob_part_store,
             &core_inventory_doc_id,
             &docs_inventory_doc_id,
+            encryption_inventory_doc_id.as_ref(),
         )
         .await?;
         ensure_derived_partitions(&derived_part_store).await?;
@@ -512,6 +555,7 @@ impl RepoCtx {
             doc_config,
             core_inventory_doc_id,
             docs_inventory_doc_id,
+            encryption_inventory_doc_id,
         ))
     }
 
@@ -528,7 +572,7 @@ impl RepoCtx {
         sqlite_local_state_repo: &Arc<crate::local_state::SqliteLocalStateRepo>,
         sql: &SqlCtx,
         blobs_root: PathBuf,
-    ) -> Res<(DocumentId, DocumentId)> {
+    ) -> Res<(DocumentId, DocumentId, DocumentId)> {
         info!(
             doc_app_id = %doc_app.document_id(),
             doc_drawer_id = %doc_drawer.document_id(),
@@ -551,7 +595,7 @@ impl RepoCtx {
         let mut drawer_stop: Option<crate::repos::RepoStopToken> = None;
         let mut init_stop: Option<crate::repos::RepoStopToken> = None;
 
-        let init_result: Res<(DocumentId, DocumentId)> = async {
+        let init_result: Res<(DocumentId, DocumentId, DocumentId)> = async {
             info!("repo init dance: loading plugs repo");
             let (repo, stop) = PlugsRepo::load(
                 Arc::clone(big_repo),
@@ -672,6 +716,13 @@ impl RepoCtx {
                     user_path: None,
                 })
                 .await?;
+            let encryption_inventory_daybook_id = _drawer_repo
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    facets: default(),
+                    user_path: None,
+                })
+                .await?;
 
             let core_entry = _drawer_repo
                 .get_entry(&core_inventory_daybook_id)
@@ -681,6 +732,10 @@ impl RepoCtx {
                 .get_entry(&docs_inventory_daybook_id)
                 .await?
                 .ok_or_eyre("missing docs inventory doc entry")?;
+            let encryption_entry = _drawer_repo
+                .get_entry(&encryption_inventory_daybook_id)
+                .await?
+                .ok_or_eyre("missing encryption inventory doc entry")?;
             let core_inventory_doc_id = core_entry
                 .branches
                 .get("main")
@@ -693,6 +748,12 @@ impl RepoCtx {
                 .ok_or_eyre("missing main branch for docs inventory doc")?
                 .branch_doc_id
                 .clone();
+            let encryption_inventory_doc_id = encryption_entry
+                .branches
+                .get("main")
+                .ok_or_eyre("missing main branch for encryption inventory doc")?
+                .branch_doc_id
+                .clone();
 
             big_repo
                 .add_admin_member_to_doc(
@@ -703,6 +764,12 @@ impl RepoCtx {
             big_repo
                 .add_admin_member_to_doc(
                     docs_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
+                .await?;
+            big_repo
+                .add_admin_member_to_doc(
+                    encryption_inventory_doc_id.clone(),
                     authority.blob_inventories.clone(),
                 )
                 .await?;
@@ -716,6 +783,19 @@ impl RepoCtx {
                     doc_config.document_id(),
                     core_inventory_doc_id.clone(),
                     docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id.clone(),
+                ],
+            )
+            .await?;
+            // See the load path: core docs are encryption-eligible, the
+            // inventories are not.
+            crate::authority::grant_docs_admin(
+                big_repo,
+                &authority.encrypted_blob_docs,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
                 ],
             )
             .await?;
@@ -724,6 +804,7 @@ impl RepoCtx {
                 .set_blob_inventories(crate::config::AppBlobInventories {
                     core_inventory_doc_id: core_inventory_doc_id.clone(),
                     docs_inventory_doc_id: docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id: Some(encryption_inventory_doc_id.clone()),
                 })
                 .await?;
 
@@ -735,6 +816,7 @@ impl RepoCtx {
                     doc_id_config: Some(doc_config.document_id()),
                     core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
                     docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
+                    encryption_inventory_doc_id: Some(encryption_inventory_doc_id.clone()),
                 },
             )
             .await?;
@@ -747,7 +829,11 @@ impl RepoCtx {
                 .await?;
             info!("repo init dance: core plug ensured");
 
-            Ok((core_inventory_doc_id, docs_inventory_doc_id))
+            Ok((
+                core_inventory_doc_id,
+                docs_inventory_doc_id,
+                encryption_inventory_doc_id,
+            ))
         }
         .await;
 
@@ -798,7 +884,8 @@ impl RepoCtx {
             return Err(err);
         }
 
-        let (core_inventory_doc_id, docs_inventory_doc_id) = init_result?;
+        let (core_inventory_doc_id, docs_inventory_doc_id, encryption_inventory_doc_id) =
+            init_result?;
 
         info!("repo init dance: stopping repos");
         drawer_stop
@@ -820,7 +907,11 @@ impl RepoCtx {
             .await?;
         blobs_repo.shutdown().await?;
         info!("repo init dance: completed");
-        Ok((core_inventory_doc_id, docs_inventory_doc_id))
+        Ok((
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ))
     }
 }
 
@@ -882,24 +973,27 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
 pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
     let init_state = globals::get_init_state(sql).await?;
-    let (doc_id_app, doc_id_drawer, doc_id_config, mut core_inv, mut docs_inv) = match init_state {
-        globals::InitState::Created {
-            doc_id_app,
-            doc_id_drawer,
-            doc_id_config,
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
-        } => (
-            doc_id_app,
-            doc_id_drawer,
-            doc_id_config,
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
-        ),
-        globals::InitState::None => {
-            eyre::bail!("clone init: InitState not set");
-        }
-    };
+    let (doc_id_app, doc_id_drawer, doc_id_config, mut core_inv, mut docs_inv, mut encryption_inv) =
+        match init_state {
+            globals::InitState::Created {
+                doc_id_app,
+                doc_id_drawer,
+                doc_id_config,
+                core_inventory_doc_id,
+                docs_inventory_doc_id,
+                encryption_inventory_doc_id,
+            } => (
+                doc_id_app,
+                doc_id_drawer,
+                doc_id_config,
+                core_inventory_doc_id,
+                docs_inventory_doc_id,
+                encryption_inventory_doc_id,
+            ),
+            globals::InitState::None => {
+                eyre::bail!("clone init: InitState not set");
+            }
+        };
     let doc_id_config =
         doc_id_config.ok_or_else(|| eyre::eyre!("clone init: InitState missing doc_id_config"))?;
     let doc_app = parts
@@ -918,7 +1012,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         .await?
         .into_ready(doc_id_config.clone())?;
 
-    if core_inv.is_none() || docs_inv.is_none() {
+    if core_inv.is_none() || docs_inv.is_none() || encryption_inv.is_none() {
         let (config_store, _) = doc_app
             .hydrate_path::<crate::config::ConfigStore>(
                 automerge::ROOT,
@@ -927,8 +1021,9 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             .await?
             .unwrap_or_default();
         if let Some(inv) = config_store.blob_inventories {
-            core_inv = Some(inv.val.0.core_inventory_doc_id);
-            docs_inv = Some(inv.val.0.docs_inventory_doc_id);
+            core_inv = core_inv.or(Some(inv.val.0.core_inventory_doc_id));
+            docs_inv = docs_inv.or(Some(inv.val.0.docs_inventory_doc_id));
+            encryption_inv = encryption_inv.or(inv.val.0.encryption_inventory_doc_id);
         }
     }
 
@@ -945,6 +1040,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             doc_id_config: Some(doc_id_config),
             core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
             docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
+            encryption_inventory_doc_id: encryption_inv.clone(),
         },
     )
     .await?;
@@ -961,6 +1057,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         &parts.blob_part_store,
         &core_inventory_doc_id,
         &docs_inventory_doc_id,
+        encryption_inv.as_ref(),
     )
     .await?;
     ensure_derived_partitions(&parts.derived_part_store).await?;
@@ -971,6 +1068,7 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         doc_config,
         core_inventory_doc_id,
         docs_inventory_doc_id,
+        encryption_inv,
     ))
 }
 
@@ -983,6 +1081,7 @@ pub(crate) async fn ensure_authority_partitions(
     for part_id in [
         authority.core_docs_part_id(),
         authority.content_docs_part_id(),
+        authority.encrypted_blob_docs_part_id(),
         authority.default_drawer_part_id(),
         authority.blob_inventories_part_id(),
     ] {
@@ -1013,12 +1112,20 @@ pub(crate) async fn ensure_blob_partitions(
     partition_store: &SharedPartStore,
     core_inventory_doc_id: &DocumentId,
     docs_inventory_doc_id: &DocumentId,
+    encryption_inventory_doc_id: Option<&DocumentId>,
 ) -> Res<()> {
     for part_id in [
         crate::blobs::blob_inventory_part_id(core_inventory_doc_id),
         crate::blobs::blob_inventory_part_id(docs_inventory_doc_id),
     ] {
         partition_store.ensure_part(part_id).await?;
+    }
+    if let Some(encryption_inventory_doc_id) = encryption_inventory_doc_id {
+        partition_store
+            .ensure_part(crate::blobs::blob_inventory_part_id(
+                encryption_inventory_doc_id,
+            ))
+            .await?;
     }
     Ok(())
 }
@@ -1100,6 +1207,7 @@ async fn load_core_docs(
     BigDocHandle,
     DocumentId,
     DocumentId,
+    Option<DocumentId>,
 )> {
     let init_state = globals::get_init_state(repo_sql).await?;
     let globals::InitState::Created {
@@ -1108,6 +1216,7 @@ async fn load_core_docs(
         doc_id_config,
         core_inventory_doc_id,
         docs_inventory_doc_id,
+        encryption_inventory_doc_id,
     } = init_state
     else {
         eyre::bail!("repo init_state missing for existing repository");
@@ -1122,28 +1231,40 @@ async fn load_core_docs(
         },
     )?;
 
-    let (core_id, docs_id) = match (core_inventory_doc_id, docs_inventory_doc_id) {
-        (Some(core_doc_id), Some(docs_doc_id)) => (core_doc_id, docs_doc_id),
-        _ => {
-            let (config_store, _) = handle_app
-                .hydrate_path::<crate::config::ConfigStore>(
-                    automerge::ROOT,
-                    vec![crate::config::ConfigStore::prop().into()],
-                )
-                .await?
-                .unwrap_or_default();
-            if let Some(inv) = config_store.blob_inventories {
-                (
-                    inv.val.0.core_inventory_doc_id,
-                    inv.val.0.docs_inventory_doc_id,
-                )
-            } else {
-                eyre::bail!("blob inventories not found in init_state or app_doc config");
-            }
+    // Either local init_state or the (possibly cloned) repo config doc knows
+    // the inventories; a repo created before the encrypted-representation
+    // inventory existed legitimately has none, so that one stays optional.
+    let mut known_core_id = core_inventory_doc_id;
+    let mut known_docs_id = docs_inventory_doc_id;
+    let mut known_encryption_id = encryption_inventory_doc_id;
+    if known_core_id.is_none() || known_docs_id.is_none() || known_encryption_id.is_none() {
+        let (config_store, _) = handle_app
+            .hydrate_path::<crate::config::ConfigStore>(
+                automerge::ROOT,
+                vec![crate::config::ConfigStore::prop().into()],
+            )
+            .await?
+            .unwrap_or_default();
+        if let Some(inv) = config_store.blob_inventories {
+            let inv = inv.val.0;
+            known_core_id = known_core_id.or(Some(inv.core_inventory_doc_id));
+            known_docs_id = known_docs_id.or(Some(inv.docs_inventory_doc_id));
+            known_encryption_id = known_encryption_id.or(inv.encryption_inventory_doc_id);
         }
-    };
+    }
+    let core_id = known_core_id
+        .ok_or_else(|| eyre::eyre!("blob inventories not found in init_state or app_doc config"))?;
+    let docs_id = known_docs_id
+        .ok_or_else(|| eyre::eyre!("blob inventories not found in init_state or app_doc config"))?;
 
-    Ok((handle_app, handle_drawer, handle_config, core_id, docs_id))
+    Ok((
+        handle_app,
+        handle_drawer,
+        handle_config,
+        core_id,
+        docs_id,
+        known_encryption_id,
+    ))
 }
 
 async fn init_core_docs(
@@ -1198,6 +1319,11 @@ pub mod globals {
             core_inventory_doc_id: Option<DocumentId>,
             #[serde(default)]
             docs_inventory_doc_id: Option<DocumentId>,
+            /// ADR 003 §13: the encrypted-representation inventory.
+            /// Serde-default so a repo created before it existed opens without
+            /// one, exactly as the two plaintext inventories above did.
+            #[serde(default)]
+            encryption_inventory_doc_id: Option<DocumentId>,
         },
     }
     const INIT_STATE_KEY: &str = "global.init_state";

@@ -10,10 +10,13 @@ use tokio::io::AsyncWriteExt;
 pub mod encrypt;
 pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
+pub mod encryption_worker;
+pub mod key_source;
 pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
 
+pub(crate) use encryption_worker::spawn_blob_encryption_worker;
 pub(crate) use pin_worker::spawn_blob_pin_worker;
 pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
 
@@ -38,6 +41,11 @@ pub struct BlobsRepo {
     root: PathBuf,
     src_local_user_path: UserPathBuf,
     iroh_store: iroh_blobs::api::Store,
+    /// Serves a representation's ciphertext from its plaintext. One instance
+    /// repo-wide, because it is also the registry of installed pairs: the worker
+    /// that installs a representation and the store path that serves it must be
+    /// the same object.
+    cipher_provider: Arc<crate::blobs::encrypt::CipherBlobProvider>,
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
@@ -258,14 +266,25 @@ impl BlobsRepo {
         tokio::fs::create_dir_all(&objects_root).await?;
         let iroh_root = root.join("iroh");
         tokio::fs::create_dir_all(&iroh_root).await?;
-        let fs_store = FsStore::load(&iroh_root)
-            .await
-            .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
+        // `load_with_virtuals` is the only public way to obtain the provider
+        // registry the store actor consults; `FsStore::load` drops it, and a
+        // virtual entry whose provider is not registered is served as not found.
+        let (fs_store, virtual_providers) = FsStore::load_with_virtuals(
+            iroh_root.join("blobs.db"),
+            iroh_blobs::store::fs::options::Options::new(&iroh_root),
+        )
+        .await
+        .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
+        let cipher_provider = Arc::new(crate::blobs::encrypt::CipherBlobProvider::new());
+        cipher_provider
+            .register(&virtual_providers)
+            .map_err(|err| eyre::eyre!("registering the cipher blob provider: {err:?}"))?;
 
         Ok(Arc::new(Self {
             root,
             src_local_user_path,
             iroh_store: fs_store.into(),
+            cipher_provider,
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
         }))
@@ -494,6 +513,13 @@ impl BlobsRepo {
 
     pub fn iroh_store(&self) -> iroh_blobs::api::Store {
         self.iroh_store.clone()
+    }
+
+    /// The repo's cipher blob provider: it serves `C` from `P` for entries the
+    /// encryption worker installed (ADR 003 §12). Shared, not cloned per caller:
+    /// the pairs it holds are the installed representations.
+    pub(crate) fn cipher_provider(&self) -> Arc<crate::blobs::encrypt::CipherBlobProvider> {
+        Arc::clone(&self.cipher_provider)
     }
 
     pub async fn shutdown(&self) -> Res<()> {
@@ -909,6 +935,25 @@ pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
     Ok(BlobId::new(bytes))
 }
 
+/// Parse a digest string in either spelling of the same 32-octet BLAKE3 digest.
+///
+/// ADR 003 §3 makes the multihash form canonical for `representation.digest`
+/// and for a plaintext content digest; a `db+blob:///` URL instead carries the
+/// bare base58 form. A facet value is authored by whoever wrote the facet, so a
+/// reader cannot assume one spelling. Both forms decode to the same digest, so
+/// accepting either cannot name a different blob.
+pub fn digest_str_to_blob_id_lenient(digest: &str) -> Option<BlobId> {
+    if let Ok(blob_id) = digest_str_to_blob_id(digest) {
+        return Some(blob_id);
+    }
+    // `ObjId`'s `FromStr` is the bare base58 form. It zero-pads a short input
+    // rather than rejecting it, so it is a weaker check than its name suggests.
+    // Kept as-is here: pins are already stored and compared in whatever form
+    // their facet used, and narrowing the rule would silently un-pin existing
+    // rows. Tightening it is a separate change with its own migration.
+    digest.parse::<BlobId>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,6 +1153,25 @@ mod tests {
         let path = repo.get_path(hash).await?;
         assert_eq!(tokio::fs::read(path).await?, b"legacy");
         Ok(())
+    }
+
+    #[test]
+    fn both_digest_spellings_name_the_same_blob() {
+        let blob_id = BlobId::random();
+        let canonical = blob_id_to_digest_str(blob_id.clone());
+        let bare = blob_id.to_string();
+        assert_ne!(canonical, bare, "the two spellings must differ");
+        let bytes = blob_id.to_bytes32();
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&canonical).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "ADR 003 §3's multihash spelling must resolve"
+        );
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&bare).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "a db+blob URL's bare spelling must resolve"
+        );
     }
 
     #[tokio::test]

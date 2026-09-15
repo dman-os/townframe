@@ -307,10 +307,14 @@ impl IrohSyncRepo {
         let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
             Arc::clone(&rcx.blob_part_store),
             Arc::clone(&rcx.big_repo),
-            vec![
-                rcx.core_inventory_doc_id.clone(),
-                rcx.docs_inventory_doc_id.clone(),
-            ],
+            [
+                Some(rcx.core_inventory_doc_id.clone()),
+                Some(rcx.docs_inventory_doc_id.clone()),
+                rcx.encryption_inventory_doc_id.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             cancel_token.clone(),
         )
         .await?;
@@ -472,11 +476,23 @@ impl IrohSyncRepo {
 }
 
 impl IrohSyncRepo {
+    /// Is `part_id` one of this repo's blob scopes? There is one per inventory
+    /// document (ADR 003 §13).
+    ///
+    /// A repo whose config predates the encrypted-representation inventory has
+    /// no such document, so it has no part for it: nothing to classify, and a
+    /// sentinel id would name a scope that cannot exist.
     #[inline]
     pub fn is_blob_part(&self, part_id: &PartKey) -> bool {
         let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);
         let docs_blob = crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id);
-        part_id == &core_blob || part_id == &docs_blob
+        part_id == &core_blob
+            || part_id == &docs_blob
+            || self
+                .rcx
+                .encryption_inventory_doc_id
+                .as_ref()
+                .is_some_and(|doc_id| part_id == &crate::blobs::blob_inventory_part_id(doc_id))
     }
 
     fn peer_partition_ids(
@@ -511,8 +527,17 @@ impl IrohSyncRepo {
             );
             parts.insert(
                 crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id),
-                blob_backend_id,
+                Arc::clone(&blob_backend_id),
             );
+            // The encrypted-representation inventory is a blob scope too. Left
+            // out, no peer ever asks for it, so a relay never learns the
+            // ciphertext digests it is meant to retain (ADR 003 §13).
+            if let Some(doc_id) = &self.rcx.encryption_inventory_doc_id {
+                parts.insert(
+                    crate::blobs::blob_inventory_part_id(doc_id),
+                    blob_backend_id,
+                );
+            }
         }
         parts
     }
@@ -939,6 +964,7 @@ impl IrohSyncRepo {
             repo_agents_group: self.authority.ids().repo_agents,
             core_docs_group: self.authority.ids().core_docs,
             content_docs_group: self.authority.ids().content_docs,
+            encrypted_blob_docs_group: self.authority.ids().encrypted_blob_docs,
             default_drawer_group: self.authority.ids().default_drawer,
             blob_inventories_group: self.authority.ids().blob_inventories,
         })

@@ -152,8 +152,8 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let mut created_doc_ids = Vec::new();
     for _ in 0..3 {
@@ -213,7 +213,7 @@ async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_i
     .await?;
     rtx.shutdown().await?;
 
-    let node = open_sync_node(&repo_path).await?;
+    let node = open_sync_node(&repo_path, false).await?;
     // The record is read through a handle taken before the stop, which consumes
     // the token.
     let shutdown_order = node.sync_stop.shutdown_order();
@@ -242,8 +242,8 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
@@ -302,13 +302,13 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let seed_node = open_sync_node(&repo_a_path).await?;
+    let seed_node = open_sync_node(&repo_a_path, false).await?;
     let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
     seed_node.stop().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
@@ -386,7 +386,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let created_doc_id = node_a
         .drawer
         .add(daybook_types::doc::AddDocArgs {
@@ -402,7 +402,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
     node_a.stop().await?;
 
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
     let core_partition_id = node_b.sync_repo.authority.core_docs_part_id();
     let partitions = node_b
         .ctx
@@ -441,7 +441,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node = open_sync_node(&repo_path).await?;
+    let node = open_sync_node(&repo_path, false).await?;
     let ticket = node.sync_repo.get_clone_ticket_url().await?;
     let info = crate::sync::resolve_clone_info_from_url(&ticket).await?;
     assert!(!info.repo_name.is_empty());
@@ -460,8 +460,8 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path).await?;
-        let node_b = open_sync_node(&repo_b_path).await?;
+        let node_a = open_sync_node(&repo_a_path, false).await?;
+        let node_b = open_sync_node(&repo_b_path, false).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -540,7 +540,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
     for idx in 0..3usize {
@@ -572,7 +572,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
     // Open node_b as a full node and converge.
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
@@ -591,6 +591,406 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     Ok(())
 }
 
+/// A clone pulls the encrypted-representation inventory's blob scope, so the
+/// ciphertext digests a relay is meant to retain (ADR 003 §13) reach it.
+///
+/// The origin runs its blob workers, because the pins exist only because the
+/// production machines derived them. The plaintext is the control: it arrives
+/// through the plaintext inventories just as it does today, while the ciphertext
+/// is named by nothing in the documents - its inventory part is its only route.
+///
+/// Presence is checked by `has_blob_on_disk` and never by a byte read, because
+/// `BlobsRepo::get_path` materializes a missing blob from the active peers: a
+/// read here would fetch it on demand and hold however the blob was meant to
+/// arrive, which is exactly what an ablation of the part advertisement did.
+#[tokio::test(flavor = "multi_thread")]
+async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+
+    tokio::fs::create_dir_all(&repo_a_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions::default(),
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    let node_a = open_sync_node(&repo_a_path, true).await?;
+    let encryption_inventory = node_a
+        .ctx
+        .encryption_inventory_doc_id
+        .clone()
+        .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?;
+    let encryption_inventory_doc_id = node_a
+        .drawer
+        .resolve_doc_id_for_branch_doc_id(encryption_inventory.clone())
+        .await?;
+
+    // One locally-stored plaintext with a `Blob` facet: the encryption worker
+    // installs the representation, the pin worker routes its digest into the
+    // encrypted-representation inventory.
+    let payload = b"clone-bootstrap-ciphertext-000".to_vec();
+    let plaintext = node_a.blobs_repo.put(&payload).await?;
+    let doc_id = node_a
+        .drawer
+        .add(AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::Blob),
+                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets: payload.len() as u64,
+                    digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
+                    inline: None,
+                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                })),
+            )]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        })
+        .await?;
+
+    let ciphertext_pins = match wait_for_inventory_pin_ids(
+        &node_a,
+        &encryption_inventory_doc_id,
+        Duration::from_secs(90),
+    )
+    .await
+    {
+        Ok(pins) => pins,
+        Err(err) => {
+            // Localise before failing: the encryption write and the pin routing
+            // are separate stages, and which one broke decides whose contract it
+            // is. Report both, and whether the inventory document was found at
+            // all (the resolution falls back to the branch doc id's own
+            // spelling, which names a document the drawer may not have).
+            let content = node_a
+                .drawer
+                .get_doc_with_facets_at_branch(
+                    &doc_id,
+                    daybook_types::doc::BranchPath::new("main"),
+                    None,
+                )
+                .await?;
+            let cipher_facets = content
+                .as_ref()
+                .map(|doc| {
+                    doc.facets
+                        .keys()
+                        .filter(|key| key.tag == WellKnownFacetTag::CipherBlob.into())
+                        .map(|key| key.id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let inventory = node_a
+                .drawer
+                .get_doc_with_facets_at_branch(
+                    &encryption_inventory_doc_id,
+                    daybook_types::doc::BranchPath::new("main"),
+                    None,
+                )
+                .await?;
+            let pin_count = inventory
+                .as_ref()
+                .map(|doc| {
+                    doc.facets
+                        .keys()
+                        .filter(|key| key.tag == WellKnownFacetTag::BlobPin.into())
+                        .count()
+                })
+                .unwrap_or(0);
+            eyre::bail!(
+                "{err:#} [localisation] inventory doc {} with {pin_count} BlobPin facet(s); content doc {} with cipherBlob facets {cipher_facets:?}",
+                if inventory.is_some() {
+                    "found"
+                } else {
+                    "NOT found"
+                },
+                if content.is_some() {
+                    "found"
+                } else {
+                    "NOT found"
+                },
+            );
+        }
+    };
+    let ciphertext = ciphertext_pins
+        .iter()
+        .map(|pin| {
+            crate::blobs::digest_str_to_blob_id_lenient(pin)
+                .ok_or_else(|| eyre::eyre!("inventory pin {pin} is not a blob digest"))
+        })
+        .collect::<Res<Vec<_>>>()?;
+    assert!(
+        !ciphertext.is_empty() && !ciphertext.contains(&plaintext),
+        "the inventory must name ciphertext, not the plaintext: {ciphertext:?}"
+    );
+
+    // Nothing in the document references the ciphertext: its only route to the
+    // mirror is the inventory's blob part. The document's `Blob` url names the
+    // plaintext, and the `?via=` url added at the commit point names the facet
+    // key (also spelled with the plaintext digest).
+    let doc = node_a
+        .drawer
+        .get_doc_with_facets_at_branch(&doc_id, daybook_types::doc::BranchPath::new("main"), None)
+        .await?
+        .ok_or_else(|| eyre::eyre!("the document with the Blob facet must exist"))?;
+    let mut doc_urls = Vec::new();
+    for (key, raw) in &doc.facets {
+        if key.tag == WellKnownFacetTag::Blob.into()
+            && let Ok(WellKnownFacet::Blob(blob)) =
+                WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::Blob)
+            && let Some(urls) = blob.urls
+        {
+            doc_urls.extend(urls);
+        }
+    }
+    for c in &ciphertext {
+        let spelled = c.to_string();
+        assert!(
+            !doc_urls.iter().any(|url| url.contains(&spelled)),
+            "ciphertext {c} must not be reachable by a document URL: {doc_urls:?}"
+        );
+    }
+
+    // Clone to repo_b through the bootstrap path.
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
+
+    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    // Both sides must name the same blob parts: the clone adopts the origin's
+    // inventory ids from the shared config doc.
+    assert_eq!(
+        node_b.ctx.encryption_inventory_doc_id.as_ref(),
+        Some(&encryption_inventory),
+        "the clone must name the origin's encrypted-representation inventory"
+    );
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
+
+    // TEMP-INSTRUMENTATION: localising why the blob scope does not replicate.
+    {
+        for (name, part) in [
+            (
+                "core",
+                crate::blobs::blob_inventory_part_id(&node_a.ctx.core_inventory_doc_id),
+            ),
+            (
+                "docs",
+                crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id),
+            ),
+            (
+                "encryption",
+                crate::blobs::blob_inventory_part_id(&encryption_inventory),
+            ),
+        ] {
+            eprintln!(
+                "PROBE part {name} members: origin={} mirror={}",
+                node_a
+                    .ctx
+                    .blob_part_store
+                    .member_count(part.clone())
+                    .await?,
+                node_b.ctx.blob_part_store.member_count(part).await?,
+            );
+        }
+        eprintln!(
+            "PROBE plaintext obj exists: origin={} parts={:?} | mirror={} parts={:?}",
+            node_a
+                .ctx
+                .blob_part_store
+                .obj_exists(plaintext.clone().into())
+                .await?,
+            node_a
+                .ctx
+                .blob_part_store
+                .obj_parts(plaintext.clone().into())
+                .await?,
+            node_b
+                .ctx
+                .blob_part_store
+                .obj_exists(plaintext.clone().into())
+                .await?,
+            node_b
+                .ctx
+                .blob_part_store
+                .obj_parts(plaintext.clone().into())
+                .await?,
+        );
+        for c in &ciphertext {
+            eprintln!(
+                "PROBE ciphertext obj {c}: origin exists={} parts={:?} | mirror exists={} parts={:?}",
+                node_a
+                    .ctx
+                    .blob_part_store
+                    .obj_exists(c.clone().into())
+                    .await?,
+                node_a
+                    .ctx
+                    .blob_part_store
+                    .obj_parts(c.clone().into())
+                    .await?,
+                node_b
+                    .ctx
+                    .blob_part_store
+                    .obj_exists(c.clone().into())
+                    .await?,
+                node_b
+                    .ctx
+                    .blob_part_store
+                    .obj_parts(c.clone().into())
+                    .await?,
+            );
+        }
+    }
+
+    // Presence first, before any byte is read: reading a missing blob fetches
+    // it from the active peers, so it would prove nothing about the sync plane.
+    wait_for_blob_replicated(
+        &node_b.blobs_repo,
+        plaintext.clone(),
+        Duration::from_secs(60),
+    )
+    .await?;
+    for c in &ciphertext {
+        wait_for_blob_replicated(&node_b.blobs_repo, c.clone(), Duration::from_secs(60)).await?;
+    }
+
+    // Only now are bytes read: the plaintext is intact, and what the
+    // encrypted-representation inventory named is real ciphertext.
+    let got_plaintext = node_b.blobs_repo.get_bytes(plaintext).await?;
+    assert_eq!(got_plaintext, payload, "the plaintext must be intact");
+    for c in &ciphertext {
+        let got = node_b.blobs_repo.get_bytes(c.clone()).await?;
+        assert!(!got.is_empty(), "ciphertext {c} must have bytes");
+        assert_ne!(
+            got, payload,
+            "ciphertext {c} must be ciphertext, not the plaintext bytes"
+        );
+    }
+
+    node_b.stop().await?;
+    node_a.stop().await?;
+    Ok(())
+}
+
+/// Wait until `blob_id` is on disk, without reading it.
+///
+/// A byte read cannot be the check: `BlobsRepo::get_path` materializes a missing
+/// blob from the active peers, so a read would fetch it here and pass no matter
+/// how (or whether) the sync plane delivered it.
+async fn wait_for_blob_replicated(
+    blobs_repo: &BlobsRepo,
+    blob_id: BlobId,
+    timeout: Duration,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if blobs_repo.has_blob_on_disk(blob_id.clone()).await? {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!("timed out waiting for {blob_id} to arrive by sync, not on demand");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `BlobPin` facet ids recorded on an inventory document, once they appear.
+async fn wait_for_inventory_pin_ids(
+    node: &SyncTestNode,
+    inventory_doc_id: &DocId,
+    timeout: Duration,
+) -> Res<Vec<String>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let pins = inventory_pin_ids(&node.drawer, inventory_doc_id).await?;
+        if !pins.is_empty() {
+            return Ok(pins);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out waiting for pins in inventory {inventory_doc_id}: the origin's blob workers must derive them"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `BlobPin` facet ids on an inventory document.
+async fn inventory_pin_ids(drawer: &DrawerRepo, inventory_doc_id: &DocId) -> Res<Vec<String>> {
+    let Some(doc) = drawer
+        .get_doc_with_facets_at_branch(
+            inventory_doc_id,
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+        )
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(doc
+        .facets
+        .keys()
+        .filter(|key| key.tag == WellKnownFacetTag::BlobPin.into())
+        .map(|key| key.id.clone())
+        .collect())
+}
+
+/// Every inventory in the repo is a blob scope, so the sync plane must
+/// advertise each one: a part that is never advertised is never pulled, and a
+/// peer that cannot pull the encrypted-representation inventory never learns
+/// the ciphertext digests it is meant to retain (ADR 003 §13).
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_partition_ids_advertise_every_blob_inventory() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_path = temp_root.path().join("repo");
+    tokio::fs::create_dir_all(&repo_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_path,
+        RepoOpenOptions::default(),
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    let node = open_sync_node(&repo_path, false).await?;
+    let advertised = node.sync_repo.peer_partition_ids("", true);
+    let inventories = [
+        node.ctx.core_inventory_doc_id.clone(),
+        node.ctx.docs_inventory_doc_id.clone(),
+        node.ctx
+            .encryption_inventory_doc_id
+            .clone()
+            .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?,
+    ];
+    for inventory in &inventories {
+        let part = crate::blobs::blob_inventory_part_id(inventory);
+        assert!(
+            advertised.contains_key(&part),
+            "inventory {inventory} must be advertised as a blob part"
+        );
+        assert!(
+            node.sync_repo.is_blob_part(&part),
+            "inventory {inventory} must classify as a blob part"
+        );
+    }
+
+    node.stop().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -602,8 +1002,8 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path).await?;
-        let node_b = open_sync_node(&repo_b_path).await?;
+        let node_a = open_sync_node(&repo_a_path, false).await?;
+        let node_b = open_sync_node(&repo_b_path, false).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -668,8 +1068,8 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path).await?;
-        let node_b = open_sync_node(&repo_b_path).await?;
+        let node_a = open_sync_node(&repo_a_path, false).await?;
+        let node_b = open_sync_node(&repo_b_path, false).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -830,7 +1230,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let mut created_doc_ids = Vec::new();
     for _ in 0..8 {
         let new_doc_id = node_a
@@ -849,7 +1249,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
@@ -889,7 +1289,7 @@ async fn init_and_copy_repo_pair(
     let source_drawer_doc_id = rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
-    let seed_node = open_sync_node(repo_a_path).await?;
+    let seed_node = open_sync_node(repo_a_path, false).await?;
     let result = async {
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
@@ -946,7 +1346,12 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     Ok(())
 }
 
-async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
+/// Open a sync node over a prepared repo.
+///
+/// `blob_workers` decides whether the production blob workers run: the node
+/// whose inventories a peer pulls needs them (those pins exist only because the
+/// workers derived them), while a node that merely fetches bytes does not.
+async fn open_sync_node(repo_root: &std::path::Path, blob_workers: bool) -> Res<SyncTestNode> {
     info!(repo_root = %repo_root.display(), "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
@@ -1014,6 +1419,7 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         crate::rt::RtConfig {
             device_id: "test-device".to_string(),
             startup_progress_task_id: None,
+            spawn_blob_workers: blob_workers,
         },
         Arc::clone(&rtx),
         Arc::clone(&drawer_repo),
@@ -1246,8 +1652,8 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
@@ -1297,8 +1703,8 @@ async fn a_peer_holds_its_revoked_branch_until_the_delete_lands_on_the_doc_chann
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;

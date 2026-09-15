@@ -936,6 +936,9 @@ async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() ->
     let revoked_groups = [
         node.repo.drawer_group.id().into(),
         node.repo.content_docs_group.id().into(),
+        // The encryption-eligibility grant is the third delegation a branch doc
+        // carries; its revocation on delete is asserted alongside the other two.
+        node.repo.encrypted_blob_docs_group.id().into(),
     ];
     for group in &revoked_groups {
         assert!(

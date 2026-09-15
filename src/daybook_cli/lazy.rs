@@ -344,6 +344,7 @@ pub async fn daybook_rt() -> Res<Arc<daybook_core::rt::Rt>> {
                 daybook_core::rt::RtConfig {
                     device_id: "main_todo".into(),
                     startup_progress_task_id: None,
+                    spawn_blob_workers: true,
                 },
                 Arc::clone(&ctx),
                 Arc::clone(&drawer),

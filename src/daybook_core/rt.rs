@@ -67,6 +67,14 @@ struct ResolvedStatelessViewProvider {
 pub struct RtConfig {
     pub device_id: String,
     pub startup_progress_task_id: Option<String>,
+    /// Whether to spawn the background blob workers: pins-part, pin, encryption.
+    ///
+    /// Off for tests that drive one of these workers themselves. An ambient
+    /// worker shares the document, the domain and the facet keys such a test
+    /// asserts on, so its assertions stop being attributable to the code under
+    /// test, and two writers race the same facet (a concurrent append to the
+    /// `Blob` facet's url list merges into two identical entries).
+    pub spawn_blob_workers: bool,
 }
 
 pub struct Rt {
@@ -99,8 +107,9 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
-    blob_pin_worker_stop: crate::repos::RepoStopToken,
-    blob_pins_part_worker_stop: crate::repos::RepoStopToken,
+    blob_pin_worker_stop: Option<crate::repos::RepoStopToken>,
+    blob_pins_part_worker_stop: Option<crate::repos::RepoStopToken>,
+    blob_encryption_worker_stop: Option<crate::repos::RepoStopToken>,
     doc_facet_set_index_stop: crate::repos::RepoStopToken,
     plugs_config_consumer_stop: crate::repos::RepoStopToken,
     plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
@@ -131,13 +140,25 @@ impl RtStopToken {
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
             );
         }
-        if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
+        if let Some(stop) = self.blob_encryption_worker_stop
+            && let Err(err) = stop.stop().await
+        {
+            warn!(
+                ?err,
+                "error stopping blob_encryption_worker during shutdown - continuing"
+            );
+        }
+        if let Some(stop) = self.blob_pins_part_worker_stop
+            && let Err(err) = stop.stop().await
+        {
             warn!(
                 ?err,
                 "error stopping blob_pins_part_worker during shutdown - continuing"
             );
         }
-        if let Err(err) = self.blob_pin_worker_stop.stop().await {
+        if let Some(stop) = self.blob_pin_worker_stop
+            && let Err(err) = stop.stop().await
+        {
             warn!(
                 ?err,
                 "error stopping blob_pin_worker during shutdown - continuing"
@@ -295,26 +316,62 @@ impl Rt {
         )
         .await?;
         let stage_started = std::time::Instant::now();
-        let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
-            Arc::clone(&rcx.blob_part_store),
-            Arc::clone(&sqlite_local_state_repo),
-            Arc::clone(&drawer),
-            doc_facet_set_index_repo.revision_store(),
-            cancel_token.clone(),
-        )
-        .await?;
-        let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
-            Arc::clone(&drawer),
-            rcx.sql.clone(),
-            rcx.core_inventory_doc_id.clone(),
-            rcx.docs_inventory_doc_id.clone(),
-            doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&plugs_repo),
-            cancel_token.clone(),
-        )
-        .await?;
+        let blob_pins_part_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_pins_part_worker(
+                    Arc::clone(&rcx.blob_part_store),
+                    Arc::clone(&sqlite_local_state_repo),
+                    Arc::clone(&drawer),
+                    doc_facet_set_index_repo.revision_store(),
+                    cancel_token.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let blob_pin_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_pin_worker(
+                    Arc::clone(&drawer),
+                    rcx.sql.clone(),
+                    rcx.core_inventory_doc_id.clone(),
+                    rcx.docs_inventory_doc_id.clone(),
+                    rcx.encryption_inventory_doc_id.clone(),
+                    Arc::clone(&blobs_repo),
+                    doc_facet_set_index_repo.revision_store(),
+                    Arc::clone(&plugs_repo),
+                    cancel_token.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         // The blob-inventory access rows (ADR 013) belong to whoever serves those parts to
         // peers, so `IrohSyncRepo::boot` owns that writer, not this runtime.
+        // Started after the pin workers, so it stops before them: it is the
+        // worker that writes the facets their pin derivation reads. Without an
+        // encrypted-representation inventory it refuses to run - installing a
+        // representation nothing can advertise or release is the one option that
+        // leaks (ADR 003 §19).
+        let blob_encryption_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_encryption_worker(
+                    Arc::clone(&drawer),
+                    rcx.sql.clone(),
+                    Arc::clone(&blobs_repo),
+                    doc_facet_set_index_repo.revision_store(),
+                    Arc::clone(&doc_facet_set_index_repo),
+                    authority.encrypted_blob_docs.clone(),
+                    rcx.encryption_inventory_doc_id.clone(),
+                    cancel_token.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -535,6 +592,7 @@ impl Rt {
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
+                blob_encryption_worker_stop,
                 doc_facet_set_index_stop,
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,

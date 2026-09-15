@@ -5,6 +5,7 @@ use big_repo::{BigKeyhiveAuthority, BigKeyhiveGroup, SharedBigRepo};
 const REPO_AGENTS_GROUP_KEY: &str = "global.authority.repo_agents_group";
 const CORE_DOCS_GROUP_KEY: &str = "global.authority.core_docs_group";
 const CONTENT_DOCS_GROUP_KEY: &str = "global.authority.content_docs_group";
+const ENCRYPTED_BLOB_DOCS_GROUP_KEY: &str = "global.authority.encrypted_blob_docs_group";
 const DRAWER_GROUP_KEY: &str = "global.authority.default_drawer_group";
 const BLOB_INVENTORIES_GROUP_KEY: &str = "global.authority.blob_inventories_group";
 const PENDING_DOCUMENTS_GROUP_KEY: &str = "local.authority.pending_documents_group";
@@ -19,6 +20,16 @@ pub(crate) struct RepoAuthorityIds {
     pub repo_agents: [u8; 32],
     pub core_docs: [u8; 32],
     pub content_docs: [u8; 32],
+    /// The encryption-eligibility group: every content doc and every core
+    /// (plug) doc is a member of it, and its id is the domain that cipherblob
+    /// facets name (ADR 003 §19).
+    ///
+    /// Optional because it crosses the clone-provision wire, where the house
+    /// pattern for a later addition is a serde-defaulted field so an older
+    /// seeder still deserializes (see `CloneProvisionResponse::config_doc_id`).
+    /// A clone from a seeder that does not know this group creates its own,
+    /// so the two devices then name different encryption domains.
+    pub encrypted_blob_docs: Option<[u8; 32]>,
     pub default_drawer: [u8; 32],
     pub blob_inventories: [u8; 32],
 }
@@ -28,6 +39,7 @@ pub(crate) struct RepoAuthority {
     pub repo_agents: BigKeyhiveGroup,
     pub core_docs: BigKeyhiveGroup,
     pub content_docs: BigKeyhiveGroup,
+    pub encrypted_blob_docs: BigKeyhiveGroup,
     pub default_drawer: BigKeyhiveGroup,
     pub blob_inventories: BigKeyhiveGroup,
     pending_documents: BigKeyhiveGroup,
@@ -39,6 +51,7 @@ impl RepoAuthority {
             repo_agents: self.repo_agents.id().to_bytes(),
             core_docs: self.core_docs.id().to_bytes(),
             content_docs: self.content_docs.id().to_bytes(),
+            encrypted_blob_docs: Some(self.encrypted_blob_docs.id().to_bytes()),
             default_drawer: self.default_drawer.id().to_bytes(),
             blob_inventories: self.blob_inventories.id().to_bytes(),
         }
@@ -53,6 +66,9 @@ impl RepoAuthority {
     }
     pub(crate) fn content_docs_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.content_docs.id().to_bytes())
+    }
+    pub(crate) fn encrypted_blob_docs_part_id(&self) -> PartKey {
+        big_repo::group_part_id(self.encrypted_blob_docs.id().to_bytes())
     }
     pub(crate) fn default_drawer_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.default_drawer.id().to_bytes())
@@ -96,6 +112,13 @@ pub(crate) async fn ensure(
         supplied_ids.map(|ids| ids.content_docs),
     )
     .await?;
+    let (encrypted_blob_docs, encrypted_blob_docs_created) = ensure_group(
+        big_repo,
+        sql,
+        ENCRYPTED_BLOB_DOCS_GROUP_KEY,
+        supplied_ids.and_then(|ids| ids.encrypted_blob_docs),
+    )
+    .await?;
     let (default_drawer, default_drawer_created) = ensure_group(
         big_repo,
         sql,
@@ -116,6 +139,7 @@ pub(crate) async fn ensure(
     if repo_agents_created
         || core_docs_created
         || content_docs_created
+        || encrypted_blob_docs_created
         || default_drawer_created
         || blob_inventories_created
     {
@@ -133,6 +157,11 @@ pub(crate) async fn ensure(
         if content_docs_created {
             big_repo
                 .add_admin_member_to_group(repo_agents.clone(), &content_docs)
+                .await?;
+        }
+        if encrypted_blob_docs_created {
+            big_repo
+                .add_admin_member_to_group(repo_agents.clone(), &encrypted_blob_docs)
                 .await?;
         }
         if default_drawer_created {
@@ -153,6 +182,7 @@ pub(crate) async fn ensure(
         repo_agents,
         core_docs,
         content_docs,
+        encrypted_blob_docs,
         default_drawer,
         blob_inventories,
         pending_documents,
@@ -233,6 +263,9 @@ pub(crate) async fn persist_ids(sql: &SqlCtx, ids: RepoAuthorityIds) -> Res<()> 
     persist_group_id(sql, REPO_AGENTS_GROUP_KEY, ids.repo_agents).await?;
     persist_group_id(sql, CORE_DOCS_GROUP_KEY, ids.core_docs).await?;
     persist_group_id(sql, CONTENT_DOCS_GROUP_KEY, ids.content_docs).await?;
+    if let Some(id) = ids.encrypted_blob_docs {
+        persist_group_id(sql, ENCRYPTED_BLOB_DOCS_GROUP_KEY, id).await?;
+    }
     persist_group_id(sql, DRAWER_GROUP_KEY, ids.default_drawer).await?;
     persist_group_id(sql, BLOB_INVENTORIES_GROUP_KEY, ids.blob_inventories).await
 }

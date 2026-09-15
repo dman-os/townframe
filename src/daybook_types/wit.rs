@@ -61,28 +61,24 @@ pub mod doc {
         pub facets: Vec<(String, FacetMeta)>,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum WellKnownFacet {
-        RefGeneric(DocId),
-        LabelGeneric(String),
-        TitleGeneric(String),
-        PathGeneric(String),
-        ImageMetadata(ImageMetadata),
-        OcrResult(OcrResult),
-        Embedding(Embedding),
-        Pending(Pending),
-        Body(Body),
-        Dmeta(Dmeta),
-        Note(Note),
-        Blob(Blob),
-        BlobPin(BlobPin),
-        // ADR 007 §1: JSON-string manifest + the plug config facet.
-        PlugManifest(String),
-        PlugsConfig(PlugsConfig),
-        // System facet payloads remain JSON strings here, matching the existing
-        // PlugManifest WIT convention while preserving their typed Rust schema.
-        Branch(String),
-        Branches(String),
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Representation {
+        pub digest: Multihash,
+        pub length_octets: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CipherBlob {
+        pub representation: Representation,
+        pub content_encoding: String,
+        /// Facet reference URL: `db+facet:///<doc-id|self>/<tag>/<key-id>`.
+        pub key_ref: String,
+        pub key_ref_heads: Vec<String>,
+        /// Scheme-selected inputs, kept as JSON because `contentEncoding` is
+        /// what defines their schema.
+        pub encoding_parameters: String,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,33 +90,6 @@ pub mod doc {
         pub last_valid: String,
         pub last_valid_version: String,
         pub last_enabled_version: Option<String>,
-    }
-
-    impl From<&root_doc::KnownPlug> for KnownPlug {
-        fn from(track: &root_doc::KnownPlug) -> Self {
-            KnownPlug {
-                latest: track.latest.to_string(),
-                latest_version: track.latest_version.clone(),
-                latest_rejection: track.latest_rejection.clone(),
-                last_valid: track.last_valid.to_string(),
-                last_valid_version: track.last_valid_version.clone(),
-                last_enabled_version: track.last_enabled_version.clone(),
-            }
-        }
-    }
-
-    impl TryFrom<KnownPlug> for root_doc::KnownPlug {
-        type Error = eyre::Report;
-        fn try_from(track: KnownPlug) -> Res<Self> {
-            Ok(root_doc::KnownPlug {
-                latest: track.latest.parse()?,
-                latest_version: track.latest_version.clone(),
-                latest_rejection: track.latest_rejection.clone(),
-                last_valid: track.last_valid.parse()?,
-                last_valid_version: track.last_valid_version.clone(),
-                last_enabled_version: track.last_enabled_version.clone(),
-            })
-        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,12 +171,6 @@ pub mod doc {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Doc {
-        pub id: DocId,
-        pub facets: Vec<(String, DocFacet)>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct DocPatch {
         pub id: DocId,
@@ -223,25 +186,6 @@ pub mod doc {
     }
 
     // --- Conversions Main <-> WIT ---
-
-    impl From<root_doc::DocPatch> for DocPatch {
-        fn from(val: root_doc::DocPatch) -> Self {
-            Self {
-                id: val.id,
-                facets_set: val
-                    .facets_set
-                    .into_iter()
-                    .map(|(key, val)| (key.to_string(), facet_from(&val)))
-                    .collect(),
-                facets_remove: val
-                    .facets_remove
-                    .into_iter()
-                    .map(|key| key.to_string())
-                    .collect(),
-                user_path: val.user_path.map(|path| path.to_string()),
-            }
-        }
-    }
 
     impl TryFrom<DocPatch> for root_doc::DocPatch {
         type Error = serde_json::Error;
@@ -260,300 +204,6 @@ pub mod doc {
                     .map(|key| FacetKey::from(&key))
                     .collect(),
                 user_path: val.user_path.map(root_doc::UserPathBuf::from),
-            })
-        }
-    }
-
-    impl From<root_doc::WellKnownFacet> for WellKnownFacet {
-        fn from(val: root_doc::WellKnownFacet) -> Self {
-            match val {
-                root_doc::WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
-                root_doc::WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
-                root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                root_doc::WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.to_string()),
-                root_doc::WellKnownFacet::ImageMetadata(val) => {
-                    Self::ImageMetadata(ImageMetadata {
-                        facet_ref: val.facet_ref.to_string(),
-                        ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
-                        mime: val.mime,
-                        width_px: val.width_px,
-                        height_px: val.height_px,
-                    })
-                }
-                root_doc::WellKnownFacet::OcrResult(val) => Self::OcrResult(OcrResult {
-                    facet_ref: val.facet_ref.to_string(),
-                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
-                    model_tag: val.model_tag,
-                    text: val.text,
-                    text_regions: val.text_regions.map(|regions| {
-                        regions
-                            .into_iter()
-                            .map(|region| OcrTextRegion {
-                                bounding_box: region
-                                    .bounding_box
-                                    .into_iter()
-                                    .map(|point| Point {
-                                        x: point.x,
-                                        y: point.y,
-                                    })
-                                    .collect(),
-                                text: region.text,
-                                confidence_score: region.confidence_score,
-                            })
-                            .collect()
-                    }),
-                }),
-                root_doc::WellKnownFacet::Embedding(val) => Self::Embedding(Embedding {
-                    facet_ref: val.facet_ref.to_string(),
-                    ref_heads: am_utils_rs::serialize_commit_heads(&val.ref_heads.0),
-                    model_tag: val.model_tag,
-                    vector: val.vector,
-                    dim: val.dim,
-                    dtype: match val.dtype {
-                        root_doc::EmbeddingDtype::F32 => EmbeddingDtype::F32,
-                        root_doc::EmbeddingDtype::F16 => EmbeddingDtype::F16,
-                        root_doc::EmbeddingDtype::I8 => EmbeddingDtype::I8,
-                        root_doc::EmbeddingDtype::Binary => EmbeddingDtype::Binary,
-                    },
-                    compression: val.compression.map(|compression| match compression {
-                        root_doc::EmbeddingCompression::Zstd => EmbeddingCompression::Zstd,
-                    }),
-                }),
-                root_doc::WellKnownFacet::Pending(pending) => Self::Pending(Pending {
-                    key: pending.key.to_string(),
-                }),
-                root_doc::WellKnownFacet::Body(body) => Self::Body(Body {
-                    order: body.order.into_iter().map(|url| url.to_string()).collect(),
-                }),
-                root_doc::WellKnownFacet::Dmeta(dmeta) => Self::Dmeta(Dmeta {
-                    id: dmeta.id,
-                    created_at: dmeta.created_at.into(),
-                    updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
-                    actors: serde_json::to_string(&dmeta.actors).expect(ERROR_JSON),
-                    facet_uuids: dmeta
-                        .facet_uuids
-                        .into_iter()
-                        .map(|(uuid, key)| (uuid.to_string(), key.to_string()))
-                        .collect(),
-                    facets: dmeta
-                        .facets
-                        .into_iter()
-                        .map(|(key, meta)| {
-                            (
-                                key.to_string(),
-                                FacetMeta {
-                                    created_at: meta.created_at.into(),
-                                    updated_at: meta
-                                        .updated_at
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    deleted_at: meta
-                                        .deleted_at
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    uuid: meta.uuid.into_iter().map(|id| id.to_string()).collect(),
-                                },
-                            )
-                        })
-                        .collect(),
-                }),
-                root_doc::WellKnownFacet::Note(note) => Self::Note(Note {
-                    mime: note.mime,
-                    content: note.content,
-                }),
-                root_doc::WellKnownFacet::Blob(blob) => Self::Blob(blob),
-                root_doc::WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
-                root_doc::WellKnownFacet::PlugManifest(val) => {
-                    Self::PlugManifest(serde_json::to_string(&val).expect(ERROR_JSON))
-                }
-                root_doc::WellKnownFacet::PlugsConfig(val) => Self::PlugsConfig(PlugsConfig {
-                    enabled: val
-                        .enabled
-                        .into_iter()
-                        .map(|(key, url)| (key, url.to_string()))
-                        .collect(),
-                    known_plugs: val
-                        .known_plugs
-                        .into_iter()
-                        .map(|(key, track)| (key, KnownPlug::from(&track)))
-                        .collect(),
-                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
-                }),
-                root_doc::WellKnownFacet::Branch(val) => {
-                    Self::Branch(serde_json::to_string(&val).expect(ERROR_JSON))
-                }
-                root_doc::WellKnownFacet::Branches(val) => {
-                    Self::Branches(serde_json::to_string(&val).expect(ERROR_JSON))
-                }
-            }
-        }
-    }
-
-    impl TryFrom<WellKnownFacet> for root_doc::WellKnownFacet {
-        type Error = eyre::Report;
-
-        fn try_from(val: WellKnownFacet) -> Result<Self, Self::Error> {
-            Ok(match val {
-                WellKnownFacet::RefGeneric(val) => Self::RefGeneric(val),
-                WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
-                WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
-                WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val),
-                WellKnownFacet::ImageMetadata(val) => {
-                    Self::ImageMetadata(root_doc::ImageMetadata {
-                        facet_ref: val.facet_ref.parse()?,
-                        ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
-                            &val.ref_heads,
-                        )?),
-                        mime: val.mime,
-                        width_px: val.width_px,
-                        height_px: val.height_px,
-                    })
-                }
-                WellKnownFacet::OcrResult(val) => Self::OcrResult(root_doc::OcrResult {
-                    facet_ref: val.facet_ref.parse()?,
-                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
-                        &val.ref_heads,
-                    )?),
-                    model_tag: val.model_tag,
-                    text: val.text,
-                    text_regions: val.text_regions.map(|regions| {
-                        regions
-                            .into_iter()
-                            .map(|region| root_doc::OcrTextRegion {
-                                bounding_box: region
-                                    .bounding_box
-                                    .into_iter()
-                                    .map(|point| root_doc::Point {
-                                        x: point.x,
-                                        y: point.y,
-                                    })
-                                    .collect(),
-                                text: region.text,
-                                confidence_score: region.confidence_score,
-                            })
-                            .collect()
-                    }),
-                }),
-                WellKnownFacet::Embedding(val) => Self::Embedding(root_doc::Embedding {
-                    facet_ref: val.facet_ref.parse()?,
-                    ref_heads: root_doc::ChangeHashSet(am_utils_rs::parse_commit_heads(
-                        &val.ref_heads,
-                    )?),
-                    model_tag: val.model_tag,
-                    vector: val.vector,
-                    dim: val.dim,
-                    dtype: match val.dtype {
-                        EmbeddingDtype::F32 => root_doc::EmbeddingDtype::F32,
-                        EmbeddingDtype::F16 => root_doc::EmbeddingDtype::F16,
-                        EmbeddingDtype::I8 => root_doc::EmbeddingDtype::I8,
-                        EmbeddingDtype::Binary => root_doc::EmbeddingDtype::Binary,
-                    },
-                    compression: val.compression.map(|compression| match compression {
-                        EmbeddingCompression::Zstd => root_doc::EmbeddingCompression::Zstd,
-                    }),
-                }),
-                WellKnownFacet::Pending(val) => Self::Pending(crate::doc::Pending {
-                    key: val.key.into(),
-                }),
-                WellKnownFacet::Body(body) => Self::Body(root_doc::Body {
-                    order: body
-                        .order
-                        .into_iter()
-                        .map(|url| url.parse())
-                        .collect::<Result<_, _>>()?,
-                }),
-                WellKnownFacet::Dmeta(dmeta) => Self::Dmeta(root_doc::Dmeta {
-                    id: dmeta.id,
-                    created_at: dmeta.created_at.into(),
-                    updated_at: dmeta.updated_at.into_iter().map(Into::into).collect(),
-                    actors: serde_json::from_str(&dmeta.actors)?,
-                    facet_uuids: dmeta
-                        .facet_uuids
-                        .into_iter()
-                        .map(|(key, uuid)| Ok((uuid.parse()?, FacetKey::from(&key))))
-                        .collect::<Result<_, eyre::Report>>()?,
-                    facets: dmeta
-                        .facets
-                        .into_iter()
-                        .map(|(key, meta)| {
-                            Ok((
-                                FacetKey::from(&key),
-                                root_doc::FacetMeta {
-                                    uuid: meta
-                                        .uuid
-                                        .into_iter()
-                                        .map(|uuid| uuid.parse())
-                                        .collect::<Result<_, _>>()?,
-                                    created_at: meta.created_at.into(),
-                                    updated_at: meta
-                                        .updated_at
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    deleted_at: meta
-                                        .deleted_at
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                },
-                            ))
-                        })
-                        .collect::<Result<_, eyre::Report>>()?,
-                }),
-                WellKnownFacet::Note(note) => Self::Note(root_doc::Note {
-                    mime: note.mime,
-                    content: note.content,
-                }),
-                WellKnownFacet::Blob(blob) => Self::Blob(blob),
-                WellKnownFacet::BlobPin(blob_pin) => Self::BlobPin(blob_pin),
-                WellKnownFacet::PlugManifest(json) => Self::PlugManifest(
-                    serde_json::from_str(&json)
-                        .wrap_err_with(|| "error parsing plugManifest facet json")?,
-                ),
-                WellKnownFacet::PlugsConfig(val) => Self::PlugsConfig(crate::doc::PlugsConfig {
-                    enabled: val
-                        .enabled
-                        .into_iter()
-                        .map(|(key, url)| Ok((key, url.parse()?)))
-                        .collect::<Result<_, eyre::Report>>()?,
-                    known_plugs: val
-                        .known_plugs
-                        .into_iter()
-                        .map(|(key, track)| Ok((key, root_doc::KnownPlug::try_from(track)?)))
-                        .collect::<Result<_, eyre::Report>>()?,
-                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
-                }),
-                WellKnownFacet::Branch(json) => Self::Branch(serde_json::from_str(&json)?),
-                WellKnownFacet::Branches(json) => Self::Branches(serde_json::from_str(&json)?),
-            })
-        }
-    }
-
-    impl From<root_doc::Doc> for Doc {
-        fn from(root_doc::Doc { id, facets }: root_doc::Doc) -> Self {
-            Self {
-                id,
-                facets: facets
-                    .into_iter()
-                    .map(|(key, val)| (key.to_string(), facet_from(&val)))
-                    .collect(),
-            }
-        }
-    }
-
-    impl TryFrom<Doc> for root_doc::Doc {
-        type Error = serde_json::Error;
-
-        fn try_from(val: Doc) -> Result<Self, Self::Error> {
-            Ok(Self {
-                id: val.id,
-                facets: val
-                    .facets
-                    .into_iter()
-                    .map(|(key, val)| Ok((FacetKey::from(&key), facet_into(&val)?)))
-                    .collect::<Result<_, _>>()?,
             })
         }
     }

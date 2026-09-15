@@ -69,6 +69,7 @@ impl RtFfi {
         let rt_config = RtConfig {
             device_id,
             startup_progress_task_id,
+            spawn_blob_workers: true,
         };
         let (rt, stop_token) = fcx
             .do_on_rt(Rt::boot(

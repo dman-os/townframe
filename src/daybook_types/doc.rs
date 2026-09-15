@@ -238,6 +238,66 @@ crate::define_enum_and_tag!(
         BlobPin struct {
             pub length_octets: u64,
         },
+        /// ADR 003 §3: one encrypted physical representation of a blob, with
+        /// the scheme and the key needed to decrypt it.
+        ///
+        /// It deliberately carries no plaintext digest, MIME type, filename or
+        /// application metadata. Those belong to the Blob facet and the layers
+        /// above it, and a domain that stores or serves the ciphertext is not
+        /// entitled to them (ADR 003 §13).
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        CipherBlob struct {
+            /// The stored ciphertext blob.
+            pub representation: Representation,
+            /// The algorithm pivot (ADR 003 §3): an HTTP content-coding token
+            /// (`aes128gcm`) naming the scheme that defines the schema of
+            /// `encoding_parameters`. A new scheme is a new token with its own
+            /// parameters, so existing facets stay decryptable.
+            pub content_encoding: String,
+            /// Facet reference to the JWK facet holding the encryption key.
+            /// `self` names a facet in this document; otherwise the document id
+            /// of the key document (docs/dict.md, "URLs").
+            pub key_ref: Url,
+            /// The JWK facet state `key_ref` meant, per the change-hash-set
+            /// convention: empty means "the same change hash as the facet
+            /// holding this reference", which is only meaningful within one
+            /// document. A cross-document reference has to pin its heads, or
+            /// rotating the JWK in place would silently change the key an
+            /// existing representation decrypts under (ADR 003 §15).
+            pub key_ref_heads: ChangeHashSet,
+            /// Scheme inputs not derivable from anywhere else - for
+            /// `aes128gcm`, `recordSize` and `padding`. Untyped on purpose:
+            /// its schema is the one `content_encoding` selects, so a new
+            /// scheme needs no change here. Consumers parse it and fail the
+            /// facet if it does not fit (it is peer-supplied input).
+            pub encoding_parameters: serde_json::Value,
+        },
+        /// ADR 003 §5: generic key storage. The value is an RFC 7517 JWK and
+        /// stays one rather than being wrapped in a Daybook-specific structure;
+        /// `members` carries the key-type-specific members verbatim, so a key
+        /// type Daybook never interprets still round-trips. A consumer reads the
+        /// members its scheme needs - the cipherblob codec reads `k` for `oct`.
+        ///
+        /// `kty` is required rather than the whole value being untyped, because
+        /// facets are also read through [`WellKnownFacet`]'s untagged
+        /// deserialization: there a variant holding a bare `serde_json::Value`
+        /// matches *any* payload, and would silently become the answer for
+        /// facets it has nothing to do with.
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Jwk struct {
+            /// RFC 7517 key type, e.g. `oct`, `EC`, `RSA`.
+            pub kty: String,
+            /// The remaining RFC 7517 members, carried verbatim and re-emitted
+            /// alongside `kty` so the facet value stays a plain JWK.
+            #[serde(flatten)]
+            pub members: serde_json::Value,
+        },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
@@ -328,7 +388,15 @@ crate::define_enum_and_tag!(
 
 impl WellKnownFacetTag {
     pub const fn is_system_managed(self) -> bool {
-        matches!(self, Self::Dmeta | Self::Branch | Self::Branches)
+        // Dmeta/Branch/Branches are maintained by the drawer. CipherBlob/Jwk
+        // are maintained by the encryption worker, and only by it: an ordinary
+        // write could point `keyRef` at another document's key or claim a
+        // representation digest the store cannot serve, leaving metadata that
+        // disagrees with what is actually stored and servable.
+        matches!(
+            self,
+            Self::Dmeta | Self::Branch | Self::Branches | Self::CipherBlob | Self::Jwk
+        )
     }
 }
 
@@ -790,6 +858,20 @@ pub struct FacetRef {
     pub heads: Vec<String>,
 }
 
+/// ADR 003 §3: the physical representation a cipherBlob facet describes,
+/// grouped so the facet JSON reads as `representation: { digest, lengthOctets }`.
+///
+/// Declared outside [`WellKnownFacet`]'s item list on purpose: every item in
+/// that list becomes a facet tag of its own, and this is not a facet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct Representation {
+    pub digest: Multihash,
+    pub length_octets: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);
 
@@ -1223,6 +1305,14 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::BlobPin => Self::BlobPin(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::CipherBlob => Self::CipherBlob(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Jwk => Self::Jwk(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

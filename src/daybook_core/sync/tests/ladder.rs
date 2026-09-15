@@ -20,12 +20,12 @@ async fn boot_connected_sync_pair()
     rtx.shutdown().await?;
 
     info!("XXX opening node a");
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     info!("XXX cloning node");
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     info!("XXX opening node b");
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     info!("XXX connecting");
     let addr_a = node_a.sync_repo.endpoint_addr();
@@ -266,10 +266,10 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     {
         let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
@@ -345,10 +345,10 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let payload = b"pre-connect sync blob".to_vec();
     let hash = node_a.blobs_repo.put(&payload).await?;
@@ -458,10 +458,10 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
     let endpoint_id_a = addr_a.id;
@@ -539,10 +539,10 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
-    let node_b = open_sync_node(&repo_b_path).await?;
+    let node_b = open_sync_node(&repo_b_path, false).await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
     let endpoint_id_a = addr_a.id;
@@ -838,7 +838,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
         node_b.stop().await?;
 
-        let reopened_b = open_sync_node(&repo_b_path).await?;
+        let reopened_b = open_sync_node(&repo_b_path, false).await?;
         let reopened_endpoint_addr = reopened_b.sync_repo.connect_url(&ticket_a).await?;
         wait_for_sync_convergence(&node_a, &reopened_b, reopened_endpoint_addr.id).await?;
         {
@@ -960,7 +960,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             })
             .await?;
         update_title_at_main_branch(&node_b, &doc_on_b, "B offline created title v2").await?;
-        let reopened_a = open_sync_node(&repo_a_path).await?;
+        let reopened_a = open_sync_node(&repo_a_path, false).await?;
         let reopened_addr_a = reopened_a.sync_repo.endpoint_addr();
         let reopened_endpoint_id = reopened_addr_a.id;
         info!(
@@ -1086,7 +1086,7 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
         .await?;
 
     // 5. Node B reopens offline, creates branch '/tmp/feature-b', and adds a note facet.
-    let reopened_b = open_sync_node(&repo_b_path).await?;
+    let reopened_b = open_sync_node(&repo_b_path, false).await?;
     let branch_b = BranchPathBuf::from("/tmp/feature-b");
     let Some((_, heads_b)) = reopened_b
         .drawer
@@ -1197,7 +1197,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     let source_doc_drawer = rtx.doc_drawer.document_id().clone();
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_a = open_sync_node(&repo_a_path, false).await?;
     let ticket = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
     node_a.stop().await?;
