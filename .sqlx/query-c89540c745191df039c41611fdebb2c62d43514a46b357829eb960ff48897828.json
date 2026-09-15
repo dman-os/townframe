@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_repo_secret_blobs\n              WHERE scope_id = ?1 AND kind = ?2 AND blob_id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c89540c745191df039c41611fdebb2c62d43514a46b357829eb960ff48897828"
+}

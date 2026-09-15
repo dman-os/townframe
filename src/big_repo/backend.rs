@@ -51,23 +51,21 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         // materialized sedimentree can still be missing the blobs needed to
         // reconstruct those heads, so it must run the backend sync.
         let local_heads = repo.doc_payload_heads(doc_id).await?;
-        // Equal heads cannot safely settle a cursor until connection-time set
-        // reconciliation proves the underlying object state is complete.
-        // if let Some(remote_payload) = &remote_payload
-        //     && let Some(local_heads) = &local_heads
-        //     && repo.doc_head_state(doc_id).await?.state
-        //         == crate::runtime2::MaterializationState::Materialized
-        // {
-        //     let remote_heads = super::doc_heads_from_payload(remote_payload);
-        //     if local_heads.as_ref() == remote_heads.as_ref() {
-        //         return Ok(big_sync::SyncTaskRunOutcome::Completion(
-        //             big_sync_core::SyncTaskCompletion {
-        //                 obj_id,
-        //                 deets: big_sync_core::SyncCompletionDeets::Noop,
-        //             },
-        //         ));
-        //     }
-        // }
+        if let Some(remote_payload) = &remote_payload
+            && let Some(local_heads) = &local_heads
+            && repo.doc_head_state(doc_id).await?.state
+                == crate::runtime2::MaterializationState::Materialized
+        {
+            let remote_heads = super::doc_heads_from_payload(remote_payload);
+            if local_heads.as_ref() == remote_heads.as_ref() {
+                return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                    big_sync_core::SyncTaskCompletion {
+                        obj_id,
+                        deets: big_sync_core::SyncCompletionDeets::Noop,
+                    },
+                ));
+            }
+        }
         let timeout = repo.sync_policy().backend_doc_sync_timeout;
         let receipt = match tokio::time::timeout(
             timeout,

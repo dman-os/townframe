@@ -11,7 +11,7 @@ $ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'
 $ daybook_cli plugs import ./plug-oci
 imported @daybook/test v0.0.1 (doc: [..])
 
-$ sh -c 'set -e; ID=$("$DAYBOOK_CLI" touch); echo "$ID" > .id; "$DAYBOOK_CLI" exec test-label "$ID"'
+$ sh -c 'set -e; ID=$("$DAYBOOK_CLI" touch); echo "$ID" > .id; "$DAYBOOK_CLI" exec test-label "$ID" -b main'
 
 $ sh -c 'ID=$(cat .id); "$DAYBOOK_CLI" cat "$ID" | grep -q "test_label" && echo "label written"'
 label written

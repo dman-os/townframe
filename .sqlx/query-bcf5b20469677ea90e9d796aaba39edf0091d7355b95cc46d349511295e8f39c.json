@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT dek_id AS \"dek_id: String\"\n               FROM big_repo_deks\n              WHERE scope_id = ?1\n              ORDER BY dek_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "dek_id: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_repo_deks",
+            "name": "dek_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bcf5b20469677ea90e9d796aaba39edf0091d7355b95cc46d349511295e8f39c"
+}

@@ -62,6 +62,13 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
         info!(idx, path = %path.display(), "cluster node repo path");
     }
     let mut nodes = open_cluster_nodes(&repo_paths).await?;
+    let log_stage = |nodes: &[Option<SyncTestNode>], stage: u8, name: &'static str| {
+        for (node, state) in nodes.iter().enumerate() {
+            if state.is_some() {
+                info!(node, stage, %name, "node entering stage {}", stage);
+            }
+        }
+    };
     let result = async {
         let topology_1 = if std::env::var_os("DAYB_STRESS_FULL_MESH").is_some() {
             (0..NODE_COUNT)
@@ -71,7 +78,9 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             generate_connected_edges(&mut rng)
         };
         info!(?topology_1, "phase-1 topology");
+        log_stage(&nodes, 1, "phase-1 topology connection");
         let mut endpoints = connect_topology(&nodes, &topology_1).await?;
+        log_stage(&nodes, 2, "initial topology settlement");
         settle_stress_phase(
             &nodes,
             &endpoints,
@@ -81,6 +90,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
         )
         .await?;
 
+        log_stage(&nodes, 3, "phase-1 mutations");
         let mut applied = Vec::new();
         for idx in 0..EVENT_COUNT {
             let node_idx = rng.random_range(0..NODE_COUNT);
@@ -96,6 +106,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             sample = ?applied.iter().take(12).collect::<Vec<_>>(),
             "phase-1 events applied"
         );
+        log_stage(&nodes, 4, "post-phase-1 mutation settlement");
         settle_stress_phase(
             &nodes,
             &endpoints,
@@ -106,6 +117,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
         .await?;
 
         let leaving_idx = rng.random_range(0..NODE_COUNT);
+        log_stage(&nodes, 5, "transfer node shutdown");
         info!(leaving_idx, "transfer phase: leaving node");
         let leaving_node = nodes[leaving_idx]
             .take()
@@ -121,6 +133,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
                 .await?;
         }
 
+        log_stage(&nodes, 6, "transfer mutations on active nodes");
         for idx in 0..(EVENT_COUNT / 2) {
             let mut active = (0..NODE_COUNT)
                 .filter(|idx| nodes[*idx].is_some())
@@ -137,6 +150,11 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             apply_event(node, kind, transfer_idx, &mut rng).await?;
         }
 
+        info!(
+            node = leaving_idx,
+            stage = 7,
+            "node entering stage 7: reopen transferred node"
+        );
         let reopened = open_sync_node(&repo_paths[leaving_idx]).await?;
         nodes[leaving_idx] = Some(reopened);
 
@@ -152,11 +170,13 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             }
         }
         info!(?full_mesh_topology, "phase-2 full mesh topology");
+        log_stage(&nodes, 8, "phase-2 full-mesh connection");
         endpoints = connect_topology(&nodes, &full_mesh_topology).await?;
         if std::env::var_os("DAYB_STRESS_STOP_AFTER_KEYHIVE_PROBE").is_some() {
             report_keyhive_document_registration(&nodes).await?;
             return Ok(());
         }
+        log_stage(&nodes, 9, "final offline-reopen settlement");
         settle_stress_phase(
             &nodes,
             &endpoints,

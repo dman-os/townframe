@@ -13,7 +13,7 @@ Error:
    1: wrong prefix, expected endpoint
 
 Location:
-   src/daybook_core/sync/bootstrap.rs:728
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.

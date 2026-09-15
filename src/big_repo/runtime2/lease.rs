@@ -5,7 +5,8 @@ use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::messages::DocWorkerMsg;
 
-/// RAII lease held by a `BigDocHandle` (the public doc handle).
+/// RAII lease held by a [`LiveDocHandle`](crate::runtime2::types::LiveDocHandle)
+/// (the caller-facing doc handle).
 ///
 /// On drop, signals the hub to decrement `local_handles` for the doc-worker,
 /// which may schedule eviction if both refcounts reach zero.

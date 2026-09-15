@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_secret_blobs(\n                scope_id, kind, blob_id, dek_id, dek_version, ciphertext, nonce\n             )\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\n             ON CONFLICT(scope_id, kind, blob_id) DO UPDATE SET\n                 dek_id = excluded.dek_id,\n                 dek_version = excluded.dek_version,\n                 ciphertext = excluded.ciphertext,\n                 nonce = excluded.nonce",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "6b7f21e378140716ca725652b32a6ffcaab1ec278eee3975c8e3475bcd57174d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_deks(\n                scope_id, dek_id, dek_version, wrapped_dek, kek_version, algorithm\n             )\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n             ON CONFLICT(scope_id, dek_id, dek_version) DO UPDATE SET\n                 wrapped_dek = excluded.wrapped_dek,\n                 kek_version = excluded.kek_version,\n                 algorithm = excluded.algorithm",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "0a6283b53e581de67db6080b0f50b88432e31717e928385cb7212cbfd35534a6"
+}

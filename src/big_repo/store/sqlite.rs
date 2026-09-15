@@ -32,10 +32,12 @@ mod checkpoints;
 mod events;
 pub(crate) use events::{
     KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER, KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
-    KEYHIVE_ADMISSION_READER_GROUP_PART,
+    KEYHIVE_ADMISSION_READER_GROUP_PART, KEYHIVE_ADMISSION_READER_PREKEY_JANITOR,
 };
 mod ids;
 mod parts_cursors;
+mod secret_blobs;
+pub(crate) use secret_blobs::SecretBlobKind;
 mod sedimentree;
 mod tree_cache;
 use tree_cache::{TREE_CACHE_METADATA_CAPACITY, TreeCache, TreeCacheGuard};

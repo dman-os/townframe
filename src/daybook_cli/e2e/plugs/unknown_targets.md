@@ -11,7 +11,7 @@ Error:
    0: no manifest for @nope/nothing (not known, or not readable at pinned heads)
 
 Location:
-   src/daybook_cli/cmds/plugs.rs:155
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.
@@ -22,7 +22,7 @@ Error:
    0: manifest doc missing main branch
 
 Location:
-   src/daybook_core/plugs/mutations.rs:474
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.

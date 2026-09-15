@@ -16,7 +16,7 @@ Error:
    0: clone destination must be empty or non-existent: [..]
 
 Location:
-   src/daybook_core/sync/bootstrap.rs:[..]
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.

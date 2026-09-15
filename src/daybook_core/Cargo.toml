@@ -16,7 +16,7 @@ path = "lib.rs"
 [features]
 default = ["uniffi"]
 uniffi = ["dep:uniffi"]
-test-support = ["dep:tempfile", "big_repo/test-support", "big_sync/test-support"]
+test-support = ["dep:tempfile", "big_repo/test-support", "big_sync/test-support", "secrets_rs/test-support"]
 
 [dependencies]
 #
@@ -32,6 +32,7 @@ daybook_types = { workspace = true, features = [
 daybook_pdk = { workspace = true }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
 utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
+secrets_rs = { workspace = true }
 wash_plugin_wflow.workspace = true
 wash_plugin_sqlite.workspace = true
 wflow = { workspace = true }
@@ -134,29 +135,12 @@ irpc.workspace = true
 directories.workspace = true
 fs4.workspace = true
 rand.workspace = true
-keyring-core = { version = "1.0", default-features = false }
 tempfile = { workspace = true, optional = true }
 
 #
 # macros
 structstruck.workspace = true
 ed25519-dalek = { version = "2.2.0", features = ["digest"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus-secret-service-keyring-store = { version = "1.0", features = ["rt-tokio-crypto-rust"] }
-linux-keyutils-keyring-store = "1.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
-
-[target.'cfg(target_os = "ios")'.dependencies]
-apple-native-keyring-store = { version = "1.0", features = ["keychain"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = { version = "1.0" }
-
-[target.'cfg(target_os = "android")'.dependencies]
-android-native-keyring-store = { version = "1.0" }
 
 [dev-dependencies]
 big_repo = { workspace = true, features = ["test-support"] }

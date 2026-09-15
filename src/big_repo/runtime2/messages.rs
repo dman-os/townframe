@@ -61,9 +61,8 @@ pub enum Runtime2Cmd {
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
     },
     /// Internal: persist a document whose doc_id is already resolved.
     /// The hub sends this to itself after `CreateDoc` completes.
@@ -74,9 +73,8 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
     },
     FinalizeAllocatedDoc {
         doc_id: DocumentId,
@@ -86,17 +84,14 @@ pub enum Runtime2Cmd {
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         pending_group: crate::keyhive::BigKeyhiveGroup,
         #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
     },
     GetDocHandle {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<
-                crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
-            >,
+            eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>,
         >,
     },
     CommitDelta {
@@ -126,14 +121,6 @@ pub enum Runtime2Cmd {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
         resp: Option<futures::channel::oneshot::Sender<eyre::Result<bool>>>,
-    },
-    ApplyKeyhiveToDoc {
-        doc_id: DocumentId,
-        admission_seq: u64,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            Result<crate::runtime2::MaterializationStatus, String>,
-        >,
     },
     InspectDocHeadState {
         doc_id: DocumentId,
@@ -364,18 +351,15 @@ pub enum DocWorkerMsg {
         initial_content: Box<automerge::Automerge>,
         #[educe(Debug(ignore))]
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
-        >,
+        resp:
+            futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
         #[educe(Debug(ignore))]
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
     AcquireHandle {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<
-                crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
-            >,
+            eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>,
         >,
         #[educe(Debug(ignore))]
         _lease: crate::runtime2::DocWorkerInternalLease,
@@ -427,9 +411,6 @@ pub enum DocWorkerMsg {
         /// materialization origin (keyhive-driven retries must not surface as
         /// `Bootstrap`).
         origin: crate::changes::BigRepoChangeOrigin,
-        /// Admission-log sequence applied by this retry. `None` is used by
-        /// opportunistic retries that are not tied to one durable admission row.
-        keyhive_seq: Option<u64>,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::MaterializationStatus, String>,
@@ -476,4 +457,5 @@ pub enum TrackedWorkKind {
     EmitMembershipChange,
     MaterializationRetry,
     WorkerFence,
+    PrekeyStatePersist,
 }

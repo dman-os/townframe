@@ -2167,7 +2167,8 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
     let client_keyhive_storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
         client.repo.sqlite_store(),
         client_path.join(crate::keyhive_storage::KEYHIVE_SUBDIR),
-    )?;
+    )
+    .await?;
     let stored_events = subduction_keyhive::load_events::<Vec<u8>, _, future_form::Sendable>(
         &client_keyhive_storage,
     )

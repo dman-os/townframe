@@ -19,6 +19,8 @@ config_doc: [..]
 facets:
   org.example.daybook.plugManifest
   org.example.daybook.plugsConfig
+  org.example.daybook.branch
+  org.example.daybook.branches
   org.example.daybook.dmeta
   org.example.daybook.refGeneric
   org.example.daybook.labelGeneric

@@ -31,12 +31,20 @@ fn main() -> Res<ExitCode> {
     // the CLI into clap reprs
     let static_res = match try_static_cli() {
         Ok(StaticCliResult::Exit(code)) => {
-            lazy::rt().block_on(lazy::shutdown())?;
+            let shutdown_res = lazy::rt().block_on(lazy::shutdown());
+            if code == ExitCode::SUCCESS {
+                shutdown_res?;
+            } else if let Err(err) = shutdown_res {
+                warn!(?err, "shutdown failed after command failure");
+            }
             return Ok(code);
         }
         Ok(val) => val,
         Err(err) => {
-            lazy::rt().block_on(lazy::shutdown())?;
+            let shutdown_res = lazy::rt().block_on(lazy::shutdown());
+            if let Err(shutdown_err) = shutdown_res {
+                warn!(?shutdown_err, "shutdown failed after command error");
+            }
             return Err(err);
         }
     };
@@ -50,8 +58,25 @@ fn main() -> Res<ExitCode> {
             res = dynamic_cli(static_res) => res,
         }
     });
-    lazy::rt().block_on(lazy::shutdown())?;
-    res
+    let shutdown_res = lazy::rt().block_on(lazy::shutdown());
+    match res {
+        Ok(code) if code == ExitCode::SUCCESS => {
+            shutdown_res?;
+            Ok(code)
+        }
+        Ok(code) => {
+            if let Err(err) = shutdown_res {
+                warn!(?err, "shutdown failed after command failure");
+            }
+            Ok(code)
+        }
+        Err(err) => {
+            if let Err(shutdown_err) = shutdown_res {
+                warn!(?shutdown_err, "shutdown failed after command error");
+            }
+            Err(err)
+        }
+    }
 }
 
 fn try_static_cli() -> Res<StaticCliResult> {

@@ -108,6 +108,7 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] DEK rotation
 - [ ] Get started on iOS
 - [ ] Server
   - [ ] Decide on wrpc vs json

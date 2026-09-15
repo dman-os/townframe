@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT blob_id AS \"blob_id: Vec<u8>\"\n               FROM big_repo_secret_blobs\n              WHERE scope_id = ?1 AND kind = ?2\n              ORDER BY blob_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob_id: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_secret_blobs",
+            "name": "blob_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc8211b764870601a8912adc414d1aa5524a45bf7433820396fa9260e96f50b3"
+}

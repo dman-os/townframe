@@ -1053,3 +1053,57 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     assert_eq!(tasks.len(), 0, "tasks must be empty after stop");
     Ok(())
 }
+
+// ─── Worker eviction after all caller leases drop ──────────────────────────
+//
+// The doc-worker retains the materialized bundle strongly, but the eviction
+// lease is owned by the caller handles. When the last caller drops its
+// handle, `local_handles` reaches zero and the worker must become evictable
+// after the idle TTL — the strong retention must not pin the worker forever.
+//
+// This is also the regression test for janitor starvation: the hub's boot
+// emits a continuous stream of keyhive/worker events, and the machine loop's
+// periodic timer branch is recreated every iteration, so a hub that only
+// evicted on that branch would never reclaim the idle worker here. The
+// janitor must check the elapsed idle TTL on every loop iteration.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(254, 255, "Owner", "Reader").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "key", "evict-me"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    assert!(
+        pair.left().repo.runtime.has_doc_worker(doc_id).await?,
+        "create_doc must spawn a doc worker"
+    );
+
+    // Drop the only caller lease; the worker's strong bundle retention must
+    // not keep it alive past the idle TTL (3s) + janitor tick (500ms).
+    drop(owner_doc);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let has_worker = match tokio::time::timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            pair.left().repo.runtime.has_doc_worker(doc_id),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
+        if !has_worker {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "doc worker was not evicted after all caller leases dropped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}

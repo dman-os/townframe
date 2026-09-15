@@ -20,7 +20,7 @@ Error:
    0: document not found: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
 Location:
-   src/daybook_cli/cmds/exec.rs:151
+   [..]
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.

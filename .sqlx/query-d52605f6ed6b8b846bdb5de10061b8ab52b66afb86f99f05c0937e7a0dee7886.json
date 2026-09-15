@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT dek_id, dek_version, ciphertext, nonce\n               FROM big_repo_secret_blobs\n              WHERE scope_id = ?1 AND kind = ?2 AND blob_id = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "dek_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_repo_secret_blobs",
+            "name": "dek_id"
+          }
+        }
+      },
+      {
+        "name": "dek_version",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_repo_secret_blobs",
+            "name": "dek_version"
+          }
+        }
+      },
+      {
+        "name": "ciphertext",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_secret_blobs",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "name": "nonce",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_secret_blobs",
+            "name": "nonce"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d52605f6ed6b8b846bdb5de10061b8ab52b66afb86f99f05c0937e7a0dee7886"
+}

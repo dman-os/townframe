@@ -14,6 +14,7 @@ blake3.workspace = true
 #
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
+secrets_rs.workspace = true
 big_sync_core.workspace = true
 big_sync.workspace = true
 am_utils_rs.workspace = true
@@ -84,3 +85,5 @@ test-support = []
 
 [dev-dependencies]
 big_sync = { workspace = true, features = ["test-support"] }
+# Enables the `secrets_rs` keyring mock store for the keyhive storage tests.
+secrets_rs = { workspace = true, features = ["test-support"] }

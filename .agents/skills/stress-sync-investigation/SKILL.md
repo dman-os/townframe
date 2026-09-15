@@ -149,3 +149,14 @@ After a demonstrated fix:
 5. remove temporary diagnostics and rerun without them.
 
 Never treat a single passing focused test as proof of a load-race fix.
+
+## Hint cache
+
+### CreateDoc stalls during boot under Keyhive fanout
+
+If logs show `creating doc` without `created doc`, correlate `Document::finish_generate`. A confirmed lock inversion was:
+
+- document generation held `csprng` while `group.pick_individual_prekeys()` awaited the active principal (`csprng -> active`);
+- the prekey janitor held the active principal while `rotate_prekey()` awaited `csprng` (`active -> csprng`).
+
+Fix by releasing `csprng` before group generation/prekey selection and reacquiring it only around operations that consume randomness. The regression test `document_generation_does_not_invert_active_and_csprng_locks` deterministically holds `active`, starts document generation, and proves `csprng` remains acquirable. Boundary tracing showed delegation insertion/listeners/rebuild all completed before the stall; do not misdiagnose this signature as a delegation-store deadlock.

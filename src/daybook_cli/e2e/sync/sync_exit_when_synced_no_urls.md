@@ -5,11 +5,9 @@ the deterministic surfaces only. Plain `daybook_cli sync` loops forever; the
 `--exit-when-synced` form without any sync URLs must fail fast instead.
 
 The QR block depends on the random local ticket (volatile lines, `...`), the
-ticket itself is random (`[..]`), and the process currently dies at teardown
-with an "error shutting down iroh blob store" eyre report (the expected
-`--exit-when-synced requires at least one sync URL` error is swallowed by the
-teardown failure — this is the known-broken part; this snapshot locks the
-current surface and should be updated together with the sync fix).
+the ticket itself is random (`[..]`), and the command reports the deterministic
+`--exit-when-synced requires at least one sync URL` validation error before
+attempting to wait for peers.
 
 ```console
 $ daybook_cli init
@@ -23,15 +21,6 @@ Or copy the following ticket:
 [..]
 
 
-Error: 
-   0: error shutting down iroh blob store: Oneshot recv error
-      Caused by:
-          Sender closed
-
-Location:
-   src/daybook_core/blobs.rs:352
-
-Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
-Run with RUST_BACKTRACE=full to include source snippets.
+[..]s ERROR daybook_cli::cmds::sync: --exit-when-synced requires at least one sync URL
 
 ```
