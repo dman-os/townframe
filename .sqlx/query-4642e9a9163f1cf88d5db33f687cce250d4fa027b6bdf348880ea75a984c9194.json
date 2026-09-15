@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)\n                     VALUES (?1, ?2, ?3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4642e9a9163f1cf88d5db33f687cce250d4fa027b6bdf348880ea75a984c9194"
+}

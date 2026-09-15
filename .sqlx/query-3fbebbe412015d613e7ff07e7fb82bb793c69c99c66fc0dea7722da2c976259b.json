@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_member_insert\n            BEFORE INSERT ON big_sync_members\n            BEGIN SELECT RAISE(ABORT, 'injected member insert failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3fbebbe412015d613e7ff07e7fb82bb793c69c99c66fc0dea7722da2c976259b"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"found!: i64\" FROM big_repo_subduction_trees\n                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9b45c500e8384df9eddcf5cc169cf4c181d6a440621becc92fe64d5393664948"
+}

@@ -142,7 +142,6 @@ pub async fn log_head_state(pair: &Pair, doc_id: DocumentId) -> Res<()> {
 }
 
 /// Render a one-line state summary for diagnostics.
-#[allow(dead_code)]
 pub fn state_summary(label: &str, state: &crate::runtime2::DocHeadState) -> String {
     let mat = state
         .materialized_heads

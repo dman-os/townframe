@@ -201,7 +201,7 @@ pub async fn expect_ready(
 pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
     for node in nodes {
         loop {
-            let event_tail = node.store.keyhive_event_log_cursor().await?;
+            let event_tail = node.store.admission_head().await?;
             if node.store.keyhive_group_part_cursor().await? >= event_tail {
                 break;
             }
@@ -230,7 +230,7 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
     big_sync::test_support::wait_for_network_rest(&targets, || async {
         for node in nodes {
             while {
-                let event_tail = node.store.keyhive_event_log_cursor().await?;
+                let event_tail = node.store.admission_head().await?;
                 node.store.keyhive_group_part_cursor().await? < event_tail
                     || node.store.causal_checkpoint_cursor().await? < event_tail
             } {

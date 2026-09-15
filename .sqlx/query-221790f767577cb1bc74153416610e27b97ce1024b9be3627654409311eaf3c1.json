@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_repo_keyhive_event_log\n             WHERE scope_id = ?1\n               AND EXISTS (\n                   SELECT 1\n                     FROM big_repo_keyhive_admissions a\n                     JOIN big_repo_keyhive_event_tombstones t\n                       ON t.scope_id = a.scope_id AND t.event_hash = a.event_hash\n                    WHERE a.scope_id = big_repo_keyhive_event_log.scope_id\n                      AND a.event_hash = big_repo_keyhive_event_log.event_hash\n                      AND a.seq <= ?2\n               )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "221790f767577cb1bc74153416610e27b97ce1024b9be3627654409311eaf3c1"
+}

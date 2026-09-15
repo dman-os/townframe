@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.seq, a.event_hash, a.source_id, e.event_bytes\n             FROM big_repo_keyhive_admissions a\n             JOIN big_repo_keyhive_event_log e\n               ON e.scope_id = a.scope_id AND e.event_hash = a.event_hash\n             WHERE a.scope_id = ?1 AND a.seq > ?2\n             ORDER BY a.seq\n             LIMIT ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_admissions",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "event_hash",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_admissions",
+            "name": "event_hash"
+          }
+        }
+      },
+      {
+        "name": "source_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_admissions",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "event_bytes",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "event_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "68259d93676ed5f683cd8157a79cb6ec52f2143ebe1e767ae2dd03deef3fd594"
+}

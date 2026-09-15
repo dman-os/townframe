@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT latest_commit_row_id\n                 FROM big_repo_sync_commits_watermark\n                WHERE scope_id = ?1\n                  AND doc_id = ?2\n                  AND big_sync_txid = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "latest_commit_row_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_repo_sync_commits_watermark",
+            "name": "latest_commit_row_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "133550d505718f7f9386e0580df601970517fe0159f62e77f141bf574a81ae41"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT part_id, latest_cursor FROM big_sync_parts\n             WHERE scope_id = ?1 ORDER BY part_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      },
+      {
+        "name": "latest_cursor",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "latest_cursor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6fae5fc9c325c0f26181443f0369a7c14e561bdf379f92c8413974d264ffd1c4"
+}

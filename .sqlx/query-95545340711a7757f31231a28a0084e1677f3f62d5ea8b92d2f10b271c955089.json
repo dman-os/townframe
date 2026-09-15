@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1\n             FROM big_sync_parts\n             WHERE scope_id = ?1 AND part_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "95545340711a7757f31231a28a0084e1677f3f62d5ea8b92d2f10b271c955089"
+}

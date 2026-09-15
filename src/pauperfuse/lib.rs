@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![expect(unused)]
 /*!
 We need to do a lot more:
 - The livetree backend impl should live in pauperfuse

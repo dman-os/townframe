@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1\n             FROM big_sync_objs\n             WHERE scope_id = ?1 AND obj_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f64e64df5737fd8226613943d57bb61286262085e171415c089eb81d2d65722c"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)\n             VALUES (?1, ?2, 0)\n             ON CONFLICT(scope_id, part_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "da6afaed15f542db068129557626dc7aba03649887b6a1eb9576cc81cfef7c7d"
+}

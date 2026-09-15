@@ -40,7 +40,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         .map_err(|err| JobErrorX::Terminal(ferr!("access error reading note facet: {err:?}")))?;
 
     let current_facet_json: daybook_types::doc::FacetRaw = serde_json::from_str(&current_facet_raw)
-        .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working facet json: {err}")))?;
+        .map_err(|err| JobErrorX::Terminal(ferr!("error parsing note facet json: {err}")))?;
 
     let current_note = WellKnownFacet::from_json(current_facet_json, WellKnownFacetTag::Note)
         .map_err(|err| JobErrorX::Terminal(err.wrap_err("input facet is not a note facet")))?;
@@ -52,7 +52,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-text: {err}")))?;
     let heads = am_utils_rs::parse_commit_heads(&args.heads)
         .map_err(|err| JobErrorX::Terminal(ferr!("invalid heads from facet-routine: {err}")))?;
-    let facet_key = daybook_types::doc::FacetKey::from(note_facet_key.as_str());
+    let facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note);
     let facet_ref =
         daybook_types::url::build_facet_ref(daybook_types::url::FACET_SELF_DOC_ID, &facet_key)
             .map_err(|err| {

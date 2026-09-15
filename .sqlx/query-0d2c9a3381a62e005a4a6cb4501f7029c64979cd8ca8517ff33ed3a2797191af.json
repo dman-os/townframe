@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.part_id, o.obj_id\n             FROM big_sync_pending_members m\n             JOIN big_sync_parts p ON p.part_ref = m.part_ref\n             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref\n             WHERE m.scope_id = ?1 ORDER BY p.part_id, o.obj_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      },
+      {
+        "name": "obj_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0d2c9a3381a62e005a4a6cb4501f7029c64979cd8ca8517ff33ed3a2797191af"
+}

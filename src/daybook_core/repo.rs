@@ -99,6 +99,8 @@ pub struct RepoCtx {
     pub part_store: SharedPartStore,
     /// Standalone, policy-free store backing the blob partitions.
     pub blob_part_store: SharedPartStore,
+    /// Local-only store backing the automerge frontier (heads) partitions.
+    pub frontier_part_store: SharedPartStore,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -129,6 +131,8 @@ pub(crate) struct RepoCtxParts {
     pub part_store: SharedPartStore,
     /// Standalone, policy-free store backing the blob partitions.
     pub blob_part_store: SharedPartStore,
+    /// Local-only store backing the automerge frontier (heads) partitions.
+    pub frontier_part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
     pub local_peer_key: PeerKey,
@@ -147,9 +151,7 @@ pub(crate) struct RepoCtxParts {
 /// Blob data is content-addressed (possession of the hash is authorization);
 /// the keyhive membership policy lives on the doc store and is deliberately
 /// absent here.
-pub(crate) async fn open_blob_part_store(repo_root: &std::path::Path) -> Res<SharedPartStore> {
-    let sql =
-        crate::app::open_sql_ctx(SqlConfig::file(repo_root.join("blob_part_store.sqlite"))).await?;
+pub(crate) async fn open_blob_part_store(sql: SqlCtx) -> Res<SharedPartStore> {
     let store =
         big_sync::SqlitePartStore::new(sql, "daybook-blobs", big_sync_core::BuckId::MAX_LEVEL)
             .await?;
@@ -174,6 +176,7 @@ impl RepoCtx {
             sql: parts.sql,
             part_store: parts.part_store,
             blob_part_store: parts.blob_part_store,
+            frontier_part_store: parts.frontier_part_store,
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -362,7 +365,8 @@ impl RepoCtx {
 
         let (big_repo, big_repo_stop) = boot_big_repo(&layout, &identity).await?;
         let part_store = big_repo.shared_part_store();
-        let blob_part_store = open_blob_part_store(&layout.repo_root).await?;
+        let blob_part_store = open_blob_part_store(big_repo.sql_ctx()).await?;
+        let frontier_part_store = big_repo.frontier_part_store();
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
@@ -432,6 +436,7 @@ impl RepoCtx {
             sql,
             part_store,
             blob_part_store,
+            frontier_part_store,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
@@ -789,9 +794,9 @@ async fn boot_big_repo(
         },
         scope_key: Arc::from("daybook-core"),
         hidden_parts: Default::default(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     };
     big_repo::BigRepo::boot(config).await
 }

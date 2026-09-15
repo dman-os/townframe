@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT obj_id, payload_json FROM big_sync_objs\n             WHERE scope_id = ?1 ORDER BY obj_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_id"
+          }
+        }
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "d3f11052195c1e3c35bc46207bc595efda049ff5f237fd906ffa313e22b04099"
+}

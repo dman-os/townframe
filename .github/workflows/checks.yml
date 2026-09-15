@@ -24,6 +24,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   NEXTEST_COLOR: always
+  SQLX_OFFLINE: true
   TEST_SEED: rand
   OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}

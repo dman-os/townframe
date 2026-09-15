@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT principal_id FROM big_sync_syncable\n                     WHERE scope_id = ?1 AND obj_ref = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "principal_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_syncable",
+            "name": "principal_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3a3354b28190950129fec90d137502449ee0eea1bdf1d3f50d47c2068a4ddee7"
+}

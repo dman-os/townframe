@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_ref",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9aabe04c7c1897c8cf0e0096bef288a02801c4035aa8f81644d5a814ef4d8851"
+}

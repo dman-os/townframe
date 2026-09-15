@@ -248,7 +248,7 @@ impl DrawerRepo {
                     doc = %doc_id,
                     branches = ?new_entry.branches.keys().collect::<Vec<_>>(),
                     deleted = ?new_entry.branches_deleted.keys().collect::<Vec<_>>(),
-                    drawer_head = %patch_heads.iter().next().map(|h| h.to_string()).unwrap_or_default(),
+                    drawer_head = %patch_heads.iter().next().map(ToString::to_string).unwrap_or_default(),
                     "entry patch applied"
                 );
 

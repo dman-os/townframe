@@ -80,12 +80,17 @@ pub fn spawn_group_part_worker(
         timer,
         evt_tx,
         scope,
-        completed: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     let fut = async move {
         let cursor = driver.store.keyhive_group_part_cursor().await?;
-
+        driver
+            .store
+            .register_keyhive_admission_reader(
+                crate::store::sqlite::KEYHIVE_ADMISSION_READER_GROUP_PART,
+                cursor,
+            )
+            .await?;
         // Fresh store: no durable cursor means the projection was never
         // built. One initial full build from current Keyhive state, then
         // incremental reconciliation over the admission stream takes over.
@@ -97,7 +102,7 @@ pub fn spawn_group_part_worker(
         let core = GroupPartCore::new();
         let source = RowSource(driver::AdmissionSource {
             store: driver.store.clone(),
-            timer: driver.timer.clone(),
+            timer: Arc::clone(&driver.timer),
             read_cursor: cursor,
             batch_size: EVENT_BATCH_SIZE,
             idle_poll: IDLE_POLL,
@@ -137,7 +142,6 @@ struct GroupPartDriver {
     timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
-    completed: Arc<std::sync::Mutex<HashMap<TaskId, GroupPartTaskOutput>>>,
 }
 
 impl GroupPartDriver {
@@ -145,8 +149,9 @@ impl GroupPartDriver {
     /// 0): re-derive the projection from CURRENT Keyhive state over ALL known
     /// documents. Per-document reconciliation runs concurrently with a bounded
     /// initial-build concurrency; the final empty-batch transaction commits the
-    /// durable cursor so incremental reconciliation takes over from there. There
-    /// are no periodic rebuilds: every later
+    /// durable cursor so incremental reconciliation takes over from there.
+    /// There are no periodic rebuilds: every later reconciliation is
+    /// incremental over the admission stream.
     async fn build_initial_projection(&mut self) -> Res<()> {
         tracing::debug!("group-part worker building initial full projection");
         // ensure all currently visible group parts exist
@@ -156,13 +161,14 @@ impl GroupPartDriver {
         // A part must exist before a pending want can be advertised:
         // `summarize_parts` needs the part row even before a document payload
         // arrives, so an empty group is still handled during the initial build.
-        let group_ids = self.keyhive.visible_group_ids().await;
-        let initial_group_parts: HashSet<PartId> = group_ids
-            .iter()
-            .map(|group_id| group_id.to_bytes())
-            .filter(|id| self.scope.admits_group(id))
-            .map(group_part_id)
-            .collect();
+        let initial_group_parts: HashSet<PartId> = match self.scope.groups() {
+            // `All` ensures every part currently in the store (never a
+            // keyhive enumeration, so parts for groups not yet in the hive
+            // are covered too); a selective scope uses its explicit group
+            // set directly.
+            None => self.store.list_parts().await?,
+            Some(groups) => groups.iter().copied().collect(),
+        };
         for part_id in &initial_group_parts {
             self.store.ensure_part(*part_id).await?;
         }
@@ -172,16 +178,26 @@ impl GroupPartDriver {
         let futs = docs.into_iter().map(|doc| {
             let store = self.store.clone();
             let keyhive = self.keyhive.clone();
-            let initial_group_parts = initial_group_parts.clone();
+            let initial_group_parts = Arc::clone(&initial_group_parts);
             let scope = self.scope.clone();
             let local_principal = self.local_peer_id;
             async move {
-                if !scope.admits_doc_groups(
-                    &keyhive
-                        .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
-                        .await,
-                ) {
-                    return Ok(());
+                // `All` reconciles every document with no group lookups; only a
+                // selective scope walks the keyhive graph to check groups.
+                match scope.groups() {
+                    None => {}
+                    Some(_) => {
+                        let admitted = scope.admits_doc_groups(
+                            &keyhive
+                                .group_ids_containing_document(crate::DocumentId::new(
+                                    doc.into_bytes(),
+                                ))
+                                .await?,
+                        );
+                        if !admitted {
+                            return Ok(());
+                        }
+                    }
                 }
                 let reconciliation =
                     reconcile_doc(&keyhive, doc, &initial_group_parts, &scope, local_principal)
@@ -232,15 +248,17 @@ impl crate::runtime2::driver::SeedRunner<GroupPartCore> for GroupPartDriver {
     fn spawn_seed(
         &mut self,
         task: SpawnedTask<GroupPartSeed>,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<Result<TaskId, eyre::Report>>,
-        live: &mut HashMap<TaskId, tokio::task::JoinHandle<()>>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<
+            Result<(TaskId, GroupPartTaskOutput), eyre::Report>,
+        >,
+        task_set: &utils_rs::AbortableJoinSet,
+        live: &mut HashMap<TaskId, utils_rs::TaskHandle>,
     ) {
         let task_id = task.id;
         let seed = task.seed;
         let store = self.store.clone();
         let keyhive = self.keyhive.clone();
         let scope = self.scope.clone();
-        let completed = self.completed.clone();
         let result_tx = result_tx.clone();
         let fut = async move {
             match seed {
@@ -279,38 +297,27 @@ impl crate::runtime2::driver::SeedRunner<GroupPartCore> for GroupPartDriver {
                 }
             }
         };
-        let handle = tokio::spawn(async move {
-            let result = fut.await;
-            if let Ok(output) = result.as_ref() {
-                completed
-                    .lock()
-                    .expect("group-part completion map poisoned")
-                    .insert(task_id, output.clone());
-            }
-            drop(result_tx.send(result.map(|_| task_id)));
-        });
+        let handle = task_set
+            .spawn(async move {
+                let result = fut.await;
+                drop(result_tx.send(result.map(|output| (task_id, output))));
+            })
+            .expect("driver task set must accept work while the driver runs");
         live.insert(task_id, handle);
     }
     fn task_completed(&mut self, _task: TaskId) -> Option<TaskId> {
         None
     }
-    fn task_stopped(&mut self, task: TaskId) {
-        self.completed
-            .lock()
-            .expect("group-part completion map poisoned")
-            .remove(&task);
-    }
 }
 
 #[async_trait::async_trait]
 impl crate::runtime2::driver::DriverHooks<GroupPartCore> for GroupPartDriver {
-    async fn on_task_completed(&mut self, machine: &mut GroupPartCore, task: TaskId) -> Res<()> {
-        let output = self
-            .completed
-            .lock()
-            .expect("group-part completion map poisoned")
-            .remove(&task)
-            .expect("successful task has no completion output");
+    async fn on_task_completed(
+        &mut self,
+        machine: &mut GroupPartCore,
+        _task: TaskId,
+        output: GroupPartTaskOutput,
+    ) -> Res<()> {
         match output {
             GroupPartTaskOutput::Decoded { seq, affected } => {
                 machine.on_evt(Evt::Decoded {
@@ -360,11 +367,11 @@ impl crate::runtime2::driver::EventSource for RowSource {
     }
 }
 
-/// This worker has one logical lane; the unit type is sufficient.
+// This worker has one logical lane; the unit type is sufficient.
 
 /// An admitted-but-unsettled keyhive log row is [`driver::AdmittedRow`]: its
 /// seq plus the raw event bytes the driver resolves to affected documents.
-
+///
 /// Keys used by the keyed task graph. Decode work is keyed by admission
 /// sequence; derived document and group work coalesces by its domain key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -609,10 +616,19 @@ impl GroupPartCore {
     }
 
     fn settle_lane(&mut self, seq: u64, lane: GroupPartKey) {
+        // The cursor commit is monotonic (MAX), so when several streams reach
+        // watermarks in one settle only the last one needs to be persisted.
+        let mut watermark: Option<u64> = None;
         for (_, reached) in self.machine.settle(seq, seq, lane) {
-            if let Some(watermark) = reached {
-                self.outbox.push(Cmd::AdvanceCursor(watermark), ());
+            if let Some(reached) = reached {
+                watermark = Some(match watermark {
+                    Some(prev) => prev.max(reached),
+                    None => reached,
+                });
             }
+        }
+        if let Some(watermark) = watermark {
+            self.outbox.push(Cmd::AdvanceCursor(watermark), ());
         }
     }
 
@@ -642,6 +658,7 @@ impl crate::runtime2::driver::StreamMachine for GroupPartCore {
     type Evt = Evt;
     type Cmd = Cmd;
     type Seed = GroupPartSeed;
+    type TaskOutput = GroupPartTaskOutput;
 
     fn on_evt(&mut self, evt: Evt) {
         GroupPartCore::on_evt(self, evt);
@@ -654,23 +671,23 @@ impl crate::runtime2::driver::StreamMachine for GroupPartCore {
     }
 
     fn complete_cmd(&mut self, id: utils_rs::prelude::Uuid) {
-        drop(self.outbox.complete(id));
+        let (_, _) = self.outbox.complete(id);
     }
 
     fn complete_job(&mut self, id: TaskId) -> bool {
         self.scheduler.complete(id)
     }
 
-    fn drain_stop_queue(&mut self) -> Vec<TaskId> {
-        self.scheduler.drain_stop_queue().collect()
+    fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, TaskId> {
+        self.scheduler.drain_stop_queue()
     }
 
     fn job_completed_evt(&mut self, _job: TaskId) -> Evt {
         unreachable!("group-part tasks complete through keyed task results")
     }
 
-    fn drain_spawn_queue(&mut self) -> Vec<SpawnedTask<GroupPartSeed>> {
-        self.scheduler.drain_spawn_queue().collect()
+    fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, SpawnedTask<GroupPartSeed>> {
+        self.scheduler.drain_spawn_queue()
     }
 
     fn tick_scheduler(&mut self, now: Instant) {
@@ -715,10 +732,17 @@ async fn reconcile_doc(
         .collect::<HashMap<_, _>>();
     let desired_group_parts: HashSet<PartId> = keyhive
         .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
-        .await
+        .await?
         .into_iter()
-        .filter(|id| scope.admits_group(id))
+        // `All` keeps every group the document belongs to; a selective scope
+        // filters by its explicit group-part set (the set is the group list,
+        // never a keyhive enumeration; the `group_part_id` conversion is done
+        // once at scope construction).
         .map(group_part_id)
+        .filter(|part| match scope.groups() {
+            None => true,
+            Some(groups) => groups.contains(part),
+        })
         .collect();
     let mut reconciled_group_parts = affected_group_parts.clone();
     reconciled_group_parts.extend(desired_group_parts.iter().copied());
@@ -812,12 +836,19 @@ async fn affected_event(
     }
     let mut docs = Vec::new();
     for doc in documents {
-        if scope.admits_doc_groups(
-            &keyhive
-                .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
-                .await,
-        ) {
-            docs.push(doc);
+        // `All` keeps every affected document with no group lookups; only a
+        // selective scope walks the keyhive graph to check groups.
+        match scope.groups() {
+            None => docs.push(doc),
+            Some(_) => {
+                if scope.admits_doc_groups(
+                    &keyhive
+                        .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+                        .await?,
+                ) {
+                    docs.push(doc);
+                }
+            }
         }
     }
     Ok(AffectedEvent {
@@ -826,9 +857,7 @@ async fn affected_event(
             .into_iter()
             .filter(|part| match scope {
                 WorkerGroupScope::All => true,
-                WorkerGroupScope::Groups(groups) => {
-                    groups.iter().any(|id| group_part_id(*id) == *part)
-                }
+                WorkerGroupScope::Groups(groups) => groups.contains(part),
             })
             .collect(),
     })
@@ -866,7 +895,7 @@ mod tests {
             if let Cmd::AdvanceCursor(watermark) = *cmd {
                 advances.push(watermark);
             }
-            drop(core.outbox.complete(id));
+            let (_, _) = core.outbox.complete(id);
         }
         advances
     }
@@ -980,8 +1009,10 @@ mod tests {
         );
 
         let ok_futs = (0..4).map(|i| async move { Ok(i) });
+        let mut out = drive_buffered(ok_futs, 2).await.unwrap();
+        out.sort_unstable();
         assert_eq!(
-            drive_buffered(ok_futs, 2).await.unwrap(),
+            out,
             vec![0, 1, 2, 3],
             "all results collected when everything succeeds"
         );

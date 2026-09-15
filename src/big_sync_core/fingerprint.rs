@@ -62,7 +62,7 @@ impl FingerprintSeed {
     /// Panics if the OS random number generator is unavailable.
     // #[cfg(feature = "getrandom")]
     // #[must_use]
-    // #[allow(clippy::expect_used)]
+    // #[expect(clippy::expect_used)]
     // pub fn random() -> Self {
     //     let mut bytes = [0u8; 16];
     //     getrandom::getrandom(&mut bytes).expect("OS RNG unavailable");
@@ -97,7 +97,7 @@ impl<'de> serde::Deserialize<'de> for FingerprintSeed {
                 formatter.write_str("16 bytes")
             }
 
-            #[allow(clippy::expect_used)]
+            #[expect(clippy::expect_used)]
             fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
                 if v.len() != 16 {
                     return Err(E::invalid_length(v.len(), &"16 bytes"));

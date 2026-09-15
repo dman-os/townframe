@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT commits.blob\n             FROM big_repo_causal_ciphertext_index AS causal\n             JOIN big_repo_subduction_commits AS commits\n               ON commits.scope_id = causal.scope_id\n              AND commits.sedimentree_id = causal.sedimentree_id\n              AND commits.commit_id = causal.content_ref\n              AND commits.digest = causal.digest\n             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2\n               AND causal.pcs_update_hash = ?3 AND causal.kind = 0\n             UNION ALL\n             SELECT fragments.blob\n             FROM big_repo_causal_ciphertext_index AS causal\n             JOIN big_repo_subduction_fragments AS fragments\n               ON fragments.scope_id = causal.scope_id\n              AND fragments.sedimentree_id = causal.sedimentree_id\n              AND fragments.head_id = causal.content_ref\n              AND fragments.digest = causal.digest\n             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2\n               AND causal.pcs_update_hash = ?3 AND causal.kind = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "blob"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a77a958cc7fffad161a9e80576a8e170e9152cbeacf977ac798122659a15719e"
+}

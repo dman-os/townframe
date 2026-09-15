@@ -258,7 +258,7 @@ where
         let mut freed = Vec::new();
         let mut emptied = Vec::new();
         for (&cursor, waiter) in job_entry.range_mut(..bound) {
-            if !waiter.streams.iter().any(|candidate| *candidate == stream) {
+            if !waiter.streams.contains(&stream) {
                 continue;
             }
             waiter.lanes.retain(|lane| keep(*lane));
@@ -453,7 +453,7 @@ where
     pub fn is_settled(&self, stream: &StreamId) -> bool {
         self.streams
             .get(stream)
-            .map_or(true, WatermarkBook::is_settled)
+            .is_none_or(WatermarkBook::is_settled)
     }
 
     fn stream_book_mut(&mut self, stream: StreamId) -> &mut WatermarkBook<Cursor> {

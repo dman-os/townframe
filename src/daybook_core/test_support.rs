@@ -163,9 +163,9 @@ pub async fn test_cx_with_options(
         storage: big_repo::StorageConfig::Memory,
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     })
     .await?;
     let part_store = big_repo.shared_part_store();
@@ -173,6 +173,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-test-cx",
+        Arc::from("daybook-core-test"),
     )?;
 
     // Create a drawer document
@@ -194,7 +195,7 @@ pub async fn test_cx_with_options(
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
 
-    let blob_part_store = crate::repo::open_blob_part_store(temp_dir.path()).await?;
+    let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
     let blobs =
         crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
             .await?;
@@ -376,6 +377,7 @@ pub async fn test_cx_with_options(
             sql: sql_ctx.clone(),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            frontier_part_store: big_repo.frontier_part_store(),
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
             local_peer_key,
@@ -490,6 +492,7 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
         Arc::clone(&store),
         HashMap::new(),
         "daybook-test-part-store",
+        Arc::from("daybook-core-test"),
     )?;
     Ok((big_sync::Ctx { store, worker }, stop))
 }
@@ -504,9 +507,9 @@ pub async fn boot_repo() -> Res<(
         storage: big_repo::StorageConfig::Memory,
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     })
     .await?;
     let part_store = repo.shared_part_store();
@@ -514,6 +517,7 @@ pub async fn boot_repo() -> Res<(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-boot-repo",
+        Arc::from("daybook-core-test"),
     )?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,
@@ -548,9 +552,9 @@ pub async fn boot_disk_repo(
         storage: big_repo::StorageConfig::Disk { path },
         scope_key: Arc::from("daybook-core-test"),
         hidden_parts: Default::default(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     })
     .await?;
     let part_store = repo.shared_part_store();
@@ -558,6 +562,7 @@ pub async fn boot_disk_repo(
         Arc::clone(&part_store),
         HashMap::new(),
         "daybook-boot-disk",
+        Arc::from("daybook-core-test"),
     )?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_syncable_delete\n            BEFORE DELETE ON big_sync_syncable\n            BEGIN SELECT RAISE(ABORT, 'injected syncable failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "dcde1e3e83544aa5a9ecf148aa6ab15e1e03cffda714350e98e19a7bc0b46cf8"
+}

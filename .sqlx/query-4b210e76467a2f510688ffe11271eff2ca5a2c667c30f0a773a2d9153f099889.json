@@ -1,0 +1,69 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT sedimentree_id, commit_id AS content_ref, digest, 0 AS kind, blob\n             FROM big_repo_subduction_commits WHERE scope_id = ?1\n             UNION ALL\n             SELECT sedimentree_id, head_id AS content_ref, digest, 1 AS kind, blob\n             FROM big_repo_subduction_fragments WHERE scope_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "sedimentree_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "sedimentree_id"
+          }
+        }
+      },
+      {
+        "name": "content_ref",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "commit_id"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "blob",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_subduction_commits",
+            "name": "blob"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4b210e76467a2f510688ffe11271eff2ca5a2c667c30f0a773a2d9153f099889"
+}

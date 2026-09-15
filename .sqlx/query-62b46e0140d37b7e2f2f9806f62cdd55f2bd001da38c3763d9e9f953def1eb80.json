@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_repo_subduction_trees(scope_id, sedimentree_id)\n             VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "62b46e0140d37b7e2f2f9806f62cdd55f2bd001da38c3763d9e9f953def1eb80"
+}

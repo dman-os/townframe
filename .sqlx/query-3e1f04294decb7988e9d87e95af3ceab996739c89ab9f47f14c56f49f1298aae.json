@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO cursors(reader, seq)\n           VALUES (?1, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3e1f04294decb7988e9d87e95af3ceab996739c89ab9f47f14c56f49f1298aae"
+}

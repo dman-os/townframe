@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.event_hash, e.event_bytes, e.source_id\n                 FROM big_repo_keyhive_event_log e\n                WHERE e.scope_id = ?1\n                ORDER BY e.seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "event_hash",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "event_hash"
+          }
+        }
+      },
+      {
+        "name": "event_bytes",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "event_bytes"
+          }
+        }
+      },
+      {
+        "name": "source_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "source_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "47df83b191cf57998a366ac5e39fe674973820233a0d58c0d554bbe80c0c1387"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT members.event_type, objs.payload_json\n             FROM big_sync_members members\n             LEFT JOIN big_sync_objs objs ON objs.obj_ref = members.obj_ref\n             WHERE members.scope_id = ?1\n               AND members.maybe_part_ref = (\n                   SELECT part_ref FROM big_sync_parts\n                    WHERE scope_id = ?1 AND part_id = ?2\n               )\n               AND members.obj_ref = (\n                   SELECT obj_ref FROM big_sync_objs\n                    WHERE scope_id = ?1 AND obj_id = ?3\n               )",
+  "describe": {
+    "columns": [
+      {
+        "name": "event_type",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_members",
+            "name": "event_type"
+          }
+        }
+      },
+      {
+        "name": "payload_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6b6972479c30cc40c144a15834c0f1329e0f277c3a3b8d9381822beb5be104d9"
+}

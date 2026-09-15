@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(MAX(seq), 0) AS \"head!: i64\"\n               FROM big_repo_keyhive_admissions\n              WHERE scope_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "head!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "49f7082f7b64f28d3101310485b8c7ec4c2774160f4756d2ba82c282ab74863b"
+}

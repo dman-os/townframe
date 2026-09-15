@@ -1,0 +1,42 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n               (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_count,\n               (SELECT COALESCE(SUM(length(event_bytes)), 0) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_bytes,\n               ((SELECT COUNT(*) FROM big_repo_subduction_commits WHERE scope_id = ?1) +\n                (SELECT COUNT(*) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_count,\n               ((SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_commits WHERE scope_id = ?1) +\n                (SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_bytes",
+  "describe": {
+    "columns": [
+      {
+        "name": "kh_count",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "kh_bytes",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "sediment_count",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "sediment_bytes",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "436fb0b2b11410ab221c1ee010475925418163371d8a0b9b1498e8aa1f1e9147"
+}

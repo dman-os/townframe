@@ -153,7 +153,7 @@ pub mod contract {
             .sync_obj(
                 case.peer_id,
                 case.obj_id,
-                Vec::new(),
+                case.initial_parts.clone(),
                 case.remote_payload.clone(),
             )
             .await?;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_keyhive_event_log(\n                scope_id, seq, event_hash, event_bytes, source_id\n             )\n             VALUES (?1, ?2, ?3, ?4, ?5)\n             ON CONFLICT(scope_id, event_hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "cc7e997b088a2244a2c9c1aa5786f6bc3320375be5e56276d0373492888cb565"
+}

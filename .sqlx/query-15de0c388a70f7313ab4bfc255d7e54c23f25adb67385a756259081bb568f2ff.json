@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload_json",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "15de0c388a70f7313ab4bfc255d7e54c23f25adb67385a756259081bb568f2ff"
+}

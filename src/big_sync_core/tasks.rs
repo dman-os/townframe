@@ -95,6 +95,20 @@ pub struct Retry {
     queued_at: Instant,
 }
 
+impl Retry {
+    /// A fresh retry state (first attempt, no backoff). Used when a removal
+    /// failure arrives for a task that was already stopped (cancelled by a
+    /// re-add): the cancelled path never consumes the retry, so a fresh
+    /// value is only a placeholder.
+    pub(crate) fn fresh() -> Self {
+        Self {
+            attempt_no: 1,
+            backoff: Duration::ZERO,
+            queued_at: Instant::now(),
+        }
+    }
+}
+
 pub enum TaskSeed {
     Machine(MachineTaskDeets),
     Sync(SyncTaskSeed),

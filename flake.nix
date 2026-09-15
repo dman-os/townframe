@@ -251,6 +251,7 @@
             tailwindcss_4
             watchexec
 
+            sqlx-cli
             # maestro
           ];
 

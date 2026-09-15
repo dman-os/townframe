@@ -123,3 +123,20 @@ repos:
           - "--"
           - "--deny"
           - "warnings"
+  - repo: local
+    hooks:
+      - id: sqlx-prepare-check
+        name: check SQLx query metadata
+        language: system
+        entry: bash -c
+        args:
+          - |
+            set -eu
+            database_dir=$(mktemp -d)
+            trap 'rm -rf "$database_dir"' EXIT
+            export DATABASE_URL="sqlite://$database_dir/sqlx-prepare.db"
+            cargo sqlx database create
+            cargo sqlx migrate run --source src/big_sync/migrations
+            cargo sqlx migrate run --source src/big_repo/migrations
+            cargo sqlx prepare --check --workspace -- --all-targets --all-features -p big_sync -p big_repo
+        pass_filenames: false

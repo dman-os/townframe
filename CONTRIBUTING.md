@@ -79,12 +79,6 @@ cargo x build-plug-oci --plug-root ./src/plug_test/
 - `./src/daybook_pdk/`: Plug development kit. 
   - Supporting code for writing plugs goes here.
 
-### Dead code
-
-The following are not in use and possibly dead code.
-
-- `./src/daybook_sql/`: wit bindings for sql.
-
 ## Style guide
 
 - Avoid crates with a `src/` directory. 
@@ -107,6 +101,9 @@ The following are not in use and possibly dead code.
 - Avoid adding dependencies if possible.
 - Always use #[expect(...)] instead of #[allow(...)] for suppressing lints.
   - The expect attribute will warn if the lint is no longer triggered, helping to keep the codebase clean.
+- Unless the test is guaranteeing wall clock times as part of the contract, avoid introducing in test timeouts.
+  - Nextest, the test runner, has a real bound on most tests that should prevent forever runs.
+  - Putting timeouts in tests makes them flaky since it's been proven hard to get good timeout values that are reliable under different CI conditions.
 
 - If a function always clones a parameter or does an allocation, replacing an argument by value instead of reference.
   - For example, a &str that's immediately turned into a String.

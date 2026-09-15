@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_keyhive_archived_through(\n                 scope_id, seq\n             )\n             VALUES (?1, ?2)\n             ON CONFLICT(scope_id) DO UPDATE\n                 SET seq = MAX(seq, excluded.seq)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "68a15c6b4a40fe0bb7c8b041f2a8082059ee46eb12e42e0a40936f3234f01007"
+}

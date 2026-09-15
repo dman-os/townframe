@@ -45,6 +45,7 @@ where
         generation,
         state: DocState::Unloaded,
         partially_decrypted: false,
+        latest_keyhive_seq: 0,
         blocked_refs: HashSet::new(),
         causal_checkpoints: HashMap::new(),
         io,
@@ -144,6 +145,9 @@ struct DocWorker2<F: FutureForm> {
 
     state: DocState,
     partially_decrypted: bool,
+    /// Latest durable Keyhive admission incorporated into this worker's
+    /// materialized document state.
+    latest_keyhive_seq: u64,
     /// Content refs (fragment/loose-commit heads) whose plaintext we could not
     /// decrypt or apply (missing key / missing Automerge dependency). The
     /// source of truth for `partially_decrypted`; retried precisely on
@@ -350,6 +354,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             DocWorkerMsg::ReattemptMaterialization {
                 origin,
+                keyhive_seq,
                 resp,
                 _lease: _,
             } => {
@@ -360,6 +365,14 @@ impl<F: FutureForm> DocWorker2<F> {
                 );
                 match self.retry_materialization(origin).await {
                     Ok(status) => {
+                        if let Some(seq) = keyhive_seq {
+                            self.latest_keyhive_seq = self.latest_keyhive_seq.max(seq);
+                            if let DocState::Live(bundle) = &self.state
+                                && let Some(bundle) = bundle.upgrade()
+                            {
+                                bundle.update_keyhive_watermark(seq);
+                            }
+                        }
                         debug!(%self.doc_id, ?status, "document materialization retry completed");
                         resp.send(Ok(status))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -431,6 +444,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.generation,
             ),
             false,
+            self.latest_keyhive_seq,
         ));
 
         self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -492,6 +506,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.generation,
                     ),
                     self.partially_decrypted,
+                    self.latest_keyhive_seq,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -633,6 +648,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.generation,
                     ),
                     self.partially_decrypted,
+                    self.latest_keyhive_seq,
                 ));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
@@ -661,6 +677,7 @@ impl<F: FutureForm> DocWorker2<F> {
                                 self.generation,
                             ),
                             partially_decrypted,
+                            self.latest_keyhive_seq,
                         ));
                         self.state = DocState::Live(Arc::downgrade(&bundle));
                         self.register_bundle_lease().await?;
@@ -1302,7 +1319,6 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Apply decrypted plaintexts into the live bundle under the doc lock.
     /// Returns the refs that hit `MissingDeps` (they stay blocked), whether
     /// heads advanced, the resulting heads, and the patches to notify.
-    #[allow(clippy::type_complexity)]
     async fn apply_blobs_to_live(
         &mut self,
         bundle: &Arc<LiveDocBundle>,

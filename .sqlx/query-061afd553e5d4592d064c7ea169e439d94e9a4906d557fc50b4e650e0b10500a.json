@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_big_repo_payload_update\n            BEFORE UPDATE OF payload_json ON big_sync_objs\n            WHEN hex(NEW.obj_id) = '0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E'\n            BEGIN SELECT RAISE(ABORT, 'injected payload failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "061afd553e5d4592d064c7ea169e439d94e9a4906d557fc50b4e650e0b10500a"
+}

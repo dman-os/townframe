@@ -295,6 +295,8 @@ pub enum SubscriptionTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubPartsRequest {
+    /// The lowest global transaction cursor whose events should be replayed.
+    pub lower_bound: CursorIndex,
     /// An immutable snapshot of the peer's complete subscription set.
     /// Reconfiguration establishes a replacement stream with a new replay barrier.
     pub targets: Set<SubscriptionTarget>,
@@ -358,14 +360,6 @@ structstruck::strike! {
         Changed(ObjChanged),
         Added(ObjAddedToPart),
         Removed(ObjRemovedFromPart),
-        ObjectChanged(pub struct ObjChangedWithoutPart {
-            pub obj_id: ObjId,
-            #[serde(
-                serialize_with = "value_as_string",
-                deserialize_with = "value_from_string"
-            )]
-            pub payload: ObjPayload,
-        }),
         ReplayComplete,
     }
 }

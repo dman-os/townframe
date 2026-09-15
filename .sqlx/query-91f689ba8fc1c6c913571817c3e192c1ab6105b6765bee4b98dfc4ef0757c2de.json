@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "91f689ba8fc1c6c913571817c3e192c1ab6105b6765bee4b98dfc4ef0757c2de"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT scope_id FROM big_sync_scopes WHERE scope_key = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "scope_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_scopes",
+            "name": "scope_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aaaddf32aae6a6bdd9c82cc1b93a9bb0950047c961f0d432dc830a9ffd996b17"
+}

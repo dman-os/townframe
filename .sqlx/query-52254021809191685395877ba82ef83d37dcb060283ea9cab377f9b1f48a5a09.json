@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_part_cursor_update\n            BEFORE UPDATE OF latest_cursor ON big_sync_parts\n            BEGIN SELECT RAISE(ABORT, 'injected part cursor failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "52254021809191685395877ba82ef83d37dcb060283ea9cab377f9b1f48a5a09"
+}

@@ -225,6 +225,17 @@ structstruck::strike! {
         /// In-flight backend removal tasks keyed by object, mirroring
         /// `sync_workers` coalescing semantics.
         remove_workers: Map<ObjId, SyncWorkerState>,
+        /// Removals whose in-flight task was cancelled by a re-add. The
+        /// re-removal (remaining hints) and re-sync (re-added parts) are
+        /// deferred until the cancelled task's completion event lands, so the
+        /// zombie task — which may still be mid-removal after a cooperative
+        /// cancel — cannot race the new work.
+        pending_removals: Map<ObjId, struct PendingRemoval {
+            remaining_hints: Set<PartId>,
+            re_added_parts: Set<PartId>,
+            cursors: Set<CursorIndex>,
+            remote_payload: Option<crate::part_store::ObjPayload>,
+        }>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
             parts: Set<PartId>,
@@ -260,20 +271,22 @@ impl PeerState {
         parts: impl std::iter::Iterator<Item = &'a PartId>,
     ) -> Map<PartId, CursorIndex> {
         parts
-            .filter_map(|part_id| match self.parts.get(part_id).map(|p| &p.strat) {
-                // A part whose strategy is still being negotiated (or that was
-                // removed and re-added while a replay worker still references
-                // it) has no replay cursor yet. Skip it: the worker's delayed
-                // retry resubscribes once the decision lands. Replay is
-                // at-least-once, so skipping here cannot lose data.
-                None | Some(PeerPartStrategy::Pending(_)) => None,
-                Some(PeerPartStrategy::Bucket(BucketState { replay_cursor, .. })) => {
-                    Some((*part_id, *replay_cursor))
-                }
-                Some(PeerPartStrategy::Cursor(CursorState { replay_cursor, .. })) => {
-                    Some((*part_id, *replay_cursor))
-                }
-            })
+            .filter_map(
+                |part_id| match self.parts.get(part_id).map(|state| &state.strat) {
+                    // A part whose strategy is still being negotiated (or that was
+                    // removed and re-added while a replay worker still references
+                    // it) has no replay cursor yet. Skip it: the worker's delayed
+                    // retry resubscribes once the decision lands. Replay is
+                    // at-least-once, so skipping here cannot lose data.
+                    None | Some(PeerPartStrategy::Pending(_)) => None,
+                    Some(PeerPartStrategy::Bucket(BucketState { replay_cursor, .. })) => {
+                        Some((*part_id, *replay_cursor))
+                    }
+                    Some(PeerPartStrategy::Cursor(CursorState { replay_cursor, .. })) => {
+                        Some((*part_id, *replay_cursor))
+                    }
+                },
+            )
             .collect()
     }
 }
@@ -675,14 +688,22 @@ impl BigSyncMachine {
                 }
             }
             BigSyncEvent::RemoveCompleted(evt) => {
-                if self.tasks.stop_task(evt.task_id).is_some() {
-                    self.handle_remove_completed(evt);
-                }
+                // Always process: a completion from a task stopped by
+                // `cancel_obj_removal_hint` is the trigger for the deferred
+                // re-removal/re-sync (`resume_pending_removal`). `stop_task`
+                // GCs the task from `all` when it is still live; the handler
+                // itself filters stale completions (replaced tasks, removed
+                // peers).
+                self.tasks.stop_task(evt.task_id);
+                self.handle_remove_completed(evt);
             }
             BigSyncEvent::RemoveFailed(evt) => {
-                if let Some(state) = self.tasks.stop_task(evt.task_id) {
-                    self.handle_remove_failed(evt, state.retry);
-                }
+                let retry = self
+                    .tasks
+                    .stop_task(evt.task_id)
+                    .map(|state| state.retry)
+                    .unwrap_or_else(Retry::fresh);
+                self.handle_remove_failed(evt, retry);
             }
         }
     }
@@ -767,6 +788,7 @@ impl BigSyncMachine {
         self.all_seen_peer.insert(peer_id);
         let mut peer_state = self.peers.remove(&peer_id).unwrap_or_else(|| PeerState {
             remove_workers: default(),
+            pending_removals: default(),
             sync_workers: default(),
             replay_worker: default(),
             objects: default(),
@@ -870,6 +892,12 @@ impl BigSyncMachine {
                 "remove peer event"
             );
             for worker in old.sync_workers.into_values() {
+                let _state = self
+                    .tasks
+                    .stop_task(worker.task_id)
+                    .expect(ERROR_UNRECONIZED);
+            }
+            for worker in old.remove_workers.into_values() {
                 let _state = self
                     .tasks
                     .stop_task(worker.task_id)
@@ -1354,19 +1382,49 @@ impl BigSyncMachine {
                                 Some(remote_payload),
                             )
                         };
+                    // Cancel any in-flight removal for the hinted parts. If one
+                    // was cancelled, the Sync task is deferred until the removal
+                    // task's completion event lands: the zombie task may still
+                    // evict the re-added parts, so the re-sync must not race it.
+                    let mut removal_cancelled = false;
+                    for part_id in &part_hints {
+                        if Self::cancel_obj_removal_hint(
+                            &mut self.tasks,
+                            &mut peer_state.remove_workers,
+                            &mut peer_state.pending_removals,
+                            obj_id,
+                            *part_id,
+                        ) {
+                            removal_cancelled = true;
+                        }
+                    }
+                    if removal_cancelled {
+                        let pending =
+                            peer_state
+                                .pending_removals
+                                .entry(obj_id)
+                                .or_insert_with(|| PendingRemoval {
+                                    remaining_hints: default(),
+                                    re_added_parts: default(),
+                                    cursors: default(),
+                                    remote_payload: None,
+                                });
+                        pending.cursors.extend(cursors.iter().copied());
+                        pending.re_added_parts.extend(part_hints.iter().copied());
+                        if remote_payload.is_some() {
+                            pending.remote_payload = remote_payload;
+                        }
+                        // The Sync task is issued by `resume_pending_removal`
+                        // once the cancelled removal task's completion lands.
+                        // `continue` (not `return`): remaining commands in the
+                        // batch (other objects) must still be processed.
+                        continue;
+                    }
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
                         remote_payload: remote_payload.clone(),
                     };
-                    for part_id in &part_hints {
-                        Self::cancel_obj_removal_hint(
-                            &mut self.tasks,
-                            &mut peer_state.remove_workers,
-                            obj_id,
-                            *part_id,
-                        );
-                    }
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
                         kind: SyncTaskKind::Sync,
                         part_hints: part_hints.iter().copied().collect(),
@@ -1503,20 +1561,105 @@ impl BigSyncMachine {
     /// Drop `part_id` from any in-flight removal task for the object — the
     /// inverse of `schedule_obj_removal`, used when a later event re-adds the
     /// object to a part while its removal is still pending.
+    ///
+    /// The in-flight task is stopped cooperatively and the remaining hints
+    /// recorded as pending; the re-removal is NOT spawned here. The zombie
+    /// task may still be mid-removal (it only checks the cancel token after
+    /// the backend call), so spawning new work immediately would let it evict
+    /// the re-added part after the new task completes. Instead the deferred
+    /// re-removal and re-sync are issued by `resume_pending_removal` when the
+    /// cancelled task's completion event lands, which guarantees ordering.
+    ///
+    /// Returns true when an in-flight removal was cancelled; the caller must
+    /// defer its own Sync task for the re-added parts until the removal
+    /// completes.
     fn cancel_obj_removal_hint(
         tasks: &mut Tasks,
         remove_workers: &mut Map<ObjId, SyncWorkerState>,
+        pending_removals: &mut Map<ObjId, PendingRemoval>,
         obj_id: ObjId,
         part_id: PartId,
-    ) {
-        let stop_task = remove_workers.get_mut(&obj_id).and_then(|worker| {
-            worker.part_hints.remove(&part_id);
-            worker.part_hints.is_empty().then_some(worker.task_id)
-        });
-        if let Some(task_id) = stop_task {
+    ) -> bool {
+        let Some(worker) = remove_workers.get_mut(&obj_id) else {
+            return false;
+        };
+        if !worker.part_hints.remove(&part_id) {
+            return false;
+        }
+        let pending = pending_removals
+            .entry(obj_id)
+            .or_insert_with(|| PendingRemoval {
+                remaining_hints: default(),
+                re_added_parts: default(),
+                cursors: default(),
+                remote_payload: None,
+            });
+        pending.cursors.extend(worker.cursors.iter().copied());
+        if worker.part_hints.is_empty() {
             let worker = remove_workers.remove(&obj_id).expect(ERROR_UNRECONIZED);
-            assert_eq!(worker.task_id, task_id);
-            tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
+            tasks.stop_task(worker.task_id).expect(ERROR_UNRECONIZED);
+        } else {
+            let worker = remove_workers.remove(&obj_id).expect(ERROR_UNRECONIZED);
+            let _state = tasks.stop_task(worker.task_id).expect(ERROR_UNRECONIZED);
+            pending
+                .remaining_hints
+                .extend(worker.part_hints.iter().copied());
+        }
+        true
+    }
+
+    /// Issue the deferred re-removal (remaining hints) and re-sync (re-added
+    /// parts) for an object whose in-flight removal was cancelled by a re-add.
+    /// Called when the cancelled removal task's completion event lands, so the
+    /// zombie task is guaranteed done and cannot race the new work.
+    fn resume_pending_removal(&mut self, peer_id: PeerId, obj_id: ObjId) {
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
+        let Some(pending) = peer_state.pending_removals.remove(&obj_id) else {
+            return;
+        };
+        if !pending.remaining_hints.is_empty() {
+            let deets = SyncTaskDeets {
+                peer_id,
+                obj_id,
+                remote_payload: None,
+            };
+            let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                kind: SyncTaskKind::RemoveFromParts,
+                part_hints: pending.remaining_hints.iter().copied().collect(),
+                deets,
+            }));
+            peer_state.remove_workers.insert(
+                obj_id,
+                SyncWorkerState {
+                    task_id,
+                    cursors: pending.cursors.clone(),
+                    part_hints: pending.remaining_hints,
+                    remote_payload: None,
+                },
+            );
+        }
+        if !pending.re_added_parts.is_empty() {
+            let deets = SyncTaskDeets {
+                peer_id,
+                obj_id,
+                remote_payload: pending.remote_payload.clone(),
+            };
+            let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                kind: SyncTaskKind::Sync,
+                part_hints: pending.re_added_parts.iter().copied().collect(),
+                deets,
+            }));
+            peer_state.sync_workers.insert(
+                obj_id,
+                SyncWorkerState {
+                    task_id,
+                    cursors: pending.cursors,
+                    part_hints: pending.re_added_parts,
+                    remote_payload: pending.remote_payload,
+                },
+            );
         }
     }
 }
@@ -1552,13 +1695,42 @@ impl BigSyncMachine {
                         } else {
                             (default(), [part_id].into(), remote_payload)
                         };
+                    // Cancel any in-flight removal for the hinted parts. If
+                    // one was cancelled, the Sync task is deferred until the
+                    // removal task's completion event lands: the zombie task
+                    // may still evict the re-added parts, so the re-sync must
+                    // not race it.
+                    let mut removal_cancelled = false;
                     for part_id in &part_hints {
-                        Self::cancel_obj_removal_hint(
+                        if Self::cancel_obj_removal_hint(
                             &mut self.tasks,
                             &mut peer_state.remove_workers,
+                            &mut peer_state.pending_removals,
                             obj_id,
                             *part_id,
-                        );
+                        ) {
+                            removal_cancelled = true;
+                        }
+                    }
+                    if removal_cancelled {
+                        let pending =
+                            peer_state
+                                .pending_removals
+                                .entry(obj_id)
+                                .or_insert_with(|| PendingRemoval {
+                                    remaining_hints: default(),
+                                    re_added_parts: default(),
+                                    cursors: default(),
+                                    remote_payload: None,
+                                });
+                        pending.cursors.extend(cursors.iter().copied());
+                        pending.re_added_parts.extend(part_hints.iter().copied());
+                        if remote_payload.is_some() {
+                            pending.remote_payload = remote_payload;
+                        }
+                        // The Sync task is issued by `resume_pending_removal`
+                        // once the cancelled removal task's completion lands.
+                        continue;
                     }
                     let deets = SyncTaskDeets {
                         peer_id,
@@ -1851,6 +2023,19 @@ impl BigSyncMachine {
 // sync support
 impl BigSyncMachine {
     fn handle_remove_completed(&mut self, evt: RemoveCompletedEvent) {
+        // A removal whose worker is gone was cancelled by a re-add; the
+        // deferred re-removal and re-sync are issued now that the zombie task
+        // is done (its completion event only lands after the removal
+        // finished).
+        let cancelled = self
+            .peers
+            .get(&evt.peer_id)
+            .and_then(|peer_state| peer_state.remove_workers.get(&evt.obj_id))
+            .is_none();
+        if cancelled {
+            self.resume_pending_removal(evt.peer_id, evt.obj_id);
+            return;
+        }
         let (cursors, part_hints) = {
             let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
@@ -1885,9 +2070,23 @@ impl BigSyncMachine {
         }
         self.drain_cursor_machine_cmds(evt.peer_id);
         self.drain_bucket_machine_cmds(evt.peer_id);
+        self.resume_pending_removal(evt.peer_id, evt.obj_id);
     }
 
     fn handle_remove_failed(&mut self, evt: RemoveFailedEvent, retry: Retry) {
+        // A removal whose worker is gone was cancelled by a re-add; the
+        // deferred re-removal and re-sync are issued now that the zombie task
+        // is done (its completion event only lands after the removal
+        // finished).
+        let cancelled = self
+            .peers
+            .get(&evt.peer_id)
+            .and_then(|peer_state| peer_state.remove_workers.get(&evt.obj_id))
+            .is_none();
+        if cancelled {
+            self.resume_pending_removal(evt.peer_id, evt.obj_id);
+            return;
+        }
         let part_hints = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
@@ -2261,5 +2460,211 @@ mod tests {
         assert_eq!(worker.task_id, task_id);
         assert_eq!(worker.part_hints, [remaining_part].into());
         assert!(!machine.drain_stop_queue().any(|stopped| stopped == task_id));
+    }
+
+    #[test]
+    fn partial_removal_trim_restarts_task_with_remaining_hints() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let part_a = PartId::random();
+        let part_b = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [part_a, part_b].into(),
+            objects: Set::new(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            BigSyncMachine::schedule_obj_removal(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                peer,
+                obj,
+                part_a,
+                Some(1),
+            );
+            BigSyncMachine::schedule_obj_removal(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                peer,
+                obj,
+                part_b,
+                Some(2),
+            );
+        }
+        let first_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].part_hints, [part_a, part_b].into());
+
+        // Trim one hint: the in-flight task is stopped and the remaining
+        // hint set is recorded as pending. The re-removal is NOT spawned
+        // here — the zombie task may still be mid-removal (it only checks
+        // the cancel token after the backend call), so spawning new work
+        // immediately would let it evict the re-added part. The deferred
+        // re-removal is issued when the zombie's completion event lands.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            assert!(BigSyncMachine::cancel_obj_removal_hint(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                &mut peer_state.pending_removals,
+                obj,
+                part_a,
+            ));
+        }
+        assert!(
+            !machine.peers[&peer].remove_workers.contains_key(&obj),
+            "cancelled removal worker must be removed from remove_workers"
+        );
+        let pending = &machine.peers[&peer].pending_removals[&obj];
+        assert_eq!(pending.remaining_hints, [part_b].into());
+        assert!(
+            machine
+                .drain_stop_queue()
+                .any(|stopped| stopped == first_task)
+        );
+        assert!(
+            machine.drain_sync_spawn_queue().next().is_none(),
+            "re-removal must be deferred until the zombie completes"
+        );
+
+        // The zombie's completion lands: the deferred re-removal is issued
+        // with the remaining hint set.
+        machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
+            task_id: first_task,
+            peer_id: peer,
+            obj_id: obj,
+        }));
+        let worker = &machine.peers[&peer].remove_workers[&obj];
+        assert_eq!(worker.part_hints, [part_b].into());
+        assert_ne!(
+            worker.task_id, first_task,
+            "deferred re-removal must spawn a fresh task"
+        );
+        let respawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(respawned.len(), 1);
+        assert_eq!(respawned[0].kind, SyncTaskKind::RemoveFromParts);
+        assert_eq!(respawned[0].part_hints, [part_b].into());
+        assert!(
+            !machine.peers[&peer].pending_removals.contains_key(&obj),
+            "pending removal must be consumed by the resume"
+        );
+    }
+
+    #[test]
+    fn readd_after_removal_triggers_resync() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [part].into(),
+            objects: Set::new(),
+        }));
+
+        // Schedule a removal for the object in the part.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            BigSyncMachine::schedule_obj_removal(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                peer,
+                obj,
+                part,
+                Some(1),
+            );
+        }
+        let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        machine.drain_sync_spawn_queue();
+
+        // The object is re-added to the same part: the removal hint is
+        // cancelled and the re-sync is deferred until the zombie removal
+        // task's completion lands (it may still be mid-removal and could
+        // evict the re-added part).
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
+                    cursor: 2,
+                    part_id: part,
+                    obj_id: obj,
+                    payload: serde_json::json!({"head": 2}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer);
+
+        // The removal worker is gone (its only hint was cancelled)…
+        assert!(!machine.peers[&peer].remove_workers.contains_key(&obj));
+        assert!(
+            machine
+                .drain_stop_queue()
+                .any(|stopped| stopped == removal_task)
+        );
+        // …and the re-sync is deferred, not spawned yet.
+        assert!(
+            machine.drain_sync_spawn_queue().next().is_none(),
+            "re-sync must be deferred until the zombie removal completes"
+        );
+        let pending = &machine.peers[&peer].pending_removals[&obj];
+        assert_eq!(pending.re_added_parts, [part].into());
+
+        // The zombie's completion lands: the deferred re-sync is issued.
+        machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
+            task_id: removal_task,
+            peer_id: peer,
+            obj_id: obj,
+        }));
+        let sync_task = machine.peers[&peer].sync_workers[&obj].task_id;
+        let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].kind, SyncTaskKind::Sync);
+        assert_eq!(spawned[0].part_hints, [part].into());
+        assert_ne!(sync_task, removal_task);
+        assert!(
+            !machine.peers[&peer].pending_removals.contains_key(&obj),
+            "pending removal must be consumed by the resume"
+        );
+    }
+
+    #[test]
+    fn peer_removal_stops_in_flight_removal_tasks() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerId::random();
+        let part = PartId::random();
+        let obj = ObjId::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer,
+            parts: [part].into(),
+            objects: Set::new(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            BigSyncMachine::schedule_obj_removal(
+                &mut machine.tasks,
+                &mut peer_state.remove_workers,
+                peer,
+                obj,
+                part,
+                Some(1),
+            );
+        }
+        let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        machine.drain_sync_spawn_queue();
+
+        machine.handle_evt(BigSyncEvent::RemovePeer(RemovePeerEvent { peer_id: peer }));
+
+        assert!(!machine.peers.contains_key(&peer));
+        assert!(
+            machine
+                .drain_stop_queue()
+                .any(|stopped| stopped == removal_task)
+        );
     }
 }

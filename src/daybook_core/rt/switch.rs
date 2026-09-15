@@ -358,8 +358,9 @@ pub async fn spawn_switch_worker(
             let partition_listener = worker
                 .rt
                 .rcx
-                .part_store
+                .frontier_part_store
                 .subscribe_local(SubPartsRequest {
+                    lower_bound: cursor,
                     targets: std::collections::HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: docs_partition_id,
@@ -441,7 +442,7 @@ pub async fn spawn_switch_worker(
                             SubEvent::Added(inner) => inner.cursor,
                             SubEvent::Changed(inner) => inner.cursor,
                             SubEvent::Removed(inner) => inner.cursor,
-                            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => cursor,
+                            SubEvent::ReplayComplete => cursor,
                         };
                         worker
                             .store
@@ -562,21 +563,13 @@ impl SwitchWorker {
         &mut self,
         event: &SubEvent,
     ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
-        let branch_doc_id: Arc<str> = match event {
-            SubEvent::Added(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
-                .to_string()
-                .into(),
-            SubEvent::Changed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
-                .to_string()
-                .into(),
-            SubEvent::Removed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
-                .to_string()
-                .into(),
-            SubEvent::ObjectChanged(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
-                .to_string()
-                .into(),
+        let obj_id = match event {
+            SubEvent::Added(inner) => inner.obj_id,
+            SubEvent::Changed(inner) => inner.obj_id,
+            SubEvent::Removed(inner) => inner.obj_id,
             SubEvent::ReplayComplete => return Ok(None),
         };
+        let branch_doc_id: Arc<str> = big_repo::automerge_obj_to_doc_id(obj_id).to_string().into();
         info!(%branch_doc_id, ?event, "SwitchWorker handle_partition_doc_event received");
         let stored_state = self
             .store
@@ -602,7 +595,7 @@ impl SwitchWorker {
         next_state.branch_name = branch_name.clone();
 
         match event {
-            SubEvent::Added(_) | SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => {
+            SubEvent::Added(_) | SubEvent::Changed(_) => {
                 let Some(handle) = self
                     .rt
                     .drawer

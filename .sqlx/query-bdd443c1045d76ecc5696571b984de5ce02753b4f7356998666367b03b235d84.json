@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(\n                       (SELECT MIN(a.seq)\n                          FROM big_repo_keyhive_admissions a\n                         WHERE a.scope_id = ?1\n                           AND NOT EXISTS (\n                               SELECT 1\n                                 FROM big_repo_keyhive_event_tombstones t\n                                WHERE t.scope_id = a.scope_id\n                                  AND t.event_hash = a.event_hash\n                           )),\n                       (SELECT COALESCE(MAX(seq), 0) + 1\n                          FROM big_repo_keyhive_admissions\n                         WHERE scope_id = ?1)\n                   ) - 1 AS \"floor!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "floor!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bdd443c1045d76ecc5696571b984de5ce02753b4f7356998666367b03b235d84"
+}

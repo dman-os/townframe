@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM big_sync_members WHERE scope_id = ?1 AND obj_ref = ?2 AND maybe_part_ref > 0 AND event_type != ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a7c37aa3f281e2365026c414f6b4c765927fc88b1bad24907691a82339507d0c"
+}

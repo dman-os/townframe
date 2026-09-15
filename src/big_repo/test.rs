@@ -30,9 +30,9 @@ pub async fn boot_repo() -> Res<(
         storage: StorageConfig::Memory,
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -40,6 +40,7 @@ pub async fn boot_repo() -> Res<(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-repo",
+        Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
         store: shared_store,
@@ -73,9 +74,9 @@ pub async fn _boot_disk_repo(
         storage: StorageConfig::Disk { path },
         scope_key: Arc::from("big-repo-test"),
         hidden_parts: HashSet::new(),
-        automerge_frontier_scope: Default::default(),
-        causal_checkpoint_scope: Default::default(),
-        group_part_scope: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -83,6 +84,7 @@ pub async fn _boot_disk_repo(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-disk",
+        Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
         store: shared_store,
@@ -2795,16 +2797,19 @@ pub(crate) struct StressBigSyncRpcClient {
 }
 
 #[async_trait::async_trait]
-impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
+impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
     async fn peer_summary(
         &self,
-        req: big_sync_core::rpc::PeerSummaryRequest,
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::PeerSummaryRequest>,
     ) -> Res<
         big_sync_core::rpc::BigSyncRpcResult<
             Result<big_sync_core::rpc::PeerSummaryResult, big_sync_core::rpc::ListPartsError>,
         >,
     > {
-        let summarized = self.target_part_store.summarize_parts(req.parts).await?;
+        let summarized = self
+            .target_part_store
+            .summarize_parts(req.inner.parts)
+            .await?;
         Ok(Ok(summarized.map(|parts| {
             big_sync_core::rpc::PeerSummaryResult {
                 parts: parts
@@ -2817,7 +2822,7 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
 
     async fn sub_parts(
         &self,
-        req: big_sync_core::rpc::SubPartsRequest,
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::SubPartsRequest>,
     ) -> Res<
         big_sync_core::rpc::BigSyncRpcResult<
             Result<
@@ -2828,30 +2833,33 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
     > {
         Ok(Ok(self
             .target_part_store
-            .subscribe(req, self.subscriber)
+            .subscribe(req.inner, self.subscriber)
             .await?))
     }
 
     async fn get_changed_buckets(
         &self,
-        req: big_sync_core::rpc::GetChangedBucketsRequest,
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::GetChangedBucketsRequest>,
     ) -> Res<
         big_sync_core::rpc::BigSyncRpcResult<
             Result<Vec<big_sync_core::rpc::BucketSummary>, big_sync_core::rpc::ListPartsError>,
         >,
     > {
-        Ok(Ok(self.target_part_store.get_changed_buckets(req).await?))
+        Ok(Ok(self
+            .target_part_store
+            .get_changed_buckets(req.inner)
+            .await?))
     }
 
     async fn leaf_buckets(
         &self,
-        req: big_sync_core::rpc::LeafBucketsRequest,
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::LeafBucketsRequest>,
     ) -> Res<
         big_sync_core::rpc::BigSyncRpcResult<
             Result<big_sync_core::rpc::LeafBucketResult, big_sync_core::rpc::LeafBucketsError>,
         >,
     > {
-        Ok(Ok(self.target_part_store.leaf_buckets(req).await?))
+        Ok(Ok(self.target_part_store.leaf_buckets(req.inner).await?))
     }
 }
 
@@ -2886,9 +2894,9 @@ impl SyncRepoNode {
             storage: StorageConfig::Disk { path: path.clone() },
             scope_key: Arc::from("big-repo-sync-test"),
             hidden_parts: HashSet::new(),
-            automerge_frontier_scope: Default::default(),
-            causal_checkpoint_scope: Default::default(),
-            group_part_scope: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
         })
         .await?;
         let shared_store = repo.shared_part_store();
@@ -2896,6 +2904,7 @@ impl SyncRepoNode {
             Arc::clone(&shared_store),
             HashMap::new(),
             "big-repo-sync-test",
+            Arc::from("big-repo-test"),
         )?;
         let big_sync_host = Arc::new(big_sync::Ctx {
             store: shared_store,
@@ -2936,6 +2945,7 @@ impl SyncRepoNode {
             Arc::clone(&big_sync_host.store),
             sync_backends,
             "big-repo-sync-test-main",
+            Arc::from("big-repo-test"),
         )?;
 
         let accept_count = Arc::new(AtomicUsize::new(0));

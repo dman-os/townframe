@@ -164,7 +164,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// Publish a key-only causal checkpoint covering the supplied encryption
     /// frontier. The implementation establishes and durably records a PCS
     /// root first when the healed Keyhive graph has none.
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn persist_causal_checkpoint(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,

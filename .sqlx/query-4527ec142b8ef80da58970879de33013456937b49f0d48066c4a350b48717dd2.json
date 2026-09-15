@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_sync_parts(scope_id, part_id)\n             VALUES (?1, ?2)\n             ON CONFLICT(scope_id, part_id) DO UPDATE SET part_id = excluded.part_id\n             RETURNING part_ref",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_ref",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4527ec142b8ef80da58970879de33013456937b49f0d48066c4a350b48717dd2"
+}

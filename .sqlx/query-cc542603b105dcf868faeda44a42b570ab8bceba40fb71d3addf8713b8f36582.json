@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO big_sync_meta(key, value) VALUES ('bucket_depth', ?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "cc542603b105dcf868faeda44a42b570ab8bceba40fb71d3addf8713b8f36582"
+}

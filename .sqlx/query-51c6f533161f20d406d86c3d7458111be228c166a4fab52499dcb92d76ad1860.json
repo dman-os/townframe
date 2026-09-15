@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.event_hash, l.event_bytes, l.source_id\n                 FROM big_repo_keyhive_event_log l\n                WHERE l.scope_id = ?1\n                  AND NOT EXISTS (\n                        SELECT 1\n                          FROM big_repo_keyhive_admissions a\n                         WHERE a.scope_id = l.scope_id\n                           AND a.event_hash = l.event_hash\n                  )\n                ORDER BY l.seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "event_hash",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "event_hash"
+          }
+        }
+      },
+      {
+        "name": "event_bytes",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "event_bytes"
+          }
+        }
+      },
+      {
+        "name": "source_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_repo_keyhive_event_log",
+            "name": "source_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "51c6f533161f20d406d86c3d7458111be228c166a4fab52499dcb92d76ad1860"
+}

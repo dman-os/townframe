@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TRIGGER fail_cursor_update\n            BEFORE UPDATE OF seq ON cursors\n            BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3b1dabb65858323aaedbfe7eb418a35b1e7a29b10b01b4556149111cae9ead2d"
+}

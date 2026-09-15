@@ -97,13 +97,18 @@ impl<Cmd, Meta> Outbox<Cmd, Meta> {
     /// - "success for a cmd that wasn't sent"
     /// - "unexpected cmd success, cmds must be performed serially"
     pub fn complete(&mut self, id: Uuid) -> (Cmd, Meta) {
-        let (found, cmd, meta) = self
+        let found_id = self
+            .queue
+            .front()
+            .map(|(found, _, _)| found.id)
+            .expect("success for a cmd that wasn't sent");
+        if id != found_id {
+            panic!("unexpected cmd success, cmds must be performed serially");
+        }
+        let (_, cmd, meta) = self
             .queue
             .pop_front()
             .expect("success for a cmd that wasn't sent");
-        if id != found.id {
-            panic!("unexpected cmd success, cmds must be performed serially");
-        }
         (cmd, meta)
     }
 }
@@ -195,5 +200,17 @@ mod tests {
         // serial-execution invariant (`handle_cmd_success`).
         let bogus_second = PendingCmd { id: Uuid::new_v4() };
         outbox.complete(bogus_second.id());
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected cmd success, cmds must be performed serially")]
+    fn genuine_out_of_order_completion_panics_without_consuming_head() {
+        let mut outbox: Outbox<Cmd, ()> = Outbox::new();
+        outbox.push(Cmd::WriteStore, ());
+        let second = outbox.push(Cmd::WriteStore, ());
+        // Completing with the second command's real id while the first is
+        // still front is the genuine out-of-order case — and must not pop
+        // the head before panicking.
+        outbox.complete(second.id());
     }
 }

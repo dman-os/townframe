@@ -130,6 +130,19 @@ impl<Seed: Clone> Scheduler<Seed> {
         old
     }
 
+    /// Stop/cancel a task that will never be respawned (a completed or
+    /// replaced task). Identical to `stop` but does not license a respawn, so
+    /// the id does not linger in `stopped` forever.
+    pub fn cancel(&mut self, id: TaskId) -> Option<Retry> {
+        let old = self.live.remove(&id);
+        if self.delayed.remove(&id).is_some() {
+            return old;
+        }
+        self.spawn_queue.retain(|task| task.id != id);
+        self.stop_queue.insert(id);
+        old
+    }
+
     /// Re-seed a failed task after a delay, computing the next backoff step.
     /// The formula is verbatim from `Tasks::spawn_delayed_task`: first retry
     /// uses `min_delay` (capped), later retries double the previous backoff
@@ -213,6 +226,11 @@ impl<Seed: Clone> Scheduler<Seed> {
     pub fn retry_of(&self, id: TaskId) -> Option<Retry> {
         self.live.get(&id).copied()
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stopped_count(&self) -> usize {
+        self.stopped.len()
+    }
 }
 
 /// Keyed task replacement layered over [`Scheduler`]. A key has at most one
@@ -269,7 +287,7 @@ where
         };
         if let Some(old_task) = self.active_by_key.remove(&key) {
             self.key_by_task.remove(&old_task);
-            self.scheduler.stop(old_task);
+            self.scheduler.cancel(old_task);
         }
         let task = self.scheduler.spawn(now, seed.clone());
         let old = self.active_by_key.insert(key, task);
@@ -289,7 +307,7 @@ where
         let current = self.active_by_key.remove(&key);
         self.seed_by_key.remove(&key);
         assert_eq!(current, Some(task), "completed task was not current");
-        self.scheduler.stop(task).is_some()
+        self.scheduler.cancel(task).is_some()
     }
 
     pub fn counts(&self) -> SchedulerCounts {
@@ -310,6 +328,11 @@ where
 
     pub fn active_task(&self, key: K) -> Option<TaskId> {
         self.active_by_key.get(&key).copied()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stopped_count(&self) -> usize {
+        self.scheduler.stopped_count()
     }
 }
 
@@ -340,6 +363,20 @@ mod tests {
         );
         assert!(!scheduler.complete(first));
         assert!(scheduler.complete(second));
+    }
+
+    #[test]
+    fn completed_and_replaced_tasks_do_not_accumulate_in_stopped() {
+        let now = t(0);
+        let mut scheduler = KeyedScheduler::<u64, Seed>::default();
+        let _first = scheduler.replace(now, 1, Seed::Diff);
+        scheduler.drain_spawn_queue();
+        let second = scheduler.replace(now, 1, Seed::Sync(2));
+        assert!(scheduler.complete(second));
+        // Neither the replaced first task nor the completed second task may
+        // linger in `stopped`: neither will ever respawn, so their ids must
+        // not accumulate unboundedly.
+        assert_eq!(scheduler.stopped_count(), 0);
     }
 
     #[test]

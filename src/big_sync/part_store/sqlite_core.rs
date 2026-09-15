@@ -133,34 +133,31 @@ impl<T> ReplayBus<T> {
 
 impl<T: Clone + Send + 'static> ReplayBus<T> {
     pub fn broadcast(&self, item: T) {
-        let live_ids: Vec<uuid::Uuid> = self
-            .live
-            .read()
-            .expect(ERROR_MUTEX)
-            .iter()
-            .copied()
-            .collect();
         let mut dead = Vec::new();
-        for id in live_ids {
-            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
-                && sub.sender.try_send(item.clone()).is_err()
-            {
-                dead.push(id);
+        {
+            // Snapshot the live set under the subs read lock (subs → live
+            // lock order, matching `remove`/`promote_to_live`) so no
+            // per-event id Vec is allocated.
+            let subs = self.subs.read().expect(ERROR_MUTEX);
+            let live = self.live.read().expect(ERROR_MUTEX);
+            for id in live.iter().copied() {
+                if let Some(sub) = subs.get(&id).cloned()
+                    && sub.sender.try_send(item.clone()).is_err()
+                {
+                    dead.push(id);
+                }
             }
         }
-        let pending_ids: Vec<uuid::Uuid> = self
-            .pending
-            .read()
-            .expect(ERROR_MUTEX)
-            .iter()
-            .copied()
-            .collect();
-        for id in pending_ids {
-            if let Some(sub) = self.subs.read().expect(ERROR_MUTEX).get(&id).cloned()
-                && sub.pending.mark_dirty()
-                && sub.sender.try_send(item.clone()).is_err()
-            {
-                dead.push(id);
+        {
+            let subs = self.subs.read().expect(ERROR_MUTEX);
+            let pending = self.pending.read().expect(ERROR_MUTEX);
+            for id in pending.iter().copied() {
+                if let Some(sub) = subs.get(&id).cloned()
+                    && sub.pending.mark_dirty()
+                    && sub.sender.try_send(item.clone()).is_err()
+                {
+                    dead.push(id);
+                }
             }
         }
         if !dead.is_empty() {
@@ -188,7 +185,8 @@ pub async fn run_replay_loop<T, C, F, Fut>(
             .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
         let (items, next_cursor) = match fetch_page(cursor).await {
             Ok(res) => res,
-            Err(_) => {
+            Err(err) => {
+                tracing::warn!(?err, "replay fetch_page failed; dropping subscription");
                 bus.remove(sub.id);
                 return;
             }
@@ -200,10 +198,14 @@ pub async fn run_replay_loop<T, C, F, Fut>(
                 return;
             }
         }
+        // A page with no next cursor is the final page: finalize even if it
+        // carried items. Re-fetching the same cursor would resend duplicates
+        // forever.
+        let has_next = next_cursor.is_some();
         if let Some(nc) = next_cursor {
             cursor = nc;
         }
-        if count != 0 {
+        if count != 0 && has_next {
             continue;
         }
         if sub.pending.begin_finalization() {
@@ -332,6 +334,10 @@ pub enum MemberState {
     Dead,
 }
 
+pub const EVENT_ADDED: i64 = 0;
+pub const EVENT_CHANGED: i64 = 1;
+pub const EVENT_REMOVED: i64 = 2;
+
 // ---------------------------------------------------------------------------
 // SqliteCore — shared SQLite database handle and helper methods used by both
 // SqlitePartStore and SqliteBigRepoStore.
@@ -345,6 +351,11 @@ pub struct SqliteCore {
     pub _scope_key: Arc<str>,
 }
 
+static MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> = std::sync::LazyLock::new(|| {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator
+});
 impl SqliteCore {
     // -----------------------------------------------------------------------
     // Construction + schema
@@ -362,29 +373,26 @@ impl SqliteCore {
     }
 
     pub async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
+        MIGRATOR.run(pool).await?;
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_meta (
-                key TEXT PRIMARY KEY NOT NULL,
-                value INTEGER NOT NULL
-            ) STRICT",
+        for key in ["global_cursor"] {
+            sqlx::query!(
+                "INSERT OR IGNORE INTO big_sync_meta(key, value) VALUES (?1, 0)",
+                key
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query!(
+            "INSERT OR IGNORE INTO big_sync_meta(key, value) VALUES ('bucket_depth', ?1)",
+            i64::from(bucket_depth)
         )
         .execute(&mut *tx)
         .await?;
-        for key in ["global_cursor"] {
-            sqlx::query("INSERT OR IGNORE INTO big_sync_meta(key, value) VALUES (?1, 0)")
-                .bind(key)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("INSERT OR IGNORE INTO big_sync_meta(key, value) VALUES ('bucket_depth', ?1)")
-            .bind(i64::from(bucket_depth))
-            .execute(&mut *tx)
-            .await?;
-        let existing_bucket_depth: i64 = sqlx::query_scalar(
+        let existing_bucket_depth: i64 = sqlx::query_scalar!(
             "SELECT value
              FROM big_sync_meta
-             WHERE key = 'bucket_depth'",
+             WHERE key = 'bucket_depth'"
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -393,121 +401,6 @@ impl SqliteCore {
             bucket_depth,
             "bucket depth is fixed for the database"
         );
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_scopes (
-                scope_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scope_key TEXT NOT NULL UNIQUE
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_parts (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                part_id BLOB NOT NULL,
-                latest_cursor INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(scope_id, part_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_objs (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                obj_id BLOB NOT NULL,
-                payload_json TEXT,
-                PRIMARY KEY(scope_id, obj_id),
-                CHECK(payload_json IS NULL OR json_valid(payload_json))
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_buckets (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                part_id BLOB NOT NULL,
-                buck_id INTEGER NOT NULL,
-                level INTEGER NOT NULL,
-                changed_at INTEGER NOT NULL DEFAULT 0,
-                live_count INTEGER NOT NULL DEFAULT 0,
-                dead_count INTEGER NOT NULL DEFAULT 0,
-                live_fp INTEGER NOT NULL DEFAULT 0,
-                dead_fp INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(scope_id, part_id, buck_id),
-                FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS big_sync_buckets_level_changed_idx
-             ON big_sync_buckets(scope_id, part_id, level, changed_at, buck_id)",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_members (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                part_id BLOB NOT NULL,
-                obj_id BLOB NOT NULL,
-                added_at INTEGER NOT NULL,
-                added_payload_json TEXT,
-                changed_at INTEGER NOT NULL,
-                removed_at INTEGER,
-                latest_cursor INTEGER NOT NULL,
-                PRIMARY KEY(scope_id, part_id, obj_id),
-                FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id),
-                FOREIGN KEY(scope_id, obj_id) REFERENCES big_sync_objs(scope_id, obj_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS big_sync_members_part_latest_idx
-             ON big_sync_members(scope_id, part_id, latest_cursor)",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS big_sync_members_obj_idx
-             ON big_sync_members(scope_id, obj_id)",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_pending_members (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                part_id BLOB NOT NULL,
-                obj_id BLOB NOT NULL,
-                PRIMARY KEY(scope_id, part_id, obj_id),
-                FOREIGN KEY(scope_id, obj_id) REFERENCES big_sync_objs(scope_id, obj_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_peer_cursors (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                peer_id BLOB NOT NULL,
-                part_id BLOB NOT NULL,
-                cursor INTEGER NOT NULL,
-                PRIMARY KEY(scope_id, peer_id, part_id),
-                FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_sync_syncable (
-                scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
-                obj_id BLOB NOT NULL,
-                principal_id BLOB NOT NULL,
-                access_level INTEGER NOT NULL,
-                PRIMARY KEY(scope_id, obj_id, principal_id)
-            ) STRICT",
-        )
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -564,11 +457,67 @@ impl SqliteCore {
     // Sequence helpers
     // -----------------------------------------------------------------------
 
-    pub async fn next_id(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, key: &str) -> Res<u64> {
-        let value: i64 = sqlx::query_scalar(
-            "UPDATE big_sync_meta SET value = value + 1 WHERE key = ?1 RETURNING value",
+    pub async fn ensure_part_ref(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        part_id: PartId,
+    ) -> Res<i64> {
+        let row = sqlx::query!(
+            "INSERT INTO big_sync_parts(scope_id, part_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id, part_id) DO UPDATE SET part_id = excluded.part_id
+             RETURNING part_ref",
+            self.scope_id,
+            Self::part_blob(part_id)
         )
-        .bind(key)
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(row.part_ref)
+    }
+
+    pub async fn ensure_obj_ref(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        obj_id: ObjId,
+    ) -> Res<i64> {
+        let row = sqlx::query!(
+            "INSERT INTO big_sync_objs(scope_id, obj_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id
+             RETURNING obj_ref",
+            self.scope_id,
+            Self::obj_blob(obj_id)
+        )
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(row.obj_ref)
+    }
+
+    pub async fn find_part_ref(&self, part_id: PartId) -> Res<Option<i64>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2",
+            self.scope_id,
+            Self::part_blob(part_id)
+        )
+        .fetch_optional(&self.sql.read_pool)
+        .await?)
+    }
+
+    pub async fn find_obj_ref(&self, obj_id: ObjId) -> Res<Option<i64>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
+            self.scope_id,
+            Self::obj_blob(obj_id)
+        )
+        .fetch_optional(&self.sql.read_pool)
+        .await?)
+    }
+
+    pub async fn next_id(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, key: &str) -> Res<u64> {
+        let value: i64 = sqlx::query_scalar!(
+            "UPDATE big_sync_meta SET value = value + 1 WHERE key = ?1 RETURNING value",
+            key
+        )
         .fetch_one(&mut **tx)
         .await?;
         Ok(u64::try_from(value).expect(ERROR_IMPOSSIBLE))
@@ -593,25 +542,28 @@ impl SqliteCore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         scope_key: &Arc<str>,
     ) -> Res<i64> {
-        if let Some(scope_id) = sqlx::query_scalar::<_, i64>(
+        if let Some(scope_id) = sqlx::query_scalar!(
             "SELECT scope_id FROM big_sync_scopes WHERE scope_key = ?1",
+            scope_key.as_ref()
         )
-        .bind(scope_key.as_ref())
         .fetch_optional(&mut **tx)
         .await?
         {
             return Ok(scope_id);
         }
 
-        sqlx::query("INSERT INTO big_sync_scopes(scope_key) VALUES (?1)")
-            .bind(scope_key.as_ref())
-            .execute(&mut **tx)
-            .await?;
-        let scope_id: i64 =
-            sqlx::query_scalar("SELECT scope_id FROM big_sync_scopes WHERE scope_key = ?1")
-                .bind(scope_key.as_ref())
-                .fetch_one(&mut **tx)
-                .await?;
+        sqlx::query!(
+            "INSERT INTO big_sync_scopes(scope_key) VALUES (?1)",
+            scope_key.as_ref()
+        )
+        .execute(&mut **tx)
+        .await?;
+        let scope_id: i64 = sqlx::query_scalar!(
+            "SELECT scope_id FROM big_sync_scopes WHERE scope_key = ?1",
+            scope_key.as_ref()
+        )
+        .fetch_one(&mut **tx)
+        .await?;
         Ok(scope_id)
     }
 
@@ -624,15 +576,18 @@ impl SqliteCore {
         part_id: PartId,
         path: BuckId,
     ) -> Res<BucketSummary> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT changed_at, live_count, dead_count, live_fp, dead_fp
              FROM big_sync_buckets
-             WHERE scope_id = ?1 AND part_id = ?2 AND level = ?3 AND buck_id = ?4",
+             WHERE scope_id = ?1 AND part_ref = (
+                 SELECT part_ref FROM big_sync_parts
+                  WHERE scope_id = ?1 AND part_id = ?2
+             ) AND level = ?3 AND buck_id = ?4",
+            self.scope_id,
+            Self::part_blob(part_id),
+            i64::from(path.level()),
+            Self::buck_i64(path)
         )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .bind(i64::from(path.level()))
-        .bind(Self::buck_i64(path))
         .fetch_optional(&self.sql.read_pool)
         .await?;
         let Some(row) = row else {
@@ -644,11 +599,11 @@ impl SqliteCore {
                 changed_at: 0,
             });
         };
-        let changed_at: i64 = row.try_get("changed_at")?;
-        let live_count: i64 = row.try_get("live_count")?;
-        let dead_count: i64 = row.try_get("dead_count")?;
-        let live_fp: i64 = row.try_get("live_fp")?;
-        let dead_fp: i64 = row.try_get("dead_fp")?;
+        let changed_at = row.changed_at;
+        let live_count = row.live_count;
+        let dead_count = row.dead_count;
+        let live_fp = row.live_fp;
+        let dead_fp = row.dead_fp;
         Ok(BucketSummary {
             id: path,
             len: u32::try_from(
@@ -672,26 +627,32 @@ impl SqliteCore {
         part_id: PartId,
         obj_id: ObjId,
     ) -> Res<MemberState> {
-        let row = sqlx::query(
-            "SELECT members.removed_at, objs.payload_json
+        let row = sqlx::query!(
+            "SELECT members.event_type, objs.payload_json
              FROM big_sync_members members
-             LEFT JOIN big_sync_objs objs
-               ON objs.scope_id = members.scope_id AND objs.obj_id = members.obj_id
-             WHERE members.scope_id = ?1 AND members.part_id = ?2 AND members.obj_id = ?3",
+             LEFT JOIN big_sync_objs objs ON objs.obj_ref = members.obj_ref
+             WHERE members.scope_id = ?1
+               AND members.maybe_part_ref = (
+                   SELECT part_ref FROM big_sync_parts
+                    WHERE scope_id = ?1 AND part_id = ?2
+               )
+               AND members.obj_ref = (
+                   SELECT obj_ref FROM big_sync_objs
+                    WHERE scope_id = ?1 AND obj_id = ?3
+               )",
+            self.scope_id,
+            Self::part_blob(part_id),
+            Self::obj_blob(obj_id)
         )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .bind(Self::obj_blob(obj_id))
         .fetch_optional(&mut **tx)
         .await?;
         let Some(row) = row else {
             return Ok(MemberState::Absent);
         };
-        let removed_at: Option<i64> = row.try_get("removed_at")?;
-        if removed_at.is_some() {
+        if row.event_type == EVENT_REMOVED {
             return Ok(MemberState::Dead);
         }
-        let payload_json: Option<String> = row.try_get("payload_json")?;
+        let payload_json = row.payload_json;
         let payload = payload_json
             .as_deref()
             .filter(|payload_json| !payload_json.is_empty())
@@ -715,6 +676,7 @@ impl SqliteCore {
         old: &MemberState,
         new: &MemberState,
     ) -> Res<()> {
+        let part_ref = self.ensure_part_ref(tx, part_id).await?;
         let bucket_ids: Vec<_> = (0..=self.bucket_depth)
             .map(|level| BuckId::from_obj_id(level, &obj_id))
             .collect();
@@ -724,8 +686,8 @@ impl SqliteCore {
              WHERE scope_id = ",
         );
         query.push_bind(self.scope_id);
-        query.push(" AND part_id = ");
-        query.push_bind(Self::part_blob(part_id));
+        query.push(" AND part_ref = ");
+        query.push_bind(part_ref);
         query.push(" AND buck_id IN (");
         let mut separated = query.separated(", ");
         for buck_id in &bucket_ids {
@@ -753,28 +715,28 @@ impl SqliteCore {
         for buck_id in bucket_ids {
             let mut summary = current.remove(&buck_id).unwrap_or_default();
             summary.apply_transition(buck_id, obj_id, cursor, old, new);
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO big_sync_buckets(
-                    scope_id, part_id, buck_id, level, changed_at,
+                    scope_id, part_ref, buck_id, level, changed_at,
                     live_count, dead_count, live_fp, dead_fp
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(scope_id, part_id, buck_id) DO UPDATE SET
+                 ON CONFLICT(scope_id, part_ref, buck_id) DO UPDATE SET
                     level = excluded.level,
                     changed_at = excluded.changed_at,
                     live_count = excluded.live_count,
                     dead_count = excluded.dead_count,
                     live_fp = excluded.live_fp,
                     dead_fp = excluded.dead_fp",
+                self.scope_id,
+                part_ref,
+                Self::buck_i64(buck_id),
+                i64::from(buck_id.level()),
+                i64::try_from(summary.changed_at).expect(ERROR_IMPOSSIBLE),
+                i64::try_from(summary.live_count).expect(ERROR_IMPOSSIBLE),
+                i64::try_from(summary.dead_count).expect(ERROR_IMPOSSIBLE),
+                Self::db_from_u64(summary.live_fp),
+                Self::db_from_u64(summary.dead_fp)
             )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(part_id))
-            .bind(Self::buck_i64(buck_id))
-            .bind(i64::from(buck_id.level()))
-            .bind(i64::try_from(summary.changed_at).expect(ERROR_IMPOSSIBLE))
-            .bind(i64::try_from(summary.live_count).expect(ERROR_IMPOSSIBLE))
-            .bind(i64::try_from(summary.dead_count).expect(ERROR_IMPOSSIBLE))
-            .bind(Self::db_from_u64(summary.live_fp))
-            .bind(Self::db_from_u64(summary.dead_fp))
             .execute(&mut **tx)
             .await?;
         }

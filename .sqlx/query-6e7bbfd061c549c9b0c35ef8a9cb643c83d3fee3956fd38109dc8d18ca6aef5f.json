@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE cursors SET seq = ?1 WHERE reader = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6e7bbfd061c549c9b0c35ef8a9cb643c83d3fee3956fd38109dc8d18ca6aef5f"
+}

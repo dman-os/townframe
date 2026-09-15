@@ -13,12 +13,104 @@ use tokio::sync::mpsc;
 
 pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
 
-/// ALPN for the blob-partition BigSync stack.
+/// A request stamped with the storage scope it targets.
 ///
-/// Blob partitions are content-addressed and carry no Keyhive membership
-/// policy, so they run on a separate store/worker/RPC server from the
-/// Keyhive-managed document partitions.
-pub const BIG_SYNC_BLOB_RPC_ALPN: &[u8] = b"townframe/big-sync-blobs/0";
+/// The `scope_key` string is the stable cross-peer scope identifier (the
+/// integer `scope_id` is AUTOINCREMENT-local to each database and must never
+/// go on the wire). The server routes each request to the scope-bound store
+/// registered under this key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScopedRequest<T> {
+    pub scope_key: Arc<str>,
+    pub inner: T,
+}
+
+/// Wire-level BigSync RPC client: every request carries its scope.
+///
+/// Scope-bound callers wrap a [`WireBigSyncRpcClient`] in a [`ScopedRpcClient`]
+/// so the machine-side [`HostBigRpcClient`] interface stays scope-agnostic.
+#[async_trait]
+pub trait WireBigSyncRpcClient: Send + Sync {
+    async fn peer_summary(
+        &self,
+        req: ScopedRequest<PeerSummaryRequest>,
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
+
+    async fn sub_parts(
+        &self,
+        req: ScopedRequest<SubPartsRequest>,
+    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>;
+
+    async fn get_changed_buckets(
+        &self,
+        req: ScopedRequest<GetChangedBucketsRequest>,
+    ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>>;
+
+    async fn leaf_buckets(
+        &self,
+        req: ScopedRequest<LeafBucketsRequest>,
+    ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>>;
+}
+
+/// Scope-stamping adapter: implements the scope-agnostic [`HostBigRpcClient`]
+/// by attaching this worker's `scope_key` to every outgoing request.
+#[derive(Clone)]
+pub struct ScopedRpcClient {
+    pub scope_key: Arc<str>,
+    pub inner: Arc<dyn WireBigSyncRpcClient>,
+}
+
+#[async_trait]
+impl HostBigRpcClient for ScopedRpcClient {
+    async fn peer_summary(
+        &self,
+        req: PeerSummaryRequest,
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+        self.inner
+            .peer_summary(ScopedRequest {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: req,
+            })
+            .await
+    }
+
+    async fn sub_parts(
+        &self,
+        req: SubPartsRequest,
+    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
+    {
+        self.inner
+            .sub_parts(ScopedRequest {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: req,
+            })
+            .await
+    }
+
+    async fn get_changed_buckets(
+        &self,
+        req: GetChangedBucketsRequest,
+    ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        self.inner
+            .get_changed_buckets(ScopedRequest {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: req,
+            })
+            .await
+    }
+
+    async fn leaf_buckets(
+        &self,
+        req: LeafBucketsRequest,
+    ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        self.inner
+            .leaf_buckets(ScopedRequest {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: req,
+            })
+            .await
+    }
+}
 
 #[async_trait]
 pub trait HostBigRpcClient: Send + Sync {
@@ -47,13 +139,13 @@ pub trait HostBigRpcClient: Send + Sync {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
-    PeerSummary(PeerSummaryRequest),
+    PeerSummary(ScopedRequest<PeerSummaryRequest>),
     #[rpc(tx = channel::mpsc::Sender<SubEvent>)]
-    SubParts(SubPartsRequest),
+    SubParts(ScopedRequest<SubPartsRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<Vec<BucketSummary>, ListPartsError>>)]
-    GetChangedBuckets(GetChangedBucketsRequest),
+    GetChangedBuckets(ScopedRequest<GetChangedBucketsRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
-    LeafBuckets(LeafBucketsRequest),
+    LeafBuckets(ScopedRequest<LeafBucketsRequest>),
 }
 impl IrohBigSyncRpcClient {
     pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
@@ -142,7 +234,7 @@ impl BigSyncRpcStopToken {
 }
 
 pub async fn spawn_big_sync_rpc(
-    store: Arc<dyn HostPartStore>,
+    stores: HashMap<Arc<str>, Arc<dyn HostPartStore>>,
 ) -> Res<(BigSyncRpcHandle, BigSyncRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
     let (authenticated_tx, mut authenticated_rx) = mpsc::channel(1024);
@@ -154,7 +246,7 @@ pub async fn spawn_big_sync_rpc(
         let cancel_token = cancel_token.clone();
         let subscription_tasks = Arc::clone(&subscription_tasks);
         let mut worker = BigSyncRpcWorker {
-            store,
+            stores,
             cancel_token: cancel_token.clone(),
             subscription_tasks,
         };
@@ -203,10 +295,10 @@ pub struct IrohBigSyncRpcClient {
 }
 
 #[async_trait]
-impl HostBigRpcClient for IrohBigSyncRpcClient {
+impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
     async fn peer_summary(
         &self,
-        req: PeerSummaryRequest,
+        req: ScopedRequest<PeerSummaryRequest>,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
@@ -220,10 +312,11 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
 
     async fn sub_parts(
         &self,
-        req: SubPartsRequest,
+        req: ScopedRequest<SubPartsRequest>,
     ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
     {
         let parts: std::collections::HashSet<_> = req
+            .inner
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -232,7 +325,13 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
             })
             .collect();
         if !parts.is_empty() {
-            match self.peer_summary(PeerSummaryRequest { parts }).await? {
+            match self
+                .peer_summary(ScopedRequest {
+                    scope_key: Arc::clone(&req.scope_key),
+                    inner: PeerSummaryRequest { parts },
+                })
+                .await?
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => return Ok(Ok(Err(err))),
                 Err(err) => return Ok(Err(err)),
@@ -276,7 +375,7 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
 
     async fn get_changed_buckets(
         &self,
-        req: GetChangedBucketsRequest,
+        req: ScopedRequest<GetChangedBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
@@ -290,7 +389,7 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
 
     async fn leaf_buckets(
         &self,
-        req: LeafBucketsRequest,
+        req: ScopedRequest<LeafBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
@@ -304,7 +403,7 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
 }
 
 struct BigSyncRpcWorker {
-    store: Arc<dyn HostPartStore>,
+    stores: HashMap<Arc<str>, Arc<dyn HostPartStore>>,
     cancel_token: CancellationToken,
     subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
@@ -319,9 +418,19 @@ impl BigSyncRpcWorker {
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
+                let Some(store) = self.stores.get(&inner.scope_key) else {
+                    warn!(scope_key = %inner.scope_key, "peer_summary for unknown scope");
+                    tx.send(Err(ListPartsError::UnkownParts {
+                        unkown_parts: vec![],
+                    }))
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                };
                 let out = {
-                    self.store
-                        .summarize_parts(inner.parts)
+                    store
+                        .summarize_parts(inner.inner.parts)
                         .await
                         .unwrap()
                         .map(|parts| PeerSummaryResult {
@@ -342,7 +451,11 @@ impl BigSyncRpcWorker {
                     warn!("rejecting unauthenticated sub_parts request");
                     return;
                 };
-                let sub = self.store.subscribe(inner, subscriber).await.unwrap();
+                let Some(store) = self.stores.get(&inner.scope_key) else {
+                    warn!(scope_key = %inner.scope_key, "sub_parts for unknown scope");
+                    return;
+                };
+                let sub = store.subscribe(inner.inner, subscriber).await.unwrap();
                 let Ok(sub) = sub else {
                     warn!("sub_parts request for unknown parts");
                     return;
@@ -384,12 +497,6 @@ impl BigSyncRpcWorker {
                                         cursor = inner.cursor,
                                         "rpc forwarding Removed event",
                                     ),
-                                    big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::debug!(
-                                        ?subscriber,
-                                        obj_id = %inner.obj_id,
-                                        payload = !inner.payload.is_null(),
-                                        "rpc forwarding ObjectChanged event",
-                                    ),
                                     big_sync_core::rpc::SubEvent::ReplayComplete => tracing::debug!(
                                         ?subscriber,
                                         "rpc forwarding ReplayComplete",
@@ -412,7 +519,17 @@ impl BigSyncRpcWorker {
             }
             BigSyncRpcMessage::GetChangedBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let out = self.store.get_changed_buckets(inner).await.unwrap();
+                let Some(store) = self.stores.get(&inner.scope_key) else {
+                    warn!(scope_key = %inner.scope_key, "get_changed_buckets for unknown scope");
+                    tx.send(Err(ListPartsError::UnkownParts {
+                        unkown_parts: vec![],
+                    }))
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                };
+                let out = store.get_changed_buckets(inner.inner).await.unwrap();
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -420,7 +537,15 @@ impl BigSyncRpcWorker {
             }
             BigSyncRpcMessage::LeafBuckets(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let out = self.store.leaf_buckets(inner).await.unwrap();
+                let Some(store) = self.stores.get(&inner.scope_key) else {
+                    warn!(scope_key = %inner.scope_key, "leaf_buckets for unknown scope");
+                    tx.send(Err(LeafBucketsError::UnkownPart))
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
+                    return;
+                };
+                let out = store.leaf_buckets(inner.inner).await.unwrap();
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -528,6 +653,7 @@ mod tests {
             store
                 .subscribe(
                     SubPartsRequest {
+                        lower_bound: 0,
                         targets: std::collections::HashSet::from([
                             big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
                         ]),
@@ -541,11 +667,15 @@ mod tests {
 
         let rpc_store = Arc::<MemoryPartStore>::clone(&store);
         let rpc_store: Arc<dyn HostPartStore> = rpc_store;
-        let (rpc_handle, rpc_stop) = spawn_big_sync_rpc(rpc_store).await?;
+        let (rpc_handle, rpc_stop) =
+            spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), rpc_store)])).await?;
         let local_peer_summary: Result<PeerSummaryResult, ListPartsError> = rpc_handle
             .client
-            .rpc(PeerSummaryRequest {
-                parts: [part_id].into_iter().collect(),
+            .rpc(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: PeerSummaryRequest {
+                    parts: [part_id].into_iter().collect(),
+                },
             })
             .await?;
         assert_eq!(local_peer_summary, Ok(expected_peer_summary.clone()));
@@ -571,41 +701,54 @@ mod tests {
         let client = IrohBigSyncRpcClient::new(client_endpoint, server_addr);
 
         let peer_summary = client
-            .peer_summary(PeerSummaryRequest {
-                parts: [part_id].into_iter().collect(),
+            .peer_summary(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: PeerSummaryRequest {
+                    parts: [part_id].into_iter().collect(),
+                },
             })
             .await?;
         assert_eq!(peer_summary, Ok(Ok(expected_peer_summary)));
 
         let changed_buckets = client
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id,
-                offset: BuckId::ROOT,
-                since: 0,
-                limit_hint: 16,
+            .get_changed_buckets(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: GetChangedBucketsRequest {
+                    part_id,
+                    offset: BuckId::ROOT,
+                    since: 0,
+                    limit_hint: 16,
+                },
             })
             .await?;
         assert_eq!(changed_buckets, Ok(Ok(expected_changed_buckets)));
 
         let leaf_buckets = client
-            .leaf_buckets(LeafBucketsRequest {
-                part_id,
-                since: 0,
-                buckets: vec![big_sync_core::rpc::LeafBucketRequest {
-                    buck_id: BuckId::ROOT,
-                    after: None,
-                }],
-                seed: FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd),
-                limit_hint: 16,
+            .leaf_buckets(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: LeafBucketsRequest {
+                    part_id,
+                    since: 0,
+                    buckets: vec![big_sync_core::rpc::LeafBucketRequest {
+                        buck_id: BuckId::ROOT,
+                        after: None,
+                    }],
+                    seed: FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd),
+                    limit_hint: 16,
+                },
             })
             .await?;
         assert_eq!(leaf_buckets, Ok(Ok(expected_leaf_buckets)));
 
         let sub_events = client
-            .sub_parts(SubPartsRequest {
-                targets: std::collections::HashSet::from([
-                    big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
-                ]),
+            .sub_parts(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: SubPartsRequest {
+                    lower_bound: 0,
+                    targets: std::collections::HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
+                    ]),
+                },
             })
             .await???;
         let sub_events =
