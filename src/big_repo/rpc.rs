@@ -47,7 +47,7 @@ struct RpcPeerMap {
 
 impl RpcPeerMap {
     fn register(&mut self, endpoint_id: iroh::EndpointId, peer_id: PeerKey) {
-        if let Some(old_peer_id) = self.by_endpoint.insert(endpoint_id, peer_id) {
+        if let Some(old_peer_id) = self.by_endpoint.insert(endpoint_id, peer_id.clone()) {
             self.by_peer.remove(&old_peer_id);
         }
         if let Some(old_endpoint_id) = self.by_peer.insert(peer_id, endpoint_id) {
@@ -62,7 +62,7 @@ impl RpcPeerMap {
     }
 
     fn lookup(&self, endpoint_id: iroh::EndpointId) -> Option<PeerKey> {
-        self.by_endpoint.get(&endpoint_id).copied()
+        self.by_endpoint.get(&endpoint_id).cloned()
     }
 }
 
@@ -123,7 +123,7 @@ impl ProtocolHandler for BigRepoRpcProtocolHandler {
                 // path still notifies, but the misconfiguration must be visible
                 // rather than silent — embedders register the mapping from the
                 // repo-sync connection (`BigRepoRpcHandle::register_peer`).
-                let peer_id = PeerKey::new(*endpoint_id.as_bytes());
+                let peer_id = PeerKey::new(endpoint_id.as_bytes());
                 tracing::warn!(
                     %endpoint_id,
                     %peer_id,
@@ -142,7 +142,7 @@ impl ProtocolHandler for BigRepoRpcProtocolHandler {
                     break;
                 }
             };
-            if self.tx.send((peer_id, msg)).await.is_err() {
+            if self.tx.send((peer_id.clone(), msg)).await.is_err() {
                 break;
             }
         }
@@ -225,13 +225,14 @@ async fn handle_rpc_message(
             // debounces the fan-out per peer. This task only keeps the
             // subscription alive for the connection's lifetime and removes it
             // on disconnect.
-            let sub_id = big_repo.subscribe_keyhive_changes(peer_id, tx).await;
+            let sub_id = big_repo.subscribe_keyhive_changes(peer_id.clone(), tx).await;
             let cancel = cancel_token.child_token();
             let repo = Arc::clone(&big_repo);
             let cleanup_repo = Arc::clone(&big_repo);
+            let peer_id_for_task = peer_id.clone();
             match subscription_tasks.spawn(async move {
                 cancel.cancelled().await;
-                repo.unsubscribe_keyhive_changes(&peer_id, sub_id).await;
+                repo.unsubscribe_keyhive_changes(&peer_id_for_task, sub_id).await;
             }) {
                 Ok(_) => {
                     tracing::debug!(%peer_id, "registered direct Keyhive change stream");
@@ -292,8 +293,8 @@ mod tests {
         let application_peer = PeerKey::new([8; 32]);
         let mut map = RpcPeerMap::default();
 
-        map.register(endpoint_id, application_peer);
-        assert_eq!(map.lookup(endpoint_id), Some(application_peer));
+        map.register(endpoint_id, application_peer.clone());
+        assert_eq!(map.lookup(endpoint_id), Some(application_peer.clone()));
 
         map.unregister(application_peer);
         assert_eq!(map.lookup(endpoint_id), None);

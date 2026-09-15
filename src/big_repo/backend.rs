@@ -20,11 +20,11 @@ impl BigRepoSyncBackend {
 /// events were received but never applied, which is an apply-side defect
 /// instead. Without this, both look identical in a rejection message.
 async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::DocumentId) -> String {
-    let Ok(local_key) = ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes())
+    let Ok(local_key) = ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
     else {
         return "local peer id is not a verifying key".to_owned();
     };
-    let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes()) else {
+let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
         return "document id is not a verifying key".to_owned();
     };
     let local = keyhive_core::principal::identifier::Identifier::from(local_key);
@@ -99,9 +99,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .repo
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
-        let doc_id: crate::DocumentId = obj_id;
+        let doc_id: crate::DocumentId = obj_id.clone();
 
-        let has_local_doc_state = repo.runtime.has_local_doc_state(doc_id).await?;
+        let has_local_doc_state = repo.runtime.has_local_doc_state(doc_id.clone()).await?;
         tracing::debug!(
             remote_peer_id = %peer_id,
             %doc_id,
@@ -112,10 +112,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         // Equal advertised heads only prove logical convergence. A partially
         // materialized sedimentree can still be missing the blobs needed to
         // reconstruct those heads, so it must run the backend sync.
-        let local_heads = repo.doc_payload_heads(doc_id).await?;
+        let local_heads = repo.doc_payload_heads(doc_id.clone()).await?;
         if let Some(remote_payload) = &remote_payload
             && let Some(local_heads) = &local_heads
-            && repo.doc_head_state(doc_id).await?.state
+            && repo.doc_head_state(doc_id.clone()).await?.state
                 == crate::runtime2::MaterializationState::Materialized
         {
             let remote_heads = super::doc_heads_from_payload(remote_payload);
@@ -131,7 +131,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         let timeout = repo.sync_policy().backend_doc_sync_timeout;
         let receipt = match tokio::time::timeout(
             timeout,
-            repo.runtime.sync_doc_with_peer_receipt(doc_id, peer_id),
+            repo.runtime.sync_doc_with_peer_receipt(doc_id.clone(), peer_id.clone()),
         )
         .await
         {
@@ -160,9 +160,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 }
 
                 let local_key =
-                    ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes())
+                    ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
                         .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
-                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .map_err(|_| eyre::eyre!("document id is not a verifying key"))?;
                 let local = keyhive_core::principal::identifier::Identifier::from(local_key);
                 let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
@@ -190,7 +190,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 // membership view before deciding whether this object is truly
                 // revoked: an object can be advertised locally while its grant
                 // is still only in the remote admission log.
-                repo.sync_keyhive_with_peer(peer_id)
+                repo.sync_keyhive_with_peer(peer_id.clone())
                     .await
                     .wrap_err("keyhive reconciliation after remote Unauthorized failed")?;
                 let after = if repo
@@ -249,7 +249,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 ));
             }
             Ok(Err(crate::SyncDocError::Policy(error))) => {
-                let local_state = describe_local_policy_state(&repo, doc_id).await;
+                let local_state = describe_local_policy_state(&repo, doc_id.clone()).await;
                 tracing::warn!(
                     %peer_id,
                     %doc_id,

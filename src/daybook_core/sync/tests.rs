@@ -361,7 +361,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     let partitions = node_b
         .ctx
         .part_store
-        .summarize_parts(HashSet::from([core_partition_id]))
+        .summarize_parts(HashSet::from([core_partition_id.clone()]))
         .await??;
     let core_partition = partitions.get(&core_partition_id);
     assert!(
@@ -500,7 +500,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     for idx in 0..3usize {
         let payload = format!("clone-bootstrap-blob-{idx:03}").into_bytes();
         let hash = node_a.blobs_repo.put(&payload).await?;
-        blob_payloads.push((hash, payload));
+        blob_payloads.push((hash.clone(), payload));
         args_batch.push(AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: [(
@@ -508,7 +508,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
                 FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
                     mime: "application/octet-stream".to_string(),
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash),
+                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
                     urls: Some(vec![format!("db+blob:///{hash}")]),
                 })),
@@ -533,7 +533,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     // The blob bytes must actually be present in node_b's blob store — doc-set
     // equality alone would not catch a blob-scope sync gap.
     for (hash, expected) in &blob_payloads {
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, None).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash.clone(), None).await?;
         assert_eq!(
             &got, expected,
             "blob content mismatch after clone bootstrap for hash={hash}"
@@ -577,7 +577,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     for idx in 0..8usize {
         let payload = format!("blob-bytes-validation-{idx:03}").into_bytes();
         let hash = node_a.blobs_repo.put(&payload).await?;
-        blob_payloads.push((hash, payload));
+        blob_payloads.push((hash.clone(), payload));
         args_batch.push(AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: [(
@@ -585,7 +585,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
                 FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
                     mime: "application/octet-stream".to_string(),
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash),
+                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
                     urls: Some(vec![format!("db+blob:///{hash}")]),
                 })),
@@ -599,7 +599,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     node_a.drawer.batch_add(args_batch).await?;
 
     for (hash, expected) in &blob_payloads {
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, None).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash.clone(), None).await?;
         assert_eq!(
             &got, expected,
             "blob content mismatch after sync for hash={hash}"
@@ -714,12 +714,12 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     assert!(hashes_b.contains(&hash_2));
 
     // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
-    let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, None).await?;
+    let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1.clone(), None).await?;
     assert_eq!(bytes_1, payload_1);
     let bytes_1_direct = node_b.blobs_repo.get_bytes(blob_id_1).await?;
     assert_eq!(bytes_1_direct, payload_1);
 
-    let bytes_2 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, None).await?;
+    let bytes_2 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2.clone(), None).await?;
     assert_eq!(bytes_2, payload_2);
     let bytes_2_direct = node_b.blobs_repo.get_bytes(blob_id_2).await?;
     assert_eq!(bytes_2_direct, payload_2);
@@ -1303,19 +1303,19 @@ async fn wait_for_doc_head_parity(
             if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
                 last_heartbeat = now;
                 let runtime_doc_id = doc_id.parse::<big_repo::DocumentId>().ok();
-                let left_state = match runtime_doc_id {
+                let left_state = match runtime_doc_id.clone() {
                     Some(id) => left.ctx.big_repo.doc_head_state(id).await.ok(),
                     None => None,
                 };
-                let right_state = match runtime_doc_id {
+                let right_state = match runtime_doc_id.clone() {
                     Some(id) => right.ctx.big_repo.doc_head_state(id).await.ok(),
                     None => None,
                 };
-                let left_diagnostics = match runtime_doc_id {
+                let left_diagnostics = match runtime_doc_id.clone() {
                     Some(id) => left.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
                     None => None,
                 };
-                let right_diagnostics = match runtime_doc_id {
+                let right_diagnostics = match runtime_doc_id.clone() {
                     Some(id) => right.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
                     None => None,
                 };
@@ -1365,7 +1365,7 @@ async fn wait_for_blob_bytes(
         .map(|t| tokio::time::Instant::now() + t);
     let mut last_log = tokio::time::Instant::now();
     loop {
-        let path = match blobs_repo.get_path(blob_id).await {
+        let path = match blobs_repo.get_path(blob_id.clone()).await {
             Ok(path) => path,
             Err(err) => {
                 let msg = err.to_string();

@@ -75,7 +75,7 @@ impl DecidePeerStrategyTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_id = self.peer_id;
+        let peer_id = self.peer_id.clone();
         self.run_run(cx)
             .await
             .map_err(|deets| DecidePeerStrategyTaskError { peer_id, deets })
@@ -102,8 +102,8 @@ impl DecidePeerStrategyTask {
         // the same one.
         let mut asker_part_cursors = Map::new();
         for part_id in &self.parts {
-            let cursor = cx.part_store.get_peer_part_cursor(self.peer_id, *part_id).await;
-            asker_part_cursors.insert(*part_id, cursor);
+            let cursor = cx.part_store.get_peer_part_cursor(self.peer_id.clone(), part_id.clone()).await;
+            asker_part_cursors.insert(part_id.clone(), cursor);
         }
         let summary = peer_rpc
             .peer_summary(PeerSummaryRequest {
@@ -167,14 +167,15 @@ impl DecidePeerStrategyTask {
                 loop {
                     let buckets = peer_rpc
                         .get_changed_buckets(GetChangedBucketsRequest {
-                            part_id,
+                            part_id: part_id.clone(),
                             offset,
+                            to_level: working_level,
                             limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
                             since: last_peer_cursor,
                         })
                         .await??;
                     let filtered = crate::bucket::filter_buckets(
-                        part_id,
+                        part_id.clone(),
                         working_level,
                         buckets,
                         &cx.part_store,
@@ -265,14 +266,15 @@ impl DecidePeerStrategyTask {
             loop {
                 let buckets = peer_rpc
                     .get_changed_buckets(GetChangedBucketsRequest {
-                        part_id,
+                        part_id: part_id.clone(),
                         offset,
+                        to_level: working_level,
                         limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
                         since: last_peer_cursor,
                     })
                     .await??;
                 let filtered =
-                    crate::bucket::filter_buckets(part_id, working_level, buckets, &cx.part_store)
+                    crate::bucket::filter_buckets(part_id.clone(), working_level, buckets, &cx.part_store)
                         .await;
                 let strat = match filtered {
                     crate::bucket::FilteredBuckets::Relist(buck_id) => {
@@ -507,19 +509,19 @@ mod tests {
         let mut cx = TaskCtx {
             task_id: 1,
             main_tx,
-            rpc_clients: Map::from_iter([(peer_id, rpc)]),
+            rpc_clients: Map::from_iter([(peer_id.clone(), rpc)]),
             part_store: store,
             rng: rand::rng(),
             _phantom: std::marker::PhantomData,
         };
         let task = DecidePeerStrategyTask {
             peer_id,
-            parts: Set::from([part_id]),
+            parts: Set::from([part_id.clone()]),
             // The bucket band is opt-in only, so a part left on `CursorOnly` would
             // short-circuit before the band choice is reached. The per-part override
             // selects it here; the machine default stays `CursorOnly`, so this also
             // covers the override layer.
-            sync_modes: Map::from_iter([(part_id, SyncMode::Bucket)]),
+            sync_modes: Map::from_iter([(part_id.clone(), SyncMode::Bucket)]),
             default_sync_mode: SyncMode::CursorOnly,
         };
         let deets = task

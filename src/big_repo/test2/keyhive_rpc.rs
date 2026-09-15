@@ -110,7 +110,7 @@ async fn create_doc_notification_drives_peer_keyhive_convergence() -> Res<()> {
             if super::harness::keyhive::assert_document_snapshot_equal(
                 pair.left(),
                 pair.right(),
-                doc_id,
+                doc_id.clone(),
             )
             .await
             .is_ok()
@@ -158,7 +158,7 @@ async fn pulled_keyhive_change_is_forwarded_across_line_topology() -> Res<()> {
             if super::harness::keyhive::assert_document_snapshot_equal(
                 topo.topo_node(0),
                 topo.topo_node(2),
-                doc_id,
+                doc_id.clone(),
             )
             .await
             .is_ok()

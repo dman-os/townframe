@@ -170,7 +170,7 @@ async fn recover_pending_documents(
     // public key before a signed Keyhive authority exists.
     for document_id in big_repo.reserved_doc_ids().await? {
         if !big_repo
-            .recover_allocated_doc(document_id, pending_documents.clone())
+            .recover_allocated_doc(document_id.clone(), pending_documents.clone())
             .await
             .map_err(eyre::Report::from)
             .wrap_err_with(|| format!("finalizing pending document {document_id}"))?
@@ -244,7 +244,7 @@ pub(crate) async fn grant_docs_admin(
     use big_repo::keyhive_core::{access::Access, principal::identifier::Identifier};
     let group_ident = Identifier::from(group.id());
     for doc_id in doc_ids {
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
             .map_err(|err| eyre::eyre!("invalid doc_id verifying key: {err}"))?;
         let doc_ident = Identifier::from(vk);
         if matches!(

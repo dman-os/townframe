@@ -20,7 +20,7 @@ fn sorted(heads: &mut [automerge::ChangeHash]) {
 
 /// Assert sedimentree-heads parity between the two nodes of a [`Pair`].
 pub async fn assert_sedimentree_parity(pair: &Pair, doc_id: DocumentId) -> Res<()> {
-    let left = pair.left().repo.doc_head_state(doc_id).await?;
+    let left = pair.left().repo.doc_head_state(doc_id.clone()).await?;
     let right = pair.right().repo.doc_head_state(doc_id).await?;
     let (mut l, mut r) = (
         left.sedimentree_heads.to_vec(),
@@ -54,7 +54,7 @@ pub async fn assert_sedimentree_parity_with_deadline(
     deadline: tokio::time::Instant,
 ) -> Res<()> {
     loop {
-        match assert_sedimentree_parity(pair, doc_id).await {
+        match assert_sedimentree_parity(pair, doc_id.clone()).await {
             Ok(()) => return Ok(()),
             Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -111,7 +111,7 @@ pub async fn tier0_invariants(
     // scaled window to converge before failing the scenario.
     let parity_deadline =
         tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
-    if let Err(error) = assert_sedimentree_parity_with_deadline(pair, doc_id, parity_deadline).await
+    if let Err(error) = assert_sedimentree_parity_with_deadline(pair, doc_id.clone(), parity_deadline).await
     {
         let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
         return Err(crate::ferr!("{error}\n{diagnostics}"));
@@ -130,8 +130,8 @@ pub async fn tier0_invariants(
 /// the stress harness), and the same state shows up verbatim in the failure
 /// diagnostics via [`state_summary`].
 pub async fn log_head_state(pair: &Pair, doc_id: DocumentId) -> Res<()> {
-    let left = pair.left().repo.doc_head_state(doc_id).await?;
-    let right = pair.right().repo.doc_head_state(doc_id).await?;
+    let left = pair.left().repo.doc_head_state(doc_id.clone()).await?;
+    let right = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     debug!(
         %doc_id,
         "tier2 head state: {} | {}",

@@ -4,9 +4,9 @@
 use crate::interlude::*;
 
 use crate::part_store::{CursorIndex, ObjPayload};
-use crate::watermark::WatermarkBook;
+use crate::watermark::{StreamDrop, WatermarkMachine};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,49 +52,27 @@ pub struct CursorSyncMachine {
     /// last cursor locally so duplicate deliveries do not schedule the same
     /// object sync twice; durable replay bounds remain request-level.
     object_cursors: HashMap<ObjKey, CursorIndex>,
-    /// Per-part slot bookkeeping: which cursors are pending work and where the
-    /// emitted watermark stands. This is the [`WatermarkBook`] primitive rather
-    /// than a machine-local copy of it, so "what is outstanding, what has
-    /// settled, when may the cursor advance" has one implementation, shared with
-    /// the delta walker.
-    watermarks: HashMap<PartKey, WatermarkBook<CursorIndex>>,
-        active_obj_jobs: BTreeMap<
-            ObjKey,
-
-            /// Look at [`SyncMachine::on_obj_sync_completed`] impl for how this
-            /// actually works in more detail.
-            struct ObjectJobState {
-                #![derive(Debug, Clone, Default)]
-                /// Since a obj can be a member of multiple partitions
-                /// from a single peer and be involved in multiple
-                /// events (consquetive changes) we, have these events
-                /// wait on the same job to dedpe work.
-                waiters: BTreeMap<
-                    CursorIndex,
-                    struct CursorWaiter {
-                        #![derive(Debug, Default, Clone)]
-                        pub parts: Vec<PartKey>,
-                        pub pending_membership: bool,
-                        pub pending_sync: bool,
-                    }
-                >,
-                // removed_from_parts: Set<PartKey>,
-            }
-
-        >,
+    /// Per-part slot bookkeeping AND the obj-job aggregation gating it: the
+    /// [`WatermarkMachine`] primitive rather than a machine-local copy, so
+    /// "what is outstanding, what has settled, when may the cursor advance"
+    /// has one implementation, shared with the delta walker. The job is the
+    /// object, a stream is a part whose cursor it gates, and the lane is which
+    /// half of the work — the membership write or the object sync — is owed.
+    ///
+    /// The primitive owns the shared-slot rule too: a `(stream, cursor)` slot
+    /// advances only once every job gating it has settled. This machine admits
+    /// a given `(part, cursor)` only once (`mark_pending_cursor` rejects a
+    /// repeat), so its slots have a single waiter — the rule matters for the
+    /// delta walker's single-stream shape, and the machine no longer needs an
+    /// opinion of its own about it.
+    jobs: WatermarkMachine<PartKey, ObjKey, CursorJobCompletionKind, (), CursorIndex>,
     }
 }
 
 impl CursorSyncMachine {
     pub(crate) fn remove_part(&mut self, part_id: PartKey) {
-        self.watermarks.remove(&part_id);
-        self.active_obj_jobs.retain(|_, job| {
-            job.waiters.retain(|_, waiter| {
-                waiter.parts.retain(|candidate| *candidate != part_id);
-                !waiter.parts.is_empty()
-            });
-            !job.waiters.is_empty()
-        });
+        // Drops the part's slot book and every waiter that gated only it.
+        self.jobs.retire_stream(part_id);
     }
 
     pub(crate) fn supersede_obj_part(
@@ -104,47 +82,27 @@ impl CursorSyncMachine {
         before_cursor: CursorIndex,
         out: &mut Vec<CursorMachineCommand>,
     ) {
-        let mut ready_cursors = Vec::new();
-        let mut empty_waiters = Vec::new();
-        if let Some(job) = self.active_obj_jobs.get_mut(&obj_id) {
-            for (&cursor, waiter) in job.waiters.range_mut(..before_cursor) {
-                if !waiter.parts.contains(&part_id) {
-                    continue;
+        let advances = self.jobs.drop_stream(part_id, obj_id, before_cursor, |waiter| {
+            if waiter.lanes.contains(&CursorJobCompletionKind::Membership)
+                && waiter.streams.len() == 1
+            {
+                // The already-queued membership mutation still has to finish
+                // before its cursor can advance, but the later removal makes
+                // fetching the object's contents unnecessary.
+                StreamDrop::Retain {
+                    keep: vec![CursorJobCompletionKind::Membership],
                 }
-                if waiter.pending_membership && waiter.parts.len() == 1 {
-                    // The already-queued membership mutation still has to finish
-                    // before its cursor can advance, but the later removal makes
-                    // fetching the object's contents unnecessary.
-                    waiter.pending_sync = false;
-                    continue;
-                }
-                waiter.parts.retain(|candidate| *candidate != part_id);
-                ready_cursors.push(cursor);
-                if waiter.parts.is_empty() {
-                    empty_waiters.push(cursor);
-                }
+            } else {
+                StreamDrop::Release
             }
-            for cursor in empty_waiters {
-                job.waiters.remove(&cursor);
-            }
-            if job.waiters.is_empty() {
-                self.active_obj_jobs.remove(&obj_id);
-            }
-        }
-        for cursor in ready_cursors {
-            self.watermarks
-                .entry(part_id)
-                .or_default()
-                .force_finish(cursor);
-            self.drain_ready_cursor_advances(part_id, out);
-        }
+        });
+        self.emit_advances(advances, out);
     }
-    fn mark_pending_cursor(&mut self, part_id: PartKey, cursor: CursorIndex) -> bool {
+    fn mark_pending_cursor(&mut self, part_id: &PartKey, cursor: CursorIndex) -> bool {
         // The admission guard (duplicate cursor, or at-or-below the emitted
         // watermark) lives in the primitive.
-        let book = self.watermarks.entry(part_id).or_default();
-        let emitted = book.watermark();
-        let admitted = book.begin(cursor);
+        let emitted = self.jobs.watermark(part_id);
+        let admitted = self.jobs.admit(part_id.clone(), cursor);
         if !admitted {
             // Upstream's diagnostic lived at this site before the guard moved into
             // the primitive. `emitted` is logged so the two rejections stay apart: a
@@ -176,14 +134,14 @@ impl CursorSyncMachine {
                     "subscription Changed event",
                 );
                 let mut parts = vec![];
-                for &part_id in &evt.part_ids {
+                for part_id in &evt.part_ids {
                     if !self.mark_pending_cursor(part_id, evt.cursor) {
                         continue;
                     }
-                    parts.push(part_id);
+                    parts.push(part_id.clone());
                 }
                 if parts.is_empty() {
-                    let last_cursor = self.object_cursors.entry(evt.obj_id).or_default();
+                    let last_cursor = self.object_cursors.entry(evt.obj_id.clone()).or_default();
                     if evt.cursor <= *last_cursor {
                         tracing::debug!(
                             ?evt.obj_id,
@@ -202,10 +160,12 @@ impl CursorSyncMachine {
                     });
                     return;
                 }
-                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                let waiter = job.waiters.entry(evt.cursor).or_default();
-                waiter.parts.extend(parts.iter().copied());
-                waiter.pending_sync = true;
+                self.track_obj_job(
+                    evt.obj_id.clone(),
+                    evt.cursor,
+                    parts.iter().cloned(),
+                    CursorJobCompletionKind::Sync,
+                );
                 out.push(CursorMachineCommand::SyncObj {
                     obj_id: evt.obj_id,
                     parts,
@@ -221,13 +181,15 @@ impl CursorSyncMachine {
                     payload = !evt.payload.is_null(),
                     "subscription Added event",
                 );
-                if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
+                if !self.mark_pending_cursor(&evt.part_id, evt.cursor) {
                     return;
                 }
-                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                let waiter = job.waiters.entry(evt.cursor).or_default();
-                waiter.parts.push(evt.part_id);
-                waiter.pending_sync = true;
+                self.track_obj_job(
+                    evt.obj_id.clone(),
+                    evt.cursor,
+                    [evt.part_id.clone()],
+                    CursorJobCompletionKind::Sync,
+                );
                 out.push(CursorMachineCommand::SyncObj {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
@@ -242,14 +204,21 @@ impl CursorSyncMachine {
                     ?evt.part_id,
                     "subscription Removed event",
                 );
-                if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
+                if !self.mark_pending_cursor(&evt.part_id, evt.cursor) {
                     return;
                 }
-                self.supersede_obj_part(evt.obj_id, evt.part_id, evt.cursor, out);
-                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                let waiter = job.waiters.entry(evt.cursor).or_default();
-                waiter.parts.push(evt.part_id);
-                waiter.pending_membership = true;
+                self.supersede_obj_part(
+                    evt.obj_id.clone(),
+                    evt.part_id.clone(),
+                    evt.cursor,
+                    out,
+                );
+                self.track_obj_job(
+                    evt.obj_id.clone(),
+                    evt.cursor,
+                    [evt.part_id.clone()],
+                    CursorJobCompletionKind::Membership,
+                );
                 out.push(CursorMachineCommand::RemoveObjFromParts {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
@@ -267,63 +236,45 @@ impl CursorSyncMachine {
         kind: CursorJobCompletionKind,
         out: &mut Vec<CursorMachineCommand>,
     ) {
-        let Some(mut job) = self.active_obj_jobs.remove(&obj_id) else {
-            return;
-        };
-        let Some(waiter) = job.waiters.get_mut(&cursor) else {
-            self.active_obj_jobs.insert(obj_id, job);
-            return;
-        };
-        match kind {
-            CursorJobCompletionKind::Membership => {
-                if !waiter.pending_membership {
-                    panic!("cursor membership completion without pending membership");
-                }
-                waiter.pending_membership = false;
+        // A completion for a job/cursor that is not tracked is stale, not an
+        // error; the primitive returns nothing for it. A completion for a lane
+        // the waiter never owed still panics inside the primitive.
+        let advances = self.jobs.settle(obj_id, cursor, kind);
+        self.emit_advances(advances, out);
+    }
+
+    /// Emit the part-cursor commands for streams that just reached a new
+    /// watermark. `PartIdle` follows `SetPartCursor` only when the part has no
+    /// un-advanced cursors left.
+    fn emit_advances(
+        &mut self,
+        advances: Vec<(PartKey, Option<CursorIndex>)>,
+        out: &mut Vec<CursorMachineCommand>,
+    ) {
+        for (part_id, reached) in advances {
+            let Some(cursor) = reached else {
+                continue;
+            };
+            out.push(CursorMachineCommand::SetPartCursor { part_id: part_id.clone(), cursor });
+            if self.jobs.is_settled(&part_id) {
+                out.push(CursorMachineCommand::PartIdle { part_id });
             }
-            CursorJobCompletionKind::Sync => {
-                if !waiter.pending_sync {
-                    panic!("cursor sync completion without pending sync");
-                }
-                waiter.pending_sync = false;
-            }
-        }
-        if waiter.pending_membership || waiter.pending_sync {
-            self.active_obj_jobs.insert(obj_id, job);
-            return;
-        }
-        let waiter = job.waiters.remove(&cursor).expect(ERROR_UNRECONIZED);
-        for part_id in waiter.parts {
-            self.watermarks
-                .entry(part_id)
-                .or_default()
-                .force_finish(cursor);
-            self.drain_ready_cursor_advances(part_id, out);
-        }
-        if !job.waiters.is_empty() {
-            self.active_obj_jobs.insert(obj_id, job);
         }
     }
 
-    fn drain_ready_cursor_advances(
+    /// One obj job gating one cursor across several parts. The machine tracks
+    /// per stream, so this is one `track` call per part and the waiter merges
+    /// them — a repeated part is not double-counted, or the slot could never
+    /// finish.
+    fn track_obj_job(
         &mut self,
-        part_id: PartKey,
-        out: &mut Vec<CursorMachineCommand>,
+        obj_id: ObjKey,
+        cursor: CursorIndex,
+        parts: impl IntoIterator<Item = PartKey>,
+        lane: CursorJobCompletionKind,
     ) {
-        // Advance to the contiguous prefix of finished slots; the primitive owns
-        // the highmark search, the covered-slot sweep and the emitted watermark.
-        let Some(cursor) = self.watermarks.entry(part_id).or_default().drain() else {
-            return;
-        };
-
-        // update sync store
-        out.push(CursorMachineCommand::SetPartCursor { part_id, cursor });
-        if self
-            .watermarks
-            .get(&part_id)
-            .is_none_or(WatermarkBook::is_settled)
-        {
-            out.push(CursorMachineCommand::PartIdle { part_id });
+        for part_id in parts {
+            self.jobs.track(part_id, obj_id.clone(), cursor, [lane], ());
         }
     }
 }

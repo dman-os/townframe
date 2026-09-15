@@ -947,7 +947,7 @@ impl DrawerRepo {
         let local_user_path = self.local_user_path.clone();
         let mut local_actor_ids = HashSet::from([
             self.local_actor_id.clone(),
-            self.content_actor_id(None, branch_doc_id),
+            self.content_actor_id(None, branch_doc_id.clone()),
         ]);
         if let Some(doc) = self
             .get_doc_with_facets_at_branch_heads(
@@ -981,7 +981,7 @@ impl DrawerRepo {
                     && local_segments.get(1) == user_segments.get(1)
                 {
                     local_actor_ids
-                        .insert(self.content_actor_id(Some(&user_meta.user_path), branch_doc_id));
+                        .insert(self.content_actor_id(Some(&user_meta.user_path), branch_doc_id.clone()));
                 }
             }
         }

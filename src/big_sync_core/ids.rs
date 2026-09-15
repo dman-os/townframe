@@ -6,9 +6,8 @@ use crate::rpc::BuckLevel;
 
 macro_rules! alias_byte_key {
     ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
-        #[repr(transparent)]
         pub struct $name(pub ByteKey);
         impl std::ops::Deref for $name {
             type Target = ByteKey;
@@ -18,8 +17,14 @@ macro_rules! alias_byte_key {
             }
         }
         impl $name {
+            /// Construct from the key's byte string.
+            ///
+            /// ADR 012 decision 1: identity *is* the byte string, so any length is a
+            /// valid key. The 32-byte width this replaced was an artifact of deriving
+            /// keys as random digests, and an ordering requirement is a property of the
+            /// byte string rather than of the width.
             #[must_use]
-            pub const fn new(bytes: [u8; 32]) -> Self {
+            pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
                 Self(ByteKey::new(bytes))
             }
 
@@ -53,22 +58,14 @@ macro_rules! alias_byte_key {
                 &self,
                 mut reconciler: R,
             ) -> Result<(), R::Error> {
-                reconciler.bytes(self.0.0)
+                reconciler.bytes(self.as_bytes())
             }
         }
 
         #[cfg(feature = "automerge")]
         impl autosurgeon::Hydrate for $name {
             fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
-                if bytes.len() != 32 {
-                    return Err(autosurgeon::HydrateError::unexpected(
-                        "version tag in 32 length byte array",
-                        format!("version tags has byte length of {}", bytes.len()),
-                    ));
-                }
-                let mut buf = [0_u8; 32];
-                buf.copy_from_slice(&bytes[0..32]);
-                Ok(Self(ByteKey(buf)))
+                Ok(Self(ByteKey::new(bytes)))
             }
         }
     };
@@ -83,48 +80,75 @@ impl ObjKey {
     ///
     /// ADR 012 decision 3: an object part is an ordinary one-member part whose key is
     /// derived from the object key, so anyone holding the object key can compute it and
-    /// it cannot collide with an unrelated part. The reserved key spaces of decision 1
-    /// make this expressible as the literal `o:{object_key}`, but that needs keys to be
-    /// variable-length; while they are still fixed 32-byte values the derivation is a
-    /// domain-separated digest, which is computable from the key and collision-free
-    /// against unrelated parts just the same.
+    /// it cannot collide with an unrelated part. The reserved key space of decision 1
+    /// makes that the literal `o:{object_key}`: the `o:` scheme keeps the boundary
+    /// between scheme and value readable for a key that is itself a path
+    /// (`o:/object/path`), which neither a `/o/` prefix (a doubled slash) nor a bare
+    /// `/o` (no readable boundary) gives.
+    ///
+    /// The appended value is the object key's own bytes, not its textual form, so the
+    /// derivation is injective on identity: a 32-byte digest renders as `o:z…` and a
+    /// textual key as `o:/object/path`, and either round-trips through `ByteKey::from_str`.
     #[must_use]
-    pub fn object_part_key(self) -> PartKey {
-        let mut bytes = b"townframe/big-sync/object-part/v1".to_vec();
+    pub fn object_part_key(&self) -> PartKey {
+        let mut bytes = b"o:".to_vec();
         bytes.extend_from_slice(self.as_bytes());
-        PartKey::new(*blake3::hash(&bytes).as_bytes())
+        PartKey::new(bytes)
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ByteKey([u8; 32]);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteKey(std::sync::Arc<[u8]>);
 
 impl ByteKey {
     #[must_use]
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(std::sync::Arc::from(bytes.into()))
     }
 
     pub fn random() -> Self {
-        Self(rand::random())
+        Self(std::sync::Arc::from(rand::random::<[u8; 32]>().to_vec()))
     }
 
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     #[must_use]
-    pub const fn into_bytes(self) -> [u8; 32] {
-        self.0
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    /// The key's bytes as a fixed-width 32-byte array.
+    ///
+    /// ADR 012 decision 1 makes keys variable-length, but the fixed-width consumers at
+    /// the workspace edges — ed25519 verifying keys, `KeyhivePeerId`, keyhive archive
+    /// reservations, automerge change hashes — still take a `[u8; 32]`. Every key that
+    /// reaches them is a 32-byte digest by construction, so a different length is an
+    /// invariant break rather than something to handle.
+    #[must_use]
+    pub fn to_bytes32(&self) -> [u8; 32] {
+        self.as_bytes()
+            .try_into()
+            .expect("key that must be 32 bytes is not")
     }
 }
 
 impl std::fmt::Display for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // FIXME: use fixed size stack buffer to write string onto and then write that onto the
-        // formatter
-        write!(formatter, "{}", bs58::encode(&self.0).into_string())
+        // ADR 012 decision 1: a key whose bytes are printable text is displayed as that
+        // text, which is what makes the reserved key spaces (`/seds`, `o:…`) readable.
+        // Anything else is multibase base58btc, which is also the human-readable serde
+        // form, so the two round-trip through each other.
+        match std::str::from_utf8(&self.0) {
+            Ok(text) if !text.chars().any(char::is_control) => formatter.write_str(text),
+            _ => write!(
+                formatter,
+                "{}",
+                utils_rs::hash::encode_base58_multibase(&self.0)
+            ),
+        }
     }
 }
 
@@ -142,10 +166,15 @@ impl std::str::FromStr for ByteKey {
     type Err = DecodeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let bytes: [u8; 32] = bs58::decode(value.as_bytes())
-            .into_array_const()
-            .map_err(|_| DecodeError)?;
-        Ok(Self(bytes))
+        // `z` is the multibase base58btc prefix, so a `z`-prefixed string is base58.
+        // Everything else is the literal text bytes, which is what makes `"o:foo"` and
+        // `"/seds"` parse as the keys they read as. A textual key that itself begins
+        // with `z` is ambiguous under this rule; the reserved key spaces start with `/`
+        // or `o:`, so no key this crate constructs is.
+        match value.strip_prefix('z') {
+            Some(encoded) => Ok(Self::new(bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?)),
+            None => Ok(Self::new(value.as_bytes())),
+        }
     }
 }
 
@@ -155,7 +184,7 @@ impl Serialize for ByteKey {
         S: serde::Serializer,
     {
         if serializer.is_human_readable() {
-            utils_rs::hash::encode_base58_multibase(self.0).serialize(serializer)
+            utils_rs::hash::encode_base58_multibase(&self.0).serialize(serializer)
         } else {
             serializer.serialize_bytes(&self.0)
         }
@@ -169,35 +198,26 @@ impl<'de> serde::Deserialize<'de> for ByteKey {
     {
         if deserializer.is_human_readable() {
             let str = String::deserialize(deserializer)?;
-            let mut buf = [0u8; 32];
-            utils_rs::hash::decode_base58_multibase_onto(&str, &mut buf)
+            let bytes = utils_rs::hash::decode_base58_multibase(&str)
                 .map_err(serde::de::Error::custom)?;
-            Ok(Self(buf))
+            Ok(Self::new(bytes))
         } else {
             struct MyVisitor;
             impl<'de> serde::de::Visitor<'de> for MyVisitor {
-                type Value = [u8; 32];
+                type Value = Vec<u8>;
 
                 fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    fmt.write_str("a 32 length byte string")
+                    fmt.write_str("a byte string")
                 }
 
                 fn visit_bytes<E>(self, val: &[u8]) -> Result<Self::Value, E>
                 where
                     E: serde::de::Error,
                 {
-                    if val.len() != 32 {
-                        return Err(serde::de::Error::invalid_length(
-                            val.len(),
-                            &"32 length byte array",
-                        ));
-                    }
-                    let mut buf = [0u8; 32];
-                    buf.copy_from_slice(val);
-                    Ok(buf)
+                    Ok(val.to_vec())
                 }
             }
-            deserializer.deserialize_bytes(MyVisitor).map(Self)
+            deserializer.deserialize_bytes(MyVisitor).map(Self::new)
         }
     }
 }
@@ -207,22 +227,14 @@ impl autosurgeon::Reconcile for ByteKey {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
-        reconciler.bytes(self.0)
+        reconciler.bytes(self.as_bytes())
     }
 }
 
 #[cfg(feature = "automerge")]
 impl autosurgeon::Hydrate for ByteKey {
     fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
-        if bytes.len() != 32 {
-            return Err(autosurgeon::HydrateError::unexpected(
-                "byte id in 32 length byte array",
-                format!("byte string has byte length of {}", bytes.len()),
-            ));
-        }
-        let mut buf = [0_u8; 32];
-        buf.copy_from_slice(&bytes[0..32]);
-        Ok(Self(buf))
+        Ok(Self::new(bytes))
     }
 }
 
@@ -294,21 +306,47 @@ impl BuckId {
         }
     }
 
-    /// The deepest bucket an object key falls into.
+    /// The deepest bucket an object key falls into: the full hash-derived index.
     ///
-    /// This inherits the bucket index from the key's leading bytes. ADR 012 decision 1
-    /// makes distribution an explicitly chosen hash of the key at the point of use, so
-    /// that a key's *ordering* and its *layout* stay independent — which matters as soon
-    /// as keys are textual (a reserved or path-shaped key would otherwise pile every
-    /// object into the ranges its prefix implies). That change rides with the
-    /// variable-length key representation.
+    /// ADR 012 decision 1: distribution is an explicitly chosen hash of the key at the
+    /// point of use, never an index inherited from the key's own leading bytes. Keys are
+    /// arbitrary byte strings whose prefixes now *mean* something — every object part key
+    /// begins `o:`, and a textual key's leading bytes are its path — so an inherited index
+    /// would pile unrelated objects into one bucket and degenerate the tree at its top
+    /// level (every `o:`-prefixed key would land in the single level-4 bucket `0x6f3a`).
+    ///
+    /// Hashing first keeps the level/truncation hierarchy intact, because a parent is
+    /// still a prefix of its children in *hash* space. It severs only the correspondence
+    /// between bucket order and key order, and nothing in the protocol relies on that:
+    /// requests, pages and relists are all ordered and compared in bucket order, and the
+    /// per-part authorization boundary means a bucket is never a disclosure unit.
     #[inline]
-    pub fn from_obj_key(level: BuckLevel, obj_key: &ObjKey) -> Self {
-        debug_assert!(level <= Self::MAX_LEVEL);
-        let l4_index = u16::from_be_bytes([obj_key.0.0[0], obj_key.0.0[1]]);
-        Self::new(4, l4_index).to_level(level)
+    #[must_use]
+    pub fn deepest_from_obj_key(obj_key: &ObjKey) -> Self {
+        let hash = blake3::hash(obj_key.as_bytes());
+        let bytes = hash.as_bytes();
+        Self::new(Self::MAX_LEVEL, u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
+    /// The bucket an object key falls into at `level`.
+    #[inline]
+    #[must_use]
+    pub fn from_obj_key(level: BuckLevel, obj_key: &ObjKey) -> Self {
+        debug_assert!(level <= Self::MAX_LEVEL);
+        Self::deepest_from_obj_key(obj_key).to_level(level)
+    }
+
+    /// The next page cursor within this level.
+    ///
+    /// ADR 012 decision 1 audit: this counts pages *at one level*, it does not walk the
+    /// tree, and an increment past this level's last index deliberately leaves the level
+    /// field alone. Requests are level-scoped (`get_changed_buckets` matches on
+    /// `offset.level()`), so the overflowed index is only ever an exclusive lower bound in
+    /// bucket order: the store answers an empty page, `filter_buckets` reads that as
+    /// `Done`, and that *is* what "nothing more at this level" looks like. Offsets that do
+    /// change level come from a dive (`Relist(dirty.to_level(level + 1))`), which the
+    /// machine's `next_page_offset.level() > working_level` check catches. None of this
+    /// depends on key order, which is why the hash-derived index needed no change here.
     #[inline]
     pub fn increment(&self) -> Self {
         if *self == Self::new(Self::MAX_LEVEL, u16::MAX) {
@@ -318,3 +356,5 @@ impl BuckId {
         }
     }
 }
+
+

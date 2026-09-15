@@ -398,7 +398,7 @@ impl Ctx {
         }
         for document_id in &documents {
             let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(document_id);
-            self.part_store.ensure_part(part_id).await?;
+            self.part_store.ensure_part(part_id.clone()).await?;
             let old_hashes = before
                 .iter()
                 .filter(|((doc_id, _), _)| doc_id == document_id)
@@ -424,12 +424,12 @@ impl Ctx {
             }
             for hash in new_hashes.difference(&old_hashes) {
                 self.part_store
-                    .add_obj_to_parts(crate::blobs::blob_id_from_hash(hash), vec![part_id])
+                    .add_obj_to_parts(crate::blobs::blob_id_from_hash(hash), vec![part_id.clone()])
                     .await?;
             }
             for hash in old_hashes.difference(&new_hashes) {
                 self.part_store
-                    .remove_obj_from_part(crate::blobs::blob_id_from_hash(hash), part_id)
+                    .remove_obj_from_part(crate::blobs::blob_id_from_hash(hash), part_id.clone())
                     .await?;
             }
         }
@@ -922,13 +922,13 @@ mod tests {
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
         assert_eq!(
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
 
         let hashes = list_hashes_for_doc(&sql, &doc_id).await?;
@@ -956,7 +956,7 @@ mod tests {
             blob_part_store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
         assert_eq!(
             blob_part_store

@@ -195,7 +195,7 @@ impl ConfigRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .into_ready(app_doc_id)?;
+            .into_ready(app_doc_id.clone())?;
 
         let store_val = ConfigStore::load(&app_doc_handle).await?;
         let local_user_path =
@@ -520,7 +520,7 @@ impl ConfigRepo {
             .big_repo
             .get_doc(&self.app_doc_id)
             .await?
-            .into_ready(self.app_doc_id)?;
+            .into_ready(self.app_doc_id.clone())?;
         let heads = handle.with_document_read(|doc| doc.get_heads()).await;
         Ok(Arc::from(heads))
     }
@@ -771,7 +771,7 @@ mod tests {
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),
-            app_doc_id,
+            app_doc_id.clone(),
             local_user_path.clone(),
             Arc::clone(&sqlite_local_state_repo),
         )

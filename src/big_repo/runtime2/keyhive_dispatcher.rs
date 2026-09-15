@@ -61,7 +61,7 @@ impl KeyhiveChangeDispatcher {
         surelock::key::lock_scope(|key| {
             let (mut subscriptions, _key) = key.lock(&self.subscriptions);
             subscriptions.insert(
-                peer_id,
+                peer_id.clone(),
                 SubscriptionEntry {
                     id: sub_id,
                     tx: tx.clone(),
@@ -239,7 +239,7 @@ async fn classify_rows(
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         subs.keys()
-            .map(|peer| KeyhivePeerId::from_bytes(*peer.as_bytes()))
+.map(|peer| KeyhivePeerId::from_bytes(peer.to_bytes32()))
             .collect()
     });
     if connected.is_empty() {
@@ -439,7 +439,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerKey, ())>) {
             let (subs, _key) = key.lock(subscriptions);
             due.into_iter()
             .filter_map(|(peer_id, ())| {
-                let found = subs.get(&peer_id).map(|entry| (peer_id, entry.id, entry.tx.clone()));
+                let found = subs.get(&peer_id).map(|entry| (peer_id.clone(), entry.id, entry.tx.clone()));
                 if dispatch_diag() && found.is_none() {
                     tracing::debug!(
                         peer = %peer_id,

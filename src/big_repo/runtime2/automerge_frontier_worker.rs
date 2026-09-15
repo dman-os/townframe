@@ -57,11 +57,11 @@ const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// scope key), so the raw `doc_id` cannot collide with the document's own
 /// sedimentree object in the main scope.
 pub fn automerge_doc_obj_id(doc_id: crate::DocumentId) -> ObjKey {
-    ObjKey(big_sync_core::ByteKey::new(*doc_id.as_bytes()))
+ObjKey(big_sync_core::ByteKey::new(doc_id.as_bytes()))
 }
 
 pub fn automerge_obj_to_doc_id(obj_id: ObjKey) -> crate::DocumentId {
-    crate::DocumentId::new(*obj_id.as_bytes())
+crate::DocumentId::new(obj_id.as_bytes())
 }
 
 #[derive(Clone)]
@@ -140,7 +140,7 @@ pub fn spawn_automerge_frontier_worker(
                         .expect("persisted keyhive admission event must decode");
                     match event {
                         StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
-                            crate::DocumentId::new(*operation.payload().doc_id().as_bytes()),
+                            crate::DocumentId::new(operation.payload().doc_id().as_bytes()),
                         ),
                         _ => FrontierKey::Decode(row.seq),
                     }
@@ -164,9 +164,9 @@ pub fn spawn_automerge_frontier_worker(
             let part_reader = part_source.open((), part_durable).await?;
             let parts = ConcurrentDeltaWalker::open(part_reader, part_state, |event| {
                 let doc_id = match event {
-                    SubEvent::Added(event) => event.obj_id,
-                    SubEvent::Changed(event) => event.obj_id,
-                    SubEvent::Removed(event) => event.obj_id,
+                    SubEvent::Added(event) => event.obj_id.clone(),
+                    SubEvent::Changed(event) => event.obj_id.clone(),
+                    SubEvent::Removed(event) => event.obj_id.clone(),
                     SubEvent::ReplayComplete => {
                         unreachable!("replay completion has no part event key")
                     }
@@ -238,7 +238,7 @@ enum SourceKind {
     Parts,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum FrontierKey {
     Decode(u64),
     Document(crate::DocumentId),
@@ -272,7 +272,7 @@ async fn publish_heads(
     // nobody holds look live (that would apply received content into the
     // materialized bundle and emit user-visible change notifications for it).
     let Ok(crate::runtime2::types::DocLookup::Ready(handle)) =
-        runtime.acquire_internal_doc_handle(doc_id).await
+        runtime.acquire_internal_doc_handle(doc_id.clone()).await
     else {
         tracing::debug!(%doc_id, "AFW publish deferred: document bundle not ready");
         return Ok(PublishOutcome::Deferred);
@@ -288,7 +288,7 @@ async fn publish_heads(
         // The admission's CGKA op advances the per-document operation count; the
         // hub forwards it to the doc worker, which re-materializes and updates
         // the bundle. Await the bundle to catch up before advertising heads.
-        let target_ops_count = keyhive.current_cgka_ops_count(doc_id).await?;
+        let target_ops_count = keyhive.current_cgka_ops_count(doc_id.clone()).await?;
         tracing::debug!(
             %doc_id,
             target_ops_count,
@@ -324,34 +324,34 @@ async fn publish_heads(
         doc.get_heads()
     });
     let heads_formatted = am_utils_rs::serialize_commit_heads(&heads);
-    let am_obj_id = automerge_doc_obj_id(doc_id);
+    let am_obj_id = automerge_doc_obj_id(doc_id.clone());
     let payload = serde_json::json!({
         "heads": heads_formatted,
         "causal_epoch": causal_epoch,
     });
-    frontier_store.set_obj_payload(am_obj_id, payload).await?;
+    frontier_store.set_obj_payload(am_obj_id.clone(), payload).await?;
     tracing::debug!(
         %doc_id,
         head_count = heads.len(),
         "AFW frontier payload written"
     );
     let desired_parts = big_sync_store
-        .obj_parts(am_obj_id)
+        .obj_parts(am_obj_id.clone())
         .await?
         .into_iter()
-        .filter(|part_id| scope_includes_part(scope, *part_id))
+        .filter(|part_id| scope_includes_part(scope, part_id.clone()))
         .collect::<Vec<_>>();
-    let current_parts = frontier_store.obj_parts(am_obj_id).await?;
+    let current_parts = frontier_store.obj_parts(am_obj_id.clone()).await?;
     if !desired_parts.is_empty() {
         frontier_store
-            .add_obj_to_parts(am_obj_id, desired_parts.clone())
+            .add_obj_to_parts(am_obj_id.clone(), desired_parts.clone())
             .await?;
     }
     let current_part_count = current_parts.len();
     for part_id in current_parts {
         if !desired_parts.contains(&part_id) {
             frontier_store
-                .remove_obj_from_part(am_obj_id, part_id)
+                .remove_obj_from_part(am_obj_id.clone(), part_id)
                 .await?;
         }
     }
@@ -420,7 +420,7 @@ impl RevisionedStoreReader<u64, SubEvent, eyre::Report> for LocalPartRevisionRea
 }
 
 const CONCURRENT_TASK_BUDGET: usize = 64;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SourceCursor {
     source: SourceKind,
     key: FrontierKey,
@@ -568,7 +568,7 @@ impl<'a> Worker<'a> {
             match cmd {
                 Cmd::RemoveFrontierMembership { doc_id, part_id } => {
                     self.frontier_store
-                        .remove_obj_from_part(automerge_doc_obj_id(*doc_id), *part_id)
+                        .remove_obj_from_part(automerge_doc_obj_id(doc_id.clone()), part_id.clone())
                         .await?;
                 }
                 Cmd::AdvanceKhCursor(cursor) => {
@@ -599,7 +599,7 @@ impl<'a> Worker<'a> {
             self.keyhive.clone(),
             self.scope.clone(),
         );
-        self.tasks.replace(key, task, future)?;
+        self.tasks.replace(key.clone(), task, future)?;
         tracing::debug!(?key, "AFW keyed task accepted by scheduler");
         Ok(())
     }
@@ -614,11 +614,11 @@ impl<'a> Worker<'a> {
             "AFW preparing frontier publish"
         );
         self.start_task(
-            FrontierKey::Document(doc_id),
+            FrontierKey::Document(doc_id.clone()),
             FrontierTask::Publish {
-                doc_id,
-                admission: self.pending_admission.get(&doc_id).copied(),
-                part_source: self.pending_part_sources.get(&doc_id).copied(),
+                doc_id: doc_id.clone(),
+                admission: self.pending_admission.get(&doc_id).cloned(),
+                part_source: self.pending_part_sources.get(&doc_id).cloned(),
                 part_cursor: self
                     .pending_parts
                     .get(&doc_id)
@@ -632,7 +632,7 @@ impl<'a> Worker<'a> {
             .entry(doc_id)
             .and_modify(|old| {
                 if source.cursor > old.cursor {
-                    *old = source;
+                    *old = source.clone();
                 }
             })
             .or_insert(source);
@@ -668,7 +668,7 @@ impl<'a> Worker<'a> {
     ) -> Res<()> {
         let source = SourceCursor {
             source: SourceKind::Admission,
-            key: delta.key,
+            key: delta.key.clone(),
             cursor: delta.cursor,
         };
         tracing::debug!(
@@ -680,13 +680,13 @@ impl<'a> Worker<'a> {
             // operations key by document and go straight to publication.
             FrontierKey::Document(doc_id) => {
                 self.pending_admission
-                    .entry(doc_id)
+                    .entry(doc_id.clone())
                     .and_modify(|old| {
                         if source.cursor > old.cursor {
-                            *old = source;
+                            *old = source.clone();
                         }
                     })
-                    .or_insert(source);
+                    .or_insert(source.clone());
                 tracing::debug!(
                     %doc_id,
                     source_cursor = source.cursor,
@@ -717,18 +717,18 @@ impl<'a> Worker<'a> {
             SubEvent::Added(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
                 tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped added part revision to document");
-                self.remember_part_source(doc_id, source);
+                self.remember_part_source(doc_id.clone(), source);
                 self.pending_parts
-                    .entry(doc_id)
+                    .entry(doc_id.clone())
                     .or_default()
                     .insert(event.part_id, event.cursor);
                 self.start_publish(doc_id)?;
             }
             SubEvent::Changed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
-                self.remember_part_source(doc_id, source);
+                self.remember_part_source(doc_id.clone(), source.clone());
                 tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped changed part revision to document");
-                let parts = self.pending_parts.entry(doc_id).or_default();
+                let parts = self.pending_parts.entry(doc_id.clone()).or_default();
                 for part_id in event.part_ids {
                     parts.insert(part_id, event.cursor);
                 }
@@ -745,7 +745,7 @@ impl<'a> Worker<'a> {
                     self.pending_parts.remove(&doc_id);
                     self.pending_part_sources.remove(&doc_id);
                     if !self.pending_admission.contains_key(&doc_id) {
-                        self.tasks.cancel(FrontierKey::Document(doc_id));
+                        self.tasks.cancel(FrontierKey::Document(doc_id.clone()));
                     }
                 }
                 self.outbox.push(
@@ -805,18 +805,18 @@ impl<'a> Worker<'a> {
                     "AFW publish task completed"
                 );
                 if let Some(source) = admission {
-                    self.acknowledge_source(source).await?;
-                    if self.pending_admission.get(&doc_id).copied() == Some(source) {
+                    self.acknowledge_source(source.clone()).await?;
+                    if self.pending_admission.get(&doc_id).cloned() == Some(source) {
                         self.pending_admission.remove(&doc_id);
                     }
                 }
                 if let Some(source) = part_source {
-                    self.acknowledge_source(source).await?;
-                    if self.pending_part_sources.get(&doc_id).copied() == Some(source) {
+                    self.acknowledge_source(source.clone()).await?;
+                    if self.pending_part_sources.get(&doc_id).cloned() == Some(source) {
                         self.pending_part_sources.remove(&doc_id);
                     }
                 }
-                if !self.settle_doc_txid(doc_id, through) {
+                if !self.settle_doc_txid(doc_id.clone(), through) {
                     self.wake_docs.insert(doc_id);
                 }
             }
@@ -830,26 +830,29 @@ impl<'a> Worker<'a> {
                 Ok(ConcurrentTaskOutput::OutOfScope),
             ) => {
                 if let Some(source) = admission {
-                    self.acknowledge_source(source).await?;
-                    if self.pending_admission.get(&doc_id).copied() == Some(source) {
+                    self.acknowledge_source(source.clone()).await?;
+                    if self.pending_admission.get(&doc_id).cloned() == Some(source) {
                         self.pending_admission.remove(&doc_id);
                     }
                 }
                 if let Some(source) = part_source {
-                    self.acknowledge_source(source).await?;
-                    if self.pending_part_sources.get(&doc_id).copied() == Some(source) {
+                    self.acknowledge_source(source.clone()).await?;
+                    if self.pending_part_sources.get(&doc_id).cloned() == Some(source) {
                         self.pending_part_sources.remove(&doc_id);
                     }
                 }
                 self.pending_parts.remove(&doc_id);
             }
-            (task @ FrontierTask::Publish { doc_id, .. }, Ok(ConcurrentTaskOutput::Deferred)) => {
+            (
+                ref task @ FrontierTask::Publish { ref doc_id, .. },
+                Ok(ConcurrentTaskOutput::Deferred),
+            ) => {
                 tracing::debug!(
                     %doc_id,
                     task = ?task,
                     "AFW publish task deferred/parked"
                 );
-                self.tasks.park(FrontierKey::Document(doc_id), task);
+                self.tasks.park(FrontierKey::Document(doc_id.clone()), task.clone());
             }
             (task, Err(error)) => {
                 tracing::error!(task = ?task, error = ?error, "AFW task failed");
@@ -891,7 +894,7 @@ impl<'a> Worker<'a> {
         // `start_ready_document_work` re-queues docs it cannot schedule, so
         // nothing is dropped when the task budget is saturated.
         for doc in self.keyhive.document_ids().await {
-            let doc_id = crate::DocumentId::new(doc.into_bytes());
+            let doc_id = crate::DocumentId::new(doc.as_bytes());
             self.wake_docs.insert(doc_id);
         }
         Ok(())
@@ -900,7 +903,7 @@ impl<'a> Worker<'a> {
     fn start_ready_document_work(&mut self) -> Res<()> {
         for doc_id in std::mem::take(&mut self.wake_docs) {
             tracing::debug!(%doc_id, active_tasks = self.tasks.active_count(), "AFW considering woken document");
-            if !self.tasks.has_capacity_for(FrontierKey::Document(doc_id)) {
+            if !self.tasks.has_capacity_for(FrontierKey::Document(doc_id.clone())) {
                 tracing::debug!(%doc_id, "AFW retaining woken document: scheduler at capacity");
                 self.wake_docs.insert(doc_id);
                 continue;
@@ -939,7 +942,7 @@ async fn run_concurrent_frontier_task(
             // here instead of quietly consuming a document worker.
             #[cfg(any(test, feature = "test-support"))]
             assert!(
-                crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id),
+                crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id.clone()),
                 "non-document object reached the automerge frontier source: obj_id={doc_id}. \
                  State that is not a document belongs in the derived scope, not the document scope"
             );
@@ -948,15 +951,15 @@ async fn run_concurrent_frontier_task(
                 // events for documents that joined or left the scope are handled
                 // by the same path as admission events.
                 tracing::debug!(%doc_id, "AFW checking live document scope membership");
-                let doc_groups = keyhive.group_ids_containing_document(doc_id).await?;
+                let doc_groups = keyhive.group_ids_containing_document(doc_id.clone()).await?;
                 tracing::debug!(%doc_id, doc_groups = ?doc_groups, "AFW resolved live document scope membership");
                 if !scope.admits_doc_groups(&doc_groups) {
                     // The document left the worker's scope: tear down its
                     // frontier mirror so nothing stale is advertised to peers.
                     let am_obj_id = automerge_doc_obj_id(doc_id);
-                    for part_id in frontier_store.obj_parts(am_obj_id).await? {
+                    for part_id in frontier_store.obj_parts(am_obj_id.clone()).await? {
                         frontier_store
-                            .remove_obj_from_part(am_obj_id, part_id)
+                            .remove_obj_from_part(am_obj_id.clone(), part_id)
                             .await?;
                     }
                     return Ok(ConcurrentTaskOutput::OutOfScope);
@@ -999,17 +1002,17 @@ mod tests {
         let part = PartKey::new([4; 32]);
         let mut pending = HashMap::new();
         pending
-            .entry(document)
+            .entry(document.clone())
             .or_insert_with(BTreeMap::new)
-            .insert(part, 2);
-        pending.get_mut(&document).unwrap().insert(part, 9);
+            .insert(part.clone(), 2);
+        pending.get_mut(&document).unwrap().insert(part.clone(), 9);
         assert_eq!(pending[&document][&part], 9);
     }
 
     #[test]
     fn scoped_frontier_mirroring_excludes_global_membership() {
         let group = PartKey::new([8; 32]);
-        let scope = WorkerGroupScope::Groups([group].into_iter().collect());
+        let scope = WorkerGroupScope::Groups([group.clone()].into_iter().collect());
         assert!(!scope_includes_part(&scope, crate::global_part_id()));
         assert!(scope_includes_part(&scope, group));
         assert!(!scope_includes_part(&scope, PartKey::new([9; 32])));

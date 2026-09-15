@@ -23,7 +23,7 @@ pub struct NetworkRestTarget {
 async fn cursor_snapshot(targets: &[NetworkRestTarget]) -> Res<Vec<BTreeMap<PartKey, CursorIndex>>> {
     let mut snapshots = Vec::with_capacity(targets.len());
     for target in targets {
-        let requested: HashSet<_> = target.part_ids.iter().copied().collect();
+        let requested: HashSet<_> = target.part_ids.iter().cloned().collect();
         let summaries = target
             .store
             .summarize_parts(requested)
@@ -64,8 +64,8 @@ where
                 target
                     .worker
                     .wait_for_full_sync(
-                        target.peer_ids.iter().copied(),
-                        target.part_ids.iter().copied(),
+                        target.peer_ids.iter().cloned(),
+                        target.part_ids.iter().cloned(),
                     )
                     .await?;
                 tracing::info!(

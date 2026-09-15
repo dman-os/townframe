@@ -23,6 +23,10 @@ rand.workspace = true
 structstruck.workspace = true
 
 #
+# collections
+smallvec.workspace = true
+
+#
 # encoding
 blake3.workspace = true
 bs58.workspace = true

@@ -489,7 +489,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
         let doc = self
             .keyhive
-            .get_document(keyhive_doc_id(doc_id)?)
+            .get_document(keyhive_doc_id(doc_id.clone())?)
             .await
             .ok_or_else(|| ferr!("keyhive document not found: {doc_id}"))?;
         Ok(doc
@@ -632,7 +632,7 @@ impl BigKeyhiveHandle {
         let doc_id = DocumentId::new(signing_key.verifying_key().to_bytes());
         let reservation = crate::keyhive_storage::DocReservation {
             magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
-            doc_id: doc_id.into_bytes(),
+doc_id: doc_id.to_bytes32(),
             signing_key: signing_key.to_bytes(),
             parents: parents
                 .into_iter()
@@ -656,14 +656,14 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         if storage
-            .load_doc_reservation(doc_id.into_bytes())
+.load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
             .is_none()
         {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_some()
             {
@@ -672,7 +672,7 @@ impl BigKeyhiveHandle {
             return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
         }
         storage
-            .stage_doc_reservation(doc_id.into_bytes(), initial_content, initial_keys)
+.stage_doc_reservation(doc_id.to_bytes32(), initial_content, initial_keys)
             .await
             .map_err(|err| ferr!("failed staging initial document content: {err}"))
     }
@@ -692,9 +692,9 @@ impl BigKeyhiveHandle {
         protocol: &BigRepoKeyhiveProtocol,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let Some(reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+.load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
         else {
@@ -714,7 +714,7 @@ impl BigKeyhiveHandle {
             return Ok(Vec::new());
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
-        if signing_key.verifying_key().to_bytes() != doc_id.into_bytes() {
+if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
             return Err(ferr!(
                 "reserved signing key does not match document id {doc_id}"
             ));
@@ -752,13 +752,13 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
         let Some(_reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+.load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
         else {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_none()
             {
@@ -768,13 +768,13 @@ impl BigKeyhiveHandle {
         };
         let document_ids = self.group_document_ids(pending_group).await;
         let hashes = if document_ids.contains(&doc_id) {
-            self.revoke_group_from_doc(pending_group, doc_id, after_content, protocol)
+            self.revoke_group_from_doc(pending_group, doc_id.clone(), after_content, protocol)
                 .await?
         } else {
             Vec::new()
         };
         storage
-            .delete_doc_reservation(doc_id.into_bytes())
+.delete_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
         Ok(hashes)
@@ -870,7 +870,7 @@ impl BigKeyhiveHandle {
             .document_ids_containing_group(group.id())
             .await
             .into_iter()
-            .map(|doc_id| DocumentId::new(*doc_id.as_bytes()))
+            .map(|doc_id| DocumentId::new(doc_id.as_bytes()))
             .collect()
     }
 
@@ -903,7 +903,7 @@ impl BigKeyhiveHandle {
         let affected_docs = update
             .cgka_ops
             .iter()
-            .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
+            .map(|op| DocumentId::new(op.payload().doc_id().as_bytes()))
             .collect();
         let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
         if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
@@ -923,7 +923,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -956,7 +956,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
 
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -1000,7 +1000,7 @@ impl BigKeyhiveHandle {
 }
 
 fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

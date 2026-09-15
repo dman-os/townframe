@@ -181,13 +181,13 @@ impl BucketMachine {
             // basically, we can get the same page twice if a failing leaf job
             // is retried
             let mut seen = HashSet::new();
-            seen.extend(state.pending_objs.iter().map(|obj| obj.obj_id));
-            seen.extend(state.active_objs.keys().copied());
-            seen.extend(self.active_obj_jobs.keys().copied());
+            seen.extend(state.pending_objs.iter().map(|obj| obj.obj_id.clone()));
+            seen.extend(state.active_objs.keys().cloned());
+            seen.extend(self.active_obj_jobs.keys().cloned());
             state
                 .pending_objs
                 .extend(page.entries.into_iter().filter(|obj| {
-                    let allow = seen.insert(obj.obj_id);
+                    let allow = seen.insert(obj.obj_id.clone());
                     if !allow {
                         // warn!("dupe obj_id seen");
                     }
@@ -284,7 +284,7 @@ impl BucketMachine {
                 continue;
             }
             state.leaf_inflight = true;
-            selected.push((buck_id, state.leaf_after));
+            selected.push((buck_id, state.leaf_after.clone()));
             estimated += remaining;
         }
 
@@ -317,7 +317,7 @@ impl BucketMachine {
                 .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
                 .collect();
             out.push(BucketMachineCommand::LeafBuckets {
-                part_id: self.part_id,
+                part_id: self.part_id.clone(),
                 since: self.last_cursor,
                 buckets,
             });
@@ -333,7 +333,7 @@ impl BucketMachine {
                 "bucket machine upgrading to cursor"
             );
             out.push(BucketMachineCommand::UpgradeToCursor {
-                part_id: self.part_id,
+                part_id: self.part_id.clone(),
             });
         } else if !self.list_dispatched
             && !self.done_listing
@@ -349,7 +349,7 @@ impl BucketMachine {
                 out.push(BucketMachineCommand::ListBuckets {
                     since: self.last_cursor,
                     offset,
-                    part_id: self.part_id,
+                    part_id: self.part_id.clone(),
                     working_level: self.working_level,
                 });
             }
@@ -368,18 +368,18 @@ impl BucketMachine {
                 match obj.delta {
                     PartObjDelta::New | PartObjDelta::Change => {
                         out.push(BucketMachineCommand::SyncObj {
-                            obj_id: obj.obj_id,
-                            part_id: self.part_id,
+                            obj_id: obj.obj_id.clone(),
+                            part_id: self.part_id.clone(),
                             remote_payload: None,
                         });
-                        self.active_obj_jobs.insert(obj.obj_id, *buck_id);
-                        let old = buck.active_objs.insert(obj.obj_id, obj);
+                        self.active_obj_jobs.insert(obj.obj_id.clone(), *buck_id);
+                        let old = buck.active_objs.insert(obj.obj_id.clone(), obj);
                         assert!(old.is_none(), "fishy");
                     }
                     PartObjDelta::Delete => {
                         out.push(BucketMachineCommand::RemoveObjFromParts {
                             obj_id: obj.obj_id,
-                            part_id: self.part_id,
+                            part_id: self.part_id.clone(),
                         });
                     }
                 }
@@ -441,7 +441,6 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
     if buckets.is_empty() {
         return FilteredBuckets::Done;
     }
-    let mut first_dirty = None;
     let mut last_id = BuckId::ROOT;
     let in_len = buckets.len();
 
@@ -460,31 +459,31 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
                 continue 'b;
             }
         }
-        let local_summary = part_store.get_bucket_summary(part_id, buck.id).await;
+        let local_summary = part_store.get_bucket_summary(part_id.clone(), buck.id).await;
         if summaries_agree(&local_summary, &buck) {
             clean_bucks.insert(buck.id);
             clean_ctr += 1;
             continue;
         }
-        first_dirty.get_or_insert(buck.id);
         if buck.id.level() == working_lvl {
             out.push(buck);
         }
     }
     if out.is_empty() {
-        if let Some(dirty) = first_dirty {
-            // dirty buckets seen but none
-            // on the working level: dive
-            FilteredBuckets::Relist(dirty.to_level(dirty.level() + 1))
-        } else if working_lvl == 0 {
+        if working_lvl == 0 {
+            // No dirty bucket at the working level: at level 0 a bucket is a leaf range and
+            // there is nothing beneath it left to look at.
             FilteredBuckets::Done
         } else {
+            // Every bucket in this page was either clean or dirty *above* the working level.
+            // In both cases the buckets that settle the answer come later in the same
+            // bucket-order scan, because the request carries `to_level` (ADR 012 decision 4,
+            // correction 3): the cursor is the whole response and no dive is needed.
             let offset = last_id.increment();
             if offset.level() > working_lvl {
                 assert_eq!(in_len, clean_ctr);
                 FilteredBuckets::Done
             } else {
-                // all the buckets we saw were clean
                 FilteredBuckets::Relist(offset)
             }
         }
@@ -522,7 +521,7 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
 ) -> Map<BuckId, BucketObjLeafPage> {
     let mut out = Map::new();
     for (buck_id, page) in bucks {
-        let summary = part_store.get_bucket_summary(part_id, buck_id).await;
+        let summary = part_store.get_bucket_summary(part_id.clone(), buck_id).await;
         let mut out_objs = vec![];
         if summary.len == 0 {
             out_objs.extend(page.entries.into_iter().filter_map(|ee| {
@@ -546,18 +545,18 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
             continue;
         }
         for obj in page.entries {
-            match part_store.obj_payload(obj.obj_id).await {
+            match part_store.obj_payload(obj.obj_id.clone()).await {
                 Some(payload) => {
                     if !obj.dead {
                         let local_fp =
-                            Fingerprint::new(&seed, &("big-sync-obj-fp-v1", obj.obj_id, payload));
+                            Fingerprint::new(&seed, &("big-sync-obj-fp-v1", obj.obj_id.clone(), payload));
                         if local_fp != obj.fp {
                             out_objs.push(BucketObjEntry {
                                 obj_id: obj.obj_id,
                                 delta: PartObjDelta::Change,
                             });
                         } else {
-                            let local_parts = part_store.obj_parts(obj.obj_id).await;
+                            let local_parts = part_store.obj_parts(obj.obj_id.clone()).await;
                             if !local_parts.contains(&part_id) {
                                 out_objs.push(BucketObjEntry {
                                     obj_id: obj.obj_id,

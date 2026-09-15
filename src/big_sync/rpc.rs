@@ -213,7 +213,7 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
                     break;
                 }
             };
-            if self.tx.send((peer_id, msg)).await.is_err() {
+            if self.tx.send((peer_id.clone(), msg)).await.is_err() {
                 break;
             }
         }
@@ -388,7 +388,7 @@ impl BigSyncRpcWorker {
                                 let since =
                                     asker_part_cursors.get(&part_id).copied().unwrap_or(0);
                                 let dirty = store
-                                    .part_dirty_count(part_id, authenticated_peer, since)
+                                    .part_dirty_count(part_id.clone(), authenticated_peer.clone(), since)
                                     .await
                                     .unwrap();
                                 summaries.insert(part_id, summary.into_strat_summaries(dirty));
@@ -500,7 +500,7 @@ mod tests {
 
 
     async fn seed_test_store(store: &MemoryPartStore, part_id: PartKey) -> Res<()> {
-        store.ensure_part(part_id).await?;
+        store.ensure_part(part_id.clone()).await?;
 
         let live_obj = test_obj(1);
         let dead_obj = test_obj(2);
@@ -508,13 +508,13 @@ mod tests {
         let payload_dead = serde_json::json!({"kind":"dead","value":2});
 
         store
-            .set_obj_payload(live_obj, payload_live.clone())
+            .set_obj_payload(live_obj.clone(), payload_live.clone())
             .await?;
-        store.add_obj_to_parts(live_obj, vec![part_id]).await?;
+        store.add_obj_to_parts(live_obj, vec![part_id.clone()]).await?;
         store
-            .set_obj_payload(dead_obj, payload_dead.clone())
+            .set_obj_payload(dead_obj.clone(), payload_dead.clone())
             .await?;
-        store.add_obj_to_parts(dead_obj, vec![part_id]).await?;
+        store.add_obj_to_parts(dead_obj.clone(), vec![part_id.clone()]).await?;
         store.remove_obj_from_part(dead_obj, part_id).await?;
         Ok(())
     }
@@ -523,7 +523,7 @@ mod tests {
     async fn real_iroh_rpc_roundtrip_matches_store() -> Res<()> {
         let part_id = test_part();
         let store = Arc::new(MemoryPartStore::new());
-        seed_test_store(&store, part_id).await?;
+        seed_test_store(&store, part_id.clone()).await?;
 
         // The same expectation is asserted for the in-process call and the network
         // call. They agree because this store holds no access rows, so the access half
@@ -532,19 +532,20 @@ mod tests {
         let expected_peer_summary = {
             let mut summaries = HashMap::new();
             for (part_id, summary) in store
-                .summarize_parts([part_id].into_iter().collect())
+                .summarize_parts([part_id.clone()].into_iter().collect())
                 .await?
                 .unwrap()
             {
-                let dirty = HostPartStore::part_dirty_count(store.as_ref(), part_id, None, 0).await?;
+                let dirty = HostPartStore::part_dirty_count(store.as_ref(), part_id.clone(), None, 0).await?;
                 summaries.insert(part_id, summary.into_strat_summaries(dirty));
             }
             PeerSummaryResult { parts: summaries }
         };
         let expected_changed_buckets = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id,
+                part_id: part_id.clone(),
                 offset: BuckId::ROOT,
+                to_level: BuckId::MAX_LEVEL,
                 since: 0,
                 limit_hint: 16,
             })
@@ -552,7 +553,7 @@ mod tests {
             .unwrap();
         let expected_leaf_buckets = store
             .leaf_buckets(LeafBucketsRequest {
-                part_id,
+                part_id: part_id.clone(),
                 since: 0,
                 buckets: vec![big_sync_core::rpc::LeafBucketRequest {
                     buck_id: BuckId::ROOT,
@@ -567,10 +568,10 @@ mod tests {
         // They agree because this store holds no access rows, so the member half
         // is the same for both and neither is denied.
         let page_target =
-            big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 };
+            big_sync_core::rpc::SubscriptionTarget::Part { part_id: part_id.clone(), cursor: 0 };
         let expected_page = store
             .replay_page(
-                page_target,
+                page_target.clone(),
                 16,
                 PeerKey::new([0u8; 32]),
                 Duration::from_millis(250),
@@ -586,8 +587,8 @@ mod tests {
             .rpc(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: PeerSummaryRequest {
-                    parts: [part_id].into_iter().collect(),
-                    asker_part_cursors: HashMap::from([(part_id, 0)]),
+                    parts: [part_id.clone()].into_iter().collect(),
+                    asker_part_cursors: HashMap::from([(part_id.clone(), 0)]),
                 },
             })
             .await?;
@@ -617,8 +618,8 @@ mod tests {
             .peer_summary(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: PeerSummaryRequest {
-                    parts: [part_id].into_iter().collect(),
-                    asker_part_cursors: HashMap::from([(part_id, 0)]),
+                    parts: [part_id.clone()].into_iter().collect(),
+                    asker_part_cursors: HashMap::from([(part_id.clone(), 0)]),
                 },
             })
             .await?;
@@ -628,8 +629,9 @@ mod tests {
             .get_changed_buckets(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: GetChangedBucketsRequest {
-                    part_id,
+                    part_id: part_id.clone(),
                     offset: BuckId::ROOT,
+                    to_level: BuckId::MAX_LEVEL,
                     since: 0,
                     limit_hint: 16,
                 },

@@ -65,7 +65,7 @@ async fn grant_and_sync(
     access: Access,
 ) -> Res<crate::BigDocHandle> {
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(pair, doc_id, &agent, access).await?;
+    fixtures::grant_and_propagate(pair, doc_id.clone(), &agent, access).await?;
     fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
 }
 
@@ -97,7 +97,7 @@ async fn sync_doc_until_ready(
     repo: &std::sync::Arc<crate::BigRepo>,
     doc_id: crate::DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    conn.sync_doc_with_peer(doc_id).await?;
+    conn.sync_doc_with_peer(doc_id.clone()).await?;
     loop {
         repo.wait_for_quiescence(None).await?;
         match repo.get_doc(&doc_id).await? {
@@ -133,7 +133,7 @@ async fn tier5_conn_two_live_conns_same_peer_both_sync() -> Res<()> {
     // Sync a fresh doc through conn2.
     let (doc2, id2) = new_doc(&pair, "via-conn2").await?;
     let agent2 = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(&pair, id2, &agent2, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, id2.clone(), &agent2, Access::Read).await?;
     let reader2 = sync_doc_until_ready(&conn2, &pair.right().repo, id2).await?;
     assert_eq!(
         read_text(&reader2, "title").await.as_deref(),
@@ -145,7 +145,7 @@ async fn tier5_conn_two_live_conns_same_peer_both_sync() -> Res<()> {
     // The original connection must still work while conn2 is live.
     let (doc3, id3) = new_doc(&pair, "via-conn1-still-live").await?;
     let agent3 = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(&pair, id3, &agent3, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, id3.clone(), &agent3, Access::Read).await?;
     let reader3 = sync_doc_until_ready(pair.right_conn(), &pair.right().repo, id3).await?;
     assert_eq!(
         read_text(&reader3, "title").await.as_deref(),
@@ -184,7 +184,7 @@ async fn tier5_conn_stop_of_superseded_conn_keeps_replacement_alive() -> Res<()>
     let (conn2, right_conn2) = open_second_conn(&pair).await?;
     let (doc2, id2) = new_doc(&pair, "pre-replace").await?;
     let agent2 = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(&pair, id2, &agent2, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, id2.clone(), &agent2, Access::Read).await?;
     let reader2 = sync_doc_until_ready(&conn2, &pair.right().repo, id2).await?;
     assert_eq!(
         read_text(&reader2, "title").await.as_deref(),
@@ -205,11 +205,11 @@ async fn tier5_conn_stop_of_superseded_conn_keeps_replacement_alive() -> Res<()>
     let agent3 = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(id3, agent3.clone(), Access::Read)
+        .grant_doc_access(id3.clone(), agent3.clone(), Access::Read)
         .await?;
     right_conn2.sync_keyhive_with_peer().await?;
-    fixtures::assert_reader_has_access(&pair.right().repo, id3).await?;
-    let reader3 = fixtures::sync_doc_expect_ready(&conn2, &pair.right().repo, id3).await?;
+    fixtures::assert_reader_has_access(&pair.right().repo, id3.clone()).await?;
+    let reader3 = fixtures::sync_doc_expect_ready(&conn2, &pair.right().repo, id3.clone()).await?;
     assert_eq!(
         read_text(&reader3, "title").await.as_deref(),
         Some("after-replace")
@@ -239,7 +239,7 @@ async fn tier5_conn_reconnect_churn_converges_each_cycle() -> Res<()> {
 
         let title = format!("churn-{i}");
         let (owner_doc, id) = new_doc(&pair, &title).await?;
-        let reader_doc = grant_and_sync(&pair, id, Access::Read).await?;
+        let reader_doc = grant_and_sync(&pair, id.clone(), Access::Read).await?;
         assert_eq!(
             read_text(&reader_doc, "title").await.as_deref(),
             Some(title.as_str()),
@@ -270,7 +270,7 @@ async fn tier5_conn_sync_on_closed_conn_fails_fast() -> Res<()> {
     let mut pair = Pair::boot(166, 167, "Owner", "Reader").await?;
 
     let (owner_doc, id) = new_doc(&pair, "pre-close").await?;
-    let reader_doc = grant_and_sync(&pair, id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, id.clone(), Access::Read).await?;
     drop(reader_doc);
     drop(owner_doc);
 
@@ -336,7 +336,7 @@ async fn tier5_conn_cross_dial_registers_both_sides() -> Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let (owner_doc, id) = new_doc(&pair, "cross-dial").await?;
-    let reader_doc = grant_and_sync(&pair, id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, id.clone(), Access::Read).await?;
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
         Some("cross-dial")

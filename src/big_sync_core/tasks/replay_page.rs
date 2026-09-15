@@ -62,8 +62,8 @@ impl ReplayPageTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_id = self.peer_id;
-        let target = self.target;
+        let peer_id = self.peer_id.clone();
+        let target = self.target.clone();
         self.run_run(cx)
             .await
             .map_err(|deets| ReplayPageTaskError {
@@ -90,7 +90,7 @@ impl ReplayPageTask {
         };
         let outcome = peer_rpc
             .replay_page(rpc::ReplayPageRequest {
-                target: self.target,
+                target: self.target.clone(),
                 limit: self.limit,
                 hold_ms: Self::HOLD_MS,
             })

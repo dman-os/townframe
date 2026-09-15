@@ -47,17 +47,11 @@ pub(crate) struct SqliteFrontierRow {
 }
 
 fn id_blob(id: ObjKey) -> Vec<u8> {
-    id.0.into_bytes().to_vec()
+    id.as_bytes().to_vec()
 }
 
 fn part_blob(id: PartKey) -> Vec<u8> {
-    id.0.into_bytes().to_vec()
-}
-
-fn bytes32(bytes: Vec<u8>) -> [u8; 32] {
-    bytes
-        .try_into()
-        .expect("SQLite part-store identifiers have exactly 32 bytes")
+    id.as_bytes().to_vec()
 }
 
 fn push_selector_predicate(
@@ -80,7 +74,7 @@ fn push_selector_predicate(
         query.push("(m.obj_ref IN (SELECT obj_ref FROM big_sync_objs WHERE scope_id = ");
         query.push_bind(scope_id);
         query.push(" AND obj_id = ");
-        query.push_bind(id_blob(*obj_id));
+        query.push_bind(id_blob(obj_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
         query.push(")");
@@ -93,7 +87,7 @@ fn push_selector_predicate(
         query.push("(m.maybe_part_ref IN (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
         query.push_bind(scope_id);
         query.push(" AND part_id = ");
-        query.push_bind(part_blob(*part_id));
+        query.push_bind(part_blob(part_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
         query.push(")");
@@ -159,10 +153,10 @@ where
                 part_ref: row.try_get("maybe_part_ref")?,
                 revision: u64::try_from(row.try_get::<i64, _>("txid")?)
                     .expect("SQLite frontier revision is non-negative"),
-                obj_id: ObjKey::new(bytes32(row.try_get::<Vec<u8>, _>("obj_id")?)),
+                obj_id: ObjKey::new(row.try_get::<Vec<u8>, _>("obj_id")?),
                 part_id: row
                     .try_get::<Option<Vec<u8>>, _>("part_id")?
-                    .map(|bytes| PartKey::new(bytes32(bytes))),
+                    .map(PartKey::new),
                 event_type: row.try_get("event_type")?,
                 payload_json: row.try_get("payload_json")?,
             })
@@ -180,8 +174,8 @@ mod tests {
         let part = PartKey::new([2; 32]);
         let selector = SqlitePartSelector {
             all: None,
-            objects: BTreeMap::from([(object, 7)]),
-            parts: BTreeMap::from([(part, 19)]),
+            objects: BTreeMap::from([(object.clone(), 7)]),
+            parts: BTreeMap::from([(part.clone(), 19)]),
         };
         assert_eq!(selector.objects[&object], 7);
         assert_eq!(selector.parts[&part], 19);

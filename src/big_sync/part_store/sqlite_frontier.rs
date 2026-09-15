@@ -126,25 +126,25 @@ impl SqliteReadSource for SqlitePartFrontier {
                 ));
             }
             _ => Some(
-                row.part_id
+                row.part_id.clone()
                     .ok_or_else(|| invariant("part frontier row has no part id"))?,
             ),
         };
-        let key = match part_id {
+        let key = match &part_id {
             Some(part_id) => PartFrontierKey::Part {
-                obj_id: row.obj_id,
-                part_id,
+                obj_id: row.obj_id.clone(),
+                part_id: part_id.clone(),
             },
-            None => PartFrontierKey::Object(row.obj_id),
+            None => PartFrontierKey::Object(row.obj_id.clone()),
         };
         let value = match row.event_type {
             EVENT_REMOVED => None,
             EVENT_ADDED => {
-                let part_id = part_id.ok_or_else(|| invariant("object key cannot be added"))?;
+                let part_id = part_id.clone().ok_or_else(|| invariant("object key cannot be added"))?;
                 Some(PartEvent::Added(ObjAddedToPart {
                     cursor: row.revision,
                     part_id,
-                    obj_id: row.obj_id,
+                    obj_id: row.obj_id.clone(),
                     payload: payload(&row)?,
                 }))
             }
@@ -153,7 +153,7 @@ impl SqliteReadSource for SqlitePartFrontier {
                 Some(PartEvent::Changed(ObjChanged {
                     cursor: row.revision,
                     part_ids,
-                    obj_id: row.obj_id,
+                    obj_id: row.obj_id.clone(),
                     payload: payload(&row)?,
                 }))
             }

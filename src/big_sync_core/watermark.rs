@@ -11,7 +11,7 @@
 //! commands its driver understands. Replay/fetching stays entirely outside.
 //!
 //! Semantics preserved from the existing code:
-//! - **At-least-once admission guard** ([`WatermarkBook::begin`]): a cursor
+//! - **At-least-once admission guard** (`WatermarkBook::begin`): a cursor
 //!   at or below the last emitted watermark, or already tracked as pending,
 //!   is a duplicate and is ignored.
 //! - **Explicit advancement**: a stream's watermark only moves to the
@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, HashMap};
 /// Per-stream slot bookkeeping: which cursors are pending work and where the
 /// emitted watermark stands. Direct extraction of `CursorStreamState`.
 #[derive(Debug, Default, Clone)]
-pub struct WatermarkBook<Cursor> {
+struct WatermarkBook<Cursor> {
     last_emitted: Option<Cursor>,
     slots: BTreeMap<Cursor, Slot>,
     /// Tracked-waiter count per slot cursor. A slot is only finished when
@@ -66,16 +66,6 @@ where
         }
         self.slots.insert(cursor, Slot::Pending);
         true
-    }
-
-    /// Mark an admitted cursor as finished. Invariant violation if the
-    /// cursor was never admitted.
-    pub fn finish(&mut self, cursor: Cursor) {
-        let slot = self
-            .slots
-            .get_mut(&cursor)
-            .expect("finished a cursor that was never admitted");
-        *slot = Slot::Ready;
     }
 
     /// Mark an admitted cursor as finished without requiring prior admission
@@ -174,6 +164,21 @@ impl<StreamId, Lane, Payload: Default> Default for Waiter<StreamId, Lane, Payloa
     }
 }
 
+/// What [`JobBoard::drop_stream`] should do with a waiter when one stream is
+/// going away for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDrop<Lane> {
+    /// Keep gating the stream, but only with the lanes in `keep`. This is
+    /// `supersede_obj_part`'s queued-membership case: the removal makes the
+    /// sync work unnecessary while the already-queued membership mutation
+    /// still has to finish before the cursor may advance.
+    Retain { keep: Vec<Lane> },
+    /// Stop gating this stream for this waiter. Its lanes are untouched and
+    /// its cursor is freed on this stream alone; a waiter that still gates
+    /// other streams stays alive for them.
+    Release,
+}
+
 /// Job aggregation across streams: many jobs in flight concurrently, each
 /// possibly gating several cursors on several streams. Extraction of
 /// `active_obj_jobs` / `ObjectJobState` (whose waiters are keyed by
@@ -198,9 +203,9 @@ impl<JobKey, StreamId, Lane, Cursor, Payload> Default
 
 impl<JobKey, StreamId, Lane, Cursor, Payload> JobBoard<JobKey, StreamId, Lane, Cursor, Payload>
 where
-    JobKey: Ord + Copy,
-    Lane: PartialEq + Copy,
-    StreamId: PartialEq + Copy,
+    JobKey: Ord + Clone,
+    Lane: PartialEq + Clone,
+    StreamId: PartialEq + Clone,
     Cursor: Ord + Copy,
     Payload: Default,
 {
@@ -223,7 +228,7 @@ where
         let mut new_streams = Vec::new();
         for stream in streams {
             if !waiter.streams.contains(&stream) {
-                waiter.streams.push(stream);
+                waiter.streams.push(stream.clone());
                 new_streams.push(stream);
             }
         }
@@ -286,37 +291,100 @@ where
 
     /// Supersede in-flight work for `job` on `stream` below `bound`: for
     /// every waiter with `cursor < bound` referencing `stream`, drop the
-    /// lanes for which `keep` returns `false`. A waiter whose lanes are all
-    /// dropped owes no work and is removed across every stream that
-    /// referenced it (a lane-less waiter cannot gate anything — keeping it
-    /// alive would panic the next `settle` on a surviving stream), and its
-    /// cursor is reported as freed for the caller to release on `stream`.
-    /// Mirrors `supersede_obj_part`, with the original's "pending membership
-    /// must still finish before its cursor advances" special case expressed
-    /// as a lane predicate.
+    /// lanes for which `keep` returns `false`.
+    ///
+    /// A waiter whose lanes are all dropped owes no work on ANY stream it
+    /// was registered on (a lane-less waiter cannot gate anything — keeping
+    /// it alive would panic the next `settle` on a surviving stream), so it
+    /// is removed outright and its cursor is reported freed **once per
+    /// stream it gated**. The caller must release the cursor on every one of
+    /// them; releasing only the superseding stream leaves the others holding
+    /// a pending slot that no waiter can ever settle, which stalls their
+    /// watermark for the life of the machine.
+    ///
+    /// Mirrors `supersede_obj_part`'s "pending membership must still finish
+    /// before its cursor advances" special case as a lane predicate. Note the
+    /// original could not reach the multi-stream empty case: there a waiter
+    /// lost all its streams only with its last one, so releasing that stream
+    /// covered everything. Expressing the same cancel as a lane predicate
+    /// makes the state reachable, so the reported set has to name every
+    /// stream rather than assume the superseding one.
     pub fn supersede(
         &mut self,
         job: JobKey,
         stream: StreamId,
         bound: Cursor,
         keep: impl Fn(Lane) -> bool,
-    ) -> Vec<Cursor> {
+    ) -> Vec<(Cursor, Vec<StreamId>)> {
         let Some(job_entry) = self.jobs.get_mut(&job) else {
             return Vec::new();
         };
         let mut emptied = Vec::new();
-        let mut freed = Vec::new();
         for (&cursor, waiter) in job_entry.range_mut(..bound) {
             if !waiter.streams.contains(&stream) {
                 continue;
             }
-            waiter.lanes.retain(|lane| keep(*lane));
+            waiter.lanes.retain(|lane| keep(lane.clone()));
             if waiter.lanes.is_empty() {
-                // No work is owed anywhere: free the cursor on every
-                // surviving stream, not just the superseding one.
                 emptied.push(cursor);
-                if waiter.streams.contains(&stream) {
-                    freed.push(cursor);
+            }
+        }
+        // Take the waiter's stream set as it is removed, so every stream that
+        // gated the cursor is named in the result.
+        let mut freed = Vec::new();
+        for cursor in emptied {
+            if let Some(waiter) = job_entry.remove(&cursor) {
+                freed.push((cursor, waiter.streams));
+            }
+        }
+        if job_entry.is_empty() {
+            self.jobs.remove(&job);
+        }
+        freed
+    }
+
+    /// Drop `stream` for `job`'s waiters below `bound` — the other half of
+    /// `supersede_obj_part`, which the extraction left out. For every waiter
+    /// referencing `stream`, `decide` says whether the removal lets it stop
+    /// gating the stream ([`StreamDrop::Release`], freeing the cursor here
+    /// while the waiter stays alive on its other streams) or merely sheds
+    /// some lanes ([`StreamDrop::Retain`]).
+    ///
+    /// Returns, per cursor, every stream whose book must release it: the
+    /// dropped stream for a released waiter, and every stream a retained
+    /// waiter still gated when its remaining lanes emptied — such a waiter
+    /// owes nothing anywhere, so it is removed outright by the same rule
+    /// [`Self::supersede`] applies.
+    pub fn drop_stream(
+        &mut self,
+        job: JobKey,
+        stream: StreamId,
+        bound: Cursor,
+        decide: impl Fn(&Waiter<StreamId, Lane, Payload>) -> StreamDrop<Lane>,
+    ) -> Vec<(Cursor, Vec<StreamId>)> {
+        let Some(job_entry) = self.jobs.get_mut(&job) else {
+            return Vec::new();
+        };
+        let mut freed = Vec::new();
+        let mut emptied = Vec::new();
+        for (&cursor, waiter) in job_entry.range_mut(..bound) {
+            if !waiter.streams.contains(&stream) {
+                continue;
+            }
+            match decide(waiter) {
+                StreamDrop::Retain { keep } => {
+                    waiter.lanes.retain(|lane| keep.contains(lane));
+                    if waiter.lanes.is_empty() {
+                        freed.push((cursor, waiter.streams.clone()));
+                        emptied.push(cursor);
+                    }
+                }
+                StreamDrop::Release => {
+                    waiter.streams.retain(|candidate| *candidate != stream);
+                    freed.push((cursor, vec![stream.clone()]));
+                    if waiter.streams.is_empty() {
+                        emptied.push(cursor);
+                    }
                 }
             }
         }
@@ -335,20 +403,20 @@ where
     pub fn retire_stream(&mut self, stream: StreamId) -> Vec<(JobKey, Cursor)> {
         let mut retired = Vec::new();
         let mut empty_jobs = Vec::new();
-        for (&job, job_entry) in self.jobs.range_mut(..) {
+        for (job, job_entry) in self.jobs.range_mut(..) {
             let mut emptied = Vec::new();
             for (&cursor, waiter) in job_entry.iter_mut() {
                 waiter.streams.retain(|candidate| *candidate != stream);
                 if waiter.streams.is_empty() {
                     emptied.push(cursor);
-                    retired.push((job, cursor));
+                    retired.push((job.clone(), cursor));
                 }
             }
             for cursor in emptied {
                 job_entry.remove(&cursor);
             }
             if job_entry.is_empty() {
-                empty_jobs.push(job);
+                empty_jobs.push(job.clone());
             }
         }
         for job in empty_jobs {
@@ -391,9 +459,9 @@ impl<StreamId, JobKey, Lane, Payload, Cursor> Default
 impl<StreamId, JobKey, Lane, Payload, Cursor>
     WatermarkMachine<StreamId, JobKey, Lane, Payload, Cursor>
 where
-    StreamId: Eq + std::hash::Hash + PartialEq + Copy,
-    JobKey: Ord + Copy,
-    Lane: PartialEq + Copy,
+    StreamId: Eq + std::hash::Hash + Clone,
+    JobKey: Ord + Clone,
+    Lane: PartialEq + Clone,
     Cursor: Ord + Copy + Default,
     Payload: Default,
 {
@@ -445,7 +513,7 @@ where
         streams
             .into_iter()
             .map(|stream| {
-                let reached = self.stream_book_mut(stream).release(cursor);
+                let reached = self.stream_book_mut(stream.clone()).release(cursor);
                 (stream, reached)
             })
             .collect()
@@ -456,10 +524,36 @@ where
     /// re-drained; the aggregated new watermarks are returned so the caller
     /// can persist them via its own commands.
     pub fn settle_job(&mut self, job: JobKey) -> Vec<(StreamId, Option<Cursor>)> {
+        let freed = self.jobs.settle_job(job);
+        self.release_freed(freed)
+    }
+
+    /// Drop `stream` for `job`'s waiters below `bound_cursor` (see
+    /// [`JobBoard::drop_stream`]). Every stream whose book releases a cursor
+    /// may now advance; the reached watermarks are returned.
+    pub fn drop_stream(
+        &mut self,
+        stream: StreamId,
+        job: JobKey,
+        bound_cursor: Cursor,
+        decide: impl Fn(&Waiter<StreamId, Lane, Payload>) -> StreamDrop<Lane>,
+    ) -> Vec<(StreamId, Option<Cursor>)> {
+        let freed = self.jobs.drop_stream(job, stream, bound_cursor, decide);
+        self.release_freed(freed)
+    }
+
+    /// Release each freed cursor on every stream the waiter gated, and
+    /// aggregate the newly reachable watermark per stream. This is the shared
+    /// tail of every operation that frees waiters: a waiter's cursor gates all
+    /// of its streams, so every one of them has to be told.
+    fn release_freed(
+        &mut self,
+        freed: Vec<(Cursor, Vec<StreamId>)>,
+    ) -> Vec<(StreamId, Option<Cursor>)> {
         let mut out: Vec<(StreamId, Option<Cursor>)> = Vec::new();
-        for (cursor, streams) in self.jobs.settle_job(job) {
+        for (cursor, streams) in freed {
             for stream in streams {
-                let reached = self.stream_book_mut(stream).release(cursor);
+                let reached = self.stream_book_mut(stream.clone()).release(cursor);
                 match out.iter_mut().find(|(candidate, _)| candidate == &stream) {
                     Some((_, slot)) => {
                         if reached.is_some() {
@@ -483,13 +577,9 @@ where
         job: JobKey,
         bound_cursor: Cursor,
         keep: impl Fn(Lane) -> bool,
-    ) -> Vec<Option<Cursor>> {
+    ) -> Vec<(StreamId, Option<Cursor>)> {
         let freed = self.jobs.supersede(job, stream, bound_cursor, keep);
-        let book = self.stream_book_mut(stream);
-        freed
-            .into_iter()
-            .map(|cursor| book.release(cursor))
-            .collect()
+        self.release_freed(freed)
     }
 
     /// Retire a stream entirely (part removed / subscription dropped).
@@ -507,7 +597,7 @@ where
         let mut out = Vec::new();
         for (job, cursors) in &self.jobs.jobs {
             for cursor in cursors.keys() {
-                out.push((*job, *cursor));
+                out.push((job.clone(), *cursor));
             }
         }
         out
@@ -581,7 +671,7 @@ mod tests {
         let freed = m.supersede("p", 1, 11, |_| false);
         // Superseding job 1's cursor-10 waiter does not finish the slot:
         // job 2 still gates it.
-        assert_eq!(freed, vec![None]);
+        assert_eq!(freed, vec![("p", None)]);
         assert_eq!(m.watermark(&"p"), None);
 
         // Job 2 settles: both slots are now ready (job 1 finished cursor 11
@@ -600,14 +690,19 @@ mod tests {
         m.track("b", 9, 10, [Lane::Sync], ());
 
         // Superseding stream "a" drops the only lane: the waiter owes no
-        // work on any stream and must be freed for both (a released slot
-        // here, b's released by the caller via the same freed cursor).
+        // work on ANY stream it gated, so it is freed on both. The machine
+        // must release the cursor on every reported stream; releasing only
+        // the superseding one leaves "b" holding a pending slot that no
+        // waiter can ever settle.
         let freed = m.supersede("a", 9, 11, |_| false);
-        assert_eq!(freed, vec![Some(10)]);
+        assert_eq!(freed, vec![("a", Some(10)), ("b", Some(10))]);
+        assert_eq!(m.watermark(&"a"), Some(10));
+        assert_eq!(m.watermark(&"b"), Some(10));
+        assert!(m.is_settled(&"a"));
+        assert!(m.is_settled(&"b"));
         // The waiter is gone: settling on the surviving stream is stale, not
         // a "lane completion without a pending lane" panic.
         assert!(m.settle(9, 10, Lane::Sync).is_empty());
-        assert!(m.is_settled(&"a"));
     }
 
     #[test]
@@ -709,7 +804,7 @@ mod tests {
         m.track("p", 7, 2, [Lane::Sync], ());
 
         let reached = m.supersede("p", 7, 3, |_| false);
-        assert_eq!(reached, vec![Some(2)]);
+        assert_eq!(reached, vec![("p", Some(2))]);
         assert!(m.is_settled(&"p"));
     }
 
@@ -803,5 +898,68 @@ mod tests {
         // Job 10 still pending: settling it advances past both.
         assert_eq!(m.settle_job(10), vec![("p", Some(2))]);
         assert!(m.is_settled(&"p"));
+    }
+
+    #[test]
+    fn drop_stream_release_sheds_only_that_stream_and_keeps_the_waiter() {
+        // supersede_obj_part's general branch: the removal makes the stream
+        // irrelevant, so the waiter stops gating it and its cursor is freed
+        // there — while the SAME waiter keeps owing work on the other stream.
+        let mut m = Machine::default();
+        assert!(m.admit("alpha", 30));
+        assert!(m.admit("beta", 30));
+        m.track("alpha", 100, 30, [Lane::Sync], ());
+        m.track("beta", 100, 30, [Lane::Sync], ());
+
+        let freed = m.drop_stream("alpha", 100, 31, |_| StreamDrop::Release);
+        assert_eq!(freed, vec![("alpha", Some(30))]);
+        assert!(m.is_settled(&"alpha"));
+        assert!(
+            !m.is_settled(&"beta"),
+            "beta still owes the sync lane and must not be released"
+        );
+        assert_eq!(m.watermark(&"beta"), None);
+
+        // The surviving stream settles through the normal path.
+        assert_eq!(m.settle(100, 30, Lane::Sync), vec![("beta", Some(30))]);
+        assert!(m.is_settled(&"beta"));
+    }
+
+    #[test]
+    fn drop_stream_retain_keeps_gating_the_stream_with_fewer_lanes() {
+        // supersede_obj_part's special case: a queued membership mutation
+        // still has to finish before the cursor can advance, so the stream
+        // stays gated and only the sync lane is shed.
+        let mut m = Machine::default();
+        assert!(m.admit("alpha", 30));
+        m.track("alpha", 100, 30, [Lane::Membership, Lane::Sync], ());
+
+        let freed = m.drop_stream("alpha", 100, 31, |_| StreamDrop::Retain {
+            keep: vec![Lane::Membership],
+        });
+        assert!(freed.is_empty(), "nothing is freed while membership gates");
+        assert_eq!(m.watermark(&"alpha"), None);
+
+        assert_eq!(
+            m.settle(100, 30, Lane::Membership),
+            vec![("alpha", Some(30))]
+        );
+        assert!(m.is_settled(&"alpha"));
+    }
+
+    #[test]
+    fn drop_stream_retain_that_empties_lanes_frees_every_stream() {
+        // A retained waiter left with no lanes owes nothing on any stream it
+        // gated, so it is removed outright and every one of them is released.
+        let mut m = Machine::default();
+        assert!(m.admit("alpha", 30));
+        assert!(m.admit("beta", 30));
+        m.track("alpha", 100, 30, [Lane::Sync], ());
+        m.track("beta", 100, 30, [Lane::Sync], ());
+
+        let freed = m.drop_stream("alpha", 100, 31, |_| StreamDrop::Retain { keep: vec![] });
+        assert_eq!(freed, vec![("alpha", Some(30)), ("beta", Some(30))]);
+        assert!(m.is_settled(&"alpha"));
+        assert!(m.is_settled(&"beta"));
     }
 }

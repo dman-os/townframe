@@ -55,8 +55,8 @@ impl ListBucketsTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_id = self.peer_id;
-        let part_id = self.part_id;
+        let peer_id = self.peer_id.clone();
+        let part_id = self.part_id.clone();
         self.run_run(cx)
             .await
             .map_err(|deets| ListBucketsTaskError {
@@ -81,14 +81,15 @@ impl ListBucketsTask {
         loop {
             let buckets = peer_rpc
                 .get_changed_buckets(GetChangedBucketsRequest {
-                    part_id: self.part_id,
+                    part_id: self.part_id.clone(),
                     offset,
+                    to_level: self.working_level,
                     limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
                     since: self.since,
                 })
                 .await??;
             let filtered = crate::bucket::filter_buckets(
-                self.part_id,
+                self.part_id.clone(),
                 self.working_level,
                 buckets,
                 &cx.part_store,

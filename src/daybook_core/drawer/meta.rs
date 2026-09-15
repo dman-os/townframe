@@ -111,7 +111,7 @@ impl DrawerRepo {
         )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(&branch_doc_id.as_bytes()[..])
+        .bind(branch_doc_id.as_bytes())
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
         .bind(updated_at)
@@ -133,7 +133,7 @@ impl DrawerRepo {
         .fetch_optional(&self.meta_store_sql.write_pool)
         .await?;
 
-        Ok(rec.map(|blob| DocumentId::new(blob.try_into().expect(ERROR_IMPOSSIBLE))))
+        Ok(rec.map(DocumentId::new))
     }
 
     pub(super) async fn list_local_branch_refs(
@@ -152,7 +152,7 @@ impl DrawerRepo {
         .map(|(path, id)| {
             (
                 path,
-                DocumentId::new(id.try_into().expect(ERROR_IMPOSSIBLE)),
+                DocumentId::new(id),
             )
         })
         .collect())
@@ -185,7 +185,7 @@ impl DrawerRepo {
         )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(&branch_doc_id.as_bytes()[..])
+        .bind(branch_doc_id.as_bytes())
         .bind(branch_heads_json)
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
@@ -252,7 +252,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(latest_heads) = self
-            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             return Ok(None);
@@ -282,7 +282,7 @@ impl DrawerRepo {
                 continue;
             };
             let Some(latest_heads) = self
-                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
                 .await?
             else {
                 // TEMP-INSTRUMENTATION: warn so convergence hangs name the offender.
@@ -297,7 +297,7 @@ impl DrawerRepo {
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
-            let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
+            let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id.clone()).await? else {
                 debug!(
                     %doc_id,
                     %branch_path,

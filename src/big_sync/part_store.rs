@@ -11,7 +11,7 @@ use big_sync_core::rpc::{
 use big_sync_core::{BuckId, ByteKey, ObjKey, PartKey, PeerKey, mpsc};
 
 /// The logical object and part routes represented by the part-store frontier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PartFrontierKey {
     Object(ObjKey),
     Part { obj_id: ObjKey, part_id: PartKey },
@@ -150,7 +150,7 @@ impl PartRevisionReader {
         {
             for part_id in &changed.part_ids {
                 if !existing.part_ids.contains(part_id) {
-                    existing.part_ids.push(*part_id);
+                    existing.part_ids.push(part_id.clone());
                 }
             }
             existing.part_ids.sort_unstable();
@@ -364,7 +364,7 @@ pub trait HostPartStore: Send + Sync {
         let cursor = match &target {
             SubscriptionTarget::Part { part_id, cursor } => {
                 if let Err(ListPartsError::UnkownParts { .. }) =
-                    self.summarize_parts(HashSet::from([*part_id])).await?
+                    self.summarize_parts(HashSet::from([part_id.clone()])).await?
                 {
                     return Ok(ReplayPageOutcome::UnknownPart);
                 }
@@ -374,7 +374,7 @@ pub trait HostPartStore: Send + Sync {
             // materializes that part while subscribing.
             SubscriptionTarget::Object { .. } => 0,
         };
-        if self.page_denied(&target, subscriber).await? {
+        if self.page_denied(&target, subscriber.clone()).await? {
             return Ok(ReplayPageOutcome::Unauthorized);
         }
 
@@ -556,36 +556,27 @@ pub enum PartScope {
     FromObject,
 }
 
-pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjKey, Option<ObjKey>) {
-    let level = bucket_id.level();
-    let prefix_bits = u32::from(level) * u32::from(BuckId::BITS_PER_LEVEL);
-    debug_assert!(prefix_bits <= u16::BITS);
-
-    if prefix_bits == 0 {
-        return (ObjKey(ByteKey::new([0; 32])), None);
-    }
-
-    let shift = u16::BITS - prefix_bits;
-    let start_prefix = (u32::from(bucket_id.index())) << shift;
-    let start = {
-        let mut bytes = [0; 32];
-        bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
-        ObjKey(ByteKey::new(bytes))
-    };
-    if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
-        return (start, None);
-    }
-    let next_prefix = (u32::from(bucket_id.index()) + 1) << shift;
-    if next_prefix > u32::from(u16::MAX) {
-        return (start, None);
-    }
-    let end = Some({
-        let mut bytes = [0; 32];
-        bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
-        ObjKey(ByteKey::new(bytes))
-    });
-    (start, end)
+/// The range of stored bucket indices belonging to `bucket_id`.
+///
+/// ADR 012 decision 1: the index is a hash of the object key, so a bucket's members are a
+/// contiguous range of that index and not of the key. A level-`L` bucket covers the deepest
+/// indices whose top `L` nibbles equal its own, which is the level/truncation hierarchy
+/// holding under a hash. `None` as the upper bound means "to the end of the index space",
+/// i.e. a terminal bucket at its level, so a range never wraps.
+#[must_use]
+pub fn bucket_index_bounds(bucket_id: BuckId) -> (u16, Option<u16>) {
+    debug_assert!(bucket_id.level() <= BuckId::MAX_LEVEL);
+    let shift = u16::BITS - u32::from(bucket_id.level()) * u32::from(BuckId::BITS_PER_LEVEL);
+    // Widened so the last index of a level still has a representable exclusive upper bound.
+    let lower = u32::from(bucket_id.index()) << shift;
+    debug_assert!(lower <= u32::from(u16::MAX));
+    let upper = lower + (1u32 << shift);
+    (
+        lower as u16,
+        (upper <= u32::from(u16::MAX)).then_some(upper as u16),
+    )
 }
+
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -652,13 +643,13 @@ pub mod contract {
         let root = BuckId::ROOT;
         for obj_id in live_ids {
             let payload = store
-                .obj_payload(*obj_id)
+                .obj_payload(obj_id.clone())
                 .await?
                 .expect("live object must have payload");
             live_fp = live_fp.wrapping_add(
                 Fingerprint::new(
                     &BUCKET_LIVE_FP_SEED,
-                    &("big-sync-bucket-live-v1", root, *obj_id, payload),
+                    &("big-sync-bucket-live-v1", root, obj_id.clone(), payload),
                 )
                 .as_u64(),
             );
@@ -670,13 +661,13 @@ pub mod contract {
                 "live and dead object sets must be disjoint"
             );
             assert!(
-                store.obj_payload(*obj_id).await?.is_none(),
+                store.obj_payload(obj_id.clone()).await?.is_none(),
                 "dead object must not have payload"
             );
             dead_fp = dead_fp.wrapping_add(
                 Fingerprint::new(
                     &BUCKET_DEAD_FP_SEED,
-                    &("big-sync-bucket-dead-v1", root, *obj_id),
+                    &("big-sync-bucket-dead-v1", root, obj_id.clone()),
                 )
                 .as_u64(),
             );
@@ -704,24 +695,24 @@ pub mod contract {
     {
         assert_eq!(
             live_ids.len(),
-            live_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            live_ids.iter().cloned().collect::<BTreeSet<_>>().len(),
             "live object set contains duplicates"
         );
         assert_eq!(
             dead_ids.len(),
-            dead_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            dead_ids.iter().cloned().collect::<BTreeSet<_>>().len(),
             "dead object set contains duplicates"
         );
-        let live_ids: BTreeSet<_> = live_ids.iter().copied().collect();
-        let dead_ids: BTreeSet<_> = dead_ids.iter().copied().collect();
+        let live_ids: BTreeSet<_> = live_ids.iter().cloned().collect();
+        let dead_ids: BTreeSet<_> = dead_ids.iter().cloned().collect();
         let expected = expected_bucket_summary(store, &live_ids, &dead_ids).await?;
 
         assert_eq!(
-            store.member_count(part_id).await?,
+            store.member_count(part_id.clone()).await?,
             u64::from(expected.live_count)
         );
 
-        let direct = store.get_bucket_summary(part_id, BuckId::ROOT).await?;
+        let direct = store.get_bucket_summary(part_id.clone(), BuckId::ROOT).await?;
         assert_eq!(direct.id, BuckId::ROOT);
         assert_eq!(direct.len, expected.len);
         assert_eq!(direct.live_count, expected.live_count);
@@ -731,6 +722,7 @@ pub mod contract {
             .get_changed_buckets(GetChangedBucketsRequest {
                 part_id,
                 offset: BuckId::ROOT,
+                to_level: BuckId::ROOT.level(),
                 since: 0,
                 limit_hint: 1,
             })
@@ -764,22 +756,22 @@ pub mod contract {
     {
         assert_eq!(
             live_ids.len(),
-            live_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            live_ids.iter().cloned().collect::<BTreeSet<_>>().len(),
             "live object set contains duplicates"
         );
         assert_eq!(
             dead_ids.len(),
-            dead_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+            dead_ids.iter().cloned().collect::<BTreeSet<_>>().len(),
             "dead object set contains duplicates"
         );
-        let live_ids: BTreeSet<_> = live_ids.iter().copied().collect();
-        let dead_ids: BTreeSet<_> = dead_ids.iter().copied().collect();
+        let live_ids: BTreeSet<_> = live_ids.iter().cloned().collect();
+        let dead_ids: BTreeSet<_> = dead_ids.iter().cloned().collect();
         assert!(
             live_ids.is_disjoint(&dead_ids),
             "live and dead object sets must be disjoint"
         );
 
-        let expected: Vec<_> = live_ids.union(&dead_ids).copied().collect();
+        let expected: Vec<_> = live_ids.union(&dead_ids).cloned().collect();
         let limit_hint = limit_hint.max(1);
         let mut seen = BTreeSet::new();
         let mut after = None;
@@ -787,7 +779,7 @@ pub mod contract {
         loop {
             let result = store
                 .leaf_buckets(LeafBucketsRequest {
-                    part_id,
+                    part_id: part_id.clone(),
                     since: 0,
                     buckets: vec![LeafBucketRequest {
                         buck_id: BuckId::ROOT,
@@ -815,7 +807,7 @@ pub mod contract {
                 break;
             }
 
-            let last_obj_id = page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id;
+            let last_obj_id = page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id.clone();
             if page.done {
                 assert!(page.next_after.is_none());
             } else {
@@ -825,7 +817,7 @@ pub mod contract {
 
             for entry in &page.entries {
                 assert!(
-                    seen.insert(entry.obj_id),
+                    seen.insert(entry.obj_id.clone()),
                     "duplicate leaf entry {}",
                     entry.obj_id
                 );
@@ -833,14 +825,14 @@ pub mod contract {
                 let expected_fp = if entry.dead {
                     Fingerprint::new(
                         &seed,
-                        &("big-sync-obj-fp-v1", entry.obj_id, serde_json::Value::Null),
+                        &("big-sync-obj-fp-v1", entry.obj_id.clone(), serde_json::Value::Null),
                     )
                 } else {
                     let payload = store
-                        .obj_payload(entry.obj_id)
+                        .obj_payload(entry.obj_id.clone())
                         .await?
                         .expect("live object must have payload");
-                    Fingerprint::new(&seed, &("big-sync-obj-fp-v1", entry.obj_id, payload))
+                    Fingerprint::new(&seed, &("big-sync-obj-fp-v1", entry.obj_id.clone(), payload))
                 };
                 assert_eq!(entry.fp, expected_fp);
             }
@@ -848,7 +840,7 @@ pub mod contract {
             if page.done {
                 break;
             }
-            after = page.next_after;
+            after = page.next_after.clone();
         }
 
         assert_eq!(seen, expected.into_iter().collect());
@@ -867,7 +859,7 @@ pub mod contract {
     where
         S: HostPartStore + Sync,
     {
-        assert_root_bucket_summary(store, part_id, live_ids, dead_ids).await?;
+        assert_root_bucket_summary(store, part_id.clone(), live_ids, dead_ids).await?;
         assert_root_leaf_pagination(store, part_id, seed, live_ids, dead_ids, limit_hint).await?;
         Ok(())
     }
@@ -900,18 +892,38 @@ pub mod host_contract {
         ObjKey(ByteKey::new(bytes))
     }
 
-    fn payload(tag: &'static str, idx: u64) -> ObjPayload {
+
+fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         serde_json::json!({
             "tag": tag,
             "idx": idx,
         })
     }
 
+    /// An object key that lands in `bucket_id` at `bucket_id`'s own level.
+    ///
+    /// The index is a hash of the key (ADR 012 decision 1), so a key can no longer be
+    /// assembled to fall in a chosen bucket; it has to be searched for, which costs about
+    /// `ARITY^level` tries — ~16 at level 1, ~65k at the deepest level.
     fn obj_in_bucket(bucket_id: BuckId, salt: u8) -> ObjKey {
-        let (start, _) = super::obj_id_bounds_for_bucket(bucket_id);
-        let mut bytes = start.0.into_bytes();
-        bytes[31] = salt;
-        ObjKey(ByteKey::new(bytes))
+        let mut matches: u8 = 0;
+        let mut counter: u32 = 0;
+        loop {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&counter.to_be_bytes());
+            let obj_id = ObjKey(ByteKey::new(bytes));
+            if BuckId::from_obj_key(bucket_id.level(), &obj_id) == bucket_id {
+                matches += 1;
+                // Returning the `salt`-th match keeps keys for one bucket ordered by salt,
+                // which is the obj_id order the leaf page is asserted against.
+                if matches == salt {
+                    return obj_id;
+                }
+            }
+            counter = counter
+                .checked_add(1)
+                .expect("some key must hash into the requested bucket");
+        }
     }
 
     async fn seed_live_obj<S>(
@@ -923,8 +935,8 @@ pub mod host_contract {
     where
         S: HostPartStore + Sync + ?Sized,
     {
-        store.set_obj_payload(obj_id, payload.clone()).await?;
-        assert_eq!(store.obj_payload(obj_id).await?, Some(payload.clone()));
+        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
+        assert_eq!(store.obj_payload(obj_id.clone()).await?, Some(payload.clone()));
         if !parts.is_empty() {
             store.add_obj_to_parts(obj_id, parts.to_vec()).await?;
         }
@@ -1052,11 +1064,11 @@ pub mod host_contract {
                 let outcome = store
                     .replay_page(
                         SubscriptionTarget::Part {
-                            part_id,
+                            part_id: part_id.clone(),
                             cursor: 0,
                         },
                         8,
-                        subscriber,
+                        subscriber.clone(),
                         PAGE_HOLD,
                     )
                     .await?;
@@ -1071,21 +1083,21 @@ pub mod host_contract {
             Ok(Vec::new())
         }
 
-        store.ensure_part(part).await?;
-        store.ensure_part(granted_empty).await?;
+        store.ensure_part(part.clone()).await?;
+        store.ensure_part(granted_empty.clone()).await?;
         store
             .set_part_members(
-                part,
-                std::collections::HashMap::from([(member, Access::Read)]),
+                part.clone(),
+                std::collections::HashMap::from([(member.clone(), Access::Read)]),
             )
             .await?;
         store
             .set_part_members(
-                granted_empty,
-                std::collections::HashMap::from([(member, Access::Read)]),
+                granted_empty.clone(),
+                std::collections::HashMap::from([(member.clone(), Access::Read)]),
             )
             .await?;
-        seed_live_obj(store, obj, payload("page-outcome", 1), &[part]).await?;
+        seed_live_obj(store, obj.clone(), payload("page-outcome", 1), std::slice::from_ref(&part)).await?;
 
         let unknown_outcome = store
             .replay_page(
@@ -1094,7 +1106,7 @@ pub mod host_contract {
                     cursor: 0,
                 },
                 8,
-                member,
+                member.clone(),
                 Duration::from_millis(0),
             )
             .await?;
@@ -1107,7 +1119,7 @@ pub mod host_contract {
         let denied = store
             .replay_page(
                 SubscriptionTarget::Part {
-                    part_id: part,
+                    part_id: part.clone(),
                     cursor: 0,
                 },
                 8,
@@ -1121,7 +1133,7 @@ pub mod host_contract {
             "a subscriber with no access row is denied, not reported as caught up"
         );
 
-        let events = page_events_for(store, part, member).await?;
+        let events = page_events_for(store, part.clone(), member.clone()).await?;
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -1133,15 +1145,15 @@ pub mod host_contract {
         // The same property, with the grant landing *after* the event it authorizes reading.
         // Both stores filter on current access rows, so this ordering is visible too; pinned so
         // that a later change to grant-time filtering has to be deliberate.
-        store.ensure_part(late_grant).await?;
-        seed_live_obj(store, late_obj, payload("page-outcome-late", 2), &[late_grant]).await?;
+        store.ensure_part(late_grant.clone()).await?;
+        seed_live_obj(store, late_obj.clone(), payload("page-outcome-late", 2), std::slice::from_ref(&late_grant)).await?;
         store
             .set_part_members(
-                late_grant,
-                std::collections::HashMap::from([(member, Access::Read)]),
+                late_grant.clone(),
+                std::collections::HashMap::from([(member.clone(), Access::Read)]),
             )
             .await?;
-        let late_events = page_events_for(store, late_grant, member).await?;
+        let late_events = page_events_for(store, late_grant.clone(), member.clone()).await?;
         assert!(
             late_events.iter().any(|event| matches!(
                 event,
@@ -1196,10 +1208,10 @@ pub mod host_contract {
 
         let part = test_part(220);
         let obj = test_obj(221);
-        store.ensure_part(part).await?;
-        seed_live_obj(store, obj, payload("revision-all", 1), &[part]).await?;
+        store.ensure_part(part.clone()).await?;
+        seed_live_obj(store, obj.clone(), payload("revision-all", 1), std::slice::from_ref(&part)).await?;
         store
-            .set_obj_payload(obj, payload("revision-all", 2))
+            .set_obj_payload(obj.clone(), payload("revision-all", 2))
             .await?;
 
         let mut saw_membership_event = false;
@@ -1253,23 +1265,23 @@ pub mod host_contract {
         let part_a = test_part(201);
         let part_b = test_part(202);
         let obj = test_obj(203);
-        store.ensure_part(part_a).await?;
-        store.ensure_part(part_b).await?;
-        seed_live_obj(store, obj, payload("revision-1", 1), &[]).await?;
-        store.add_obj_to_parts(obj, vec![part_a, part_b]).await?;
-        store.set_obj_payload(obj, payload("revision-2", 2)).await?;
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
+        seed_live_obj(store, obj.clone(), payload("revision-1", 1), &[]).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()]).await?;
+        store.set_obj_payload(obj.clone(), payload("revision-2", 2)).await?;
 
         let mut reader = store
             .open_local_revision_reader(SubPartsRequest {
                 lower_bound: 0,
                 targets: HashSet::from([
-                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj },
+                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() },
                     big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_a,
+                        part_id: part_a.clone(),
                         cursor: 0,
                     },
                     big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_b,
+                        part_id: part_b.clone(),
                         cursor: 0,
                     },
                 ]),
@@ -1293,7 +1305,7 @@ pub mod host_contract {
                     if let Some(changed) = entries.iter().find_map(|entry| match entry {
                         SubEvent::Changed(changed)
                             if changed.obj_id == obj
-                                && changed.part_ids == vec![part_a, part_b] =>
+                                && changed.part_ids == vec![part_a.clone(), part_b.clone()] =>
                         {
                             Some(changed)
                         }
@@ -1302,7 +1314,7 @@ pub mod host_contract {
                         assert_eq!(entries.len(), 1, "same-revision changes must be grouped");
                         grouped_revision = Some(revision);
                         assert_eq!(changed.obj_id, obj);
-                        assert_eq!(changed.part_ids, vec![part_a, part_b]);
+                        assert_eq!(changed.part_ids, vec![part_a.clone(), part_b.clone()]);
                     }
                 }
                 RevisionRead::ReplayComplete { through } => {
@@ -1313,7 +1325,7 @@ pub mod host_contract {
         };
         let grouped_revision = grouped_revision.expect("replay must contain grouped change");
 
-        store.remove_obj_from_part(obj, part_a).await?;
+        store.remove_obj_from_part(obj.clone(), part_a.clone()).await?;
         let removed_revision = match reader.next(RevisionReadLimits::default()).await? {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision > replay_through);
@@ -1404,7 +1416,7 @@ pub mod host_contract {
         ));
 
         store
-            .set_obj_payload(obj, payload("revision-live", 6))
+            .set_obj_payload(obj.clone(), payload("revision-live", 6))
             .await?;
         match reader.next(RevisionReadLimits::default()).await? {
             RevisionRead::Entries { revision, entries } => {
@@ -1425,16 +1437,16 @@ pub mod host_contract {
         let store = harness.store();
         let part_id = test_part(14);
         let obj_id = test_obj(15);
-        assert!(!store.obj_exists(obj_id).await?);
+        assert!(!store.obj_exists(obj_id.clone()).await?);
 
         let payload = payload("occupancy", 1);
-        store.set_obj_payload(obj_id, payload).await?;
-        assert!(store.obj_exists(obj_id).await?);
+        store.set_obj_payload(obj_id.clone(), payload).await?;
+        assert!(store.obj_exists(obj_id.clone()).await?);
 
-        store.add_obj_to_parts(obj_id, vec![part_id]).await?;
-        assert!(store.obj_exists(obj_id).await?);
+        store.add_obj_to_parts(obj_id.clone(), vec![part_id.clone()]).await?;
+        assert!(store.obj_exists(obj_id.clone()).await?);
 
-        store.remove_obj_from_part(obj_id, part_id).await?;
+        store.remove_obj_from_part(obj_id.clone(), part_id).await?;
         assert!(store.obj_exists(obj_id).await?);
         Ok(())
     }
@@ -1450,25 +1462,25 @@ pub mod host_contract {
         let obj_a = test_obj(1);
         let obj_b = test_obj(2);
 
-        store.ensure_part(part_a).await?;
-        store.ensure_part(part_b).await?;
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
 
         assert_eq!(
             store.summarize_parts(HashSet::new()).await??,
             HashMap::new()
         );
-        match store.summarize_parts(HashSet::from([unknown])).await? {
+        match store.summarize_parts(HashSet::from([unknown.clone()])).await? {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
-                assert_eq!(unkown_parts, vec![unknown]);
+                assert_eq!(unkown_parts, vec![unknown.clone()]);
             }
             other => panic!("unexpected summarize_parts result: {other:?}"),
         }
 
-        seed_live_obj(store, obj_a, payload("summarize-a", 1), &[part_a]).await?;
-        seed_live_obj(store, obj_b, payload("summarize-b", 2), &[part_b]).await?;
+        seed_live_obj(store, obj_a, payload("summarize-a", 1), std::slice::from_ref(&part_a)).await?;
+        seed_live_obj(store, obj_b, payload("summarize-b", 2), std::slice::from_ref(&part_b)).await?;
 
         let summary = store
-            .summarize_parts(HashSet::from([part_a, part_b]))
+            .summarize_parts(HashSet::from([part_a.clone(), part_b.clone()]))
             .await??;
         assert_eq!(summary.len(), 2);
         assert_eq!(summary[&part_a].member_count, 1);
@@ -1477,7 +1489,7 @@ pub mod host_contract {
         assert_eq!(summary[&part_b].latest_cursor, 4);
 
         match store
-            .summarize_parts(HashSet::from([part_a, unknown]))
+            .summarize_parts(HashSet::from([part_a, unknown.clone()]))
             .await?
         {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
@@ -1502,15 +1514,16 @@ pub mod host_contract {
         let obj_b = obj_in_bucket(bucket_b, 2);
         let obj_c = obj_in_bucket(bucket_c, 3);
 
-        store.ensure_part(part).await?;
-        seed_live_obj(store, obj_a, payload("changed-a", 1), &[part]).await?;
-        seed_live_obj(store, obj_b, payload("changed-b", 2), &[part]).await?;
-        seed_live_obj(store, obj_c, payload("changed-c", 3), &[part]).await?;
+        store.ensure_part(part.clone()).await?;
+        seed_live_obj(store, obj_a.clone(), payload("changed-a", 1), std::slice::from_ref(&part)).await?;
+        seed_live_obj(store, obj_b, payload("changed-b", 2), std::slice::from_ref(&part)).await?;
+        seed_live_obj(store, obj_c, payload("changed-c", 3), std::slice::from_ref(&part)).await?;
 
         match store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: unknown,
+                part_id: unknown.clone(),
                 offset: bucket_a,
+                to_level: bucket_a.level(),
                 since: 0,
                 limit_hint: 16,
             })
@@ -1524,8 +1537,9 @@ pub mod host_contract {
 
         let changed = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 offset: bucket_a,
+                to_level: bucket_a.level(),
                 since: 0,
                 limit_hint: 16,
             })
@@ -1540,13 +1554,14 @@ pub mod host_contract {
                 .all(|buck| buck.id.level() == bucket_a.level())
         );
         for buck in &changed {
-            assert_eq!(store.get_bucket_summary(part, buck.id).await?, *buck);
+            assert_eq!(store.get_bucket_summary(part.clone(), buck.id).await?, *buck);
         }
 
         let changed_from_b = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 offset: bucket_b,
+                to_level: bucket_b.level(),
                 since: 0,
                 limit_hint: 16,
             })
@@ -1561,6 +1576,38 @@ pub mod host_contract {
             vec![bucket_b, bucket_c]
         );
 
+        // ADR 012 decision 4 correction 3: one request returns every changed bucket from the
+        // cursor down through `to_level`, so a walk reaches its working level in a single
+        // scan instead of one exchange per level. The page is still in bucket order, and it
+        // now contains levels the cursor's own level never covered.
+        let mixed = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part.clone(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::MAX_LEVEL,
+                since: 0,
+                limit_hint: 64,
+            })
+            .await??
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert!(
+            mixed.windows(2).all(|pair| pair[0].id < pair[1].id),
+            "a mixed-level page is still ordered by bucket id"
+        );
+        for (buck, salt) in [(bucket_a, 1u8), (bucket_b, 2), (bucket_c, 3)] {
+            assert!(
+                mixed.iter().any(|page| page.id == buck),
+                "the scan covers the cursor's own level"
+            );
+            // The same key that was seeded above, so its deeper ancestor exists.
+            let deeper = BuckId::from_obj_key(buck.level() + 1, &obj_in_bucket(buck, salt));
+            assert!(
+                mixed.iter().any(|page| page.id == deeper),
+                "and levels beneath it, in the same request"
+            );
+        }
+
         let cutoff = changed
             .iter()
             .map(|buck| buck.changed_at)
@@ -1568,19 +1615,21 @@ pub mod host_contract {
             .expect(ERROR_IMPOSSIBLE);
         let nothing = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 offset: bucket_a,
+                to_level: bucket_a.level(),
                 since: cutoff,
                 limit_hint: 16,
             })
             .await??;
         assert!(nothing.is_empty());
 
-        seed_live_obj(store, obj_a, payload("changed-a-2", 4), &[part]).await?;
+        seed_live_obj(store, obj_a, payload("changed-a-2", 4), std::slice::from_ref(&part)).await?;
         let changed_after = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 offset: bucket_a,
+                to_level: bucket_a.level(),
                 since: cutoff,
                 limit_hint: 16,
             })
@@ -1607,14 +1656,14 @@ pub mod host_contract {
         let obj = obj_in_bucket(bucket, 9);
         let seed = FingerprintSeed::new(0x4444_5555, 0x6666_7777);
 
-        store.ensure_part(part).await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
+        store.ensure_part(part.clone()).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
 
-        assert_eq!(store.obj_payload(obj).await?, None);
-        assert_eq!(store.obj_parts(obj).await?, vec![part]);
-        assert_eq!(store.member_count(part).await?, 0);
+        assert_eq!(store.obj_payload(obj.clone()).await?, None);
+        assert_eq!(store.obj_parts(obj.clone()).await?, vec![part.clone()]);
+        assert_eq!(store.member_count(part.clone()).await?, 0);
 
-        let bucket_before = store.get_bucket_summary(part, bucket).await?;
+        let bucket_before = store.get_bucket_summary(part.clone(), bucket).await?;
         assert_eq!(
             bucket_before,
             BucketSummary {
@@ -1628,7 +1677,7 @@ pub mod host_contract {
 
         let leaf_before = store
             .leaf_buckets(LeafBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 since: 0,
                 buckets: vec![LeafBucketRequest {
                     buck_id: bucket,
@@ -1650,7 +1699,7 @@ pub mod host_contract {
             }
         );
 
-        let events_before = store.list_events(HashSet::from([part]), 0, 8).await??;
+        let events_before = store.list_events(HashSet::from([part.clone()]), 0, 8).await??;
         assert_eq!(
             events_before.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
@@ -1659,7 +1708,7 @@ pub mod host_contract {
             }
         );
         store
-            .set_obj_payload(obj, payload("late-payload", 99))
+            .set_obj_payload(obj.clone(), payload("late-payload", 99))
             .await?;
 
         let live_fp_after = Fingerprint::new(
@@ -1667,12 +1716,12 @@ pub mod host_contract {
             &(
                 "big-sync-bucket-live-v1",
                 bucket,
-                obj,
+                obj.clone(),
                 payload("late-payload", 99),
             ),
         )
         .as_u64();
-        let bucket_after = store.get_bucket_summary(part, bucket).await?;
+        let bucket_after = store.get_bucket_summary(part.clone(), bucket).await?;
         assert_eq!(bucket_after.id, bucket);
         assert_eq!(bucket_after.len, 1);
         assert_eq!(bucket_after.live_count, 1);
@@ -1681,8 +1730,9 @@ pub mod host_contract {
 
         let changed = store
             .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 offset: bucket,
+                to_level: bucket.level(),
                 since: bucket_before.changed_at,
                 limit_hint: 16,
             })
@@ -1693,7 +1743,7 @@ pub mod host_contract {
 
         let leaf_after = store
             .leaf_buckets(LeafBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 since: bucket_before.changed_at,
                 buckets: vec![LeafBucketRequest {
                     buck_id: bucket,
@@ -1710,11 +1760,11 @@ pub mod host_contract {
             leaf_after,
             LeafBucketPage {
                 entries: vec![BucketObjPageEntry {
-                    obj_id: obj,
+                    obj_id: obj.clone(),
                     dead: false,
                     fp: Fingerprint::new(
                         &seed,
-                        &("big-sync-obj-fp-v1", obj, payload("late-payload", 99)),
+                        &("big-sync-obj-fp-v1", obj.clone(), payload("late-payload", 99)),
                     ),
                 }],
                 next_after: None,
@@ -1722,7 +1772,7 @@ pub mod host_contract {
             }
         );
 
-        let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
+        let events_after = store.list_events(HashSet::from([part.clone()]), 0, 8).await??;
         let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
         assert_eq!(page_after.events.len(), 1);
         let added_cursor = match &page_after.events[0] {
@@ -1755,12 +1805,12 @@ pub mod host_contract {
         let b1 = obj_in_bucket(bucket_b, 1);
         let seed = FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd);
 
-        store.ensure_part(part).await?;
-        seed_live_obj(store, a2, payload("leaf-a2", 2), &[part]).await?;
-        seed_live_obj(store, a1, payload("leaf-a1", 1), &[part]).await?;
-        seed_live_obj(store, a3, payload("leaf-a3", 3), &[part]).await?;
-        store.remove_obj_from_part(a3, part).await?;
-        seed_live_obj(store, b1, payload("leaf-b1", 4), &[part]).await?;
+        store.ensure_part(part.clone()).await?;
+        seed_live_obj(store, a2.clone(), payload("leaf-a2", 2), std::slice::from_ref(&part)).await?;
+        seed_live_obj(store, a1.clone(), payload("leaf-a1", 1), std::slice::from_ref(&part)).await?;
+        seed_live_obj(store, a3.clone(), payload("leaf-a3", 3), std::slice::from_ref(&part)).await?;
+        store.remove_obj_from_part(a3.clone(), part.clone()).await?;
+        seed_live_obj(store, b1.clone(), payload("leaf-b1", 4), std::slice::from_ref(&part)).await?;
 
         match store
             .leaf_buckets(LeafBucketsRequest {
@@ -1781,7 +1831,7 @@ pub mod host_contract {
 
         let page = store
             .leaf_buckets(LeafBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 since: 0,
                 buckets: vec![
                     LeafBucketRequest {
@@ -1804,7 +1854,7 @@ pub mod host_contract {
             &LeafBucketPage {
                 entries: vec![
                     BucketObjPageEntry {
-                        obj_id: a1,
+                        obj_id: a1.clone(),
                         dead: false,
                         fp: Fingerprint::new(
                             &seed,
@@ -1812,15 +1862,15 @@ pub mod host_contract {
                         ),
                     },
                     BucketObjPageEntry {
-                        obj_id: a2,
+                        obj_id: a2.clone(),
                         dead: false,
                         fp: Fingerprint::new(
                             &seed,
-                            &("big-sync-obj-fp-v1", a2, payload("leaf-a2", 2))
+                            &("big-sync-obj-fp-v1", a2.clone(), payload("leaf-a2", 2))
                         ),
                     },
                 ],
-                next_after: Some(a2),
+                next_after: Some(a2.clone()),
                 done: false,
             }
         );
@@ -1829,21 +1879,21 @@ pub mod host_contract {
             page_b,
             &LeafBucketPage {
                 entries: vec![BucketObjPageEntry {
-                    obj_id: b1,
+                    obj_id: b1.clone(),
                     dead: false,
-                    fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", b1, payload("leaf-b1", 4))),
+                    fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", b1.clone(), payload("leaf-b1", 4))),
                 }],
                 next_after: None,
                 done: true,
             }
         );
 
-        let since = store.get_bucket_summary(part, bucket_b).await?.changed_at;
-        store.set_obj_payload(b1, payload("leaf-b1-2", 5)).await?;
+        let since = store.get_bucket_summary(part.clone(), bucket_b).await?.changed_at;
+        store.set_obj_payload(b1.clone(), payload("leaf-b1-2", 5)).await?;
 
         let since_page = store
             .leaf_buckets(LeafBucketsRequest {
-                part_id: part,
+                part_id: part.clone(),
                 since,
                 buckets: vec![
                     LeafBucketRequest {
@@ -1871,7 +1921,7 @@ pub mod host_contract {
             since_page.bucks.get(&bucket_b).expect(ERROR_IMPOSSIBLE),
             &LeafBucketPage {
                 entries: vec![BucketObjPageEntry {
-                    obj_id: b1,
+                    obj_id: b1.clone(),
                     dead: false,
                     fp: Fingerprint::new(
                         &seed,
@@ -1902,7 +1952,7 @@ pub mod host_contract {
             page_a_tail,
             LeafBucketPage {
                 entries: vec![BucketObjPageEntry {
-                    obj_id: a3,
+                    obj_id: a3.clone(),
                     dead: true,
                     fp: Fingerprint::new(
                         &seed,
@@ -1926,16 +1976,16 @@ pub mod host_contract {
         let unknown = test_part(43);
         let obj = test_obj(44);
 
-        store.ensure_part(part_a).await?;
-        store.ensure_part(part_b).await?;
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
 
-        seed_live_obj(store, obj, payload("events-1", 1), &[part_a]).await?;
-        store.add_obj_to_parts(obj, vec![part_b]).await?;
-        store.set_obj_payload(obj, payload("events-2", 2)).await?;
-        store.remove_obj_from_part(obj, part_a).await?;
-        store.set_obj_payload(obj, payload("events-3", 3)).await?;
+        seed_live_obj(store, obj.clone(), payload("events-1", 1), std::slice::from_ref(&part_a)).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
+        store.set_obj_payload(obj.clone(), payload("events-2", 2)).await?;
+        store.remove_obj_from_part(obj.clone(), part_a.clone()).await?;
+        store.set_obj_payload(obj.clone(), payload("events-3", 3)).await?;
 
-        match store.list_events(HashSet::from([unknown]), 0, 10).await? {
+        match store.list_events(HashSet::from([unknown.clone()]), 0, 10).await? {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
                 assert_eq!(unkown_parts, vec![unknown]);
             }
@@ -1943,7 +1993,7 @@ pub mod host_contract {
         }
 
         let page1 = store
-            .list_events(HashSet::from([part_a]), 0, 10)
+            .list_events(HashSet::from([part_a.clone()]), 0, 10)
             .await??
             .remove(&part_a)
             .expect(ERROR_IMPOSSIBLE);
@@ -1956,7 +2006,7 @@ pub mod host_contract {
         }
 
         let page_b = store
-            .list_events(HashSet::from([part_b]), 0, 10)
+            .list_events(HashSet::from([part_b.clone()]), 0, 10)
             .await??
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
@@ -1980,11 +2030,11 @@ pub mod host_contract {
         let obj = test_obj(55);
         let reader = big_sync_core::PeerKey::new([56u8; 32]);
 
-        store.ensure_part(part).await?;
+        store.ensure_part(part.clone()).await?;
         store
             .set_part_members(
-                part,
-                std::collections::HashMap::from([(reader, Access::Read)]),
+                part.clone(),
+                std::collections::HashMap::from([(reader.clone(), Access::Read)]),
             )
             .await?;
         let rx = store
@@ -1992,7 +2042,7 @@ pub mod host_contract {
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
+                        part_id: part.clone(),
                         cursor: 0,
                     }]),
                 },
@@ -2006,9 +2056,9 @@ pub mod host_contract {
         }
 
         store
-            .set_obj_payload(obj, payload("readable-subscribe", 1))
+            .set_obj_payload(obj.clone(), payload("readable-subscribe", 1))
             .await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
 
         loop {
             match recv_sub_event(&rx).await? {
@@ -2032,33 +2082,33 @@ pub mod host_contract {
         let part_b = test_part(52);
         let obj = test_obj(53);
 
-        store.ensure_part(part_a).await?;
-        store.ensure_part(part_b).await?;
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
 
         // Grant the subscriber Read access on every part the object is in, so the
         // filter passes events.
         let sub_peer = big_sync_core::PeerKey::new([0u8; 32]);
-        for part in [part_a, part_b] {
+        for part in [part_a.clone(), part_b.clone()] {
             store
                 .set_part_members(
                     part,
-                    std::collections::HashMap::from([(sub_peer, Access::Read)]),
+                    std::collections::HashMap::from([(sub_peer.clone(), Access::Read)]),
                 )
                 .await?;
         }
 
-        seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
-        store.add_obj_to_parts(obj, vec![part_b]).await?;
-        store.set_obj_payload(obj, payload("sub-2", 2)).await?;
-        store.remove_obj_from_part(obj, part_a).await?;
-        store.set_obj_payload(obj, payload("sub-3", 3)).await?;
+        seed_live_obj(store, obj.clone(), payload("sub-1", 1), std::slice::from_ref(&part_a)).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
+        store.set_obj_payload(obj.clone(), payload("sub-2", 2)).await?;
+        store.remove_obj_from_part(obj.clone(), part_a).await?;
+        store.set_obj_payload(obj.clone(), payload("sub-3", 3)).await?;
 
         let rx = store
             .subscribe(
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_b,
+                        part_id: part_b.clone(),
                         cursor: 0,
                     }]),
                 },
@@ -2068,7 +2118,7 @@ pub mod host_contract {
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
             [SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
-                assert_eq!(changed.part_ids, vec![part_b]);
+                assert_eq!(changed.part_ids, vec![part_b.clone()]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("sub-3", 3));
                 changed.cursor
@@ -2076,7 +2126,7 @@ pub mod host_contract {
             other => panic!("unexpected replay events: {other:?}"),
         };
 
-        store.set_obj_payload(obj, payload("sub-4", 4)).await?;
+        store.set_obj_payload(obj.clone(), payload("sub-4", 4)).await?;
         let live_evt = recv_sub_event(&rx).await?;
         match live_evt {
             SubEvent::Changed(transition) => {
@@ -2100,20 +2150,20 @@ pub mod host_contract {
         let auth_peer = big_sync_core::PeerKey::new([63u8; 32]);
         let denied_peer = big_sync_core::PeerKey::new([64u8; 32]);
 
-        store.ensure_part(part).await?;
+        store.ensure_part(part.clone()).await?;
 
         // Seed the doc before any subscriptions.
         store
-            .set_obj_payload(obj, payload("replay-filter", 1))
+            .set_obj_payload(obj.clone(), payload("replay-filter", 1))
             .await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
 
         // Set explicit membership: auth_peer has Read; denied_peer gets
         // an empty membership map (explicitly denied).
         store
             .set_part_members(
-                part,
-                std::collections::HashMap::from([(auth_peer, Access::Read)]),
+                part.clone(),
+                std::collections::HashMap::from([(auth_peer.clone(), Access::Read)]),
             )
             .await?;
 
@@ -2123,7 +2173,7 @@ pub mod host_contract {
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part,
+                        part_id: part.clone(),
                         cursor: 0,
                     }]),
                 },
@@ -2135,7 +2185,7 @@ pub mod host_contract {
             auth_events.iter().any(|evt| match evt {
                 SubEvent::Added(added) => added.obj_id == obj && added.part_id == part,
                 SubEvent::Changed(changed) => {
-                    changed.obj_id == obj && changed.part_ids == vec![part]
+                    changed.obj_id == obj && changed.part_ids == vec![part.clone()]
                 }
                 _ => false,
             }),
@@ -2204,26 +2254,26 @@ pub mod host_contract {
         let relay_peer = big_sync_core::PeerKey::new([74u8; 32]);
         let denied_peer = big_sync_core::PeerKey::new([75u8; 32]);
 
-        store.ensure_part(part).await?;
-        store.ensure_part(overlapping_part).await?;
+        store.ensure_part(part.clone()).await?;
+        store.ensure_part(overlapping_part.clone()).await?;
 
         // Seed the doc before any subscriptions.
         store
-            .set_obj_payload(obj, payload("live-filter", 1))
+            .set_obj_payload(obj.clone(), payload("live-filter", 1))
             .await?;
         store
-            .add_obj_to_parts(obj, vec![part, overlapping_part])
+            .add_obj_to_parts(obj.clone(), vec![part.clone(), overlapping_part.clone()])
             .await?;
 
         // Grant both parts the object is in: auth_peer has Read, relay_peer has
         // Relay, denied_peer has no row in either (explicitly denied).
-        for part in [part, overlapping_part] {
+        for part in [part.clone(), overlapping_part.clone()] {
             store
                 .set_part_members(
                     part,
                     std::collections::HashMap::from([
-                        (auth_peer, Access::Read),
-                        (relay_peer, Access::Relay),
+                        (auth_peer.clone(), Access::Read),
+                        (relay_peer.clone(), Access::Relay),
                     ]),
                 )
                 .await?;
@@ -2231,26 +2281,32 @@ pub mod host_contract {
 
         // Subscribe all three and drain through ReplayComplete so each
         // is registered for live events.
-        let sub = |peer| async move {
-            store
-                .subscribe(
-                    SubPartsRequest {
-                        lower_bound: 0,
-                        targets: HashSet::from([
-                            big_sync_core::rpc::SubscriptionTarget::Part {
-                                part_id: part,
-                                cursor: 0,
-                            },
-                            big_sync_core::rpc::SubscriptionTarget::Part {
-                                part_id: overlapping_part,
-                                cursor: 0,
-                            },
-                        ]),
-                    },
-                    peer,
-                )
-                .await?
-                .map_err(eyre::Report::from)
+        // The async block moves the two part keys in, so each call needs its own
+        // copies: the closure is invoked once per subscriber below.
+        let sub = |peer| {
+            let part = part.clone();
+            let overlapping_part = overlapping_part.clone();
+            async move {
+                store
+                    .subscribe(
+                        SubPartsRequest {
+                            lower_bound: 0,
+                            targets: HashSet::from([
+                                big_sync_core::rpc::SubscriptionTarget::Part {
+                                    part_id: part,
+                                    cursor: 0,
+                                },
+                                big_sync_core::rpc::SubscriptionTarget::Part {
+                                    part_id: overlapping_part,
+                                    cursor: 0,
+                                },
+                            ]),
+                        },
+                        peer,
+                    )
+                    .await?
+                    .map_err(eyre::Report::from)
+            }
         };
         let auth_rx = sub(auth_peer).await?;
         let relay_rx = sub(relay_peer).await?;
@@ -2262,7 +2318,7 @@ pub mod host_contract {
 
         // Now all three are subscribed for live events.  Mutate the doc.
         store
-            .set_obj_payload(obj, payload("live-filter", 2))
+            .set_obj_payload(obj.clone(), payload("live-filter", 2))
             .await?;
 
         // Authorized (Read) must receive the live Changed event for each subscribed partition.
@@ -2276,7 +2332,7 @@ pub mod host_contract {
         assert_eq!(auth_changed.payload, payload("live-filter", 2));
         assert_eq!(
             auth_changed.part_ids.into_iter().collect::<HashSet<_>>(),
-            HashSet::from([part, overlapping_part]),
+            HashSet::from([part.clone(), overlapping_part.clone()]),
             "one live event must cover every subscribed part",
         );
         assert!(
@@ -2333,17 +2389,17 @@ pub mod host_contract {
             peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
-            store.ensure_part(part_a).await?;
-            store.ensure_part(part_b).await?;
-            for part in [part_a, part_b] {
+            store.ensure_part(part_a.clone()).await?;
+            store.ensure_part(part_b.clone()).await?;
+            for part in [part_a.clone(), part_b.clone()] {
                 store
-                    .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                    .set_part_members(part, HashMap::from([(peer.clone(), Access::Read)]))
                     .await?;
             }
-            store.set_obj_payload(obj, payload("matrix", 0)).await?;
-            store.add_obj_to_parts(obj, vec![part_a, part_b]).await?;
+            store.set_obj_payload(obj.clone(), payload("matrix", 0)).await?;
+            store.add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()]).await?;
             let baseline_cursor = store
-                .list_events(HashSet::from([part_a, part_b]), 0, u32::MAX)
+                .list_events(HashSet::from([part_a.clone(), part_b.clone()]), 0, u32::MAX)
                 .await??
                 .values()
                 .flat_map(|page| page.events.iter())
@@ -2357,7 +2413,7 @@ pub mod host_contract {
             let mut targets = HashSet::new();
             if mode != 1 {
                 targets.insert(big_sync_core::rpc::SubscriptionTarget::Part {
-                    part_id: part_a,
+                    part_id: part_a.clone(),
                     cursor: baseline_cursor,
                 });
                 targets.insert(big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2366,7 +2422,7 @@ pub mod host_contract {
                 });
             }
             if mode != 0 {
-                targets.insert(big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj });
+                targets.insert(big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() });
             }
             let request = SubPartsRequest {
                 lower_bound: baseline_cursor,
@@ -2381,9 +2437,9 @@ pub mod host_contract {
             if !live {
                 for operation in operations {
                     match operation {
-                        0 => store.set_obj_payload(obj, payload("matrix", 1)).await?,
-                        1 => store.remove_obj_from_part(obj, part_a).await?,
-                        2 => store.set_obj_payload(obj, payload("matrix", 2)).await?,
+                        0 => store.set_obj_payload(obj.clone(), payload("matrix", 1)).await?,
+                        1 => store.remove_obj_from_part(obj.clone(), part_a.clone()).await?,
+                        2 => store.set_obj_payload(obj.clone(), payload("matrix", 2)).await?,
                         _ => unreachable!("unknown subscription mutation"),
                     }
                 }
@@ -2395,9 +2451,9 @@ pub mod host_contract {
             let mut events = collect_sub_events(&rx).await?;
             for operation in operations {
                 match operation {
-                    0 => store.set_obj_payload(obj, payload("matrix", 1)).await?,
-                    1 => store.remove_obj_from_part(obj, part_a).await?,
-                    2 => store.set_obj_payload(obj, payload("matrix", 2)).await?,
+                    0 => store.set_obj_payload(obj.clone(), payload("matrix", 1)).await?,
+                    1 => store.remove_obj_from_part(obj.clone(), part_a.clone()).await?,
+                    2 => store.set_obj_payload(obj.clone(), payload("matrix", 2)).await?,
                     _ => unreachable!("unknown subscription mutation"),
                 }
                 events.push(recv_sub_event(&rx).await?);
@@ -2493,7 +2549,7 @@ pub mod host_contract {
                         }
                         self.check_changed_projection(&inner.part_ids);
                         self.state.payload = Some(inner.payload);
-                        self.state.live_parts.extend(inner.part_ids.iter().copied());
+                        self.state.live_parts.extend(inner.part_ids.iter().cloned());
                         self.changed_groups
                             .entry((inner.cursor, inner.obj_id))
                             .or_default()
@@ -2507,7 +2563,7 @@ pub mod host_contract {
                                 inner.obj_id, self.obj
                             ));
                         }
-                        self.check_part(inner.part_id, "Added");
+                        self.check_part(inner.part_id.clone(), "Added");
                         self.state.payload = Some(inner.payload);
                         self.state.live_parts.insert(inner.part_id);
                     }
@@ -2519,7 +2575,7 @@ pub mod host_contract {
                                 inner.obj_id, self.obj
                             ));
                         }
-                        self.check_part(inner.part_id, "Removed");
+                        self.check_part(inner.part_id.clone(), "Removed");
                         self.state.live_parts.remove(&inner.part_id);
                     }
                 }
@@ -2577,9 +2633,9 @@ pub mod host_contract {
                 mode,
                 order,
                 test_obj(seed + 2),
-                part_a,
-                part_b,
-                peer,
+                part_a.clone(),
+                part_b.clone(),
+                peer.clone(),
                 false,
             )
             .await?;
@@ -2588,9 +2644,9 @@ pub mod host_contract {
                 mode,
                 order,
                 test_obj(seed + 3),
-                part_a,
-                part_b,
-                peer,
+                part_a.clone(),
+                part_b.clone(),
+                peer.clone(),
                 true,
             )
             .await?;
@@ -2606,16 +2662,16 @@ pub mod host_contract {
                 live_parts: if mode == 1 {
                     BTreeSet::new()
                 } else if order == 0 {
-                    BTreeSet::from([part_a, part_b])
+                    BTreeSet::from([part_a.clone(), part_b.clone()])
                 } else {
-                    BTreeSet::from([part_b])
+                    BTreeSet::from([part_b.clone()])
                 },
             };
             let replay_state = canonical_state(
                 mode,
                 test_obj(seed + 2),
-                part_a,
-                part_b,
+                part_a.clone(),
+                part_b.clone(),
                 replay,
                 expected.clone(),
             );
@@ -2641,13 +2697,13 @@ pub mod host_contract {
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             if !live {
-                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+                store.set_obj_payload(obj.clone(), payload("zero-part", 1)).await?;
             }
             let rx = store
                 .subscribe_local(SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                        obj_id: obj,
+                        obj_id: obj.clone(),
                     }]),
                 })
                 .await??;
@@ -2672,14 +2728,14 @@ pub mod host_contract {
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             if !live {
-                store.set_obj_payload(obj, payload("zero-part", 1)).await?;
+                store.set_obj_payload(obj.clone(), payload("zero-part", 1)).await?;
             }
             let rx = store
                 .subscribe(
                     SubPartsRequest {
                         lower_bound: 0,
                         targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                            obj_id: obj,
+                            obj_id: obj.clone(),
                         }]),
                     },
                     peer,
@@ -2751,14 +2807,14 @@ pub mod host_contract {
             peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
-            store.ensure_part(part).await?;
+            store.ensure_part(part.clone()).await?;
             store
-                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
                 .await?;
-            store.set_obj_payload(obj, payload("mixed", 0)).await?;
-            store.add_obj_to_parts(obj, vec![part]).await?;
+            store.set_obj_payload(obj.clone(), payload("mixed", 0)).await?;
+            store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
             let baseline = store
-                .list_events(HashSet::from([part]), 0, u32::MAX)
+                .list_events(HashSet::from([part.clone()]), 0, u32::MAX)
                 .await??
                 .values()
                 .flat_map(|page| page.events.iter())
@@ -2770,7 +2826,7 @@ pub mod host_contract {
                 .max()
                 .unwrap_or_default();
             if !live {
-                store.set_obj_payload(obj, payload("mixed", 1)).await?;
+                store.set_obj_payload(obj.clone(), payload("mixed", 1)).await?;
             }
             let rx = store
                 .subscribe(
@@ -2781,7 +2837,7 @@ pub mod host_contract {
                                 part_id: part,
                                 cursor: baseline,
                             },
-                            big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj },
+                            big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() },
                         ]),
                     },
                     peer,
@@ -2809,14 +2865,14 @@ pub mod host_contract {
             peer: PeerKey,
             live: bool,
         ) -> Res<Vec<SubEvent>> {
-            store.ensure_part(part).await?;
+            store.ensure_part(part.clone()).await?;
             store
-                .set_part_members(part, HashMap::from([(peer, Access::Read)]))
+                .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
                 .await?;
             store
-                .set_obj_payload(obj, payload("object-only", 0))
+                .set_obj_payload(obj.clone(), payload("object-only", 0))
                 .await?;
-            store.add_obj_to_parts(obj, vec![part]).await?;
+            store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
             let baseline = store
                 .list_events(HashSet::from([part]), 0, u32::MAX)
                 .await??
@@ -2832,7 +2888,7 @@ pub mod host_contract {
 
             if !live {
                 store
-                    .set_obj_payload(obj, payload("object-only", 1))
+                    .set_obj_payload(obj.clone(), payload("object-only", 1))
                     .await?;
             }
             let rx = store
@@ -2840,7 +2896,7 @@ pub mod host_contract {
                     SubPartsRequest {
                         lower_bound: baseline,
                         targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                            obj_id: obj,
+                            obj_id: obj.clone(),
                         }]),
                     },
                     peer,
@@ -2903,7 +2959,7 @@ pub mod host_contract {
         let mixed_replay = run_zero_mixed_case(
             store,
             test_obj(184),
-            mixed_replay_part,
+            mixed_replay_part.clone(),
             PeerKey::new([186; 32]),
             false,
         )
@@ -2912,31 +2968,31 @@ pub mod host_contract {
         let mixed_live = run_zero_mixed_case(
             store,
             test_obj(187),
-            mixed_live_part,
+            mixed_live_part.clone(),
             PeerKey::new([189; 32]),
             true,
         )
         .await?;
         let mixed_replay_expected = CanonicalState {
             payload: Some(payload("mixed", 1)),
-            live_parts: BTreeSet::from([mixed_replay_part]),
+            live_parts: BTreeSet::from([mixed_replay_part.clone()]),
         };
         let mixed_replay_state = canonical_state(
             2,
             test_obj(184),
-            mixed_replay_part,
+            mixed_replay_part.clone(),
             mixed_replay_part,
             mixed_replay,
             mixed_replay_expected,
         );
         let mixed_live_expected = CanonicalState {
             payload: Some(payload("mixed", 1)),
-            live_parts: BTreeSet::from([mixed_live_part]),
+            live_parts: BTreeSet::from([mixed_live_part.clone()]),
         };
         let mixed_live_state = canonical_state(
             2,
             test_obj(187),
-            mixed_live_part,
+            mixed_live_part.clone(),
             mixed_live_part,
             mixed_live,
             mixed_live_expected,
@@ -2968,31 +3024,31 @@ pub mod host_contract {
         let obj = test_obj(83);
         let peer = big_sync_core::PeerKey::new([84u8; 32]);
 
-        store.ensure_part(part_a).await?;
-        store.ensure_part(part_b).await?;
-        for part in [part_a, part_b] {
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
+        for part in [part_a.clone(), part_b.clone()] {
             store
                 .set_part_members(
                     part,
-                    HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                    HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
                 )
                 .await?;
         }
         // Build events: cursor 1-4 only for part_a, 5-6 involve part_b.
         // First set payload while obj has no parts (no event recorded).
-        store.set_obj_payload(obj, payload("per-cursor", 1)).await?;
-        store.add_obj_to_parts(obj, vec![part_a]).await?;
+        store.set_obj_payload(obj.clone(), payload("per-cursor", 1)).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part_a.clone()]).await?;
         // cursor=1: Added obj, part_a
-        store.set_obj_payload(obj, payload("per-cursor", 2)).await?;
+        store.set_obj_payload(obj.clone(), payload("per-cursor", 2)).await?;
         // cursor=2: Changed [part_a]
-        store.set_obj_payload(obj, payload("per-cursor", 3)).await?;
+        store.set_obj_payload(obj.clone(), payload("per-cursor", 3)).await?;
         // cursor=3: Changed [part_a]
-        store.set_obj_payload(obj, payload("per-cursor", 4)).await?;
+        store.set_obj_payload(obj.clone(), payload("per-cursor", 4)).await?;
         // cursor=4: Changed [part_a]
 
-        store.add_obj_to_parts(obj, vec![part_b]).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
         // cursor=5: Added obj, part_b
-        store.set_obj_payload(obj, payload("per-cursor", 5)).await?;
+        store.set_obj_payload(obj.clone(), payload("per-cursor", 5)).await?;
         // cursor=6: Changed [part_a, part_b]
 
         // The request lower bound is shared by all targets. The latest-state
@@ -3004,11 +3060,11 @@ pub mod host_contract {
                     lower_bound: 0,
                     targets: HashSet::from([
                         big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part_a,
+                            part_id: part_a.clone(),
                             cursor: 0,
                         },
                         big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part_b,
+                            part_id: part_b.clone(),
                             cursor: 0,
                         },
                     ]),
@@ -3031,7 +3087,7 @@ pub mod host_contract {
             "one logical multi-part change must produce one replay message: {events:?}",
         );
         assert_eq!(
-            changes[0].part_ids.iter().copied().collect::<HashSet<_>>(),
+            changes[0].part_ids.iter().cloned().collect::<HashSet<_>>(),
             HashSet::from([part_a, part_b]),
         );
         Ok(())
@@ -3045,14 +3101,16 @@ pub mod host_contract {
         let part = test_part(151);
         let objs = [test_obj(152), test_obj(153), test_obj(154)];
 
-        store.ensure_part(part).await?;
+        store.ensure_part(part.clone()).await?;
 
         // Create three distinct events on the same part, each at a distinct cursor.
-        for (ii, &obj_id) in objs.iter().enumerate() {
+        for (ii, obj_id) in objs.iter().enumerate() {
             store
-                .set_obj_payload(obj_id, payload("pagination", ii as u64))
+                .set_obj_payload(obj_id.clone(), payload("pagination", ii as u64))
                 .await?;
-            store.add_obj_to_parts(obj_id, vec![part]).await?;
+            store
+                .add_obj_to_parts(obj_id.clone(), vec![part.clone()])
+                .await?;
         }
 
         // Paginate with limit=1, following next_cursor until exhaustion.
@@ -3060,14 +3118,14 @@ pub mod host_contract {
         let mut collected: Vec<(CursorIndex, ObjKey)> = Vec::new();
         loop {
             let page = store
-                .list_events(HashSet::from([part]), cursor, 1)
+                .list_events(HashSet::from([part.clone()]), cursor, 1)
                 .await??
                 .remove(&part)
                 .expect(ERROR_IMPOSSIBLE);
             for evt in &page.events {
                 match evt {
                     PartEvent::Added(added) => {
-                        collected.push((added.cursor, added.obj_id));
+                        collected.push((added.cursor, added.obj_id.clone()));
                     }
                     PartEvent::Changed(_) | PartEvent::Removed(_) => {
                         panic!("unexpected event type for single-object part");
@@ -3087,10 +3145,11 @@ pub mod host_contract {
             "expected {} events via pagination, got {collected:?}",
             objs.len(),
         );
-        for (ii, &expected_obj_id) in objs.iter().enumerate() {
-            let (retrieved_cursor, retrieved_obj_id) = collected[ii];
+        for (ii, expected_obj_id) in objs.iter().enumerate() {
+            let (retrieved_cursor, retrieved_obj_id) = collected[ii].clone();
             assert_eq!(
-                retrieved_obj_id, expected_obj_id,
+                retrieved_obj_id,
+                expected_obj_id.clone(),
                 "event {ii}: expected obj {expected_obj_id}, got {retrieved_obj_id}"
             );
             if ii > 0 {
@@ -3113,18 +3172,18 @@ pub mod host_contract {
         let part = test_part(101);
         let peer = big_sync_core::PeerKey::new([102u8; 32]);
 
-        store.ensure_part(part).await?;
+        store.ensure_part(part.clone()).await?;
 
         // Set to a higher cursor, then attempt regression.
-        store.set_peer_part_cursor(peer, part, 42).await?;
+        store.set_peer_part_cursor(peer.clone(), part.clone(), 42).await?;
         assert_eq!(
-            store.get_peer_part_cursor(peer, part).await?,
+            store.get_peer_part_cursor(peer.clone(), part.clone()).await?,
             42,
             "initial cursor should be 42"
         );
 
         // Attempt to regress: setting to 5 must be a no-op.
-        store.set_peer_part_cursor(peer, part, 5).await?;
+        store.set_peer_part_cursor(peer.clone(), part.clone(), 5).await?;
         let cursor = store.get_peer_part_cursor(peer, part).await?;
         assert!(
             cursor >= 42,
@@ -3141,19 +3200,19 @@ pub mod host_contract {
         let part = test_part(111);
         let obj = test_obj(112);
 
-        store.ensure_part(part).await?;
-        store.set_obj_payload(obj, payload("cursor-adv", 1)).await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
+        store.ensure_part(part.clone()).await?;
+        store.set_obj_payload(obj.clone(), payload("cursor-adv", 1)).await?;
+        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
 
-        let summaries_after_add = store.summarize_parts(HashSet::from([part])).await??;
+        let summaries_after_add = store.summarize_parts(HashSet::from([part.clone()])).await??;
         let cursor_after_add = summaries_after_add
             .get(&part)
             .expect("summary must contain part")
             .latest_cursor;
 
-        store.remove_obj_from_part(obj, part).await?;
+        store.remove_obj_from_part(obj.clone(), part.clone()).await?;
 
-        let summaries_after_remove = store.summarize_parts(HashSet::from([part])).await??;
+        let summaries_after_remove = store.summarize_parts(HashSet::from([part.clone()])).await??;
         let cursor_after_remove = summaries_after_remove
             .get(&part)
             .expect("summary must contain part")
@@ -3165,7 +3224,7 @@ pub mod host_contract {
         );
 
         let page = store
-            .list_events(HashSet::from([part]), cursor_after_add, u32::MAX)
+            .list_events(HashSet::from([part.clone()]), cursor_after_add, u32::MAX)
             .await??
             .remove(&part)
             .expect(ERROR_IMPOSSIBLE);
@@ -3188,17 +3247,17 @@ pub mod host_contract {
         let obj2 = test_obj(123);
         let obj3 = test_obj(124);
 
-        store.ensure_part(part).await?;
+        store.ensure_part(part.clone()).await?;
 
         // Seed 2 objects
-        store.set_obj_payload(obj1, payload("exactness", 1)).await?;
-        store.add_obj_to_parts(obj1, vec![part]).await?;
-        store.set_obj_payload(obj2, payload("exactness", 2)).await?;
-        store.add_obj_to_parts(obj2, vec![part]).await?;
+        store.set_obj_payload(obj1.clone(), payload("exactness", 1)).await?;
+        store.add_obj_to_parts(obj1, vec![part.clone()]).await?;
+        store.set_obj_payload(obj2.clone(), payload("exactness", 2)).await?;
+        store.add_obj_to_parts(obj2, vec![part.clone()]).await?;
 
         // Query exactly limit=2 matching 2 events: next_cursor MUST be None
         let page_exact = store
-            .list_events(HashSet::from([part]), 0, 2)
+            .list_events(HashSet::from([part.clone()]), 0, 2)
             .await??
             .remove(&part)
             .expect(ERROR_IMPOSSIBLE);
@@ -3210,12 +3269,12 @@ pub mod host_contract {
         );
 
         // Seed 3rd object
-        store.set_obj_payload(obj3, payload("exactness", 3)).await?;
-        store.add_obj_to_parts(obj3, vec![part]).await?;
+        store.set_obj_payload(obj3.clone(), payload("exactness", 3)).await?;
+        store.add_obj_to_parts(obj3, vec![part.clone()]).await?;
 
         // Query limit=2 when 3 events exist: next_cursor MUST be Some
         let page_more = store
-            .list_events(HashSet::from([part]), 0, 2)
+            .list_events(HashSet::from([part.clone()]), 0, 2)
             .await??
             .remove(&part)
             .expect(ERROR_IMPOSSIBLE);
@@ -3227,7 +3286,7 @@ pub mod host_contract {
 
         // Fetching page starting from next_cursor gets the 3rd event with next_cursor == None
         let page_tail = store
-            .list_events(HashSet::from([part]), next, 2)
+            .list_events(HashSet::from([part.clone()]), next, 2)
             .await??
             .remove(&part)
             .expect(ERROR_IMPOSSIBLE);

@@ -35,7 +35,7 @@ impl Drop for DocLease {
         if let Err(async_channel::TrySendError::Full(_)) =
             self.cmd_tx
                 .try_send(crate::runtime2::Runtime2Cmd::ReleaseDocLease {
-                    doc_id: self.doc_id,
+                    doc_id: self.doc_id.clone(),
                     generation: self.generation,
                 })
         {

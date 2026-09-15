@@ -221,7 +221,7 @@ pub async fn test_cx_with_options(
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&blobs),
-        config_doc_id,
+        config_doc_id.clone(),
         local_user_path.clone(),
         Arc::clone(&sqlite_local_state_repo),
     )
@@ -229,7 +229,7 @@ pub async fn test_cx_with_options(
     let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
-        app_doc_id,
+        app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
         sql_ctx.clone(),
@@ -251,7 +251,7 @@ pub async fn test_cx_with_options(
         .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
         Arc::clone(&big_repo),
-        app_doc_id,
+        app_doc_id.clone(),
         local_user_path.clone(),
         sql_ctx.clone(),
     )
@@ -267,7 +267,7 @@ pub async fn test_cx_with_options(
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&part_store),
-        drawer_doc_id,
+        drawer_doc_id.clone(),
         local_user_path.clone(),
         sql_ctx.clone(),
         temp_dir.path().join("local_state"),
@@ -313,7 +313,7 @@ pub async fn test_cx_with_options(
     let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
     let secret_store = secrets_rs::SecretStore::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
-    let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
+    let local_peer_key = daybook_types::doc::format_peer_key(&peer_id.to_bytes32());
     let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
     let core_inventory_daybook_id = drawer_repo
         .add(daybook_types::doc::AddDocArgs {
@@ -341,24 +341,24 @@ pub async fn test_cx_with_options(
         .branches
         .get("main")
         .ok_or_eyre("missing main branch for core inventory doc")?
-        .branch_doc_id;
+        .branch_doc_id.clone();
     let docs_inventory_doc_id = docs_entry
         .branches
         .get("main")
         .ok_or_eyre("missing main branch for docs inventory doc")?
-        .branch_doc_id;
+        .branch_doc_id.clone();
 
     big_repo
-        .add_admin_member_to_doc(core_inventory_doc_id, authority.blob_inventories.clone())
+        .add_admin_member_to_doc(core_inventory_doc_id.clone(), authority.blob_inventories.clone())
         .await?;
     big_repo
-        .add_admin_member_to_doc(docs_inventory_doc_id, authority.blob_inventories.clone())
+        .add_admin_member_to_doc(docs_inventory_doc_id.clone(), authority.blob_inventories.clone())
         .await?;
 
     config_repo
         .set_blob_inventories(crate::config::AppBlobInventories {
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
+            core_inventory_doc_id: core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: docs_inventory_doc_id.clone(),
         })
         .await?;
 
@@ -366,10 +366,10 @@ pub async fn test_cx_with_options(
         &big_repo,
         &authority.core_docs,
         [
-            app_doc_id,
-            drawer_doc_id,
-            core_inventory_doc_id,
-            docs_inventory_doc_id,
+            app_doc_id.clone(),
+            drawer_doc_id.clone(),
+            core_inventory_doc_id.clone(),
+            docs_inventory_doc_id.clone(),
         ],
     )
     .await?;
@@ -414,7 +414,7 @@ pub async fn test_cx_with_options(
         big_repo
             .get_doc(&app_doc_id)
             .await?
-            .into_ready(app_doc_id)?,
+            .into_ready(app_doc_id.clone())?,
         big_repo
             .get_doc(&drawer_doc_id)
             .await?

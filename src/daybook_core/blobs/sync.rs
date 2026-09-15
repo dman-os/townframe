@@ -42,7 +42,7 @@ impl BlobSyncBackend {
     pub fn active_peer_ids(&self) -> Vec<PeerKey> {
         surelock::key::lock_scope(|key| {
             let (map, _key) = key.lock(&self.peer_addrs);
-            map.keys().copied().collect()
+            map.keys().cloned().collect()
         })
     }
 
@@ -54,11 +54,11 @@ impl BlobSyncBackend {
     }
 
     pub async fn ensure_local_blob(&self, peer_id: PeerKey, blob_id: BlobId) -> Res<()> {
-        if self.blobs_repo.has_blob_on_disk(blob_id).await? {
+        if self.blobs_repo.has_blob_on_disk(blob_id.clone()).await? {
             return Ok(());
         }
 
-        let iroh_hash = blob_id_to_iroh_hash(blob_id);
+        let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
         if self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
             self.blobs_repo.put_from_store(blob_id).await?;
             return Ok(());
@@ -96,9 +96,9 @@ impl SyncBackend for BlobSyncBackend {
         parts: Vec<PartKey>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
-        let blob_id = BlobId::new(*obj_id.as_bytes());
-        let local_has_blob = self.blobs_repo.has_blob_on_disk(blob_id).await?;
-        let local_payload = self.part_store.obj_payload(obj_id).await?;
+        let blob_id = BlobId::new(obj_id.as_bytes());
+        let local_has_blob = self.blobs_repo.has_blob_on_disk(blob_id.clone()).await?;
+        let local_payload = self.part_store.obj_payload(obj_id.clone()).await?;
         if local_has_blob {
             match &remote_payload {
                 Some(remote_payload) if local_payload.as_ref() == Some(remote_payload) => {
@@ -122,7 +122,7 @@ impl SyncBackend for BlobSyncBackend {
             .clone()
             .or_else(|| local_payload.clone())
             .unwrap_or_else(|| serde_json::json!({}));
-        self.part_store.set_obj_payload(obj_id, payload).await?;
+        self.part_store.set_obj_payload(obj_id.clone(), payload).await?;
         let deets = if remote_payload.is_none() {
             SyncCompletionDeets::Noop
         } else if local_payload.is_none() {
@@ -134,7 +134,7 @@ impl SyncBackend for BlobSyncBackend {
         };
         for part_id in parts {
             self.part_store
-                .add_obj_to_parts(obj_id, vec![part_id])
+                .add_obj_to_parts(obj_id.clone(), vec![part_id])
                 .await?;
         }
         Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
@@ -150,7 +150,7 @@ impl SyncBackend for BlobSyncBackend {
     ) -> Res<()> {
         for part_id in parts {
             self.part_store
-                .remove_obj_from_part(obj_id, part_id)
+                .remove_obj_from_part(obj_id.clone(), part_id)
                 .await?;
         }
         Ok(())
@@ -280,7 +280,7 @@ mod tests {
                 changed_multi_hints_blob_id,
                 old_payload.clone(),
                 new_payload.clone(),
-                vec![parts[0], extra_part],
+                vec![parts[0].clone(), extra_part],
             ),
             SyncBackendScenario::added_member(
                 "added_member_materializes_missing_blob",
@@ -386,8 +386,8 @@ mod tests {
         );
         let peer_id_a = PeerKey::new(*endpoint_a.id().as_bytes());
 
-        backend_b.register_peer_addr(peer_id_a, addr_a);
-        backend_b.ensure_local_blob(peer_id_a, hash).await?;
+        backend_b.register_peer_addr(peer_id_a.clone(), addr_a);
+        backend_b.ensure_local_blob(peer_id_a, hash.clone()).await?;
 
         let got = blobs_repo_b.get_path(hash).await?;
         let bytes = tokio::fs::read(got).await?;
@@ -454,20 +454,20 @@ mod tests {
                 .map(iroh::TransportAddr::Ip),
         );
         let peer_id_a = PeerKey::new(*endpoint_a.id().as_bytes());
-        backend_b.register_peer_addr(peer_id_a, addr_a);
+        backend_b.register_peer_addr(peer_id_a.clone(), addr_a);
 
         // Case 1: Remote Blob Added — Node B is missing blob bytes and sync_obj materializes it from Node A over iroh downloader
         let payload_added = b"contract-multi-node-added-blob".to_vec();
         let hash_added = blobs_repo_a.put(&payload_added).await?;
-        let obj_id_added = ObjKey::new(*hash_added.as_bytes());
+        let obj_id_added = ObjKey::new(hash_added.as_bytes());
 
-        assert!(!blobs_repo_b.has_hash(hash_added).await?);
+        assert!(!blobs_repo_b.has_hash(hash_added.clone()).await?);
 
         let remote_payload = serde_json::json!({ "mime": "text/plain" });
         let outcome = backend_b
             .sync_obj(
-                peer_id_a,
-                obj_id_added,
+                peer_id_a.clone(),
+                obj_id_added.clone(),
                 Vec::new(),
                 Some(remote_payload.clone()),
             )
@@ -480,11 +480,11 @@ mod tests {
             other => panic!("expected completion with AddedMember, got {other:?}"),
         }
 
-        assert!(blobs_repo_b.has_hash(hash_added).await?);
+        assert!(blobs_repo_b.has_hash(hash_added.clone()).await?);
         let path_b = blobs_repo_b.get_path(hash_added).await?;
         assert_eq!(tokio::fs::read(path_b).await?, payload_added);
         assert_eq!(
-            part_store_b.obj_payload(obj_id_added).await?,
+            part_store_b.obj_payload(obj_id_added.clone()).await?,
             Some(remote_payload.clone())
         );
 
@@ -593,11 +593,11 @@ mod tests {
         // Phase 2: Node 1 syncs all blobs from Node 0
         let peer_0 = PeerKey::new(*nodes[0].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjKey::new(*hash.as_bytes());
+            let obj_id = ObjKey::new(hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[1]
                 .backend
-                .sync_obj(peer_0, obj_id, Vec::new(), Some(remote_meta))
+                .sync_obj(peer_0.clone(), obj_id, Vec::new(), Some(remote_meta))
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -605,7 +605,7 @@ mod tests {
                 }
                 other => panic!("expected AddedMember for node 1 sync_obj, got {other:?}"),
             }
-            let read_bytes = tokio::fs::read(nodes[1].blobs_repo.get_path(*hash).await?).await?;
+            let read_bytes = tokio::fs::read(nodes[1].blobs_repo.get_path(hash.clone()).await?).await?;
             assert_eq!(&read_bytes, payload);
         }
 
@@ -623,24 +623,24 @@ mod tests {
         // Phase 4: Node 2 syncs all 8 blobs from Node 1
         let peer_1 = PeerKey::new(*nodes[1].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjKey::new(*hash.as_bytes());
+            let obj_id = ObjKey::new(hash.as_bytes());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[2]
                 .backend
-                .sync_obj(peer_1, obj_id, Vec::new(), Some(remote_meta))
+                .sync_obj(peer_1.clone(), obj_id, Vec::new(), Some(remote_meta))
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(_) => {}
                 other => panic!("expected Completion for node 2 sync_obj, got {other:?}"),
             }
-            let read_bytes = tokio::fs::read(nodes[2].blobs_repo.get_path(*hash).await?).await?;
+            let read_bytes = tokio::fs::read(nodes[2].blobs_repo.get_path(hash.clone()).await?).await?;
             assert_eq!(&read_bytes, payload);
         }
 
         // Phase 5: Parity check across all 3 nodes for all 8 blobs
         for node in &nodes {
             for (hash, payload) in &created_blobs {
-                let path = node.blobs_repo.get_path(*hash).await?;
+                let path = node.blobs_repo.get_path(hash.clone()).await?;
                 let bytes = tokio::fs::read(path).await?;
                 assert_eq!(&bytes, payload);
             }

@@ -84,15 +84,17 @@ impl<'a> SqliteFrontierWrite<'a> {
     }
 
     async fn obj_ref(&mut self, obj_id: ObjKey) -> KeyedFrontierResult<i64> {
-        sqlx::query("INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id) VALUES (?, ?)")
+        let buck_index = i64::from(big_sync_core::BuckId::deepest_from_obj_key(&obj_id).index());
+        sqlx::query("INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id, buck_index) VALUES (?, ?, ?)")
             .bind(self.scope_id)
-            .bind(obj_id.0.into_bytes().to_vec())
+            .bind(obj_id.as_bytes().to_vec())
+            .bind(buck_index)
             .execute(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         sqlx::query_scalar("SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?")
             .bind(self.scope_id)
-            .bind(obj_id.0.into_bytes().to_vec())
+            .bind(obj_id.as_bytes().to_vec())
             .fetch_one(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
@@ -101,13 +103,13 @@ impl<'a> SqliteFrontierWrite<'a> {
     async fn part_ref(&mut self, part_id: PartKey) -> KeyedFrontierResult<i64> {
         sqlx::query("INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id) VALUES (?, ?)")
             .bind(self.scope_id)
-            .bind(part_id.0.into_bytes().to_vec())
+            .bind(part_id.as_bytes().to_vec())
             .execute(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         sqlx::query_scalar("SELECT part_ref FROM big_sync_parts WHERE scope_id = ? AND part_id = ?")
             .bind(self.scope_id)
-            .bind(part_id.0.into_bytes().to_vec())
+            .bind(part_id.as_bytes().to_vec())
             .fetch_one(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
@@ -118,7 +120,7 @@ impl<'a> SqliteFrontierWrite<'a> {
         key: &PartFrontierKey,
     ) -> KeyedFrontierResult<Option<PartEvent>> {
         let (obj_id, maybe_part_ref) = match key {
-            PartFrontierKey::Object(obj_id) => (*obj_id, 0),
+            PartFrontierKey::Object(obj_id) => (obj_id.clone(), 0),
             PartFrontierKey::Part { obj_id, part_id } => {
                 let part_ref = sqlx::query_scalar(
                     "SELECT part_ref
@@ -127,14 +129,14 @@ impl<'a> SqliteFrontierWrite<'a> {
                         AND part_id = ?",
                 )
                 .bind(self.scope_id)
-                .bind(part_id.0.into_bytes().to_vec())
+                .bind(part_id.as_bytes().to_vec())
                 .fetch_optional(&mut **self.transaction_mut())
                 .await
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
                 let Some(part_ref) = part_ref else {
                     return Ok(None);
                 };
-                (*obj_id, part_ref)
+                (obj_id.clone(), part_ref)
             }
         };
         let row = sqlx::query(
@@ -149,7 +151,7 @@ impl<'a> SqliteFrontierWrite<'a> {
         )
         .bind(self.scope_id)
         .bind(self.scope_id)
-        .bind(obj_id.0.into_bytes().to_vec())
+        .bind(obj_id.as_bytes().to_vec())
         .bind(maybe_part_ref)
         .fetch_optional(&mut **self.transaction_mut())
         .await
@@ -191,7 +193,7 @@ impl<'a> SqliteFrontierWrite<'a> {
             PartFrontierKey::Part { part_id, .. } if event_type == EVENT_ADDED => {
                 PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                     cursor,
-                    part_id: *part_id,
+                    part_id: part_id.clone(),
                     obj_id,
                     payload,
                 })
@@ -199,7 +201,7 @@ impl<'a> SqliteFrontierWrite<'a> {
             PartFrontierKey::Part { part_id, .. } if event_type == EVENT_CHANGED => {
                 PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                     cursor,
-                    part_ids: vec![*part_id],
+                    part_ids: vec![part_id.clone()],
                     obj_id,
                     payload,
                 })
@@ -216,9 +218,9 @@ impl<'a> SqliteFrontierWrite<'a> {
         key: PartFrontierKey,
         mutation: Option<PartEvent>,
     ) -> KeyedFrontierResult<()> {
-        let (obj_id, part_id) = match key {
-            PartFrontierKey::Object(obj_id) => (obj_id, None),
-            PartFrontierKey::Part { obj_id, part_id } => (obj_id, Some(part_id)),
+        let (obj_id, part_id) = match &key {
+            PartFrontierKey::Object(obj_id) => (obj_id.clone(), None),
+            PartFrontierKey::Part { obj_id, part_id } => (obj_id.clone(), Some(part_id.clone())),
         };
         let obj_ref = self.obj_ref(obj_id).await?;
         let (event_type, payload) = match (key, mutation) {

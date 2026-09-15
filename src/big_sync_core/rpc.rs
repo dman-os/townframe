@@ -77,8 +77,8 @@ impl BucketSummaryState {
         self.changed_at = cursor;
         match old {
             BucketMemberKind::Absent => {}
-            BucketMemberKind::Live(payload) => self.remove_live(buck_id, obj_id, payload),
-            BucketMemberKind::Dead => self.remove_dead(buck_id, obj_id),
+            BucketMemberKind::Live(payload) => self.remove_live(buck_id, obj_id.clone(), payload),
+            BucketMemberKind::Dead => self.remove_dead(buck_id, obj_id.clone()),
         }
         match new {
             BucketMemberKind::Absent => {}
@@ -156,7 +156,15 @@ impl BucketFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetChangedBucketsRequest {
     pub part_id: PartKey,
+    /// Resume cursor in bucket order. The response contains buckets with an id at or past
+    /// it, at any level up to [`Self::to_level`].
     pub offset: BuckId,
+    /// The deepest level the response may contain. Changed buckets are returned for every
+    /// level from `offset.level()` through this one, in bucket order, so a walk that needs
+    /// level N is a single scan instead of one exchange per level (ADR 012 decision 4,
+    /// correction 3). Because a change stamps every ancestor's `changed_at`, filtering on
+    /// the peer's cursor already narrows this to the buckets whose ranges differ.
+    pub to_level: BuckLevel,
     pub since: CursorIndex,
     /// RPC impls should return all changed
     /// sibling buckets of the last bucket before the limit
@@ -305,7 +313,7 @@ structstruck::strike! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SubscriptionTarget {
     Part {
         part_id: PartKey,

@@ -93,7 +93,7 @@ struct BigRepoSubscriptions {
     /// side rejects it at the wire with `Unauthorized`, and the peer settles
     /// its cursor. Content delivery stays gated by fetch access — the notice
     /// never carries an object payload.
-    revoked_fetch: HashSet<(ObjId, PeerId)>,
+    revoked_fetch: HashSet<(ObjKey, PeerKey)>,
 }
 
 impl BigRepoSubscriptions {
@@ -303,16 +303,18 @@ impl SqliteBigRepoStore {
 #[derive(Debug, Clone)]
 pub(crate) struct GroupPartReconciliation {
     pub(crate) doc: ObjKey,
-    /// The doc-level union of [`Self::part_agents`]: used by the grant re-emit and the
-    /// global-marker flag. Never written to a part row.
+    /// The doc-level union of [`Self::part_agents`]: used by the grant re-emit. Never
+    /// written to a part row.
     pub(crate) agents: HashMap<PeerKey, keyhive_core::access::Access>,
     /// The agent set of each part the doc resides in — these are the access rows that
     /// get written, so a principal of one group never receives another group's part.
     pub(crate) part_agents:
         HashMap<PartKey, Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
+    /// The parts this reconciliation manages: a part the doc is currently in that is
+    /// managed but not desired is removed. `/seds` is in here like any other part
+    /// (decision 9).
     pub(crate) managed_group_parts: HashSet<PartKey>,
     pub(crate) desired_group_parts: HashSet<PartKey>,
-    pub(crate) desired_global: bool,
 }
 
 /// Durable record of keyhive event *incorporation*.
@@ -486,8 +488,8 @@ impl SqliteBigRepoStore {
                 PartScope::AnyOf(inner.part_ids.clone())
             }
             SubEvent::Changed(_) => PartScope::FromObject,
-            SubEvent::Added(inner) => PartScope::Part(inner.part_id),
-            SubEvent::Removed(inner) => PartScope::Part(inner.part_id),
+            SubEvent::Added(inner) => PartScope::Part(inner.part_id.clone()),
+            SubEvent::Removed(inner) => PartScope::Part(inner.part_id.clone()),
             SubEvent::ReplayComplete => PartScope::FromObject,
         }
     }
@@ -503,11 +505,11 @@ impl SqliteBigRepoStore {
 
     /// Payload-free description of an event, for diagnostics that must not
     /// spill object content into logs.
-    fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartId>) {
+    fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartKey>) {
         match event {
             SubEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
-            SubEvent::Added(inner) => (inner.cursor, vec![inner.part_id]),
-            SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id]),
+            SubEvent::Added(inner) => (inner.cursor, vec![inner.part_id.clone()]),
+            SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id.clone()]),
             SubEvent::ReplayComplete => (CursorIndex::default(), Vec::new()),
         }
     }
@@ -533,17 +535,17 @@ impl SqliteBigRepoStore {
     /// just lost fetch access to `obj_id`.
     pub(crate) fn arm_revocation_notices(
         &self,
-        obj_id: ObjId,
-        principals: impl IntoIterator<Item = PeerId>,
+        obj_id: ObjKey,
+        principals: impl IntoIterator<Item = PeerKey>,
     ) {
         let mut bus = self.bus.write().expect(ERROR_MUTEX);
         for principal in principals {
-            bus.revoked_fetch.insert((obj_id, principal));
+            bus.revoked_fetch.insert((obj_id.clone(), principal));
         }
     }
 
     /// Consume a pending revocation notice for `(obj_id, principal)`.
-    fn take_revocation_notice(&self, obj_id: ObjId, principal: Option<PeerId>) -> bool {
+    fn take_revocation_notice(&self, obj_id: ObjKey, principal: Option<PeerKey>) -> bool {
         let Some(principal) = principal else {
             return false;
         };
@@ -558,9 +560,9 @@ impl SqliteBigRepoStore {
             HashMap::new();
         let mut push_recipient = |sub_id: Uuid, event: SubEvent| {
             let (obj_id, cursor, part_id) = match &event {
-                SubEvent::Changed(inner) => (inner.obj_id, inner.cursor, None),
-                SubEvent::Added(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
-                SubEvent::Removed(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
+                SubEvent::Changed(inner) => (inner.obj_id.clone(), inner.cursor, None),
+                SubEvent::Added(inner) => (inner.obj_id.clone(), inner.cursor, Some(inner.part_id.clone())),
+                SubEvent::Removed(inner) => (inner.obj_id.clone(), inner.cursor, Some(inner.part_id.clone())),
                 SubEvent::ReplayComplete => unreachable!(),
             };
             recipients
@@ -569,7 +571,7 @@ impl SqliteBigRepoStore {
                     if let (SubEvent::Changed(existing), SubEvent::Changed(new)) =
                         (existing, &event)
                     {
-                        existing.part_ids.extend(new.part_ids.iter().copied());
+                        existing.part_ids.extend(new.part_ids.iter().cloned());
                         existing.part_ids.sort_unstable();
                         existing.part_ids.dedup();
                         existing.payload = new.payload.clone();
@@ -590,9 +592,9 @@ impl SqliteBigRepoStore {
                     );
                 }
                 let obj_id = match &event {
-                    SubEvent::Changed(inner) => inner.obj_id,
-                    SubEvent::Added(inner) => inner.obj_id,
-                    SubEvent::Removed(inner) => inner.obj_id,
+                    SubEvent::Changed(inner) => inner.obj_id.clone(),
+                    SubEvent::Added(inner) => inner.obj_id.clone(),
+                    SubEvent::Removed(inner) => inner.obj_id.clone(),
                     SubEvent::ReplayComplete => continue,
                 };
                 let object_event = match &event {
@@ -600,7 +602,7 @@ impl SqliteBigRepoStore {
                         Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                             cursor: inner.cursor,
                             part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
+                            obj_id: inner.obj_id.clone(),
                             payload: inner.payload.clone(),
                         }))
                     }
@@ -608,7 +610,7 @@ impl SqliteBigRepoStore {
                         Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                             cursor: inner.cursor,
                             part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
+                            obj_id: inner.obj_id.clone(),
                             payload: inner.payload.clone(),
                         }))
                     }
@@ -621,7 +623,7 @@ impl SqliteBigRepoStore {
                                 for &sub_id in subs {
                                     let mut projected = event.clone();
                                     if let SubEvent::Changed(inner) = &mut projected {
-                                        inner.part_ids = vec![*part_id];
+                                        inner.part_ids = vec![part_id.clone()];
                                     }
                                     push_recipient(sub_id, projected);
                                 }
@@ -665,14 +667,14 @@ impl SqliteBigRepoStore {
                 };
                 if bus.pending.contains(&sub_id) {
                     if sub.pending.mark_dirty() {
-                        promote.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
+                        promote.push((sub_id, event, obj_id, sub.principal.clone(), sub.sender.clone()));
                     }
                     continue;
                 }
                 if !bus.live.contains(&sub_id) {
                     continue;
                 }
-                dispatch.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
+                dispatch.push((sub_id, event, obj_id, sub.principal.clone(), sub.sender.clone()));
             }
         }
 
@@ -682,14 +684,17 @@ impl SqliteBigRepoStore {
             // would silently drop a deliverable event from a live subscriber.
             // Filtered parts are the authorization decision AND the non-exposure
             // rule: a dropped event disclosed nothing about a part the recipient
-            // cannot read.
-            let readable = self
-                .permitted_parts(Self::event_scope(&event), obj_id, principal)
-                .await?;
-            let permitted = !readable.is_some_and(|readable| readable.is_empty());
+            // cannot read. A removal is exempt: it carries no content, and a
+            // recipient that just lost access must still learn the doc left the part
+            // it was reading.
+            let permitted = matches!(event, SubEvent::Removed(_))
+                || !self
+                    .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
+                    .await?
+                    .is_some_and(|readable| readable.is_empty());
             let event = if permitted {
                 event
-            } else if self.take_revocation_notice(obj_id, principal) {
+            } else if self.take_revocation_notice(obj_id.clone(), principal.clone()) {
                 let (cursor, part_ids) = Self::event_diagnostic(&event);
                 tracing::debug!(
                     ?sub_id,
@@ -720,13 +725,14 @@ impl SqliteBigRepoStore {
         }
 
         for (sub_id, event, obj_id, principal, sender) in promote {
-            let readable = self
-                .permitted_parts(Self::event_scope(&event), obj_id, principal)
-                .await?;
-            let permitted = !readable.is_some_and(|readable| readable.is_empty());
+            let permitted = matches!(event, SubEvent::Removed(_))
+                || !self
+                    .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
+                    .await?
+                    .is_some_and(|readable| readable.is_empty());
             let event = if permitted {
                 Some(event)
-            } else if self.take_revocation_notice(obj_id, principal) {
+            } else if self.take_revocation_notice(obj_id.clone(), principal.clone()) {
                 let (cursor, part_ids) = Self::event_diagnostic(&event);
                 tracing::debug!(
                     ?sub_id,
@@ -798,10 +804,10 @@ impl SqliteBigRepoStore {
         obj_id: ObjKey,
         principal: Option<PeerKey>,
     ) -> Res<Option<Vec<PartKey>>> {
-        let Some(peer) = principal else {
+        let Some(ref peer) = principal else {
             return Ok(None);
         };
-        let peer_blob = Self::peer_blob(peer);
+        let peer_blob = Self::peer_blob(peer.clone());
         let candidates: Vec<PartKey> = match scope {
             // Resolve and filter in one query: the object's live parts that grant this
             // principal access. An event that named nothing usable still delivers when
@@ -821,7 +827,7 @@ impl SqliteBigRepoStore {
                        AND s.principal_id = ?3
                      ORDER BY p.part_id",
                     self.scope_id,
-                    Self::obj_blob(obj_id),
+                    Self::obj_blob(obj_id.clone()),
                     &peer_blob
                 )
                 .fetch_all(&self.sql.read_pool)
@@ -844,7 +850,7 @@ impl SqliteBigRepoStore {
         };
         let mut readable = Vec::with_capacity(candidates.len());
         for part_id in candidates {
-            let Some(part_ref) = self.core.find_part_ref(part_id).await? else {
+            let Some(part_ref) = self.core.find_part_ref(part_id.clone()).await? else {
                 continue;
             };
             let access_level: Option<i64> = sqlx::query_scalar!(
@@ -876,30 +882,6 @@ fn is_fetch_access(access_level: i64) -> bool {
         .ok()
         .map(big_sync::sqlite_core::decode_access)
         .is_some_and(|access| access.is_fetcher())
-}
-fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjKey, Option<ObjKey>) {
-    let prefix_bits = u32::from(bucket_id.level()) * u32::from(BuckId::BITS_PER_LEVEL);
-    debug_assert!(prefix_bits <= u16::BITS);
-    if prefix_bits == 0 {
-        return (ObjKey(ByteKey::new([0; 32])), None);
-    }
-    let shift = u16::BITS - prefix_bits;
-    let start_prefix = u32::from(bucket_id.index()) << shift;
-    let start = {
-        let mut bytes = [0; 32];
-        bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
-        ObjKey(ByteKey::new(bytes))
-    };
-    if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
-        return (start, None);
-    }
-    let next_prefix = (u32::from(bucket_id.index()) + 1) << shift;
-    if next_prefix > u32::from(u16::MAX) {
-        return (start, None);
-    }
-    let mut bytes = [0; 32];
-    bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
-    (start, Some(ObjKey(ByteKey::new(bytes))))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -63,11 +63,11 @@ pub fn spawn_causal_checkpoint_worker(
                     if runtime.is_stopped() {
                         return Ok(());
                     }
-                    let doc_id = crate::DocumentId::new(*doc_obj.as_bytes());
+let doc_id = crate::DocumentId::new(doc_obj.as_bytes());
                     let admitted = match scope.groups() {
                         None => true,
                         Some(_) => scope.admits_doc_groups(
-                            &keyhive.group_ids_containing_document(doc_id).await?,
+                            &keyhive.group_ids_containing_document(doc_id.clone()).await?,
                         ),
                     };
                     if admitted {
@@ -106,7 +106,7 @@ pub fn spawn_causal_checkpoint_worker(
                         .expect("persisted keyhive admission event must decode");
                     match event {
                         StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
-                            crate::DocumentId::new(*operation.payload().doc_id().as_bytes()),
+                            crate::DocumentId::new(operation.payload().doc_id().as_bytes()),
                         ),
                         _ => FrontierKey::Decode(row.seq),
                     }
@@ -145,13 +145,13 @@ enum Cmd {
     AdvanceCursor(u64),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum FrontierKey {
     Decode(u64),
     Document(crate::DocumentId),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SourceCursor {
     key: FrontierKey,
     cursor: u64,
@@ -265,7 +265,7 @@ impl<'a> Worker<'a> {
         >,
     ) -> Res<()> {
         let source = SourceCursor {
-            key: delta.key,
+            key: delta.key.clone(),
             cursor: delta.cursor,
         };
         match delta.key {
@@ -273,15 +273,15 @@ impl<'a> Worker<'a> {
             // operations key by document, so no second bincode decode.
             FrontierKey::Document(doc_id) => {
                 self.pending_admission
-                    .entry(doc_id)
+                    .entry(doc_id.clone())
                     .and_modify(|old| {
                         if source.cursor > old.cursor {
-                            *old = source;
+                            *old = source.clone();
                         }
                     })
-                    .or_insert(source);
+                    .or_insert(source.clone());
                 self.start_task(
-                    FrontierKey::Document(doc_id),
+                    FrontierKey::Document(doc_id.clone()),
                     Task::EnsureCoverage { doc_id, source },
                 )
             }
@@ -311,7 +311,7 @@ impl<'a> Worker<'a> {
                     // Keyhive itself never received them.
                     let cgka_ops = self
                         .keyhive
-                        .current_cgka_ops_count(doc_id)
+                        .current_cgka_ops_count(doc_id.clone())
                         .await
                         .map(|count| count.to_string())
                         .unwrap_or_else(|error| format!("error: {error:?}"));
@@ -322,7 +322,7 @@ impl<'a> Worker<'a> {
                         "CAUSAL coverage done"
                     );
                 }
-                self.acknowledge_source(source).await?;
+                self.acknowledge_source(source.clone()).await?;
                 if self.pending_admission.get(&doc_id).is_some_and(|pending| {
                     pending.key == source.key && pending.cursor == source.cursor
                 }) {
@@ -366,7 +366,7 @@ async fn run_task(
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
             if let Some(_) = scope.groups()
-                && !scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await?)
+                && !scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id.clone()).await?)
             {
                 return Ok(TaskOutput::OutOfScope);
             }

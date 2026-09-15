@@ -253,7 +253,7 @@ pub fn unauthorized_backoff() -> Duration {
 /// The cursor travels in the page request, but it moves as the machine consumes
 /// events, so it must not key the in-flight state: a key that changes under the
 /// machine would strand the page it belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ReplayRoute {
     Part(PartKey),
     Object(ObjKey),
@@ -262,8 +262,8 @@ enum ReplayRoute {
 impl ReplayRoute {
     fn of(target: &SubscriptionTarget) -> Self {
         match target {
-            SubscriptionTarget::Part { part_id, .. } => Self::Part(*part_id),
-            SubscriptionTarget::Object { obj_id } => Self::Object(*obj_id),
+            SubscriptionTarget::Part { part_id, .. } => Self::Part(part_id.clone()),
+            SubscriptionTarget::Object { obj_id } => Self::Object(obj_id.clone()),
         }
     }
 }
@@ -336,10 +336,10 @@ impl PeerState {
                     // at-least-once, so skipping here cannot lose data.
                     None | Some(PeerPartStrategy::Pending(_)) => None,
                     Some(PeerPartStrategy::Bucket(BucketState { replay_cursor, .. })) => {
-                        Some((*part_id, *replay_cursor))
+                        Some((part_id.clone(), *replay_cursor))
                     }
                     Some(PeerPartStrategy::Cursor(CursorState { replay_cursor, .. })) => {
-                        Some((*part_id, *replay_cursor))
+                        Some((part_id.clone(), *replay_cursor))
                     }
                 },
             )
@@ -389,7 +389,7 @@ impl SyncStatMachine {
                     waiter
                         .need_set
                         .difference(&waiter.done_set)
-                        .copied()
+                        .cloned()
                         .collect(),
                 )
             })
@@ -401,11 +401,11 @@ impl SyncStatMachine {
     pub fn debug_peer_part_sync_flags(&self) -> Vec<(PeerKey, PartKey, bool, bool, bool, bool)> {
         let mut out = Vec::new();
         for (peer_id, peer_state) in &self.peers {
-            for part_id in peer_state.parts.keys().copied() {
+            for part_id in peer_state.parts.keys().cloned() {
                 let default = Default::default();
                 let part_state = peer_state.parts.get(&part_id).unwrap_or(&default);
                 out.push((
-                    *peer_id,
+                    peer_id.clone(),
                     part_id,
                     part_state.pending,
                     part_state.multi_strat,
@@ -421,7 +421,9 @@ impl SyncStatMachine {
     pub fn debug_last_object_syncs(&self) -> Vec<(PeerKey, PartKey, ObjKey, std::time::Instant)> {
         self.last_object_syncs
             .iter()
-            .map(|(&(peer_id, part_id), &(obj_id, at))| (peer_id, part_id, obj_id, at))
+            .map(|((peer_id, part_id), (obj_id, at))| {
+                (peer_id.clone(), part_id.clone(), obj_id.clone(), *at)
+            })
             .collect()
     }
 
@@ -450,11 +452,11 @@ impl SyncStatMachine {
         let part_count = part_ids.len();
         let mut done_set = Set::new();
         let mut need_set = Set::new();
-        for &peer_id in &peer_ids {
-            for &part_id in &part_ids {
-                need_set.insert((peer_id, part_id));
-                if self.peer_part_is_fully_synced(peer_id, part_id) {
-                    done_set.insert((peer_id, part_id));
+        for peer_id in &peer_ids {
+            for part_id in &part_ids {
+                need_set.insert((peer_id.clone(), part_id.clone()));
+                if self.peer_part_is_fully_synced(peer_id.clone(), part_id.clone()) {
+                    done_set.insert((peer_id.clone(), part_id.clone()));
                 }
             }
         }
@@ -485,7 +487,7 @@ impl SyncStatMachine {
     fn set_peer(&mut self, peer_id: PeerKey, parts: impl Iterator<Item = PartKey>) {
         let peer_state = self.peers.entry(peer_id).or_default();
         for part_id in parts {
-            let _part_state = self.parts.entry(part_id).or_default();
+            let _part_state = self.parts.entry(part_id.clone()).or_default();
             let _peer_part_state = peer_state.parts.entry(part_id).or_default();
         }
     }
@@ -495,7 +497,7 @@ impl SyncStatMachine {
             return;
         };
         for (part_id, _peer_part_state) in peer_state.parts {
-            self.last_object_syncs.remove(&(peer_id, part_id));
+            self.last_object_syncs.remove(&(peer_id.clone(), part_id.clone()));
             let Some(part_state) = self.parts.get_mut(&part_id) else {
                 continue;
             };
@@ -504,8 +506,8 @@ impl SyncStatMachine {
             // When a peer is removed, clean up all waiters that reference it
             // so they don't remain stranded.
             for waiter in self.waiters.values_mut() {
-                waiter.done_set.remove(&(peer_id, part_id));
-                waiter.need_set.remove(&(peer_id, part_id));
+                waiter.done_set.remove(&(peer_id.clone(), part_id.clone()));
+                waiter.need_set.remove(&(peer_id.clone(), part_id.clone()));
             }
             if part_state.peers.is_empty() {
                 self.parts.remove(&part_id);
@@ -530,13 +532,13 @@ impl SyncStatMachine {
     }
 
     fn mark_peer_replay_done(&mut self, peer_id: PeerKey, replay_done: bool) {
-        let peer_state = self.peers.entry(peer_id).or_default();
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
         peer_state.replay_phase_done = replay_done;
-        for part_id in peer_state.parts.keys().copied().collect::<Vec<_>>() {
+        for part_id in peer_state.parts.keys().cloned().collect::<Vec<_>>() {
             if replay_done {
-                self.__check_peer_part_synced(peer_id, part_id);
+                self.__check_peer_part_synced(peer_id.clone(), part_id);
             } else {
-                self.__check_peer_part_stale(peer_id, part_id);
+                self.__check_peer_part_stale(peer_id.clone(), part_id);
             }
         }
     }
@@ -547,8 +549,8 @@ impl SyncStatMachine {
         part_id: PartKey,
         only_cursor_strat: bool,
     ) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
         peer_part_state.multi_strat = !only_cursor_strat;
         if only_cursor_strat {
             self.__check_peer_part_synced(peer_id, part_id);
@@ -558,25 +560,25 @@ impl SyncStatMachine {
     }
 
     fn mark_peer_part_idle(&mut self, peer_id: PeerKey, part_id: PartKey) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
         peer_part_state.cursor_active = false;
         self.__check_peer_part_synced(peer_id, part_id);
     }
 
     fn mark_peer_part_cursor_active(&mut self, peer_id: PeerKey, part_id: PartKey) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let part_state = self.parts.entry(part_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
-        part_state.peers.insert(peer_id);
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let part_state = self.parts.entry(part_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
+        part_state.peers.insert(peer_id.clone());
 
         peer_part_state.cursor_active = true;
         self.__check_peer_part_stale(peer_id, part_id);
     }
 
     fn mark_peer_part_pending(&mut self, peer_id: PeerKey, part_id: PartKey, pending: bool) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
         peer_part_state.pending = pending;
         if pending {
             self.__check_peer_part_stale(peer_id, part_id);
@@ -586,10 +588,10 @@ impl SyncStatMachine {
     }
 
     fn __check_peer_part_synced(&mut self, peer_id: PeerKey, part_id: PartKey) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let part_state = self.parts.entry(part_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
-        part_state.peers.insert(peer_id);
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let part_state = self.parts.entry(part_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
+        part_state.peers.insert(peer_id.clone());
 
         if peer_part_state.pending
             || peer_part_state.multi_strat
@@ -599,12 +601,12 @@ impl SyncStatMachine {
             return;
         }
 
-        peer_state.fully_synced_parts.insert(part_id);
-        part_state.fully_synced_peers.insert(peer_id);
+        peer_state.fully_synced_parts.insert(part_id.clone());
+        part_state.fully_synced_peers.insert(peer_id.clone());
 
         for waiter in self.waiters.values_mut() {
-            if waiter.need_set.contains(&(peer_id, part_id)) {
-                waiter.done_set.insert((peer_id, part_id));
+            if waiter.need_set.contains(&(peer_id.clone(), part_id.clone())) {
+                waiter.done_set.insert((peer_id.clone(), part_id.clone()));
             }
         }
         for (waiter_id, _waiter) in self
@@ -618,7 +620,7 @@ impl SyncStatMachine {
         if !peer_part_state.emitted_full_synced {
             peer_part_state.emitted_full_synced = true;
             self.stat_evts
-                .push(SyncStatEvent::PeerPartFullySynced { peer_id, part_id });
+                .push(SyncStatEvent::PeerPartFullySynced { peer_id: peer_id.clone(), part_id: part_id.clone() });
         }
         if peer_state.fully_synced_parts.len() == peer_state.parts.len()
             && !peer_state.emitted_full_synced
@@ -637,10 +639,10 @@ impl SyncStatMachine {
     }
 
     fn __check_peer_part_stale(&mut self, peer_id: PeerKey, part_id: PartKey) {
-        let peer_state = self.peers.entry(peer_id).or_default();
-        let part_state = self.parts.entry(part_id).or_default();
-        let peer_part_state = peer_state.parts.entry(part_id).or_default();
-        part_state.peers.insert(peer_id);
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let part_state = self.parts.entry(part_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
+        part_state.peers.insert(peer_id.clone());
 
         if !(peer_part_state.pending
             || peer_part_state.multi_strat
@@ -654,18 +656,18 @@ impl SyncStatMachine {
         part_state.fully_synced_peers.remove(&peer_id);
 
         for waiter in self.waiters.values_mut() {
-            waiter.done_set.remove(&(peer_id, part_id));
+            waiter.done_set.remove(&(peer_id.clone(), part_id.clone()));
         }
 
         if peer_state.emitted_full_synced {
             peer_state.emitted_full_synced = false;
-            self.stat_evts.push(SyncStatEvent::PeerStale { peer_id });
+            self.stat_evts.push(SyncStatEvent::PeerStale { peer_id: peer_id.clone() });
         }
 
         if peer_part_state.emitted_full_synced {
             peer_part_state.emitted_full_synced = false;
             self.stat_evts
-                .push(SyncStatEvent::PeerPartStale { peer_id, part_id });
+                .push(SyncStatEvent::PeerPartStale { peer_id, part_id: part_id.clone() });
         }
         if part_state.emitted_full_synced {
             part_state.emitted_full_synced = false;
@@ -807,7 +809,7 @@ impl BigSyncMachine {
                     part_ids,
                 } = evt;
                 for peer_id in &peer_ids {
-                    self.refresh_peer_replay_worker(*peer_id, true);
+                    self.refresh_peer_replay_worker(peer_id.clone(), true);
                 }
                 self.stat_machine
                     .add_full_sync_waiter(waiter_id, peer_ids, part_ids);
@@ -935,7 +937,7 @@ impl BigSyncMachine {
         );
         // Incrementally update peer state: preserve sync_workers, cursor_machine,
         // and resolved parts while stopping only pending/obsolete strategy tasks.
-        self.all_seen_peer.insert(peer_id);
+        self.all_seen_peer.insert(peer_id.clone());
         let mut peer_state = self.peers.remove(&peer_id).unwrap_or_else(|| PeerState {
             remove_workers: default(),
             pending_removals: default(),
@@ -947,21 +949,21 @@ impl BigSyncMachine {
             bucket_cmd_buf: default(),
             parts: default(),
         });
-        let old_part_ids: Set<_> = peer_state.parts.keys().copied().collect();
-        let removed_parts: Set<_> = old_part_ids.difference(&parts).copied().collect();
+        let old_part_ids: Set<_> = peer_state.parts.keys().cloned().collect();
+        let removed_parts: Set<_> = old_part_ids.difference(&parts).cloned().collect();
         let mut pending_parts = Set::new();
         let mut pending_tasks = Set::new();
-        for &part_id in old_part_ids.intersection(&parts) {
+        for part_id in old_part_ids.intersection(&parts) {
             if matches!(
-                peer_state.parts.get(&part_id),
+                peer_state.parts.get(part_id),
                 Some(PeerPartState {
                     strat: PeerPartStrategy::Pending(_)
                 })
             ) && let Some(PeerPartState {
                 strat: PeerPartStrategy::Pending(task_id),
-            }) = peer_state.parts.remove(&part_id)
+            }) = peer_state.parts.remove(part_id)
             {
-                pending_parts.insert(part_id);
+                pending_parts.insert(part_id.clone());
                 pending_tasks.insert(task_id);
             }
         }
@@ -985,8 +987,8 @@ impl BigSyncMachine {
                 }
             }
         }
-        for &part_id in &removed_parts {
-            peer_state.cursor_machine.remove_part(part_id);
+        for part_id in &removed_parts {
+            peer_state.cursor_machine.remove_part(part_id.clone());
         }
         // Deferred work is allowed to outlive the event that created it, but
         // not the peer route that gives its part hints meaning. In particular,
@@ -1012,7 +1014,7 @@ impl BigSyncMachine {
             .sync_workers
             .iter()
             .filter(|(_, worker)| !worker.part_hints.is_disjoint(&removed_parts))
-            .map(|(&obj_id, _)| obj_id)
+            .map(|(obj_id, _)| obj_id.clone())
             .collect();
         for obj_id in affected_sync_workers {
             let mut worker = peer_state
@@ -1031,19 +1033,19 @@ impl BigSyncMachine {
                 kind: SyncTaskKind::Sync,
                 part_hints: worker.part_hints.clone(),
                 deets: SyncTaskDeets {
-                    peer_id,
-                    obj_id,
+                    peer_id: peer_id.clone(),
+                    obj_id: obj_id.clone(),
                     remote_payload: worker.remote_payload.clone(),
                 },
             }));
             let old = peer_state.sync_workers.insert(obj_id, worker);
             assert!(old.is_none(), "fishy");
         }
-        let added_parts: Set<_> = parts.difference(&old_part_ids).copied().collect();
-        let decision_parts: Set<_> = pending_parts.union(&added_parts).copied().collect();
+        let added_parts: Set<_> = parts.difference(&old_part_ids).cloned().collect();
+        let decision_parts: Set<_> = pending_parts.union(&added_parts).cloned().collect();
         if !decision_parts.is_empty() {
             let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
-                peer_id,
+                peer_id: peer_id.clone(),
                 parts: decision_parts.clone(),
                 sync_modes: default(),
                 default_sync_mode: self.default_sync_mode,
@@ -1051,7 +1053,7 @@ impl BigSyncMachine {
             let decide_task = self.tasks.spawn(std::time::Instant::now(), TaskSeed::Machine(deets));
             for part_id in &decision_parts {
                 peer_state.parts.insert(
-                    *part_id,
+                    part_id.clone(),
                     PeerPartState {
                         strat: PeerPartStrategy::Pending(decide_task),
                     },
@@ -1061,8 +1063,8 @@ impl BigSyncMachine {
         let stale_workers: Vec<_> = peer_state
             .sync_workers
             .iter()
-            .filter_map(|(&obj_id, worker)| {
-                (worker.part_hints.is_empty() && !objects.contains(&obj_id)).then_some(obj_id)
+            .filter_map(|(obj_id, worker)| {
+                (worker.part_hints.is_empty() && !objects.contains(obj_id)).then_some(obj_id.clone())
             })
             .collect();
         for obj_id in stale_workers {
@@ -1076,12 +1078,13 @@ impl BigSyncMachine {
                 .expect(ERROR_UNRECONIZED);
         }
         peer_state.objects = objects;
-        self.stat_machine.set_peer(peer_id, parts.iter().copied());
-        for &part_id in &decision_parts {
+        self.stat_machine
+            .set_peer(peer_id.clone(), parts.iter().cloned());
+        for part_id in &decision_parts {
             self.stat_machine
-                .mark_peer_part_pending(peer_id, part_id, true);
+                .mark_peer_part_pending(peer_id.clone(), part_id.clone(), true);
         }
-        self.peers.insert(peer_id, peer_state);
+        self.peers.insert(peer_id.clone(), peer_state);
         self.refresh_peer_replay_worker(peer_id, false);
     }
 
@@ -1192,13 +1195,13 @@ impl BigSyncMachine {
             let strat = match decision {
                 PeerPartStratDecision::Unkown => {
                     self.stat_machine
-                        .mark_peer_part_only_cursor_strat(peer_id, part_id, false);
+                        .mark_peer_part_only_cursor_strat(peer_id.clone(), part_id.clone(), false);
                     parts_retry.insert(part_id);
                     continue;
                 }
                 PeerPartStratDecision::Bucket(strat) => {
                     let mut machine = Box::new(BucketMachine::new(
-                        part_id,
+                        part_id.clone(),
                         strat.remote_depth,
                         strat.remote_len,
                         strat.last_cursor,
@@ -1208,9 +1211,9 @@ impl BigSyncMachine {
                         &mut peer_state.bucket_cmd_buf,
                     );
                     self.stat_machine
-                        .mark_peer_part_only_cursor_strat(peer_id, part_id, false);
+                        .mark_peer_part_only_cursor_strat(peer_id.clone(), part_id.clone(), false);
                     self.stat_machine
-                        .mark_peer_part_pending(peer_id, part_id, false);
+                        .mark_peer_part_pending(peer_id.clone(), part_id.clone(), false);
                     PeerPartStrategy::Bucket(BucketState {
                         machine,
                         // NOTE: we replay from the latest
@@ -1222,9 +1225,9 @@ impl BigSyncMachine {
                 }
                 PeerPartStratDecision::Cursor(strat) => {
                     self.stat_machine
-                        .mark_peer_part_only_cursor_strat(peer_id, part_id, true);
+                        .mark_peer_part_only_cursor_strat(peer_id.clone(), part_id.clone(), true);
                     self.stat_machine
-                        .mark_peer_part_pending(peer_id, part_id, false);
+                        .mark_peer_part_pending(peer_id.clone(), part_id.clone(), false);
                     PeerPartStrategy::Cursor(CursorState {
                         replay_cursor: strat.last_cursor,
                     })
@@ -1253,7 +1256,7 @@ impl BigSyncMachine {
             }
             let deets = TaskSeed::Machine(MachineTaskDeets::DecidePeerStrategy(
                 DecidePeerStrategyTask {
-                    peer_id,
+                    peer_id: peer_id.clone(),
                     parts: parts_retry.clone(),
                     sync_modes: default(),
                     default_sync_mode: self.default_sync_mode,
@@ -1267,20 +1270,20 @@ impl BigSyncMachine {
             };
             for part_id in parts_retry {
                 peer_state.parts.insert(
-                    part_id,
+                    part_id.clone(),
                     PeerPartState {
                         strat: PeerPartStrategy::Pending(decide_task),
                     },
                 );
                 self.stat_machine
-                    .mark_peer_part_pending(peer_id, part_id, true);
+                    .mark_peer_part_pending(peer_id.clone(), part_id, true);
             }
         }
 
         let bucket_cmd_count = peer_state.bucket_cmd_buf.len();
         let cursor_cmd_count = peer_state.cursors_cmd_buf.len();
         // refresh the replay pages if needed
-        self.refresh_peer_replay_worker(peer_id, false);
+        self.refresh_peer_replay_worker(peer_id.clone(), false);
         tracing::debug!(
             peer_id = %peer_id,
             bucket_cmd_count,
@@ -1331,14 +1334,14 @@ impl BigSyncMachine {
                         // are decided in the same task (having per part task ids can be misleading)
                         return;
                     }
-                    parts_retry.insert(*part_id);
+                    parts_retry.insert(part_id.clone());
                 }
                 PeerPartStrategy::Bucket(_) | PeerPartStrategy::Cursor(_) => {}
             };
         }
         if !parts_retry.is_empty() {
             let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
-                peer_id,
+                peer_id: peer_id.clone(),
                 parts: parts_retry.clone(),
                 sync_modes: default(),
                 default_sync_mode: self.default_sync_mode,
@@ -1351,7 +1354,7 @@ impl BigSyncMachine {
             );
             for part_id in parts_retry {
                 let old = peer_state.parts.insert(
-                    part_id,
+                    part_id.clone(),
                     PeerPartState {
                         strat: PeerPartStrategy::Pending(decide_task),
                     },
@@ -1364,7 +1367,7 @@ impl BigSyncMachine {
                     })
                 ));
                 self.stat_machine
-                    .mark_peer_part_pending(peer_id, part_id, true);
+                    .mark_peer_part_pending(peer_id.clone(), part_id, true);
             }
         }
     }
@@ -1384,9 +1387,9 @@ impl BigSyncMachine {
         let replay_req_parts: Set<_> = peer_state
             .parts
             .iter()
-            .filter_map(|(&part_id, state)| match state.strat {
+            .filter_map(|(part_id, state)| match state.strat {
                 PeerPartStrategy::Pending(_) => None,
-                PeerPartStrategy::Bucket(_) | PeerPartStrategy::Cursor(_) => Some(part_id),
+                PeerPartStrategy::Bucket(_) | PeerPartStrategy::Cursor(_) => Some(part_id.clone()),
             })
             .collect();
         let mut targets = peer_state
@@ -1394,14 +1397,14 @@ impl BigSyncMachine {
             .into_iter()
             .map(|(part_id, cursor)| {
                 (
-                    ReplayRoute::Part(part_id),
+                    ReplayRoute::Part(part_id.clone()),
                     SubscriptionTarget::Part { part_id, cursor },
                 )
             })
             .collect::<Map<_, _>>();
-        targets.extend(peer_state.objects.iter().copied().map(|obj_id| {
+        targets.extend(peer_state.objects.iter().cloned().map(|obj_id| {
             (
-                ReplayRoute::Object(obj_id),
+                ReplayRoute::Object(obj_id.clone()),
                 SubscriptionTarget::Object { obj_id },
             )
         }));
@@ -1424,7 +1427,7 @@ impl BigSyncMachine {
                 .next()
                 .map(|(part_id, cursor)| SubscriptionTarget::Part { part_id, cursor }),
             SubscriptionTarget::Object { obj_id } => {
-                Some(SubscriptionTarget::Object { obj_id: *obj_id })
+                Some(SubscriptionTarget::Object { obj_id: obj_id.clone() })
             }
         }
     }
@@ -1441,7 +1444,7 @@ impl BigSyncMachine {
     ) {
         let route = ReplayRoute::of(&target);
         let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
-            peer_id,
+            peer_id: peer_id.clone(),
             target,
             limit: ReplayPageTask::LIMIT,
         }));
@@ -1464,7 +1467,7 @@ impl BigSyncMachine {
     ) {
         let route = ReplayRoute::of(&target);
         let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
-            peer_id,
+            peer_id: peer_id.clone(),
             target,
             limit: ReplayPageTask::LIMIT,
         }));
@@ -1479,7 +1482,7 @@ impl BigSyncMachine {
     /// The peer-level replay verdict: caught up when every wanted route has an
     /// answer saying so. No routes means there is nothing left to replay.
     fn update_peer_replay_done(&mut self, peer_id: PeerKey) {
-        let routes = self.replay_page_targets(peer_id);
+        let routes = self.replay_page_targets(peer_id.clone());
         let done = routes.keys().all(|route| {
             self.peers
                 .get(&peer_id)
@@ -1490,7 +1493,7 @@ impl BigSyncMachine {
     }
 
     fn refresh_peer_replay_worker(&mut self, peer_id: PeerKey, force: bool) {
-        let targets = self.replay_page_targets(peer_id);
+        let targets = self.replay_page_targets(peer_id.clone());
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return;
         };
@@ -1510,7 +1513,7 @@ impl BigSyncMachine {
             .replay_pages
             .keys()
             .filter(|route| force || !targets.contains_key(*route))
-            .copied()
+            .cloned()
             .collect();
         for route in stale {
             if let Some(state) = peer_state.replay_pages.remove(&route) {
@@ -1531,7 +1534,7 @@ impl BigSyncMachine {
             "refresh peer replay pages"
         );
         for target in missing {
-            self.spawn_replay_page(peer_id, target, false);
+            self.spawn_replay_page(peer_id.clone(), target, false);
         }
         self.update_peer_replay_done(peer_id);
     }
@@ -1606,15 +1609,15 @@ impl BigSyncMachine {
                 delayed_retry = Some(UNAUTHORIZED_BACKOFF);
             }
         }
-        self.drain_cursor_machine_cmds(peer_id);
-        let next_target = self.refreshed_replay_target(peer_id, &target);
+        self.drain_cursor_machine_cmds(peer_id.clone());
+        let next_target = self.refreshed_replay_target(peer_id.clone(), &target);
         match next_target {
             Some(next_target) => match delayed_retry {
                 Some(delay) => {
-                    self.schedule_replay_page(peer_id, next_target, caught_up, retry, delay);
+                    self.schedule_replay_page(peer_id.clone(), next_target, caught_up, retry, delay);
                 }
                 None => {
-                    self.spawn_replay_page(peer_id, next_target, caught_up);
+                    self.spawn_replay_page(peer_id.clone(), next_target, caught_up);
                 }
             },
             None => {
@@ -1658,7 +1661,7 @@ impl BigSyncMachine {
             deets = ?deets,
             "replay page failed; rescheduling",
         );
-        self.schedule_replay_page(peer_id, target, caught_up, retry, Duration::from_secs(2));
+        self.schedule_replay_page(peer_id.clone(), target, caught_up, retry, Duration::from_secs(2));
         self.update_peer_replay_done(peer_id);
     }
     fn drain_cursor_machine_cmds(&mut self, peer_id: PeerKey) {
@@ -1667,7 +1670,8 @@ impl BigSyncMachine {
             trace!(peer_id = %peer_id, ?cmd,"processing cursor cmd");
             match cmd {
                 CursorMachineCommand::PartIdle { part_id } => {
-                    self.stat_machine.mark_peer_part_idle(peer_id, part_id);
+                    self.stat_machine
+                        .mark_peer_part_idle(peer_id.clone(), part_id);
                 }
                 CursorMachineCommand::SyncObj {
                     obj_id,
@@ -1695,7 +1699,7 @@ impl BigSyncMachine {
                                 .cancel(worker.task_id)
                                 .expect(ERROR_UNRECONIZED);
 
-                            worker.part_hints.extend(parts.iter().copied());
+                            worker.part_hints.extend(parts.iter().cloned());
                             worker.cursors.insert(cursor);
                             (
                                 worker.cursors,
@@ -1705,7 +1709,7 @@ impl BigSyncMachine {
                         } else {
                             (
                                 [cursor].into(),
-                                parts.iter().copied().collect(),
+                                parts.iter().cloned().collect(),
                                 remote_payload,
                             )
                         };
@@ -1719,8 +1723,8 @@ impl BigSyncMachine {
                             &mut self.tasks,
                             &mut peer_state.remove_workers,
                             &mut peer_state.pending_removals,
-                            obj_id,
-                            *part_id,
+                            obj_id.clone(),
+                            part_id.clone(),
                         ) {
                             removal_cancelled = true;
                         }
@@ -1737,7 +1741,7 @@ impl BigSyncMachine {
                                     remote_payload: None,
                                 });
                         pending.cursors.extend(cursors.iter().copied());
-                        pending.re_added_parts.extend(part_hints.iter().copied());
+                        pending.re_added_parts.extend(part_hints.iter().cloned());
                         if remote_payload.is_some() {
                             pending.remote_payload = remote_payload;
                         }
@@ -1748,13 +1752,13 @@ impl BigSyncMachine {
                         continue;
                     }
                     let deets = SyncTaskDeets {
-                        peer_id,
-                        obj_id,
+                        peer_id: peer_id.clone(),
+                        obj_id: obj_id.clone(),
                         remote_payload: remote_payload.clone(),
                     };
                     let task_id = self.tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
                         kind: SyncTaskKind::Sync,
-                        part_hints: part_hints.iter().copied().collect(),
+                        part_hints: part_hints.iter().cloned().collect(),
                         deets: deets.clone(),
                     }));
                     peer_state.sync_workers.insert(
@@ -1768,7 +1772,7 @@ impl BigSyncMachine {
                     );
                     for part_id in parts {
                         self.stat_machine
-                            .mark_peer_part_cursor_active(peer_id, part_id);
+                            .mark_peer_part_cursor_active(peer_id.clone(), part_id);
                     }
                 }
                 CursorMachineCommand::SetPartCursor { part_id, cursor } => {
@@ -1783,12 +1787,12 @@ impl BigSyncMachine {
                             self.cmds.push_back((
                                 Uuid::new_v4(),
                                 BigSyncMachineCommand::SetPartCursor {
-                                    peer_id,
+                                    peer_id: peer_id.clone(),
                                     part_id,
                                     cursor,
                                 },
                                 None,
-                                peer_id,
+                                peer_id.clone(),
                             ));
                             state.replay_cursor = cursor;
                         }
@@ -1829,7 +1833,7 @@ impl BigSyncMachine {
                     Self::schedule_obj_removal(
                         &mut self.tasks,
                         &mut peer_state.remove_workers,
-                        peer_id,
+                        peer_id.clone(),
                         obj_id,
                         part_id,
                         Some(cursor),
@@ -1866,12 +1870,12 @@ impl BigSyncMachine {
         };
         let deets = SyncTaskDeets {
             peer_id,
-            obj_id,
+            obj_id: obj_id.clone(),
             remote_payload: None,
         };
         let task_id = tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
             kind: SyncTaskKind::RemoveFromParts,
-            part_hints: part_hints.iter().copied().collect(),
+            part_hints: part_hints.iter().cloned().collect(),
             deets,
         }));
         remove_workers.insert(
@@ -1914,7 +1918,7 @@ impl BigSyncMachine {
             return false;
         }
         let pending = pending_removals
-            .entry(obj_id)
+            .entry(obj_id.clone())
             .or_insert_with(|| PendingRemoval {
                 remaining_hints: default(),
                 re_added_parts: default(),
@@ -1930,7 +1934,7 @@ impl BigSyncMachine {
             let _state = tasks.cancel(worker.task_id).expect(ERROR_UNRECONIZED);
             pending
                 .remaining_hints
-                .extend(worker.part_hints.iter().copied());
+                .extend(worker.part_hints.iter().cloned());
         }
         true
     }
@@ -1954,17 +1958,17 @@ impl BigSyncMachine {
             .retain(|part_id| peer_state.parts.contains_key(part_id));
         if !pending.remaining_hints.is_empty() {
             let deets = SyncTaskDeets {
-                peer_id,
-                obj_id,
+                peer_id: peer_id.clone(),
+                obj_id: obj_id.clone(),
                 remote_payload: None,
             };
             let task_id = self.tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
                 kind: SyncTaskKind::RemoveFromParts,
-                part_hints: pending.remaining_hints.iter().copied().collect(),
+                part_hints: pending.remaining_hints.iter().cloned().collect(),
                 deets,
             }));
             peer_state.remove_workers.insert(
-                obj_id,
+                obj_id.clone(),
                 SyncWorkerState {
                     task_id,
                     cursors: pending.cursors.clone(),
@@ -1976,12 +1980,12 @@ impl BigSyncMachine {
         if !pending.re_added_parts.is_empty() {
             let deets = SyncTaskDeets {
                 peer_id,
-                obj_id,
+                obj_id: obj_id.clone(),
                 remote_payload: pending.remote_payload.clone(),
             };
             let task_id = self.tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
                 kind: SyncTaskKind::Sync,
-                part_hints: pending.re_added_parts.iter().copied().collect(),
+                part_hints: pending.re_added_parts.iter().cloned().collect(),
                 deets,
             }));
             peer_state.sync_workers.insert(
@@ -2039,8 +2043,8 @@ impl BigSyncMachine {
                             &mut self.tasks,
                             &mut peer_state.remove_workers,
                             &mut peer_state.pending_removals,
-                            obj_id,
-                            *part_id,
+                            obj_id.clone(),
+                            part_id.clone(),
                         ) {
                             removal_cancelled = true;
                         }
@@ -2057,7 +2061,7 @@ impl BigSyncMachine {
                                     remote_payload: None,
                                 });
                         pending.cursors.extend(cursors.iter().copied());
-                        pending.re_added_parts.extend(part_hints.iter().copied());
+                        pending.re_added_parts.extend(part_hints.iter().cloned());
                         if remote_payload.is_some() {
                             pending.remote_payload = remote_payload;
                         }
@@ -2066,13 +2070,13 @@ impl BigSyncMachine {
                         continue;
                     }
                     let deets = SyncTaskDeets {
-                        peer_id,
-                        obj_id,
+                        peer_id: peer_id.clone(),
+                        obj_id: obj_id.clone(),
                         remote_payload: remote_payload.clone(),
                     };
                     let task_id = self.tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
                         kind: SyncTaskKind::Sync,
-                        part_hints: part_hints.iter().copied().collect(),
+                        part_hints: part_hints.iter().cloned().collect(),
                         deets: deets.clone(),
                     }));
                     peer_state.sync_workers.insert(
@@ -2101,7 +2105,7 @@ impl BigSyncMachine {
                     Self::schedule_obj_removal(
                         &mut self.tasks,
                         &mut peer_state.remove_workers,
-                        peer_id,
+                        peer_id.clone(),
                         obj_id,
                         part_id,
                         None,
@@ -2114,8 +2118,8 @@ impl BigSyncMachine {
                     working_level,
                 } => {
                     let task = ListBucketsTask {
-                        peer_id,
-                        part_id,
+                        peer_id: peer_id.clone(),
+                        part_id: part_id.clone(),
                         offset,
                         since,
                         working_level,
@@ -2135,8 +2139,8 @@ impl BigSyncMachine {
                     part_id,
                 } => {
                     let task = LeafBucketsTask {
-                        peer_id,
-                        part_id,
+                        peer_id: peer_id.clone(),
+                        part_id: part_id.clone(),
                         since,
                         buckets,
                     };
@@ -2161,15 +2165,15 @@ impl BigSyncMachine {
                     self.cmds.push_back((
                         Uuid::new_v4(),
                         BigSyncMachineCommand::SetPartCursor {
-                            peer_id,
-                            part_id,
+                            peer_id: peer_id.clone(),
+                            part_id: part_id.clone(),
                             cursor: old.replay_cursor,
                         },
                         None,
-                        peer_id,
+                        peer_id.clone(),
                     ));
                     peer_state.parts.insert(
-                        part_id,
+                        part_id.clone(),
                         PeerPartState {
                             strat: PeerPartStrategy::Cursor(CursorState {
                                 replay_cursor: old.replay_cursor,
@@ -2177,7 +2181,7 @@ impl BigSyncMachine {
                         },
                     );
                     self.stat_machine
-                        .mark_peer_part_only_cursor_strat(peer_id, part_id, true);
+                        .mark_peer_part_only_cursor_strat(peer_id.clone(), part_id, true);
                     refresh_peer_replaly = true;
                 }
             }
@@ -2397,14 +2401,14 @@ impl BigSyncMachine {
         peer_state.remove_workers.remove(&evt.obj_id);
         for &cursor in &cursors {
             peer_state.cursor_machine.on_obj_sync_job_evt(
-                evt.obj_id,
+                evt.obj_id.clone(),
                 cursor,
                 CursorJobCompletionKind::Membership,
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        self.drain_cursor_machine_cmds(evt.peer_id);
-        self.drain_bucket_machine_cmds(evt.peer_id);
+        self.drain_cursor_machine_cmds(evt.peer_id.clone());
+        self.drain_bucket_machine_cmds(evt.peer_id.clone());
         self.resume_pending_removal(evt.peer_id, evt.obj_id);
     }
 
@@ -2505,11 +2509,11 @@ impl BigSyncMachine {
             let mut stale_part_hints = Vec::new();
             for part_id in &part_hints {
                 let Some(part) = peer_state.parts.get_mut(part_id) else {
-                    stale_part_hints.push(*part_id);
+                    stale_part_hints.push(part_id.clone());
                     continue;
                 };
                 match &mut part.strat {
-                    PeerPartStrategy::Pending(_) => stale_part_hints.push(*part_id),
+                    PeerPartStrategy::Pending(_) => stale_part_hints.push(part_id.clone()),
                     PeerPartStrategy::Bucket(state) => {
                         state
                             .machine
@@ -2523,12 +2527,12 @@ impl BigSyncMachine {
                 // cursor job for the obj still has other pending parts, their
                 // waiters may never resolve (cursor_active stuck).
                 tracing::warn!(?part_id, obj_id = %completion.obj_id, "discarding sync completion for stale peer part");
-                peer_state.cursor_machine.remove_part(part_id);
+                peer_state.cursor_machine.remove_part(part_id.clone());
                 part_hints.remove(&part_id);
             }
             for &cursor in &completion.cursors {
                 peer_state.cursor_machine.on_obj_sync_job_evt(
-                    completion.obj_id,
+                    completion.obj_id.clone(),
                     cursor,
                     CursorJobCompletionKind::Sync,
                     &mut peer_state.cursors_cmd_buf,
@@ -2537,16 +2541,19 @@ impl BigSyncMachine {
             (completion, part_hints)
         };
         for part_id in &part_hints {
-            self.stat_machine
-                .record_object_synced(evt.peer_id, *part_id, completion.obj_id);
+            self.stat_machine.record_object_synced(
+                evt.peer_id.clone(),
+                part_id.clone(),
+                completion.obj_id.clone(),
+            );
         }
         self.stat_machine
             .stat_evts
             .push(SyncStatEvent::ObjectSynced {
-                peer_id: evt.peer_id,
+                peer_id: evt.peer_id.clone(),
                 obj_id: completion.obj_id,
             });
-        self.drain_cursor_machine_cmds(evt.peer_id);
+        self.drain_cursor_machine_cmds(evt.peer_id.clone());
         self.drain_bucket_machine_cmds(evt.peer_id);
     }
 
@@ -2564,8 +2571,8 @@ impl BigSyncMachine {
             }
             (
                 SyncTaskDeets {
-                    peer_id: evt.peer_id,
-                    obj_id: evt.obj_id,
+                    peer_id: evt.peer_id.clone(),
+                    obj_id: evt.obj_id.clone(),
                     remote_payload: worker.remote_payload.clone(),
                 },
                 worker.part_hints.clone(),
@@ -2614,8 +2621,8 @@ impl BigSyncMachine {
             }
             (
                 SyncTaskDeets {
-                    peer_id: evt.peer_id,
-                    obj_id: evt.obj_id,
+                    peer_id: evt.peer_id.clone(),
+                    obj_id: evt.obj_id.clone(),
                     remote_payload: worker.remote_payload.clone(),
                 },
                 worker.part_hints.clone(),
@@ -2664,10 +2671,10 @@ mod tests {
         let part = PartKey::random();
 
         // Register the peer and its part.
-        stat.set_peer(peer, [part].into_iter());
+        stat.set_peer(peer.clone(), [part.clone()].into_iter());
 
         // Register a waiter needing that peer + part.
-        stat.add_full_sync_waiter(1, [peer].into(), [part].into());
+        stat.add_full_sync_waiter(1, [peer.clone()].into(), [part].into());
 
         // Remove the peer -- the waiter must be cleaned up.
         stat.remove_peer(peer);
@@ -2688,8 +2695,8 @@ mod tests {
         let part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [part].into(),
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
             objects: Set::new(),
         }));
 
@@ -2698,14 +2705,14 @@ mod tests {
             peer_state.cursor_machine.on_subscription_evt(
                 crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
                     cursor: 1,
-                    part_id: part,
-                    obj_id: obj,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
                     payload: serde_json::json!({"head": 1}),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
         let task_id = machine
             .peers
             .get(&peer)
@@ -2718,13 +2725,13 @@ mod tests {
             peer_state.cursor_machine.on_subscription_evt(
                 crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 2,
-                    part_id: part,
-                    obj_id: obj,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
 
         // The sync task is cancelled…
         assert!(
@@ -2756,13 +2763,13 @@ mod tests {
         let remaining_part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [removed_part, remaining_part].into(),
+            peer_id: peer.clone(),
+            parts: [removed_part.clone(), remaining_part.clone()].into(),
             objects: Set::new(),
         }));
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
-            for part_id in [removed_part, remaining_part] {
+            for part_id in [removed_part.clone(), remaining_part.clone()] {
                 peer_state
                     .parts
                     .get_mut(&part_id)
@@ -2776,14 +2783,14 @@ mod tests {
             peer_state.cursor_machine.on_subscription_evt(
                 crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 1,
-                    part_ids: vec![removed_part, remaining_part],
-                    obj_id: obj,
+                    part_ids: vec![removed_part.clone(), remaining_part.clone()],
+                    obj_id: obj.clone(),
                     payload: serde_json::json!({"head": 1}),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
         let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
 
         {
@@ -2792,12 +2799,12 @@ mod tests {
                 crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 2,
                     part_id: removed_part,
-                    obj_id: obj,
+                    obj_id: obj.clone(),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
 
         let worker = &machine.peers[&peer].sync_workers[&obj];
         assert_eq!(worker.task_id, task_id);
@@ -2813,8 +2820,8 @@ mod tests {
         let part_b = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [part_a, part_b].into(),
+            peer_id: peer.clone(),
+            parts: [part_a.clone(), part_b.clone()].into(),
             objects: Set::new(),
         }));
 
@@ -2823,24 +2830,24 @@ mod tests {
             BigSyncMachine::schedule_obj_removal(
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
-                peer,
-                obj,
-                part_a,
+                peer.clone(),
+                obj.clone(),
+                part_a.clone(),
                 Some(1),
             );
             BigSyncMachine::schedule_obj_removal(
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
-                peer,
-                obj,
-                part_b,
+                peer.clone(),
+                obj.clone(),
+                part_b.clone(),
                 Some(2),
             );
         }
         let first_task = machine.peers[&peer].remove_workers[&obj].task_id;
         let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
         assert_eq!(spawned.len(), 1);
-        assert_eq!(spawned[0].part_hints, [part_a, part_b].into());
+        assert_eq!(spawned[0].part_hints, [part_a.clone(), part_b.clone()].into());
 
         // Trim one hint: the in-flight task is stopped and the remaining
         // hint set is recorded as pending. The re-removal is NOT spawned
@@ -2854,7 +2861,7 @@ mod tests {
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
                 &mut peer_state.pending_removals,
-                obj,
+                obj.clone(),
                 part_a,
             ));
         }
@@ -2863,7 +2870,7 @@ mod tests {
             "cancelled removal worker must be removed from remove_workers"
         );
         let pending = &machine.peers[&peer].pending_removals[&obj];
-        assert_eq!(pending.remaining_hints, [part_b].into());
+        assert_eq!(pending.remaining_hints, [part_b.clone()].into());
         assert!(
             machine
                 .drain_stop_queue()
@@ -2878,11 +2885,11 @@ mod tests {
         // with the remaining hint set.
         machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
             task_id: first_task,
-            peer_id: peer,
-            obj_id: obj,
+            peer_id: peer.clone(),
+            obj_id: obj.clone(),
         }));
         let worker = &machine.peers[&peer].remove_workers[&obj];
-        assert_eq!(worker.part_hints, [part_b].into());
+        assert_eq!(worker.part_hints, [part_b.clone()].into());
         assert_ne!(
             worker.task_id, first_task,
             "deferred re-removal must spawn a fresh task"
@@ -2904,8 +2911,8 @@ mod tests {
         let part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [part].into(),
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
             objects: Set::new(),
         }));
 
@@ -2915,9 +2922,9 @@ mod tests {
             BigSyncMachine::schedule_obj_removal(
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
-                peer,
-                obj,
-                part,
+                peer.clone(),
+                obj.clone(),
+                part.clone(),
                 Some(1),
             );
         }
@@ -2933,14 +2940,14 @@ mod tests {
             peer_state.cursor_machine.on_subscription_evt(
                 crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
                     cursor: 2,
-                    part_id: part,
-                    obj_id: obj,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
                     payload: serde_json::json!({"head": 2}),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
 
         // The removal worker is gone (its only hint was cancelled)…
         assert!(!machine.peers[&peer].remove_workers.contains_key(&obj));
@@ -2955,13 +2962,13 @@ mod tests {
             "re-sync must be deferred until the zombie removal completes"
         );
         let pending = &machine.peers[&peer].pending_removals[&obj];
-        assert_eq!(pending.re_added_parts, [part].into());
+        assert_eq!(pending.re_added_parts, [part.clone()].into());
 
         // The zombie's completion lands: the deferred re-sync is issued.
         machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
             task_id: removal_task,
-            peer_id: peer,
-            obj_id: obj,
+            peer_id: peer.clone(),
+            obj_id: obj.clone(),
         }));
         let sync_task = machine.peers[&peer].sync_workers[&obj].task_id;
         let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
@@ -2982,8 +2989,8 @@ mod tests {
         let part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [part].into(),
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
             objects: Set::new(),
         }));
 
@@ -2992,9 +2999,9 @@ mod tests {
             BigSyncMachine::schedule_obj_removal(
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
-                peer,
-                obj,
-                part,
+                peer.clone(),
+                obj.clone(),
+                part.clone(),
                 Some(1),
             );
         }
@@ -3006,21 +3013,21 @@ mod tests {
             peer_state.cursor_machine.on_subscription_evt(
                 crate::rpc::SubEvent::Added(crate::rpc::ObjAddedToPart {
                     cursor: 2,
-                    part_id: part,
-                    obj_id: obj,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
                     payload: serde_json::json!({"head": 2}),
                 }),
                 &mut peer_state.cursors_cmd_buf,
             );
         }
-        machine.drain_cursor_machine_cmds(peer);
+        machine.drain_cursor_machine_cmds(peer.clone());
         assert_eq!(
             machine.peers[&peer].pending_removals[&obj].re_added_parts,
             [part].into()
         );
 
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
+            peer_id: peer.clone(),
             parts: Set::new(),
             objects: Set::new(),
         }));
@@ -3028,7 +3035,7 @@ mod tests {
 
         machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
             task_id: removal_task,
-            peer_id: peer,
+            peer_id: peer.clone(),
             obj_id: obj,
         }));
         assert!(machine.peers[&peer].sync_workers.is_empty());
@@ -3046,17 +3053,17 @@ mod tests {
         let retained_part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [removed_part, retained_part].into(),
+            peer_id: peer.clone(),
+            parts: [removed_part.clone(), retained_part.clone()].into(),
             objects: Set::new(),
         }));
 
         let task_id = machine.tasks.spawn(std::time::Instant::now(), TaskSeed::Sync(SyncTaskSeed {
             kind: SyncTaskKind::Sync,
-            part_hints: [removed_part, retained_part].into(),
+            part_hints: [removed_part.clone(), retained_part.clone()].into(),
             deets: SyncTaskDeets {
-                peer_id: peer,
-                obj_id: obj,
+                peer_id: peer.clone(),
+                obj_id: obj.clone(),
                 remote_payload: Some(serde_json::json!({"head": 1})),
             },
         }));
@@ -3066,24 +3073,24 @@ mod tests {
             .expect(ERROR_UNRECONIZED)
             .sync_workers
             .insert(
-                obj,
+                obj.clone(),
                 SyncWorkerState {
                     task_id,
                     cursors: [1].into(),
-                    part_hints: [removed_part, retained_part].into(),
+                    part_hints: [removed_part, retained_part.clone()].into(),
                     remote_payload: Some(serde_json::json!({"head": 1})),
                 },
             );
 
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [retained_part].into(),
+            peer_id: peer.clone(),
+            parts: [retained_part.clone()].into(),
             objects: Set::new(),
         }));
 
         let tasks: Vec<_> = machine.drain_sync_spawn_queue().collect();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].part_hints, [retained_part].into());
+        assert_eq!(tasks[0].part_hints, [retained_part.clone()].into());
         assert_ne!(tasks[0].id, task_id);
         assert_eq!(
             machine.peers[&peer].sync_workers[&obj].part_hints,
@@ -3098,8 +3105,8 @@ mod tests {
         let part = PartKey::random();
         let obj = ObjKey::random();
         machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
-            peer_id: peer,
-            parts: [part].into(),
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
             objects: Set::new(),
         }));
 
@@ -3108,8 +3115,8 @@ mod tests {
             BigSyncMachine::schedule_obj_removal(
                 &mut machine.tasks,
                 &mut peer_state.remove_workers,
-                peer,
-                obj,
+                peer.clone(),
+                obj.clone(),
                 part,
                 Some(1),
             );
@@ -3117,7 +3124,7 @@ mod tests {
         let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
         machine.drain_sync_spawn_queue();
 
-        machine.handle_evt(BigSyncEvent::RemovePeer(RemovePeerEvent { peer_id: peer }));
+        machine.handle_evt(BigSyncEvent::RemovePeer(RemovePeerEvent { peer_id: peer.clone() }));
 
         assert!(!machine.peers.contains_key(&peer));
         assert!(

@@ -76,8 +76,8 @@ impl StressFixture for LwwStressFixture {
 
     async fn disconnect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
         tokio::try_join!(
-            left.host.worker.remove_peer(right.peer_id),
-            right.host.worker.remove_peer(left.peer_id),
+            left.host.worker.remove_peer(right.peer_id.clone()),
+            right.host.worker.remove_peer(left.peer_id.clone()),
         )?;
         Ok(())
     }
@@ -97,7 +97,7 @@ impl StressFixture for LwwStressFixture {
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        node.seed_obj(*obj, payload).await
+        node.seed_obj(obj.clone(), payload).await
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
@@ -105,7 +105,7 @@ impl StressFixture for LwwStressFixture {
     }
 
     fn peer_id(&self, node: &Self::Node) -> PeerKey {
-        node.peer_id
+        node.peer_id.clone()
     }
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
@@ -206,7 +206,7 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
     let part_ids = stress_support::test_parts();
     for node in nodes {
         let connected_peers = node.handle.snapshot().await?.peer_parts.into_keys();
-        node.wait_for_full_sync(connected_peers, part_ids.iter().copied())
+        node.wait_for_full_sync(connected_peers, part_ids.iter().cloned())
             .await?;
     }
     let mut last_log = tokio::time::Instant::now();
@@ -216,10 +216,10 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
         let mut store_snaps = Vec::with_capacity(nodes.len());
         for node in nodes {
             let snapshot = node.snapshot().await?;
-            for &(_, part_id) in snapshot.peer_part_cursors.keys() {
-                assert_eq!(part_id, stress_support::test_part());
+            for (_, part_id) in snapshot.peer_part_cursors.keys() {
+                assert_eq!(part_id.clone(), stress_support::test_part());
             }
-            store_snaps.push((node.peer_id, snapshot));
+            store_snaps.push((node.peer_id.clone(), snapshot));
         }
 
         let mut converged = true;
@@ -227,9 +227,9 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
             if store_snaps[0].1.objs != snapshot.1.objs {
                 converged = false;
                 last_diff = Some(diff_scoped_obj_snapshots(
-                    store_snaps[0].0,
+                    store_snaps[0].0.clone(),
                     &store_snaps[0].1,
-                    snapshot.0,
+                    snapshot.0.clone(),
                     &snapshot.1,
                 ));
                 break;
@@ -287,9 +287,9 @@ async fn restart_sqlite_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<No
         sqlite_temp_dir,
         ..
     } = node;
-    node_world.set_online(peer_id, false);
+    node_world.set_online(peer_id.clone(), false);
     stop.stop().await?;
-    node_world.remove_store(peer_id);
+    node_world.remove_store(peer_id.clone());
     let temp_dir = sqlite_temp_dir.ok_or_eyre("sqlite stress node is missing its temp dir")?;
     let peer_seed = peer_id.as_bytes()[0];
     boot_sqlite_node_at(world, peer_seed, temp_dir).await
@@ -361,8 +361,8 @@ impl StressFixture for PolicyMembershipFixture {
 
     async fn disconnect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
         tokio::try_join!(
-            left.host.worker.remove_peer(right.peer_id),
-            right.host.worker.remove_peer(left.peer_id),
+            left.host.worker.remove_peer(right.peer_id.clone()),
+            right.host.worker.remove_peer(left.peer_id.clone()),
         )?;
         Ok(())
     }
@@ -373,7 +373,7 @@ impl StressFixture for PolicyMembershipFixture {
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        node.seed_obj(*obj, payload).await
+        node.seed_obj(obj.clone(), payload).await
     }
 
     async fn seed_obj(
@@ -382,7 +382,7 @@ impl StressFixture for PolicyMembershipFixture {
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        node.seed_obj(*obj, payload).await
+        node.seed_obj(obj.clone(), payload).await
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
@@ -390,7 +390,7 @@ impl StressFixture for PolicyMembershipFixture {
     }
 
     fn peer_id(&self, node: &Self::Node) -> PeerKey {
-        node.peer_id
+        node.peer_id.clone()
     }
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {

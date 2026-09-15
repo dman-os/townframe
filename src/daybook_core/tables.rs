@@ -381,7 +381,7 @@ impl TablesRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .into_ready(app_doc_id)?;
+            .into_ready(app_doc_id.clone())?;
 
         let store_val = TablesStore::load(&app_doc_handle).await?;
         let store = crate::stores::AmStoreHandle::new(

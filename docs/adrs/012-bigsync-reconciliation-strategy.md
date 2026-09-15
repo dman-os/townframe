@@ -189,21 +189,27 @@ like `/object/path`, a naive `/o/` prefix produces `/o//object/path` (a doubled 
 because the value already begins with `/`), and a bare `/o` prefix leaves the boundary
 unreadable. Reserved part keys are themselves plain paths, so `/seds` stays `/seds`.
 
-**As built, and what is staged.** The renames have landed — `ObjKey` / `PartKey` / `PeerKey` /
-`ByteKey` across 89 files — together with `GLOBAL_PART_ID` becoming `global_part_id()`, since a
-`const` cannot hold a key once keys stop being const-constructible. The representation is still
-fixed-width, so the literal `o:{object_key}` (34 bytes for a 32-byte key) and a literal `/seds`
-cannot exist yet; both derivations keep their interim forms byte-for-byte and say so in comment.
-Nothing at the persistence or wire layer blocks the change: key columns are already unconstrained
-`BLOB` and binary serde already uses `serialize_bytes`, which `sqlx prepare --check` confirms by
-producing zero metadata changes. The representation pass is sized rather than open — roughly 800
-move-and-reuse sites workspace-wide, dominated by `E0382` value reuse over the hottest names
-(`part_id`, `peer_id`, `peer`, `obj_id`, `obj`), with `SubscriptionTarget` and `ReplayRoute`
-losing `Copy` — so it is a dedicated pass, not a step. Two things it must carry: a global rename
-has to exclude same-named foreign types (`automerge::ObjId`, `subduction_core`'s `PeerId`, and
-`daybook_core::sync::PeerId`, an `Arc<str>` alias whose fields change type if renamed), and the
-text encoding is already decided — display text when the bytes are printable UTF-8, else
-multibase base58, with human-readable serde staying multibase so no persisted format moves.
+**As built.** The renames have landed — `ObjKey` / `PartKey` / `PeerKey` / `ByteKey`
+across 89 files — together with `GLOBAL_PART_ID` becoming `global_part_id()`, since a
+`const` cannot hold a key once keys stop being const-constructible. The representation is
+`Arc<[u8]>`, and it was chosen on measurement rather than taste: 16 bytes per key with an
+O(1) clone that is an atomic increment, against 24 for `Vec<u8>`, 16 for `Box<[u8]>`, 32
+for `bytes::Bytes` (4 words, always allocated), 32 for the `[u8; 32]` this replaces, and 48
+for `SmallVec<[u8; 32]>` — 32 bytes inline *plus* a length and a discriminant, i.e. larger
+than the fixed-width key it was meant to un-bloat. The one shape that beats both is a
+hand-rolled `Inline { len: u8, buf: [u8; 32] } | Heap(Arc<[u8]>)` at ~40 bytes, which keeps
+the common case inline and allocation-free; it is recorded here as the option to reach for
+if a measured need appears, not built now. `Copy` was never on the table once keys gained
+storage, so `SubscriptionTarget` and `ReplayRoute` lost it. Nothing at the persistence or
+wire layer blocked the change: key columns were already unconstrained `BLOB`s, binary serde
+already used `serialize_bytes`, and `sqlx prepare --check` confirmed zero metadata changes.
+The pass itself was the sized ~800 move-and-reuse sites workspace-wide, dominated by `E0382`
+value reuse over the hottest names (`part_id`, `peer_id`, `peer`, `obj_id`, `obj`), and it
+had to carry two things: a global rename excludes same-named foreign types
+(`automerge::ObjId`, `subduction_core`'s `PeerId`, and `daybook_core::sync::PeerId`, an
+`Arc<str>` alias whose fields change type if renamed), and the text encoding is display text
+when the bytes are printable UTF-8, else multibase base58, with human-readable serde staying
+multibase so no persisted format moves.
 
 **The concrete site this lands on, and one consequence to face.** `BuckId::from_obj_key` derives its
 index from the key's first two bytes — `u16::from_be_bytes([obj_key[0], obj_key[1]])` — at arity 16
@@ -218,6 +224,32 @@ and key order: buckets still form a complete partition, but no longer in key ord
 relies on the two agreeing changes meaning. `BuckId::increment`, sibling iteration,
 `next_page_offset`, and the starting-`working_level` choice all need auditing as part of this pass, and
 they are adjacent to the deferred question of whether the range structure keeps its fixed arity and
+
+**What the audit found was actually load-bearing, and what had to change.** Of the four
+sites named above, `increment` needed no change: it counts pages *at one level*, requests
+are level-scoped (`get_changed_buckets` matches on `offset.level()`), and an increment past
+a level's last index is only ever an exclusive lower bound in bucket order — the store
+answers an empty page and `filter_buckets` reads that as `Done`, which *is* what "nothing
+more at this level" looks like. The offsets that do change level come from a dive
+(`Relist(dirty.to_level(level + 1))`), which the machine's
+`next_page_offset.level() > working_level` check catches. Sibling iteration and the starting
+`working_level` are unaffected: `working_level` stays size-derived, and a bucket is a
+complete partition of the key space under either index.
+
+The dependency is *leaf enumeration*. `obj_id_bounds_for_bucket` turns a bucket id into a
+range of object keys, and that key range is how all three stores find a bucket's members —
+the memory store's `bucket_items_for_path`, `big_sync`'s sqlite store, and the host store's
+sqlite implementation (which carries a duplicate of the helper). That range exists only
+while the bucket index *is* the key's own leading bytes. Under a hash index nothing may
+derive a bucket's members from key order, so membership has to be stored: the object's
+deepest bucket index becomes a column on `big_sync_objs`, one per object because the index
+is a pure function of the object key and therefore needs no per-membership fan-out; the leaf
+predicate becomes a range over that index while the page cursor stays an object key ordered
+by `obj_id`, so no wire format moves; and the duplicate helper disappears. The
+`big_sync_buckets` aggregate rows are keyed by the same index and are derived state, so any
+store that predates this change holds aggregates under bucket ids no new request will name —
+a rebuild rather than a compatibility path, and only observable once a part uses the bucket
+band at all.
 level.
 
 Content addressing stays separate: payload digests remain real hashes and are
@@ -355,10 +387,10 @@ API demonstrates.
 This does not imply per-object authorization for the local case, which stays
 unfiltered, and it does not resurrect per-object grant rows.
 
-**As built.** The key is a domain-separated digest (`ObjId::object_part_id()`, blake3 over a
-namespace plus the object's bytes, alongside `group_part_id`) rather than the literal
-`o:{object_key}`, because keys are still fixed 32-byte ids; turning it into the literal
-reserved-prefix key belongs to step 7, not to a migration of its own. Derivation triggers on
+**As built.** The key is the literal reserved-prefix key of decision 1: `o:` followed by
+the object key's own bytes, so `o:/object/path` and `o:z…` each read as what they are and
+the key stays computable by anyone holding the object key. (While keys were fixed-width
+this was a domain-separated digest, `ObjKey::object_part_key()`; step 7 replaced it.) Derivation triggers on
 a remote object subscription, which materializes the part row and the object's single live
 membership row; the local lane is untouched. Inheritance needed no new authorization code:
 the materialized row makes the object part one of the object's containing parts, so the
@@ -395,15 +427,28 @@ sides agree on and pruning works. Three corrections remain:
    cancellation require count-preserving collisions and also catches
    summary-maintenance defects. This needs no protocol change: every field is
    already on the wire.
-2. **Replace the level estimate with a measured input.** `calc_working_level`
-   infers a starting level from the peer's advertised member count and materialized
-   depth. That is the "know the difference size in advance" problem in another
-   guise; the dirty count (decision 5) is a cheap, part-relative estimate and
-   should choose both the band and the starting level.
-3. **Collapse the round-trip chain.** The walk is requested level by level, so a
-   depth-4 dive costs a chain of round trips. A request should be able to carry a
-   range and return the summaries beneath it, reducing the chain to a small
-   constant number of exchanges.
+2. **The level estimate stays size-derived; the dirty count chooses only the band.**
+   `calc_working_level` bounds what a leaf page can return — objects per bucket at
+   `member_count / ARITY^level <= ACTIVE_SYNC_JOB_TARGET` — which is not the quantity the dirty
+   count measures. The dirty count totals *relevant changes* (decision 5) and is the band
+   input: bucket-versus-cursor is decided first, and a part that stays on the cursor band
+   never computes a level at all. Substituting one for the other would let a large part
+   with small dirt start *shallower* than its width bound and hand a leaf page many
+   unchanged objects, so the size-derived level stands as the width bound and the dirty
+   count does not move it. An earlier draft of this decision said the count "should choose
+   both the band and the starting level"; the code disproved it (`decide_peer_strat.rs`
+   decides the band, then calls `calc_working_level(member_count, deepest_bucket_level)`).
+3. **Collapse the round-trip chain.** The walk was requested level by level, so a
+   depth-4 dive cost a chain of round trips. A request carries a range and returns the
+   summaries beneath it, reducing the chain to a small constant number of exchanges.
+
+   **As built.** The request carries `to_level`, and a page contains the changed buckets at
+   every level from the cursor through it, in bucket order. A level-*N* walk is one scan,
+   and the client's per-level dive is gone: a dirty bucket *above* the working level is
+   answered by advancing the cursor, because its descendants come later in the same scan.
+   The narrowing therefore comes from `since` rather than from the dive — a change stamps
+   every ancestor's `changed_at`, so the peer's cursor already restricts a page to the
+   ranges that actually differ, and the common mostly-caught-up case is a single exchange.
 
 The tree is, properly described, RBSR with materialized per-range fingerprints, a
 fixed arity, and a since-filter. The arity and the level are implementation
@@ -546,11 +591,14 @@ never enter the bucket machine, so their name is a claim they do not check.
 visibility was per object. With authorization per part, an authorized peer sees a part's
 whole membership, both sides describe the same set, and the tree's ranges are comparable —
 so `Bucket` becomes the default and the disabling moves to the embedder that actually
-wanted it: big_repo sets `CursorOnly` at its usage sites, with the reason recorded at
-those call sites rather than baked into a global default that silently disables the
-strategy for everyone. Two preconditions before the production default flips: one
-bucket-shaped test must complete end to end, and the cutoff must come from the
-instrumentation rather than from the placeholder.
+wanted it, recorded at those call sites rather than baked into a global default that
+silently disables the strategy for everyone. Two preconditions were named for the
+production default: one bucket-shaped test completing end to end, and the cutoff coming
+from instrumentation rather than from the placeholder. The opt-out itself is gone: the
+reason those sites recorded was the band stalling in the offline-reopen path with no test
+covering it, and that path now has one
+(`bucket_band_reconciles_after_offline_reopen` in big_repo). The cutoff remains the
+placeholder, so it stays deferred rather than guessed.
 
 Stage 1 confirmed the precondition and also showed the four bucket-shaped tests were in the
 wrong regime: they are cold seeds, where everything is dirty and pruning has nothing to
@@ -560,11 +608,12 @@ the tests must create. Comparing bands by wall-clock is not viable: the same 100
 measured 72s under concurrent load and 25s solo. The comparison asserts work — payloads or
 messages moved — and logs durations beside it.
 
-**As built.** `SyncMode` now defaults to `Bucket`, and the disable lives at the sites that
-want it: daybook's four production spawns and big_repo's harnesses pass `CursorOnly`
-explicitly with the reason commented there, while big_sync's own suite — about sixty tests,
-including the three randomized four-node stress runs this gate was protecting — now
-exercises the bucket band and passes. `restart_node` inherits the mode it booted with, so a
+**As built.** `SyncMode` defaults to `Bucket`, and the opt-out is gone: the reason those
+sites recorded was the band stalling in the offline-reopen path with no test covering it, so
+the coverage was written (`bucket_band_reconciles_after_offline_reopen`) and daybook's four
+production spawns and big_repo's harnesses now run the band. big_sync's own suite — about
+sixty tests, including the three randomized four-node stress runs this gate was protecting —
+already exercised it and passes. `restart_node` inherits the mode it booted with, so a
 restart cannot silently change band mid-scenario. Band observability went a different way
 than the obvious one: a stats variant is emitted at decision time into a 1024-capacity
 broadcast drained only after the scenario, so it is dropped as `Lagged` on exactly the large
@@ -683,12 +732,17 @@ paging removes the long-lived stream that the current bookkeeping exists to
 manage.
 
 **As built, and where it stops.** The cursor machine's per-part stream book *is* now
-`WatermarkBook<CursorIndex>`: `cursor_state` with its `CursorStreamState`/`CursorSlotState` is
-gone, and the admission guard, the contiguous-prefix drain, `PartIdle` and the force-finish
-path all come from the primitive. It uses the untracked half (`begin` / `force_finish` /
-`drain` / `is_settled` / `watermark`) because this machine has no shared-slot waiters, so
-`track_ref`/`release` are deliberately not involved; `tasks.rs` already owned the task frame
-and was not touched. No test changed and none was added — the semantics newly relied on are
+`WatermarkMachine`: `cursor_state` with its `CursorStreamState`/`CursorSlotState` is gone, and the
+admission guard, the contiguous-prefix drain, `PartIdle` and the cursor advance all come from the
+primitive. It drives the **tracked** half — `admit` / `track` / `settle` / `drop_stream` /
+`retire_stream`, with `watermark` / `is_settled` as the predicates — because an object's events
+are admitted per job (`track_obj_job`), settled one lane at a time (`Membership`, then `Sync`),
+and a single stream is shed while its waiter survives on the object's other parts.
+`tasks.rs` already owned the task frame and was not touched. The `WatermarkBook` below the
+machine (`begin` / `force_finish` / `track_ref` / `release` / `drain`) has no caller outside
+`watermark.rs` other than the slot-level `WatermarkMachine::finish`, which is for empty source
+revisions; an earlier draft of this paragraph described the machine as using that untracked layer,
+which the code never did. No test changed and none was added — the semantics newly relied on are
 covered by `watermark.rs`'s own tests.
 
 Two boundaries, established rather than assumed. The **job-lane half cannot be layered
@@ -704,10 +758,10 @@ or waiter-level — removes a stream from a waiter that survives on its other st
 normal disposition here, so the case that motivates the change keeps no code path. A waiter-level
 predicate is also needed, because the branch is selected by stream *count* rather than lane
 identity, but it is the smaller half. The shape arrived at is
-`StreamDrop<Lane> { Retain { shed: Vec<Lane> }, Release }` with
+`StreamDrop<Lane> { Retain { keep: Vec<Lane> }, Release }` with
 `drop_stream(job, stream, bound, decide: impl Fn(&Waiter<..>) -> StreamDrop<Lane>) -> Vec<Cursor>`:
-`Release` removes the stream and frees its cursor, `Retain` keeps the stream and sheds only the
-lanes the caller names. It is an API decision on a primitive shared with `concurrent_delta_walker`
+`Release` removes the stream and frees its cursor, and `Retain` keeps gating the stream with only
+the lanes the caller named in `keep`. It is an API decision on a primitive shared with `concurrent_delta_walker`
 and belongs to this step's writer rather than being invented in the ADR. Three constraints belong to
 the signature rather than to a call site. `supersede`'s emptied-waiter path removes a waiter from
 **every** stream but reports a freed cursor only for the superseding stream, leaving a `Pending`
@@ -715,17 +769,18 @@ slot no waiter can finish, so `is_settled` stays false and `PartIdle` is never e
 siblings; neither current consumer is exposed, but the `PeerState` retarget makes multi-stream
 waiters the norm, so it is fixed with or before that. The board's `Copy` bounds (`JobKey: Ord +
 Copy`, streams taken by value) are invalidated by step 7, so the new signature must anticipate
-`Clone + Ord` and by-reference stream parameters or step 7 re-opens this API. Last, whether the
-untracked half is sound was settled rather than assumed, and it is: **two objects cannot share one
+`Clone + Ord` and by-reference stream parameters or step 7 re-opens this API. Last, whether one slot can
+carry two objects was settled rather than assumed, and it cannot: **two objects cannot share one
 part cursor.** Every membership-mutating path allocates a cursor per `(object, part)` mutation, and
 the one path that genuinely shares a single cursor across a batch — `materialize_object_parts`,
 which takes a `Vec<ObjKey>` — gives each object its own derived part, so the share never collides:
-the slot key is `(part, cursor)`, and a shared cursor in *different* parts is harmless. The
-machine's unconditional `force_finish` is therefore correct and the untracked half is the right
-half, not a simplification that happens to work. The caveat is that this is enforced by
-construction rather than by schema or type — nothing prevents a future writer from putting two
-objects' events in one part at one cursor — which is why the reason belongs written down here
-rather than left for a reader to guess. One caution on the materialization site, since it reads like a
+the slot key is `(part, cursor)`, and a shared cursor in *different* parts is harmless. With the
+tracked half this is no longer load-bearing — a waiter is addressed by `(job, cursor, lane)`, so
+two objects on one slot would settle independently — but it is what keeps the slot-level
+`finish` sound for anyone who reaches for it, and it is enforced by construction rather than by
+schema or type — nothing prevents a future writer from putting two objects' events in one part at
+one cursor — which is why the reason belongs written down here rather than left for a reader to
+guess. One caution on the materialization site, since it reads like a
 bug at first glance: the memory store's materialization reads the cursor (`peek`) and consumes
 nothing, which matches its own "quiet" documentation. An experimental change to consume a revision
 there was justified by an A/B over a roughly-50% flaky test, and did not survive measurement — both
@@ -792,17 +847,44 @@ of a single frame (`tasks: Tasks`, `lib.rs:684`), and "nothing to hand over" is 
 for them, exactly as it is for the bucket machine's watermark half.
 
 **A precondition the layering depends on: the part stores do not implement one contract.** Three
-divergences were found between the memory and sqlite stores. Memory can never answer
-`ReplayPageOutcome::Unauthorized` even though it *does* filter per recipient — the trait default's
-stated justification, that the in-memory store hands every subscriber the same stream, is falsified
-by that store's own `select_memory_event`. Object-part materialization emits an event on sqlite and
-nothing on memory. And memory's `latest_revision()` allocates a revision where sqlite's is a pure
-read, so a read mutates. The shared `assert_*_contract` harness that both stores run cannot catch
-any of the three, because it predates steps 4 and 5: it never mentions object parts,
-materialization, or page outcomes. That last point is the structural one — fixing the three
-behaviours is not the fix, extending the harness so both stores are held to one contract is. A
-primitive trusted with settling cannot have two stores emitting different events, so this is fixed
-before or with the layering rather than after it.
+divergences were found between the memory and sqlite stores, and one of them is still open. The
+first two are closed in the stores *and* pinned by the shared harness, which was the structural
+half: memory now answers `ReplayPageOutcome::Unauthorized` where it previously filtered per
+recipient but reported the denial as an empty page (`assert_page_outcome_contract`), and
+`latest_revision` is a read on both stores rather than an allocating one on memory
+(`assert_latest_revision_is_a_read_contract`). The trait default's stated justification for never
+answering `Unauthorized` — that the in-memory store hands every subscriber the same stream — was
+falsified by that store's own `select_memory_event`, which is why the behaviour had to change
+rather than the comment. What remains is object-part materialization: sqlite records it as one
+keyed-frontier `Changed` at the current revision, memory records nothing. It is deliberately still
+open — an earlier attempt to make memory consume a revision there was justified by an A/B over a
+test that was flaky for unrelated reasons, so the measurement supported nothing — and no shared
+contract asserts either behaviour, because whether *derived* state is observable is a decision
+rather than a detail. A primitive trusted with settling cannot have two stores emitting different
+events, so this is settled before or with the layering rather than after it.
+
+**The remaining conversions, read and declined.** With the code in hand, none of the four
+retargeted sites is wiring. The machine's frame is a single `Scheduler<TaskSeed>` with one
+`TaskId` space and one spawn/requeue queue shared with the worker's admission policy, so a
+keyed scheduler *per domain* is not a local change: each `Scheduler` allocates its own ids
+(`next_id` is per-instance) while `TaskId` is the worker's task handle, and the drain that
+preserves the uncapped-machine / capped-sync split and the surplus-sync LIFO order would have
+to fan out and re-collect per scheduler. Keying the single frame instead needs a key enum with
+an unkeyed variant, because two of the machine's four task kinds are not one per key:
+`LeafBuckets` is per working bucket, so one part legitimately has N concurrent leaf requests
+and `LeafBucketsResult` carries no key at all, and `DecidePeerStrategy` carries none either.
+`KeyedScheduler` also hides its seeds, while the sync, removal and replay handlers all read
+their payload (`cursors`, `part_hints`, `caught_up`) — so that shape needs a `seed(&K)`
+accessor on the primitive as well. The barrier fails on the other side of the same test:
+`JobBoard`'s unit is `(job, cursor, lane)` with one waiter per cursor, so "N needed pairs,
+satisfied when all are" needs the pair itself as the cursor (relaxing `JobBoard`'s
+`Cursor: Ord + Copy`) and an `is_pending` query, because `settle` panics on a lane that was
+never pending, while the sync check fires for every pair that syncs, needed or not. Its
+`retire_stream` is the one clean match, and it is what the `remove_peer` cleanup would use if
+this is ever revisited. What the six maps add up to is coalescing on references across 121
+lines with 28 spawn/cancel sites, and eight characterization tests already pin it. So they
+stay, and the honest summary is that the machine's task lifecycle is the frame — `Scheduler` —
+not the maps built on top of it.
 
 **Scope discipline: reasonable, not uniform.** The goal is one implementation of what is genuinely
 the same question, not DRY for its own sake. Convert where the primitive's semantics actually match;
@@ -880,6 +962,22 @@ is required by every keyed operation and variable-length keys will not be `Copy`
 Two narrower observations are worth keeping regardless: the runtime2 pattern for budget pressure is that
 the driver declines to call `replace` rather than letting the scheduler queue, and `wake` is called by no
 consumer at all — only by its own unit test.
+
+**The job half's extraction lost a branch, and `supersede` paid for it.** The original
+`supersede_obj_part` had two branches: shed the stream from the waiter and free that stream's cursor (the
+general case), and cancel only the sync lane while a queued membership still gates (the special case). The
+extraction kept the second as a `keep: Fn(Lane) -> bool` predicate and replaced stream-shedding with
+lane-filtering — which makes `lanes.is_empty()` reachable on a waiter that gated *several* streams, a state
+the original's invariant forbade (there, a waiter lost all its streams only with its last one, so freeing
+that one covered everything). The doc comment kept promising "free the cursor on every surviving stream"
+while the return type `Vec<Cursor>` could not name them, and the wrapper released the superseding stream
+alone: every other gated stream kept a `Pending` slot with a tracked waiter no one could settle, stalling
+its watermark for the life of the machine. Nothing caught it because the one multi-stream test only called
+`settle`, and the test that did exercise the empty case asserted `is_settled` on the superseding stream
+alone — its comment described the correct behaviour and its body stopped one assertion short of detecting
+the bug. `supersede` now reports `(cursor, streams)` exactly as its siblings `settle`/`settle_job` do, and
+the machine releases each freed cursor on every stream the waiter gated. The stream-shedding branch is
+still missing, and restoring it is what `drop_stream` is for.
 
 ### 11. Additional reconciliation algorithms arrive as plug-ins behind one view/summary surface
 
@@ -1086,16 +1184,21 @@ The store and the protocol need to expose, for a view:
      no part is not remotely deliverable. Its replay-versus-live convergence
      assertion is kept on the local, unfiltered lane; a remote assertion is added
      for the fail-closed behavior. This is a semantic change, not a weakened test.
-2. **Per-part dirt.** The access-change stamp index and the counting primitive have
-   landed. Wiring the count into the band decision is gated on decision 6's descriptor
-   exchange: it must be computed by the announcing side against the cursor the asker
-   advertises, because a local read compares two independent scales (decision 5). Once
-   the descriptor carries it, instrument both numbers before choosing any cutoff, so the
-   thresholds are measured.
-3. **Bucket fixes.** Compare counts alongside fingerprints; choose the starting
-   level from the dirty count instead of `calc_working_level`; allow a range
-   request to return its summaries in one page. Then invert the opt-in-only gate: bucket
-   becomes the default and big_repo opts out at its usage sites (see decision 6).
+2. **Per-part dirt.** Landed: the access-change stamp index, the counting primitive, the
+   descriptor exchange, and the wiring. The asker advertises its per-part cursors in
+   `PeerSummaryRequest.asker_part_cursors`, the responder counts its own rows against
+   them for the authenticated asker — the count has to be computed on the announcing
+   side because a local read compares two independent scales (decision 5) — and
+   `decide_peer_strat` consumes `CursorPartSummary.dirty_count` as the band input.
+   Both numbers are instrumented for every band, `CursorOnly` included, so the cutoff
+   can be measured rather than guessed. The cutoff itself is still the unmeasured
+   placeholder, which is why it stays deferred.
+3. **Bucket fixes.** Compare counts alongside fingerprints (landed); a range request
+   returns its summaries in one page (landed — see decision 4's `to_level`). The starting level stays the
+   size-derived `calc_working_level` choice: the dirty count selects the band and nothing
+   else, so there is no second level input to plumb (decision 4). The opt-in-only gate is
+   inverted (landed): bucket is the default and the embedders that had opted out run it
+   too, with the offline-reopen coverage their recorded reason asked for (decision 6).
 4. **Object parts.** Start with the difference inventory, then give object
    subscriptions a derived `o:{object_key}` part, one membership row, lazy
    lifecycle, and inherited access with optional additive rows. This restores
@@ -1105,17 +1208,28 @@ The store and the protocol need to expose, for a view:
    cursor machine, with explicit unknown/unauthorized page outcomes and filtered
    events. Delete the push-stream path.
 6. **Machine layering.** Re-express the cursor and bucket machines' bookkeeping in
-   terms of `watermark.rs` and `tasks.rs` primitives.
-7. **Byte-string keys.** Convert persisted keys and wire formats, derive any
-   distribution hash at the point of use, and rename the `Key` types in the same
-   pass.
+   terms of `watermark.rs` and `tasks.rs` primitives. Landed where the primitives'
+   semantics match: the cursor machine's stream book is `WatermarkMachine`; the machine's
+   task frame is `Scheduler<TaskSeed>`, with the `Tasks` frame gone and the `next_due` wake
+   in its place; and the job-lane half got the `drop_stream` / `StreamDrop` operation it was
+   missing. Read and declined, with the reasons in decision 10: the bucket machine, the
+   `PeerState` object-work maps, the bucket-strategy task maps, the full-sync waiter
+   barrier, the domain command queue, and the worker's task maps.
+7. **Byte-string keys.** Landed: keys are `Arc<[u8]>` byte strings, the persisted
+   columns and wire formats carry them (key columns were already unconstrained `BLOB`s),
+   the `Key` types are renamed, the reserved key spaces are literal, and the distribution
+   hash is derived at the point of use — as a stored `buck_index` on the object row, since
+   the stores range-scan a bucket's members and SQL cannot hash (decision 1).
 8. **RIBLT — deferred, not in this PR.** Adding it as the first difference-proportional
    algorithm behind the same surface, then the next one when a scenario demands it. This is out
    of scope for the current change by decision rather than by omission: it is an addition, not a
    fix, it depends on the unmeasured item-width `ℓ` (decision 5, and the deferred list below),
    and nothing already built needs it to work.
-9. **`/seds`.** Rename the global marker to the reserved key, keep it a real part,
-   and remove the special-casing in `scope_includes_part` and the write paths.
+9. **`/seds`.** The rename landed — `global_part_id()` returns the reserved `/seds` — and
+   it stays a real part. The special-casing removal is the remainder, and it is three
+   sites: `add_obj_to_parts` still filters `/seds` out of its inputs, the batch write path
+   still carries a `desired_global` flag instead of plain membership, and
+   `scope_includes_part` still treats the reserved part specially.
 
 Steps 1–3 are the near-term focus: a bucket that works for the authorized case,
 with a measured dirty count replacing the global-watermark heuristic and no part

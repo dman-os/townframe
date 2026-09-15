@@ -327,13 +327,13 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .collect(),
                 )
                 .ok_or_else(|| ferr!("automerge document has no content heads"))?;
-                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 // Stage the plaintext before creating the Keyhive authority.
                 // This is the recovery record for a crash in any later step.
                 let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
                 runtime_io
                     .stage_allocated_document(
-                        doc_id,
+                        doc_id.clone(),
                         initial_content.save(),
                         initial_keys.clone(),
                         already_persisted,
@@ -342,13 +342,13 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 // The initial content is encrypted against the Keyhive document,
                 // so authority creation precedes Sedimentree persistence.
                 runtime_io
-                    .finalize_document_authority(doc_id, content_heads.clone())
+                    .finalize_document_authority(doc_id.clone(), content_heads.clone())
                     .await?;
                 let handle = if runtime_io.contains_sedimentree(sed_id).await? {
                     let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
                     cmd_tx
                         .send(Runtime2Cmd::GetDocHandle {
-                            doc_id,
+                            doc_id: doc_id.clone(),
                             lease: crate::runtime2::DocLeaseKind::Caller,
                             resp: handle_resp,
                         })
@@ -394,7 +394,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                     let (put_resp, put_rx) = futures::channel::oneshot::channel();
                     cmd_tx
                         .send(Runtime2Cmd::PutDoc {
-                            doc_id,
+                            doc_id: doc_id.clone(),
                             initial_content,
                             initial_keys: initial_keys.clone(),
                             resp: put_resp,
@@ -480,7 +480,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
             } else {
                 runtime_io
                     .contains_sedimentree(sedimentree_core::id::SedimentreeId::new(
-                        doc_id.into_bytes(),
+doc_id.to_bytes32(),
                     ))
                     .await
             };
@@ -543,7 +543,7 @@ where
         self.quiescence_barrier_ids = self.quiescence_barrier_ids.wrapping_add(1);
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
-        let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
+        let doc_ids: Vec<_> = self.doc_workers.keys().cloned().collect();
         let group_part_settled_seq = self.group_part_settled_seq;
         debug!(
             barrier_id,
@@ -557,11 +557,11 @@ where
         self.quiescence_probe = Some(QuiescenceProbe {
             barrier_id,
             activity_generation: generation,
-            pending_docs: doc_ids.iter().copied().collect(),
+            pending_docs: doc_ids.iter().cloned().collect(),
             group_part_settled_seq,
         });
         for doc_id in doc_ids {
-            let (worker, lease) = self.doc_worker_handle(doc_id)?;
+            let (worker, lease) = self.doc_worker_handle(doc_id.clone())?;
             let (fence_reply, reply_rx) = futures::channel::oneshot::channel();
             worker
                 .send(DocWorkerMsg::Fence {
@@ -763,7 +763,7 @@ where
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
-                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id)
+                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id.clone())
                 {
                     if let Err(err) = worker.send(DocWorkerMsg::InspectHeadState { resp, _lease }) {
                         debug!(%doc_id, ?err, "failed sending InspectHeadState to worker");
@@ -842,19 +842,19 @@ where
             } => {
                 let request_id = subduction_core::connection::message::RequestId {
                     requestor: subduction_core::peer::id::PeerId::new(
-                        *self.local_peer_id.as_bytes(),
+self.local_peer_id.to_bytes32(),
                     ),
                     nonce: waiter_id,
                 };
                 self.pending_doc_syncs.insert(
                     waiter_id,
                     PendingDocSyncWaiter {
-                        doc_id,
-                        peer_id,
+                        doc_id: doc_id.clone(),
+                        peer_id: peer_id.clone(),
                         resp,
                     },
                 );
-                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::SyncDoc,
                     F::sync_doc_with_peer(
@@ -908,7 +908,7 @@ where
                 waiter_id,
                 resp,
             } => {
-                let entry = self.keyhive_waiters.entry(peer_id).or_default();
+                let entry = self.keyhive_waiters.entry(peer_id.clone()).or_default();
                 entry.ids.insert(waiter_id);
                 entry.waiters.push((waiter_id, resp));
                 let queued_waiters = entry.waiters.len();
@@ -961,7 +961,7 @@ where
             }
             Runtime2Cmd::RegisterDocLease { doc_id, registered } => {
                 if !self.doc_workers.contains_key(&doc_id) {
-                    self.spawn_doc_worker(doc_id)?;
+                    self.spawn_doc_worker(doc_id.clone())?;
                 }
                 if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                     entry.local_handles += 1;
@@ -979,7 +979,7 @@ where
                 self.handle_release_internal_lease(doc_id, generation);
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
-                let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::ContainsSedimentree,
                     F::contains_sedimentree(Arc::clone(&self.runtime_io), sedimentree_id, resp),
@@ -1149,7 +1149,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         F::from_future(
             async move {
                 match runtime_io
-                    .sync_keyhive_with_peer(peer_id, request_id.clone())
+                    .sync_keyhive_with_peer(peer_id.clone(), request_id.clone())
                     .await
                 {
                     Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {
@@ -1166,7 +1166,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                     Ok(crate::runtime2::KeyhiveSyncOutcome::PeerDisappeared) => {
                         evt_tx
                             .send(Runtime2Evt::KeyhiveSyncFailed {
-                                peer_id,
+                                peer_id: peer_id.clone(),
                                 request_id,
                                 error: format!(
                                     "keyhive peer {peer_id} disappeared before sync could start"
@@ -1222,12 +1222,12 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 let group_id = crate::changes::GroupId::new(target.to_bytes());
                 if removed {
                     change_manager.notify_document_removed_from_group(
-                        DocumentId::new(member_id.0.into_bytes()),
+                        DocumentId::new(member_id.0.as_bytes()),
                         group_id,
                     )?;
                 } else {
                     change_manager.notify_document_added_to_group(
-                        DocumentId::new(member_id.0.into_bytes()),
+                        DocumentId::new(member_id.0.as_bytes()),
                         group_id,
                     )?;
                 }
@@ -1351,7 +1351,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         F::from_future(async move {
             let dial_started = std::time::Instant::now();
             tracing::debug!(%peer, "dialing peer");
-            let dial_result = connect.connect(peer, addr).await;
+            let dial_result = connect.connect(peer.clone(), addr).await;
             tracing::debug!(
                 %peer,
                 elapsed_ms = dial_started.elapsed().as_millis() as u64,
@@ -1364,7 +1364,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // The connector has already authenticated the peer;
                         // close that authenticated connection before rejecting
                         // the caller's expected-target mismatch.
-                        connect.close(handshake_peer, closed).await?;
+                        connect.close(handshake_peer.clone(), closed).await?;
                         resp.send(Err(ferr!(
                             "handshake peer mismatch: expected {peer}, got {handshake_peer}"
                         )))
@@ -1374,7 +1374,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     }
                     let (end_tx, end_rx) = futures::channel::oneshot::channel();
                     let watcher_closed = Arc::clone(&closed);
-                    let watcher_peer = handshake_peer;
+                    let watcher_peer = handshake_peer.clone();
                     let watcher_evt_tx = evt_tx.clone();
                     let watcher_end_tx = end_tx;
                     let evt_tx_established = evt_tx.clone();
@@ -1397,7 +1397,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
-                                peer_id: watcher_peer,
+                                peer_id: watcher_peer.clone(),
                                 closed: Arc::clone(&watcher_closed),
                                 error,
                             })
@@ -1417,7 +1417,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     }
                     if evt_tx_established
                         .send(Runtime2Evt::ConnEstablished {
-                            peer_id: handshake_peer,
+                            peer_id: handshake_peer.clone(),
                             closed: closed_established,
                         })
                         .await
@@ -1462,7 +1462,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 Ok((handshake_peer, closed, end_fut)) => {
                     let (end_tx, end_rx) = futures::channel::oneshot::channel();
                     let watcher_closed = Arc::clone(&closed);
-                    let watcher_peer = handshake_peer;
+                    let watcher_peer = handshake_peer.clone();
                     let watcher_evt_tx = evt_tx.clone();
                     let watcher_end_tx = end_tx;
                     let evt_tx_established = evt_tx.clone();
@@ -1485,7 +1485,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             .ok();
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
-                                peer_id: watcher_peer,
+                                peer_id: watcher_peer.clone(),
                                 closed: Arc::clone(&watcher_closed),
                                 error,
                             })
@@ -1504,7 +1504,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     }
                     if evt_tx_established
                         .send(Runtime2Evt::ConnEstablished {
-                            peer_id: handshake_peer,
+                            peer_id: handshake_peer.clone(),
                             closed: closed_established,
                         })
                         .await
@@ -1536,7 +1536,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let result = match connect.close(peer_id, closed).await {
+            let result = match connect.close(peer_id.clone(), closed).await {
                 Ok(Some(replacement)) => {
                     evt_tx
                         .send(Runtime2Evt::ConnEstablished {
@@ -1569,7 +1569,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
             "document_sync",
             request_nonce = request_id.nonce,
             remote_peer_id = %peer_id,
-            document_id = %DocumentId::new(*sed_id.as_bytes()),
+            document_id = %DocumentId::new(sed_id.as_bytes()),
         );
         F::from_future(
             async move {
@@ -1696,7 +1696,7 @@ where
             Runtime2Evt::SyncSessionObserved { session, .. } => {
                 debug!(
                     local_peer_id = %self.local_peer_id,
-                    doc_id = %DocumentId::new(*session.sedimentree_id.as_bytes()),
+                    doc_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
                     peer_id = %session.peer_id,
                     kind = ?session.kind,
                     remote_rejection = ?&session.remote_rejection,
@@ -1765,7 +1765,7 @@ where
                 let span = tracing::debug_span!(
                     "apply_sync_session",
                     remote_peer_id = %session.peer_id,
-                    document_id = %DocumentId::new(*session.sedimentree_id.as_bytes()),
+                    document_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
                     kind = ?session.kind,
                 );
                 span.follows_from(cause);
@@ -1856,7 +1856,7 @@ where
                 }
             }
             Runtime2Evt::DocWorkerMaterializationPending { doc_id } => {
-                self.pending_materialization.insert(doc_id);
+                self.pending_materialization.insert(doc_id.clone());
                 debug!(
                     local_peer_id = %self.local_peer_id,
                     %doc_id,
@@ -1879,7 +1879,7 @@ where
                 let stale = start_seq.is_some_and(|start| self.admitted_head > start);
                 match &status {
                     crate::runtime2::MaterializationStatus::Pending(blockers) => {
-                        self.pending_materialization.insert(doc_id);
+                        self.pending_materialization.insert(doc_id.clone());
                         debug!(
                             %doc_id,
                             ?blockers,
@@ -1892,13 +1892,13 @@ where
                             // this Pending may be stale; re-verify with the
                             // fresher key state (B6).
                             debug!(%doc_id, "re-verifying stale materialization retry");
-                            self.retry_existing_doc_materialization(doc_id)?;
+                            self.retry_existing_doc_materialization(doc_id.clone())?;
                         }
                     }
                     crate::runtime2::MaterializationStatus::Ready {
                         partially_decrypted: true,
                     } => {
-                        self.pending_materialization.insert(doc_id);
+                        self.pending_materialization.insert(doc_id.clone());
                         debug!(
                             %doc_id,
                             stale,
@@ -1913,7 +1913,7 @@ where
                             // frontier publish barrier waits for a wakeup that
                             // never comes.
                             debug!(%doc_id, "re-verifying stale partial materialization retry");
-                            self.retry_existing_doc_materialization(doc_id)?;
+                            self.retry_existing_doc_materialization(doc_id.clone())?;
                         }
                     }
                     crate::runtime2::MaterializationStatus::Missing
@@ -1929,7 +1929,7 @@ where
                         );
                         if stale {
                             debug!(%doc_id, "re-verifying stale terminal materialization retry");
-                            self.retry_existing_doc_materialization(doc_id)?;
+                            self.retry_existing_doc_materialization(doc_id.clone())?;
                         }
                     }
                 }
@@ -1961,7 +1961,7 @@ where
             // to multiple CGKA ops
             Runtime2Evt::CgkaOp { data } => {
                 // Every CGKA op is a document key rotation.
-                let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
+                let doc_id = crate::DocumentId::new(data.payload().doc_id().as_bytes());
                 let worker_present = self.doc_workers.contains_key(&doc_id);
                 debug!(
                     local_peer_id = %self.local_peer_id,
@@ -1971,7 +1971,7 @@ where
                     "processing CGKA operation; routing document materialization update"
                 );
                 self.change_manager
-                    .notify_document_key_rotated(doc_id)
+                    .notify_document_key_rotated(doc_id.clone())
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
                 // Route the per-document key update to an existing worker. The
@@ -1997,7 +1997,7 @@ where
                         member_is_document,
                     ),
                 )?;
-                let pending: Vec<_> = self.pending_materialization.iter().copied().collect();
+                let pending: Vec<_> = self.pending_materialization.iter().cloned().collect();
                 for doc_id in pending {
                     self.retry_doc_materialization(doc_id)?;
                 }
@@ -2052,7 +2052,7 @@ where
         skip_all,
         fields(
             local_peer_id = %self.local_peer_id,
-            doc_id = %DocumentId::new(*session.sedimentree_id.as_bytes()),
+            doc_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
             remote_peer_id = %session.peer_id,
             kind = ?session.kind,
             received_commits = session.received_commit_ids.len(),
@@ -2067,7 +2067,7 @@ where
             debug!("discarding observed sync session while shutting down");
             return Ok(());
         }
-        let doc_id = DocumentId::new(*session.sedimentree_id.as_bytes());
+        let doc_id = DocumentId::new(session.sedimentree_id.as_bytes());
         debug!(
             peer_id = %session.peer_id,
             kind = ?session.kind,
@@ -2085,7 +2085,7 @@ where
             // the reconsider walk. Skipped as before B4.
             return Ok(());
         }
-        let peer_id = PeerKey::new(*session.peer_id.as_bytes());
+        let peer_id = PeerKey::new(session.peer_id.as_bytes());
 
         // Sessions are always routed fire-and-forget. Caller waiters are
         // resolved at round completion (`DocSyncRoundDone` /
@@ -2131,7 +2131,7 @@ where
         // Received content must pass through the document worker even without
         // an application handle: writable overlap nodes use cold/transient
         // materialization to publish causal-key healing checkpoints.
-        let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+        let (worker, _lease) = self.doc_worker_handle(doc_id.clone())?;
         if let Err(err) = worker.send(DocWorkerMsg::ApplySyncSession {
             peer_id,
             commit_ids,
@@ -2160,7 +2160,7 @@ where
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
         self.connected_peers.insert(
-            peer_id,
+            peer_id.clone(),
             ConnDeets {
                 closed: Arc::clone(&closed),
             },
@@ -2220,12 +2220,12 @@ where
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {
             requestor: subduction_keyhive::KeyhivePeerId::from_bytes(
-                *self.local_peer_id.as_bytes(),
+self.local_peer_id.to_bytes32(),
             ),
             nonce: round_id,
         };
         self.active_keyhive_syncs.insert(
-            peer_id,
+            peer_id.clone(),
             KeyhiveSyncRound {
                 round_id,
                 started_at: self.clock.instant(),
@@ -2317,7 +2317,7 @@ where
             return Ok(());
         }
         if self.active_keyhive_syncs.contains_key(&peer_id) {
-            self.keyhive_notif_pending.insert(peer_id);
+            self.keyhive_notif_pending.insert(peer_id.clone());
             debug!(
                 %peer_id,
                 "keyhive change notification latched; follow-up round after current completes"
@@ -2438,7 +2438,7 @@ where
     /// admission advanced, because even an apparently complete snapshot may have
     /// materialized one fewer CGKA operation than the now-current document state.
     fn retry_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
-        let (worker, lease) = self.doc_worker_handle(doc_id)?;
+        let (worker, lease) = self.doc_worker_handle(doc_id.clone())?;
         self.send_materialization_retry(doc_id, worker, lease)
     }
 
@@ -2446,7 +2446,7 @@ where
     /// documents are admitted and materialized by AFW instead of being spawned
     /// merely because a keyhive operation arrived.
     fn retry_existing_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
-        let Some((worker, lease)) = self.acquire_existing_doc_worker_handle(doc_id)? else {
+        let Some((worker, lease)) = self.acquire_existing_doc_worker_handle(doc_id.clone())? else {
             debug!(%doc_id, "skipping materialization retry without an existing document worker");
             return Ok(());
         };
@@ -2460,7 +2460,7 @@ where
         lease: DocWorkerInternalLease,
     ) -> eyre::Result<()> {
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
-            self.materialization_retries_requested.insert(doc_id);
+            self.materialization_retries_requested.insert(doc_id.clone());
             debug!(
                 %doc_id,
                 "latching materialization retry behind the in-flight walk"
@@ -2470,7 +2470,7 @@ where
         self.materialization_retries_requested.remove(&doc_id);
         let start_seq = self.admitted_head;
         self.materialization_retries_in_flight
-            .insert(doc_id, start_seq);
+            .insert(doc_id.clone(), start_seq);
         debug!(
             %doc_id,
             start_seq,
@@ -2543,7 +2543,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         &mut self,
         doc_id: DocumentId,
     ) -> eyre::Result<(DocWorkerHandle, DocWorkerInternalLease)> {
-        self.spawn_doc_worker(doc_id)?;
+        self.spawn_doc_worker(doc_id.clone())?;
         let entry = self
             .doc_workers
             .get_mut(&doc_id)
@@ -2614,7 +2614,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         self.next_doc_worker_generation += 1;
 
         let worker = crate::runtime2::spawn_doc_worker(
-            doc_id,
+            doc_id.clone(),
             Arc::clone(&self.doc_io),
             Arc::clone(&self.change_manager),
             self.cmd_tx.clone(),
@@ -2775,7 +2775,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             .filter_map(|(peer_id, round)| {
                 round
                     .latch_if_unresolved(now, threshold)
-                    .map(|report| (*peer_id, report))
+                    .map(|report| (peer_id.clone(), report))
             })
             .collect::<Vec<_>>();
 
@@ -2818,7 +2818,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
                     .eviction_deadline
                     .is_some_and(|deadline| deadline <= now)
             })
-            .map(|(doc_id, _)| *doc_id)
+            .map(|(doc_id, _)| doc_id.clone())
             .collect();
         for doc_id in expired {
             // Eviction requires both lease counts to be zero (the deadline is
@@ -3161,7 +3161,7 @@ where
     let keyhive_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
     let hub: Runtime2Hub<F, R> = Runtime2Hub {
-        local_peer_id,
+        local_peer_id: local_peer_id.clone(),
         span: tracing::info_span!("runtime2_hub", local_peer_id = %local_peer_id),
         sync_policy,
         runtime_io: Arc::clone(&runtime_io),

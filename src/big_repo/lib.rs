@@ -91,13 +91,13 @@ pub use changes::{
 pub type DocumentId = big_sync_core::ObjKey;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
-/// The global partition: every doc we can read appears here as a marker.
-/// Embedders pass this part key to big_sync's `set_peer`.
+/// The reserved partition listing every sedimentree we have saved locally: every doc we
+/// can read appears here as a member, which is what makes it the store-wide enumeration
+/// surface. ADR 012 decision 12 keeps this a *real part* rather than a synthetic marker,
+/// and names it with the reserved key `/seds`. Embedders pass this part key to big_sync's
+/// `set_peer`.
 pub fn global_part_id() -> big_sync_core::PartKey {
-    big_sync_core::PartKey::new([
-        0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ])
+    big_sync_core::PartKey::new("/seds")
 }
 /// Return the deterministic BigSync partition derived from a Keyhive group.
 pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartKey {
@@ -382,7 +382,7 @@ impl BigRepo {
         ));
         let signer =
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
-        let peer_id = PeerKey::new(*signer.verifying_key().as_bytes());
+        let peer_id = PeerKey::new(signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         // The embedder-facing scope controller: workers read the live scope
@@ -449,7 +449,7 @@ impl BigRepo {
     }
 
     pub fn local_peer_id(&self) -> PeerKey {
-        self.local_peer_id
+        self.local_peer_id.clone()
     }
 
     /// Update the Automerge frontier worker's group scope at runtime.
@@ -483,7 +483,7 @@ impl BigRepo {
     }
     /// Resolve this repository's local Keyhive agent.
     pub async fn local_keyhive_agent(&self) -> Res<BigKeyhiveAgent> {
-        let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(*self.local_peer_id.as_bytes());
+let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.to_bytes32());
         self.keyhive
             .get_agent_by_peer_id(&peer_id)
             .await?
@@ -505,7 +505,7 @@ impl BigRepo {
     }
     /// Resolve a connected peer's Keyhive agent.
     pub async fn keyhive_agent_for_peer(&self, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
-        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32());
         self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
     }
     /// Grant administrative membership without exposing the Keyhive access type.
@@ -583,7 +583,7 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
-        let out = self.runtime.get_doc_handle(*document_id).await?;
+        let out = self.runtime.get_doc_handle(document_id.clone()).await?;
         Ok(out.map_ready(|handle| BigDocHandle {
             repo: Arc::clone(self),
             handle,
@@ -599,10 +599,10 @@ impl BigRepo {
         &self,
         document_id: DocumentId,
     ) -> Res<DocumentSyncSnapshot> {
-        let head_state = self.runtime.inspect_doc_head_state(document_id).await?;
+        let head_state = self.runtime.inspect_doc_head_state(document_id.clone()).await?;
         let store = &self.big_sync_store;
-        let indexed_parts = store.obj_parts(document_id).await?.len();
-        let payload_present = store.obj_payload(document_id).await?.is_some();
+        let indexed_parts = store.obj_parts(document_id.clone()).await?.len();
+        let payload_present = store.obj_payload(document_id.clone()).await?.is_some();
         let stage = match head_state.as_ref().map(|state| state.state) {
             Some(
                 MaterializationState::Materialized | MaterializationState::PartiallyMaterialized,
@@ -724,7 +724,7 @@ impl BigRepo {
     ) -> Result<bool, CreateDocError> {
         let Some((bytes, initial_keys)) = self
             .keyhive_storage
-            .staged_doc_content(doc_id.into_bytes())
+.staged_doc_content(doc_id.to_bytes32())
             .await
             .map_err(|err| {
                 CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
@@ -822,13 +822,13 @@ impl BigRepo {
     ) -> Res<()> {
         let mut docs = BTreeMap::new();
         for doc_id in self.keyhive.group_document_ids(group).await {
-            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
             docs.insert(doc_id, doc);
         }
 
         let mut after_content = BTreeMap::new();
-        for doc_id in docs.keys().copied() {
-            let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        for doc_id in docs.keys().cloned() {
+            let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
             after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
         }
 
@@ -844,7 +844,7 @@ impl BigRepo {
                 let _doc = docs
                     .get(doc_id)
                     .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
-                if !self.runtime.ensure_causal_coverage(*doc_id).await? {
+                if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
                     tracing::debug!(%doc_id, "group grant causal checkpoint deferred to durable event reconciliation");
                 }
             }
@@ -865,7 +865,7 @@ impl BigRepo {
         principal: impl Into<BigKeyhiveAuthority>,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        let heads = match self.doc_head_state(doc_id).await {
+        let heads = match self.doc_head_state(doc_id.clone()).await {
             Ok(state) => state.sedimentree_heads,
             Err(err) => {
                 tracing::debug!(%doc_id, %err, "doc_head_state unavailable for grant_doc_access boundary; using empty heads");
@@ -878,14 +878,14 @@ impl BigRepo {
             .keyhive
             .grant_doc_access(
                 principal,
-                doc_id,
+                doc_id.clone(),
                 access,
                 after_content,
                 &self.keyhive_protocol,
             )
             .await?;
 
-        if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id).await? {
+        if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
 
@@ -899,20 +899,20 @@ impl BigRepo {
         doc_id: DocumentId,
         principal: impl Into<BigKeyhiveAuthority>,
     ) -> Res<()> {
-        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
-        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
+        let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
         let _hashes = self
             .keyhive
             .revoke_doc_access(
                 principal,
-                doc_id,
+                doc_id.clone(),
                 true,
                 after_content,
                 &self.keyhive_protocol,
             )
             .await?;
-        if !self.runtime.ensure_causal_coverage(doc_id).await? {
+        if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document revocation causal checkpoint deferred to durable event reconciliation");
         }
         self.wait_for_keyhive_reconciliation().await?;
@@ -938,7 +938,7 @@ impl BigRepo {
             .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
         watch_connection_end(
-            peer_id,
+            peer_id.clone(),
             Arc::clone(&closed),
             end_rx,
             end_signal_tx,
@@ -966,7 +966,7 @@ impl BigRepo {
             .accept_connection(Box::new((conn, Some(endpoint))))
             .await?;
         watch_connection_end(
-            peer_id,
+            peer_id.clone(),
             Arc::clone(&closed),
             end_rx,
             end_signal_tx,
@@ -1036,7 +1036,7 @@ pub struct ConnFinishSignal {
 
 impl BigRepoConnection {
     pub fn peer_id(&self) -> PeerKey {
-        self.peer_id
+        self.peer_id.clone()
     }
 
     /// The connection's end flag, shared with the runtime's watcher; use for
@@ -1054,7 +1054,7 @@ impl BigRepoConnection {
         if self.is_closed() {
             return Err(ferr!("connection is closed"));
         }
-        self.repo.runtime.sync_keyhive_with_peer(self.peer_id).await
+        self.repo.runtime.sync_keyhive_with_peer(self.peer_id.clone()).await
     }
 
     /// NOTE: a succesful outcome doesn't correspond to doc
@@ -1065,7 +1065,7 @@ impl BigRepoConnection {
         }
         self.repo
             .runtime
-            .sync_doc_with_peer(doc_id, self.peer_id)
+            .sync_doc_with_peer(doc_id, self.peer_id.clone())
             .await
     }
 
@@ -1078,7 +1078,7 @@ impl BigRepoConnection {
         }
         self.repo
             .runtime
-            .sync_doc_with_peer_receipt(doc_id, self.peer_id)
+            .sync_doc_with_peer_receipt(doc_id, self.peer_id.clone())
             .await
     }
 
@@ -1199,7 +1199,7 @@ impl BigRepo {
 
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
-        self.handle.bundle.doc_id
+        self.handle.bundle.doc_id.clone()
     }
 
     pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {

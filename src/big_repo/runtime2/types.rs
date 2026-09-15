@@ -528,12 +528,12 @@ mod tests {
         let doc_id = DocumentId::new([23; 32]);
 
         let err = DocLookup::<()>::Missing
-            .into_ready(doc_id)
+            .into_ready(doc_id.clone())
             .expect_err("missing doc should fail");
         assert!(matches!(err, GetDocError::NotFound(id) if id == doc_id));
 
         let err = DocLookup::<()>::PendingMaterialization
-            .into_ready(doc_id)
+            .into_ready(doc_id.clone())
             .expect_err("pending doc should fail");
         assert!(matches!(err, GetDocError::PendingMaterialization(id) if id == doc_id));
 

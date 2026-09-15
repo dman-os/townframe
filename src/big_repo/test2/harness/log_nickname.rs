@@ -26,9 +26,9 @@ fn registry() -> &'static std::sync::Mutex<HashMap<[u8; 32], String>> {
 /// without this every interleaved multi-node failure report is unreadable.
 pub fn register(peer_id: PeerKey, name: impl Into<String>) {
     let name = name.into();
-    let bytes = peer_id.as_bytes();
+    let bytes: [u8; 32] = peer_id.as_bytes().try_into().expect("peer id must be 32 bytes");
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let keyhive_peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(*bytes);
+    let keyhive_peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(bytes);
     tracing::info!(
         nickname = %name,
         repo_peer_hex = %hex,
@@ -36,7 +36,7 @@ pub fn register(peer_id: PeerKey, name: impl Into<String>) {
         "node nickname registered"
     );
     let mut map = registry().lock().expect("nickname registry poisoned");
-    map.insert(*bytes, name);
+    map.insert(bytes, name);
 }
 
 /// Render `peer_id` as its registered nickname, or a short hex prefix if none.

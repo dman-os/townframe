@@ -39,7 +39,7 @@ async fn tier9_ephemeral_roundtrip_between_two_nodes() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let mut pair = Pair::boot_disconnected(210, 211, "Publisher", "Subscriber").await?;
     let topic = BigEphemeralTopic::new([0xAB; 32]);
-    let sender = subduction_core::peer::id::PeerId::new(*pair.left().peer_id().as_bytes());
+    let sender = subduction_core::peer::id::PeerId::new(pair.left().peer_id().to_bytes32());
     let mut subscription = pair
         .right()
         .repo
@@ -67,8 +67,8 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
     let mut pair = Pair::boot_disconnected(212, 213, "Publisher", "Subscriber").await?;
     let topic = BigEphemeralTopic::new([0xAC; 32]);
     let other_topic = BigEphemeralTopic::new([0xAD; 32]);
-    let sender = subduction_core::peer::id::PeerId::new(*pair.left().peer_id().as_bytes());
-    let other_sender = subduction_core::peer::id::PeerId::new(*pair.right().peer_id().as_bytes());
+    let sender = subduction_core::peer::id::PeerId::new(pair.left().peer_id().to_bytes32());
+    let other_sender = subduction_core::peer::id::PeerId::new(pair.right().peer_id().to_bytes32());
     let mut matching = pair
         .right()
         .repo

@@ -133,16 +133,16 @@ pub mod contract {
 
         match &case.initial_payload {
             Some(payload) => {
-                store.set_obj_payload(case.obj_id, payload.clone()).await?;
+                store.set_obj_payload(case.obj_id.clone(), payload.clone()).await?;
                 if !case.initial_parts.is_empty() {
                     store
-                        .add_obj_to_parts(case.obj_id, case.initial_parts.clone())
+                        .add_obj_to_parts(case.obj_id.clone(), case.initial_parts.clone())
                         .await?;
                 }
             }
             None if !case.initial_parts.is_empty() => {
                 store
-                    .add_obj_to_parts(case.obj_id, case.initial_parts.clone())
+                    .add_obj_to_parts(case.obj_id.clone(), case.initial_parts.clone())
                     .await?;
             }
             None => {}
@@ -153,17 +153,17 @@ pub mod contract {
         // converged (for example because a subscription delivered the remote
         // payload while the case was being prepared) must be visible in the
         // failure report.
-        let local_payload_before = store.obj_payload(case.obj_id).await?;
+        let local_payload_before = store.obj_payload(case.obj_id.clone()).await?;
         let outcome = harness
             .backend()
             .sync_obj(
-                case.peer_id,
-                case.obj_id,
+                case.peer_id.clone(),
+                case.obj_id.clone(),
                 case.initial_parts.clone(),
                 case.remote_payload.clone(),
             )
             .await?;
-        let local_payload_after = store.obj_payload(case.obj_id).await?;
+        let local_payload_after = store.obj_payload(case.obj_id.clone()).await?;
 
         match (&case.expected_outcome, outcome) {
             (
@@ -198,7 +198,7 @@ pub mod contract {
             }
         }
 
-        let mut actual_parts = store.obj_parts(case.obj_id).await?;
+        let mut actual_parts = store.obj_parts(case.obj_id.clone()).await?;
         let mut expected_parts = case.expected_parts.clone();
         actual_parts.sort();
         actual_parts.dedup();

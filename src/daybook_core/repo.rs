@@ -434,8 +434,8 @@ impl RepoCtx {
                         doc_app.document_id(),
                         doc_drawer.document_id(),
                         doc_config.document_id(),
-                        core_id,
-                        docs_id,
+                        core_id.clone(),
+                        docs_id.clone(),
                     ],
                 )
                 .await?;
@@ -672,18 +672,18 @@ impl RepoCtx {
                 .branches
                 .get("main")
                 .ok_or_eyre("missing main branch for core inventory doc")?
-                .branch_doc_id;
+                .branch_doc_id.clone();
             let docs_inventory_doc_id = docs_entry
                 .branches
                 .get("main")
                 .ok_or_eyre("missing main branch for docs inventory doc")?
-                .branch_doc_id;
+                .branch_doc_id.clone();
 
             big_repo
-                .add_admin_member_to_doc(core_inventory_doc_id, authority.blob_inventories.clone())
+                .add_admin_member_to_doc(core_inventory_doc_id.clone(), authority.blob_inventories.clone())
                 .await?;
             big_repo
-                .add_admin_member_to_doc(docs_inventory_doc_id, authority.blob_inventories.clone())
+                .add_admin_member_to_doc(docs_inventory_doc_id.clone(), authority.blob_inventories.clone())
                 .await?;
 
             crate::authority::grant_docs_admin(
@@ -693,16 +693,16 @@ impl RepoCtx {
                     doc_app.document_id(),
                     doc_drawer.document_id(),
                     doc_config.document_id(),
-                    core_inventory_doc_id,
-                    docs_inventory_doc_id,
+                    core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id.clone(),
                 ],
             )
             .await?;
 
             config_repo
                 .set_blob_inventories(crate::config::AppBlobInventories {
-                    core_inventory_doc_id,
-                    docs_inventory_doc_id,
+                    core_inventory_doc_id: core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id: docs_inventory_doc_id.clone(),
                 })
                 .await?;
 
@@ -712,8 +712,8 @@ impl RepoCtx {
                     doc_id_app: doc_app.document_id(),
                     doc_id_drawer: doc_drawer.document_id(),
                     doc_id_config: Some(doc_config.document_id()),
-                    core_inventory_doc_id: Some(core_inventory_doc_id),
-                    docs_inventory_doc_id: Some(docs_inventory_doc_id),
+                    core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+                    docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
                 },
             )
             .await?;
@@ -885,17 +885,17 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         .big_repo
         .get_doc(&doc_id_app)
         .await?
-        .into_ready(doc_id_app)?;
+        .into_ready(doc_id_app.clone())?;
     let doc_drawer = parts
         .big_repo
         .get_doc(&doc_id_drawer)
         .await?
-        .into_ready(doc_id_drawer)?;
+        .into_ready(doc_id_drawer.clone())?;
     let doc_config = parts
         .big_repo
         .get_doc(&doc_id_config)
         .await?
-        .into_ready(doc_id_config)?;
+        .into_ready(doc_id_config.clone())?;
 
     if core_inv.is_none() || docs_inv.is_none() {
         let (config_store, _) = doc_app
@@ -922,8 +922,8 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             doc_id_app,
             doc_id_drawer,
             doc_id_config: Some(doc_id_config),
-            core_inventory_doc_id: Some(core_inventory_doc_id),
-            docs_inventory_doc_id: Some(docs_inventory_doc_id),
+            core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+            docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
         },
     )
     .await?;

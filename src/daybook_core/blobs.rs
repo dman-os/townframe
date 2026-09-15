@@ -138,7 +138,7 @@ impl BlobsRepo {
     }
 
     pub async fn ensure_hash_materialized(&self, blob_id: BlobId) -> Res<()> {
-        if self.has_blob_on_disk(blob_id).await? {
+        if self.has_blob_on_disk(blob_id.clone()).await? {
             return Ok(());
         }
         let backend = surelock::key::lock_scope(|key| {
@@ -148,7 +148,7 @@ impl BlobsRepo {
         if let Some(backend) = backend {
             let peers = backend.active_peer_ids();
             for peer_id in peers {
-                if let Ok(()) = backend.ensure_local_blob(peer_id, blob_id).await {
+                if let Ok(()) = backend.ensure_local_blob(peer_id, blob_id.clone()).await {
                     return Ok(());
                 }
             }
@@ -166,7 +166,7 @@ impl BlobsRepo {
         let source_snapshot = self.create_source_snapshot(&source_path).await?;
         let result = async {
             let hash = blob_id_from_reader(tokio::fs::File::open(&source_snapshot).await?).await?;
-            let object_paths = self.object_paths(hash)?;
+            let object_paths = self.object_paths(hash.clone())?;
 
             tokio::fs::create_dir_all(&object_paths.dir).await?;
             if !tokio::fs::try_exists(&object_paths.blob).await? {
@@ -176,14 +176,14 @@ impl BlobsRepo {
 
             let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
             let mut meta = self.build_meta(
-                hash,
+                hash.clone(),
                 BlobMode::OwnedCopy,
                 blob_meta.len(),
                 Vec::new(),
                 false,
             );
             self.write_meta(&object_paths.meta, &meta).await?;
-            self.ingest_path_with_iroh(&object_paths.blob, hash).await?;
+            self.ingest_path_with_iroh(&object_paths.blob, hash.clone()).await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
 
@@ -211,9 +211,9 @@ impl BlobsRepo {
         let result = async {
             let snapshot_meta = tokio::fs::metadata(&source_snapshot).await?;
             let hash = blob_id_from_reader(tokio::fs::File::open(&source_snapshot).await?).await?;
-            let object_paths = self.object_paths(hash)?;
+            let object_paths = self.object_paths(hash.clone())?;
             tokio::fs::create_dir_all(&object_paths.dir).await?;
-            let hash_lock = self.lock_for_hash(hash);
+            let hash_lock = self.lock_for_hash(hash.clone());
             let _hash_guard = hash_lock.lock().await;
 
             let source_path_string = source_path
@@ -221,7 +221,7 @@ impl BlobsRepo {
                 .ok_or_else(|| eyre::eyre!("reference path must be valid UTF-8"))?
                 .to_string();
             let mut meta = self.build_meta(
-                hash,
+                hash.clone(),
                 BlobMode::Reference,
                 snapshot_meta.len(),
                 vec![source_path_string.clone()],
@@ -236,7 +236,7 @@ impl BlobsRepo {
             }
 
             self.write_meta(&object_paths.meta, &meta).await?;
-            self.ingest_path_with_iroh(&source_snapshot, hash).await?;
+            self.ingest_path_with_iroh(&source_snapshot, hash.clone()).await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
             Ok(hash)
@@ -252,7 +252,7 @@ impl BlobsRepo {
     /// Compatibility alias that ingests bytes as an owned blob.
     pub async fn put(&self, data: &[u8]) -> Result<BlobId, eyre::Report> {
         let hash = BlobId::new(*blake3::hash(data).as_bytes());
-        let object_paths = self.object_paths(hash)?;
+        let object_paths = self.object_paths(hash.clone())?;
 
         tokio::fs::create_dir_all(&object_paths.dir).await?;
         if !tokio::fs::try_exists(&object_paths.blob).await? {
@@ -261,14 +261,14 @@ impl BlobsRepo {
 
         let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
         let mut meta = self.build_meta(
-            hash,
+            hash.clone(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
             Vec::new(),
             false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
-        self.ingest_path_with_iroh(&object_paths.blob, hash).await?;
+        self.ingest_path_with_iroh(&object_paths.blob, hash.clone()).await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
 
@@ -276,9 +276,9 @@ impl BlobsRepo {
     }
 
     pub async fn get_path(&self, blob_id: BlobId) -> Result<PathBuf, eyre::Report> {
-        let object_paths = self.object_paths(blob_id)?;
+        let object_paths = self.object_paths(blob_id.clone())?;
         if !tokio::fs::try_exists(&object_paths.blob).await? {
-            self.ensure_hash_materialized(blob_id).await.ok();
+            self.ensure_hash_materialized(blob_id.clone()).await.ok();
         }
         if tokio::fs::try_exists(&object_paths.blob).await? {
             if self.read_meta(&object_paths.meta).await?.is_none() {
@@ -323,7 +323,7 @@ impl BlobsRepo {
                         drift_error = Some(format!(
                             "Referenced blob hash diverged for {}: expected={}, got={}",
                             source_path.display(),
-                            blob_hash_from_id(meta.hash),
+                            blob_hash_from_id(meta.hash.clone()),
                             blob_hash_from_id(source_hash)
                         ));
                     }
@@ -371,8 +371,8 @@ impl BlobsRepo {
         blob_id: BlobId,
         request: BlobMaterializeRequest,
     ) -> Res<PathBuf> {
-        let hash = blob_hash_from_id(blob_id);
-        self.ensure_local_object_no_meta_rewrite(blob_id).await?;
+        let hash = blob_hash_from_id(blob_id.clone());
+        self.ensure_local_object_no_meta_rewrite(blob_id.clone()).await?;
         let source_path = self.object_paths(blob_id)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
@@ -410,8 +410,8 @@ impl BlobsRepo {
         blob_id: BlobId,
         filename_stem: &str,
     ) -> Res<PathBuf> {
-        let hash = blob_hash_from_id(blob_id);
-        let object_paths = self.object_paths(blob_id)?;
+        let hash = blob_hash_from_id(blob_id.clone());
+        let object_paths = self.object_paths(blob_id.clone())?;
         let meta = self
             .read_meta(&object_paths.meta)
             .await?
@@ -420,7 +420,7 @@ impl BlobsRepo {
             meta.mime.as_deref().is_some() || !meta.source_paths.is_empty(),
             "materialize_with_meta_extension requires blob metadata with mime or source_paths for hash {hash}"
         );
-        let ext = self.preferred_extension_from_meta(blob_id).await?;
+        let ext = self.preferred_extension_from_meta(blob_id.clone()).await?;
         let stem = Self::sanitize_requested_stem(filename_stem)?;
         self.materialize(
             blob_id,
@@ -430,11 +430,11 @@ impl BlobsRepo {
     }
 
     pub async fn put_from_store(&self, blob_id: BlobId) -> Res<BlobId> {
-        let object_paths = self.object_paths(blob_id)?;
+        let object_paths = self.object_paths(blob_id.clone())?;
         tokio::fs::create_dir_all(&object_paths.dir).await?;
 
         if !tokio::fs::try_exists(&object_paths.blob).await? {
-            let iroh_hash = blob_id_to_iroh_hash(blob_id);
+            let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
             self.iroh_store
                 .blobs()
                 .export(iroh_hash, &object_paths.blob)
@@ -444,7 +444,7 @@ impl BlobsRepo {
 
         let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
         let meta = self.build_meta(
-            blob_id,
+            blob_id.clone(),
             BlobMode::OwnedCopy,
             blob_meta.len(),
             Vec::new(),
@@ -456,7 +456,7 @@ impl BlobsRepo {
     }
 
     async fn ensure_local_object_no_meta_rewrite(&self, blob_id: BlobId) -> Res<()> {
-        let object_paths = self.object_paths(blob_id)?;
+        let object_paths = self.object_paths(blob_id.clone())?;
         tokio::fs::create_dir_all(&object_paths.dir).await?;
         if !tokio::fs::try_exists(&object_paths.blob).await? {
             let iroh_hash = blob_id_to_iroh_hash(blob_id);
@@ -489,7 +489,7 @@ impl BlobsRepo {
     }
 
     async fn preferred_extension_from_meta(&self, blob_id: BlobId) -> Res<String> {
-        let hash = blob_hash_from_id(blob_id);
+        let hash = blob_hash_from_id(blob_id.clone());
         let object_paths = self.object_paths(blob_id)?;
         if let Some(meta) = self.read_meta(&object_paths.meta).await? {
             if let Some(mime) = meta.mime.as_deref()
@@ -742,11 +742,11 @@ impl BlobsRepo {
 // }
 
 pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
-    iroh_blobs::Hash::from_bytes(*blob_id.as_bytes())
+    iroh_blobs::Hash::from_bytes(blob_id.to_bytes32())
 }
 
 pub fn blob_id_to_digest_str(blob_id: BlobId) -> String {
-    utils_rs::hash::encode_base58_multihash_blake3(*blob_id.as_bytes())
+    utils_rs::hash::encode_base58_multihash_blake3(blob_id.to_bytes32())
 }
 
 #[tracing::instrument]
@@ -780,7 +780,7 @@ mod tests {
         let expected_hash = BlobId::new(*blake3::hash(data).as_bytes());
         assert_eq!(hash, expected_hash);
 
-        let path = repo.get_path(hash).await?;
+        let path = repo.get_path(hash.clone()).await?;
         let saved_data = tokio::fs::read(path).await?;
         assert_eq!(saved_data, data);
 
@@ -848,11 +848,11 @@ mod tests {
         tokio::fs::write(&source, b"owned wins").await?;
 
         let hash = repo.put_path_copy(&source).await?;
-        let object_paths = repo.object_paths(hash)?;
+        let object_paths = repo.object_paths(hash.clone())?;
 
         let bogus_ref = BlobMetaV1 {
             version: 1,
-            hash,
+            hash: hash.clone(),
             mode: BlobMode::Reference,
             size_bytes: 123,
             mime: None,
@@ -874,7 +874,7 @@ mod tests {
         let data = b"roundtrip";
 
         let hash = repo.put(data).await?;
-        let object_paths = repo.object_paths(hash)?;
+        let object_paths = repo.object_paths(hash.clone())?;
         let meta: BlobMetaV1 = serde_json::from_slice(&tokio::fs::read(&object_paths.meta).await?)?;
 
         assert_eq!(meta.hash, hash);
@@ -937,9 +937,9 @@ mod tests {
             .await
             .map_err(|err| eyre::eyre!("iroh add bytes failed: {err:?}"))?;
 
-        assert!(repo.get_path(hash).await.is_err());
+        assert!(repo.get_path(hash.clone()).await.is_err());
 
-        repo.put_from_store(hash).await?;
+        repo.put_from_store(hash.clone()).await?;
         let path = repo.get_path(hash).await?;
         let got = tokio::fs::read(path).await?;
         assert_eq!(got, data);
@@ -1047,7 +1047,7 @@ mod tests {
         let hash = repo.put(b"materialize-layout").await?;
         let out = repo
             .materialize(
-                hash,
+                hash.clone(),
                 BlobMaterializeRequest::Filename("preview.yaml".into()),
             )
             .await?;

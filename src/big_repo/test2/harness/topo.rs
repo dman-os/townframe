@@ -249,10 +249,10 @@ impl Node {
             backends,
             label,
             Some(Duration::from_secs(5)),
-            // Cursor replay, explicitly: big_repo is the embedder where bucket-diff was
-            // observed stalling in the offline-reopen scenario, and this harness is the
-            // only big_repo usage site, so it keeps the path it was debugged on.
-            Some(big_sync::SyncMode::CursorOnly),
+            // Bucket-diff, explicitly: this harness runs the band the embedder ships, so big_repo's
+            // tests exercise it; `bucket_band_reconciles_after_offline_reopen` covers the
+            // offline-reopen path that used to be the reason to stay on cursor replay.
+            Some(big_sync::SyncMode::Bucket),
             Arc::from("big-repo-test"),
         )?;
         log_nickname::register(repo.local_peer_id(), label);
@@ -383,10 +383,10 @@ impl Node {
         Ok(connection)
     }
     pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerKey> {
-        self.connections.lock().await.keys().copied().collect()
+        self.connections.lock().await.keys().cloned().collect()
     }
     pub(crate) async fn disconnect_peer(&self, peer_id: PeerKey) -> crate::Res<()> {
-        self.worker.remove_peer(peer_id).await?;
+        self.worker.remove_peer(peer_id.clone()).await?;
         if let Some(connection) = self.connections.lock().await.remove(&peer_id) {
             connection.stop().await?;
         }

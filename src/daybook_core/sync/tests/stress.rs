@@ -129,7 +129,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             active
                 .sync_repo
                 .big_sync_worker
-                .remove_peer(leaving_peer_id)
+                .remove_peer(leaving_peer_id.clone())
                 .await?;
         }
 
@@ -362,12 +362,12 @@ async fn connect_topology(
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
         let peer_b_id = PeerKey::new(*endpoint_addr_ab.id.as_bytes());
-        endpoint_sets[*a].insert(peer_b_id);
+        endpoint_sets[*a].insert(peer_b_id.clone());
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
         let peer_a_id = PeerKey::new(*endpoint_addr_ba.id.as_bytes());
-        endpoint_sets[*b].insert(peer_a_id);
+        endpoint_sets[*b].insert(peer_a_id.clone());
 
         node_a
             .sync_repo
@@ -501,7 +501,7 @@ async fn collect_diagnostic_report(
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("stress document id must be a verifying key"),
             );
             let registered = !node
@@ -519,16 +519,16 @@ async fn collect_diagnostic_report(
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let state = node.sync_repo.rcx.big_repo.doc_head_state(doc_id.clone()).await?;
             let signature = format!(
                 "registered={registered} access={access:?} state={:?} sedimentree={:?} materialized={:?}",
                 state.state, state.sedimentree_heads, state.materialized_heads
             );
             warn!(phase, node = node_index, %doc_id, %signature, "diagnostic document state");
             if state.materialized_heads.is_some() {
-                known_good_sources.entry(*doc_id).or_insert(node_index);
+                known_good_sources.entry(doc_id.clone()).or_insert(node_index);
             }
-            signatures.entry(*doc_id).or_default().push(signature);
+            signatures.entry(doc_id.clone()).or_default().push(signature);
         }
 
         // TEMP-FORENSICS: compare per-node stored commit/fragment blobs for
@@ -538,7 +538,7 @@ async fn collect_diagnostic_report(
                 .sync_repo
                 .rcx
                 .big_repo
-                .inspect_stored_doc_blobs(*doc_id)
+                .inspect_stored_doc_blobs(doc_id.clone())
                 .await
             else {
                 warn!(phase, node = node_index, %doc_id, "blob forensics: inspect failed");
@@ -599,7 +599,7 @@ async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
+                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id.clone()));
                 }
             }
         }
@@ -704,7 +704,7 @@ async fn diagnostic_phase_settlement(
                     .sync_repo
                     .rcx
                     .big_repo
-                    .sync_doc_with_peer(*doc_id, source_peer)
+                    .sync_doc_with_peer(doc_id.clone(), source_peer.clone())
                     .await
                 {
                     Ok(receipt) => {
@@ -749,7 +749,7 @@ async fn wait_network_rest(
                 .peer_partition_ids("", true)
                 .into_keys()
                 .collect::<Vec<_>>();
-            let peers = peers_set[index].iter().copied().collect::<Vec<_>>();
+            let peers = peers_set[index].iter().cloned().collect::<Vec<_>>();
             info!(
                 barrier = "network-rest",
                 node = index,
@@ -884,7 +884,7 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("stress document id must be a verifying key"),
             );
             let registered = !node
@@ -902,7 +902,7 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let head_state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let head_state = node.sync_repo.rcx.big_repo.doc_head_state(doc_id.clone()).await?;
             let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
                 big_repo::DocLookup::Ready(handle) => {
                     let mut heads = handle
@@ -935,7 +935,7 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
+                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id.clone()));
                 }
             }
         }
@@ -950,7 +950,7 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
                 .sync_repo
                 .rcx
                 .big_repo
-                .doc_head_state(*big_doc_id)
+                .doc_head_state(big_doc_id.clone())
                 .await?;
             let mut sed_heads = head_state
                 .sedimentree_heads
@@ -1046,7 +1046,7 @@ fn big_sync_store_diff(
         snapshot
             .memberships
             .iter()
-            .map(|(part, obj, event_type, _)| ((*part, *obj), *event_type != 2))
+            .map(|(part, obj, event_type, _)| ((part.clone(), obj.clone()), *event_type != 2))
             .collect::<BTreeMap<_, _>>()
     };
     let left_memberships = semantic_memberships(left);

@@ -171,7 +171,7 @@ impl BigSyncWorkerHandle {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::SetPeer {
-                peer_id,
+                peer_id: peer_id.clone(),
                 client,
                 parts,
                 objects,
@@ -188,7 +188,7 @@ impl BigSyncWorkerHandle {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::RemovePeer {
-                peer_id,
+                peer_id: peer_id.clone(),
                 resp: resp_tx,
             })
             .await
@@ -484,7 +484,7 @@ impl PeerState {
             return Some((backend_id, Vec::new()));
         }
 
-        let mut part_ids: Vec<_> = task.part_hints.iter().copied().collect();
+        let mut part_ids: Vec<_> = task.part_hints.iter().cloned().collect();
         part_ids.sort_unstable();
         part_ids.dedup();
         let mut backend_id = None;
@@ -546,6 +546,9 @@ const ZOMBIE_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 /// This is a safety net rather than a known periodic dependency: at complete idle it is one
 /// wake per minute where the previous fixed interval was two per second, and every other
 /// dependency in the loop tail is driven by an event one of the select arms waits on.
+/// The loop logs when it wakes on this ceiling with nothing due, so a dependency that is
+/// periodic without being expressed as a deadline shows up as a visible cadence rather than
+/// as silence.
 const IDLE_SLEEP_CEILING: Duration = Duration::from_secs(60);
 
 impl BigSyncWorker {
@@ -565,9 +568,9 @@ impl BigSyncWorker {
     #[tracing::instrument(skip(self, shutdown), fields(worker = %self.label))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         loop {
-            let wake_at = self
-                .next_wake()
-                .unwrap_or_else(|| std::time::Instant::now() + IDLE_SLEEP_CEILING);
+            let next_due = self.next_wake();
+            let wake_at =
+                next_due.unwrap_or_else(|| std::time::Instant::now() + IDLE_SLEEP_CEILING);
             let wake_timer = tokio::time::sleep_until(tokio::time::Instant::from_std(wake_at));
             tokio::pin!(wake_timer);
             tokio::select! {
@@ -598,6 +601,17 @@ impl BigSyncWorker {
                     self.handle_msg(msg).await?;
                 }
                 _ = &mut wake_timer => {
+                    if next_due.is_none() {
+                        // Nothing was paced and no zombie was outstanding when this
+                        // iteration went to sleep, so every other tail dependency is
+                        // event-driven: this wake is the safety net firing. A regular
+                        // cadence here means some dependency is periodic but is not
+                        // expressed as a deadline.
+                        debug!(
+                            worker = %self.label,
+                            "big sync worker woke on the idle ceiling with nothing due"
+                        );
+                    }
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
@@ -661,22 +675,22 @@ impl BigSyncWorker {
                 objects,
                 resp,
             } => {
-                for (&part_id, backend_id) in &parts {
+                for (part_id, backend_id) in &parts {
                     if !self.sync_backends.contains_key(backend_id) {
                         resp.send(Err(BigSyncWorkerError::UnknownBackend {
                             backend_id: Arc::clone(backend_id),
-                            part_id,
+                            part_id: part_id.clone(),
                         }))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
                 }
-                for (&obj_id, backend_id) in &objects {
+                for (obj_id, backend_id) in &objects {
                     if !self.sync_backends.contains_key(backend_id) {
                         resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
                             backend_id: Arc::clone(backend_id),
-                            obj_id,
+                            obj_id: obj_id.clone(),
                         }))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
@@ -684,14 +698,14 @@ impl BigSyncWorker {
                     }
                 }
                 self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
-                    peer_id,
+                    peer_id.clone(),
                     Arc::new(crate::rpc::ScopedRpcClient {
                         scope_key: Arc::clone(&self.scope_key),
                         inner: client,
                     }) as SharedPeerRpcClient,
                 );
                 self.peers.insert(
-                    peer_id,
+                    peer_id.clone(),
                     PeerState {
                         parts: parts.clone(),
                         objects: objects.clone(),
@@ -700,7 +714,7 @@ impl BigSyncWorker {
                 let part_count = parts.len();
                 let object_count = objects.len();
                 let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                    peer_id,
+                    peer_id: peer_id.clone(),
                     parts: parts.into_keys().collect(),
                     objects: objects.into_keys().collect(),
                 });
@@ -713,7 +727,7 @@ impl BigSyncWorker {
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
-                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
+                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id: peer_id.clone() });
                 self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
@@ -726,7 +740,7 @@ impl BigSyncWorker {
             } => {
                 for peer_id in &peer_ids {
                     let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: *peer_id }))
+                        resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: peer_id.clone() }))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
                         return Ok(());
@@ -734,8 +748,8 @@ impl BigSyncWorker {
                     for part_id in &part_ids {
                         if !peer_state.parts.contains_key(part_id) {
                             resp.send(Err(BigSyncWorkerError::UnknownPart {
-                                peer_id: *peer_id,
-                                part_id: *part_id,
+                                peer_id: peer_id.clone(),
+                                part_id: part_id.clone(),
                             }))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
@@ -769,7 +783,7 @@ impl BigSyncWorker {
                     peer_parts: self
                         .peers
                         .iter()
-                        .map(|(&peer_id, peer_state)| (peer_id, peer_state.parts.clone()))
+                        .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
                         .collect(),
                     full_sync_waiters: self.machine.debug_full_sync_waiters(),
                     last_object_syncs: self.machine.debug_last_object_syncs(),
@@ -991,9 +1005,9 @@ impl MachineTaskWorker {
                         .lock()
                         .expect(ERROR_MUTEX)
                         .iter()
-                        .map(|(&peer_id, client)| {
+                        .map(|(peer_id, client)| {
                             (
-                                peer_id,
+                                peer_id.clone(),
                                 trap::TrappedRpcClient {
                                     trap: trap.clone(),
                                     inner: Arc::clone(client),
@@ -1048,10 +1062,10 @@ impl SyncTaskWorker {
             } = deets;
             let event = match kind {
                 SyncTaskKind::RemoveFromParts => {
-                    let mut parts: Vec<PartKey> = part_hints.iter().copied().collect();
+                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
                     parts.sort_unstable();
                     parts.dedup();
-                    match self.backend.remove_obj_from_parts(obj_id, parts).await {
+                    match self.backend.remove_obj_from_parts(obj_id.clone(), parts).await {
                         Ok(()) => {
                             BigSyncEvent::RemoveCompleted(big_sync_core::RemoveCompletedEvent {
                                 task_id: _task_id,
@@ -1068,11 +1082,11 @@ impl SyncTaskWorker {
                     }
                 }
                 SyncTaskKind::Sync => {
-                    let mut parts: Vec<PartKey> = part_hints.iter().copied().collect();
+                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
                     parts.sort_unstable();
                     let res = self
                         .backend
-                        .sync_obj(peer_id, obj_id, parts, remote_payload)
+                        .sync_obj(peer_id.clone(), obj_id.clone(), parts, remote_payload)
                         .await;
                     match res {
                         Ok(SyncTaskRunOutcome::Completion(completion)) => {

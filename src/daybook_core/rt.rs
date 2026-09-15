@@ -305,8 +305,8 @@ impl Rt {
         let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
             Arc::clone(&drawer),
             rcx.sql.clone(),
-            rcx.core_inventory_doc_id,
-            rcx.docs_inventory_doc_id,
+            rcx.core_inventory_doc_id.clone(),
+            rcx.docs_inventory_doc_id.clone(),
             doc_facet_set_index_repo.revision_store(),
             Arc::clone(&plugs_repo),
             cancel_token.clone(),
@@ -2487,7 +2487,7 @@ async fn upsert_processor_runlog_item(
         "done_token": done_token,
         "done_at": jiff::Timestamp::now().to_string(),
     });
-    partition_store.set_obj_payload(item_id, payload).await?;
+    partition_store.set_obj_payload(item_id.clone(), payload).await?;
     partition_store
         .add_obj_to_parts(
             item_id,
@@ -2867,7 +2867,7 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(store.obj_parts(item_id).await?, vec![part_id]);
+        assert_eq!(store.obj_parts(item_id.clone()).await?, vec![part_id]);
 
         let payload = store
             .obj_payload(item_id)
@@ -2898,7 +2898,7 @@ mod tests {
         // Open ensures the partition in the derived scope.
         assert!(
             rtx.derived_part_store
-                .summarize_parts(std::collections::HashSet::from([part_id]))
+                .summarize_parts(std::collections::HashSet::from([part_id.clone()]))
                 .await??
                 .contains_key(&part_id),
             "open should ensure the processor-runlog partition in the derived scope"
@@ -2916,11 +2916,11 @@ mod tests {
         // The document scope must not learn about the item at all: the automerge
         // frontier worker reads that scope's match-all part stream as documents.
         assert!(
-            rtx.part_store.obj_payload(item_id).await?.is_none(),
+            rtx.part_store.obj_payload(item_id.clone()).await?.is_none(),
             "processor-runlog items must not be written to the document scope"
         );
         assert!(
-            rtx.part_store.obj_parts(item_id).await?.is_empty(),
+            rtx.part_store.obj_parts(item_id.clone()).await?.is_empty(),
             "processor-runlog items must not join a document-scope partition"
         );
         assert_eq!(

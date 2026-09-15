@@ -253,7 +253,7 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                             // object has no remaining frontier routes.
                             if !self
                                 .store
-                                .obj_parts(obj_id)
+                                .obj_parts(obj_id.clone())
                                 .await
                                 .wrap_err("reading remaining frontier routes")?
                                 .is_empty()
@@ -313,14 +313,14 @@ mod tests {
                 entries: vec![
                     SubEvent::Added(ObjAddedToPart {
                         cursor: 3,
-                        part_id: p1,
-                        obj_id: obj,
+                        part_id: p1.clone(),
+                        obj_id: obj.clone(),
                         payload: payload(1),
                     }),
                     SubEvent::Changed(ObjChanged {
                         cursor: 3,
-                        part_ids: vec![p1, p2],
-                        obj_id: obj,
+                        part_ids: vec![p1.clone(), p2],
+                        obj_id: obj.clone(),
                         payload: payload(2),
                     }),
                     SubEvent::Removed(ObjRemovedFromPart {
@@ -371,8 +371,8 @@ mod tests {
         let p1 = PartKey::new([1; 32]);
         let p2 = PartKey::new([2; 32]);
         let store = Arc::new(big_sync::MemoryPartStore::default());
-        store.add_obj_to_parts(obj, vec![p1, p2]).await?;
-        store.remove_obj_from_part(obj, p1).await?;
+        store.add_obj_to_parts(obj.clone(), vec![p1.clone(), p2]).await?;
+        store.remove_obj_from_part(obj.clone(), p1.clone()).await?;
 
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
@@ -513,7 +513,7 @@ mod tests {
             // Add the part first (no event while the payload is absent), then
             // set the payload — one frontier event per commit.
             self.part_store
-                .add_obj_to_parts(obj_id, vec![route])
+                .add_obj_to_parts(obj_id.clone(), vec![route])
                 .await
                 .expect("add object to part");
             self.part_store

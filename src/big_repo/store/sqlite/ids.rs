@@ -12,7 +12,7 @@ impl IdCodec {
         id.as_bytes().to_vec()
     }
     pub(crate) fn obj_id(id: SedimentreeId) -> ObjKey {
-        ObjKey(ByteKey::new(*id.as_bytes()))
+        ObjKey(ByteKey::new(id.as_bytes()))
     }
     pub(crate) fn commit_blob(id: CommitId) -> Vec<u8> {
         id.as_bytes().to_vec()
@@ -90,11 +90,11 @@ mod tests {
             bytes
         );
         let part = PartKey::new(bytes);
-        assert_eq!(IdCodec::part_from_blob(IdCodec::part_blob(part)), part);
+        assert_eq!(IdCodec::part_from_blob(IdCodec::part_blob(part.clone())), part);
         let obj = ObjKey::new(bytes);
-        assert_eq!(IdCodec::obj_from_blob(IdCodec::obj_blob(obj)), obj);
+        assert_eq!(IdCodec::obj_from_blob(IdCodec::obj_blob(obj.clone())), obj);
         let peer = PeerKey::new(bytes);
-        assert_eq!(IdCodec::peer_blob(peer), peer.as_bytes().to_vec());
+        assert_eq!(IdCodec::peer_blob(peer.clone()), peer.as_bytes().to_vec());
         let buck = BuckId::new(3, 17);
         assert_eq!(IdCodec::buck_id(IdCodec::buck_i64(buck)), buck);
         assert_eq!(IdCodec::u64_from_db(42), 42);

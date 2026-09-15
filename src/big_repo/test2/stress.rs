@@ -79,7 +79,7 @@ impl BigRepoStressFixture {
             .lock()
             .await
             .get(obj)
-            .copied()
+            .cloned()
             .ok_or_else(|| crate::ferr!("stress object {obj:?} has no mapped document id"))
     }
 
@@ -90,7 +90,7 @@ impl BigRepoStressFixture {
     async fn collect_heads(&self, node: &Node) -> Res<BTreeMap<DocumentId, BTreeSet<[u8; 32]>>> {
         let mut result = BTreeMap::new();
         for doc_id in self.tracked_docs().await {
-            let state = node.repo.doc_head_state(doc_id).await?;
+            let state = node.repo.doc_head_state(doc_id.clone()).await?;
             result.insert(
                 doc_id,
                 state.sedimentree_heads.iter().map(|head| head.0).collect(),
@@ -102,7 +102,7 @@ impl BigRepoStressFixture {
     async fn collect_parts(&self, node: &Node) -> Res<BTreeMap<DocumentId, Vec<PartKey>>> {
         let mut result = BTreeMap::new();
         for doc_id in self.tracked_docs().await {
-            let mut parts = node.store.obj_parts(doc_id).await?;
+            let mut parts = node.store.obj_parts(doc_id.clone()).await?;
             parts.sort_unstable();
             result.insert(doc_id, parts);
         }
@@ -119,8 +119,8 @@ impl BigRepoStressFixture {
             let mut peer_cursors = BTreeMap::new();
             for part_id in parts {
                 peer_cursors.insert(
-                    *part_id,
-                    node.store.get_peer_part_cursor(peer_id, *part_id).await?,
+                    part_id.clone(),
+                    node.store.get_peer_part_cursor(peer_id.clone(), part_id.clone()).await?,
                 );
             }
             result.insert(peer_id, peer_cursors);
@@ -134,7 +134,7 @@ impl BigRepoStressFixture {
     async fn collect_local_cursors(&self, node: &Node, parts: &[PartKey]) -> Res<String> {
         match node
             .store
-            .summarize_parts(parts.iter().copied().collect())
+            .summarize_parts(parts.iter().cloned().collect())
             .await?
         {
             Ok(summaries) => {
@@ -333,7 +333,7 @@ impl StressFixture for BigRepoStressFixture {
         // group-part membership index — per-doc grants would be an
         // anti-pattern.
 
-        self.obj_doc_map.lock().await.insert(*obj, doc_id);
+        self.obj_doc_map.lock().await.insert(obj.clone(), doc_id.clone());
         self.all_docs.lock().await.insert(doc_id);
         Ok(())
     }
@@ -417,7 +417,7 @@ impl StressFixture for BigRepoStressFixture {
             .create_group_with_parents(Vec::new())
             .await?;
         *self.shared_edit_group_id.lock().await = Some(group.id());
-        for peer_id in self.editor_peer_ids.lock().await.iter().copied() {
+        for peer_id in self.editor_peer_ids.lock().await.iter().cloned() {
             if peer_id == group_owner.peer_id() {
                 continue;
             }
@@ -434,7 +434,7 @@ impl StressFixture for BigRepoStressFixture {
         // group membership is the primitive that makes the relay subscribe to
         // and forward the group part.
         for relay_peer_id in self.relay_peer_ids.lock().await.iter() {
-            let relay_agent = wait_for_agent(&group_owner.repo, *relay_peer_id).await?;
+            let relay_agent = wait_for_agent(&group_owner.repo, relay_peer_id.clone()).await?;
             group_owner
                 .repo
                 .add_member_to_group(relay_agent, &group, Access::Relay)
@@ -491,7 +491,7 @@ impl StressFixture for BigRepoStressFixture {
         }
         let agent = node.repo.keyhive().keyhive_peer_id().to_identifier()?;
         let document = keyhive_core::principal::identifier::Identifier::from(
-            ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                 .expect("stress document id must be a verifying key"),
         );
         Ok(node
@@ -661,12 +661,12 @@ impl StressFixture for BigRepoStressFixture {
         };
         let _reference_peer = observations
             .first()
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .expect("stress cluster must contain nodes");
         let _reference_heads = &observations[0].1.sedimentree_heads;
         let mut sedimentree_mismatches = Vec::new();
         for doc_id in &tracked_docs {
-            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes()) else {
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
                 continue;
             };
             let doc_identifier = keyhive_core::principal::identifier::Identifier::from(vk);
@@ -688,7 +688,7 @@ impl StressFixture for BigRepoStressFixture {
             if active_peers.is_empty() {
                 continue;
             }
-            let reference_peer = active_peers[0].0;
+            let reference_peer = &active_peers[0].0;
             let expected = active_peers[0]
                 .1
                 .sedimentree_heads
@@ -750,14 +750,14 @@ impl StressFixture for BigRepoStressFixture {
                     crate::DocLookup::PendingMaterialization => ("pending", None),
                     crate::DocLookup::Missing => ("missing", None),
                 };
-                documents.insert(*doc_id, materialization);
+                documents.insert(doc_id.clone(), materialization);
             }
             materialized_by_peer.push((node.peer_id(), documents));
         }
 
         let materialized_reference_peer = materialized_by_peer
             .first()
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .expect("stress cluster must contain an editor");
         let materialized_reference = &materialized_by_peer[0].1;
         let mut materialized_mismatches = Vec::new();
@@ -778,20 +778,20 @@ impl StressFixture for BigRepoStressFixture {
                         .copied()
                         .find(|node| node.peer_id() == *peer_id)
                         .expect("materialization peer must have a node");
-                    let parts = node.store.obj_parts(*doc_id).await?;
+                    let parts = node.store.obj_parts(doc_id.clone()).await?;
                     let blob_lengths = node
                         .repo
-                        .inspect_stored_doc_blobs(*doc_id)
+                        .inspect_stored_doc_blobs(doc_id.clone())
                         .await?
                         .iter()
                         .map(Vec::len)
                         .collect::<Vec<_>>();
                     let agent_id = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(peer_id.as_bytes())
+                        ed25519_dalek::VerifyingKey::from_bytes(&peer_id.to_bytes32())
                             .expect("stress peer id must be a verifying key"),
                     );
                     let doc_identifier = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                             .expect("stress document id must be a verifying key"),
                     );
                     let access = node

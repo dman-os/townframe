@@ -41,7 +41,7 @@ async fn tier2_grant_before_content_read() -> crate::Res<()> {
     let doc_id = owner_doc.document_id();
 
     // Grant before the meaningful content exists.
-    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     // Owner writes meaningful content after the grant has propagated.
     owner_doc
@@ -53,7 +53,7 @@ async fn tier2_grant_before_content_read() -> crate::Res<()> {
 
     // Reader syncs and sees the content written after the grant.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "grant-before-content");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -74,7 +74,7 @@ async fn tier2_grant_before_content_edit() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(seed).await?;
     let doc_id = owner_doc.document_id();
 
-    fixtures::grant_and_propagate(&pair, doc_id, &editor_agent, Access::Edit).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
 
     // Owner writes meaningful content after the edit grant.
     owner_doc
@@ -85,7 +85,7 @@ async fn tier2_grant_before_content_edit() -> crate::Res<()> {
         .await??;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&editor_doc).await, "edit-after-grant");
 
     // Editor can also write (Edit implies write permission).
@@ -100,7 +100,7 @@ async fn tier2_grant_before_content_edit() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
     assert_eq!(
         read_optional_text(&owner_doc2, "editor_note")
             .await
@@ -126,7 +126,7 @@ async fn tier2_grant_before_content_admin() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(seed).await?;
     let doc_id = owner_doc.document_id();
 
-    fixtures::grant_and_propagate(&pair, doc_id, &admin_agent, Access::Admin).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &admin_agent, Access::Admin).await?;
 
     owner_doc
         .with_document(|doc| {
@@ -136,7 +136,7 @@ async fn tier2_grant_before_content_admin() -> crate::Res<()> {
         .await??;
 
     let admin_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&admin_doc).await, "admin-after-grant");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &admin_doc).await?;
 
@@ -163,10 +163,10 @@ async fn tier2_grant_after_content_read() -> crate::Res<()> {
     let doc_id = owner_doc.document_id();
 
     // Grant after content exists.
-    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "pre-grant-content");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -188,10 +188,10 @@ async fn tier2_grant_after_content_edit() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    fixtures::grant_and_propagate(&pair, doc_id, &editor_agent, Access::Edit).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&editor_doc).await, "existing-content");
 
     // Editor adds content post-grant.
@@ -206,7 +206,7 @@ async fn tier2_grant_after_content_edit() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
     assert_eq!(
         read_optional_text(&owner_doc2, "editor_added")
             .await
@@ -233,10 +233,10 @@ async fn tier2_grant_after_content_admin() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    fixtures::grant_and_propagate(&pair, doc_id, &admin_agent, Access::Admin).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &admin_agent, Access::Admin).await?;
 
     let admin_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&admin_doc).await, "admin-target");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &admin_doc).await?;
 
@@ -265,10 +265,10 @@ async fn tier2_group_grant_read_materializes_member() -> crate::Res<()> {
         .repo
         .add_member_to_group(reader_agent, &group, Access::Read)
         .await?;
-    fixtures::grant_group_and_propagate(&pair, doc_id, &group, Access::Read).await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id.clone(), &group, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "group-readable");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -294,7 +294,7 @@ async fn tier2_group_grant_before_content_read() -> crate::Res<()> {
         .repo
         .add_member_to_group(reader_agent, &group, Access::Read)
         .await?;
-    fixtures::grant_group_and_propagate(&pair, doc_id, &group, Access::Read).await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id.clone(), &group, Access::Read).await?;
 
     owner_doc
         .with_document(|doc| {
@@ -304,7 +304,7 @@ async fn tier2_group_grant_before_content_read() -> crate::Res<()> {
         .await??;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "group-before-content");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -336,10 +336,10 @@ async fn tier2_nested_group_edit_propagates_member_update() -> crate::Res<()> {
         .repo
         .add_member_to_group(inner.clone(), &outer, Access::Edit)
         .await?;
-    fixtures::grant_group_and_propagate(&pair, doc_id, &outer, Access::Edit).await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id.clone(), &outer, Access::Edit).await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&editor_doc).await, "nested-group");
     editor_doc
         .with_document(|doc| {
@@ -352,7 +352,7 @@ async fn tier2_nested_group_edit_propagates_member_update() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
     assert_eq!(
         read_optional_text(&owner_doc2, "nested_note")
             .await
@@ -387,7 +387,7 @@ async fn tier2_grant_after_content_while_offline_read() -> crate::Res<()> {
     // change and must become readable after reconnection.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
 
     let new_left = pair.left().connect(pair.right()).await?;
@@ -397,14 +397,14 @@ async fn tier2_grant_after_content_while_offline_read() -> crate::Res<()> {
 
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?;
-    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    fixtures::assert_reader_has_access(&pair.right().repo, doc_id.clone()).await?;
+    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     let reader_doc = pair
         .right()
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     assert_eq!(read_title(&reader_doc).await, "offline-grant");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -430,7 +430,7 @@ async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent, Access::Edit)
         .await?;
 
     let new_left = pair.left().connect(pair.right()).await?;
@@ -441,7 +441,7 @@ async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     editor_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "offline_note", "editor-added"))
@@ -453,7 +453,7 @@ async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     drop(owner_doc);
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
     assert_eq!(
         read_optional_text(&owner_doc2, "offline_note")
             .await
@@ -535,7 +535,7 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
     fixtures::go_offline(&mut pair).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, agent, access)
+        .grant_doc_access(doc_id.clone(), agent, access)
         .await?;
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -549,9 +549,9 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
             .await??;
     }
     let agent_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     assert_eq!(read_title(&agent_doc).await, "offline-agent-matrix");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &agent_doc).await?;
     if access.is_editor() {
         let agent_heads_before = agent_doc.with_document_read(|doc| doc.get_heads()).await;
         agent_doc
@@ -572,10 +572,10 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
         pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
         let owner_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
         let owner_agent_note = read_optional_text(&owner_doc, "agent_note").await;
         if owner_agent_note.as_deref() != Some("agent-member") {
-            let owner_state = pair.left().repo.doc_head_state(doc_id).await?;
+            let owner_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
             let agent_state = pair.right().repo.doc_head_state(doc_id).await?;
             let owner_live_heads = owner_doc.with_document_read(|doc| doc.get_heads()).await;
             let agent_live_heads = agent_doc.with_document_read(|doc| doc.get_heads()).await;
@@ -710,13 +710,13 @@ async fn run_group_case(
         fixtures::go_offline(&mut pair).await?;
         pair.left()
             .repo
-            .grant_doc_access(doc_id, target_group.clone(), access)
+            .grant_doc_access(doc_id.clone(), target_group.clone(), access)
             .await?;
         pair.connect().await?;
         pair.right_conn().sync_keyhive_with_peer().await?;
-        fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?
+        fixtures::assert_reader_has_access(&pair.right().repo, doc_id.clone()).await?
     } else {
-        fixtures::grant_group_and_propagate(&pair, doc_id, &target_group, access).await?;
+        fixtures::grant_group_and_propagate(&pair, doc_id.clone(), &target_group, access).await?;
     }
 
     if before_content {
@@ -729,7 +729,7 @@ async fn run_group_case(
     }
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     if read_title(&member_doc).await != "group-matrix" {
         return Err(crate::ferr!(concat!(
             "{label} {access} case did not materialize the expected title ",
@@ -749,7 +749,7 @@ async fn run_group_case(
         pair.right().repo.wait_for_quiescence(None).await?;
         drop(owner_doc);
         drop(member_doc);
-        let (owner_doc, member_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
+        let (owner_doc, member_doc) = fixtures::sync_doc_pair(&pair, doc_id.clone()).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "member_note")
                 .await
@@ -789,7 +789,7 @@ async fn run_public_case(
     }
     pair.left()
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), access)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), access)
         .await?;
     if offline {
         pair.connect().await?;
@@ -806,10 +806,10 @@ async fn run_public_case(
             .await??;
     }
     drop(owner_doc);
-    let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
-    heads::log_head_state(&pair, doc_id).await?;
+    let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id.clone()).await?;
+    heads::log_head_state(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&public_doc).await, "public-matrix");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &public_doc).await?;
     if access.is_editor() {
         public_doc
             .with_document(|doc| {
@@ -821,8 +821,8 @@ async fn run_public_case(
         pair.left_conn().sync_keyhive_with_peer().await?;
         drop(owner_doc);
         drop(public_doc);
-        let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
-        heads::log_head_state(&pair, doc_id).await?;
+        let (owner_doc, public_doc) = fixtures::sync_doc_pair(&pair, doc_id.clone()).await?;
+        heads::log_head_state(&pair, doc_id.clone()).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "public_note")
                 .await
@@ -918,7 +918,7 @@ async fn run_document_as_member_case(
     }
     pair.left()
         .repo
-        .grant_doc_access(source_id, member_agent, access)
+        .grant_doc_access(source_id.clone(), member_agent, access)
         .await?;
     let source_agent = fixtures::document_agent(&pair.left().repo, source_id).await?;
 
@@ -965,9 +965,9 @@ async fn run_document_as_member_case(
     pair.left().repo.wait_for_quiescence(None).await?;
 
     drop(target_doc);
-    let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;
+    let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id.clone()).await?;
     assert_eq!(read_title(&member_doc).await, "doc-member-matrix");
-    heads::tier0_invariants(&pair, target_id, &target_doc, &member_doc).await?;
+    heads::tier0_invariants(&pair, target_id.clone(), &target_doc, &member_doc).await?;
     if access.is_editor() {
         member_doc
             .with_document(|doc| {
@@ -979,7 +979,7 @@ async fn run_document_as_member_case(
         pair.left_conn().sync_keyhive_with_peer().await?;
         drop(target_doc);
         drop(member_doc);
-        let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id).await?;
+        let (target_doc, member_doc) = fixtures::sync_doc_pair(&pair, target_id.clone()).await?;
         assert_eq!(
             read_optional_text(&target_doc, "member_note")
                 .await
@@ -1103,7 +1103,7 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
         .ok();
     let doc = pair.left().repo.create_doc(seed).await?;
     let doc_id = doc.document_id();
-    let obj_id = big_sync_core::ObjKey::new(*doc_id.as_bytes());
+let obj_id = big_sync_core::ObjKey::new(doc_id.as_bytes());
     let unknown_obj_id = big_sync_core::ObjKey::new([0x88; 32]);
 
     let store = &pair.left().repo.big_sync_store;
@@ -1111,7 +1111,7 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     // 1. None-principal case: a trusted local subscriber is unfiltered
     assert_eq!(
         store
-            .permitted_parts(big_sync::PartScope::FromObject, obj_id, None)
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id.clone(), None)
             .await?,
         None,
     );
@@ -1122,7 +1122,7 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
             .permitted_parts(
                 big_sync::PartScope::FromObject,
                 unknown_obj_id,
-                Some(reader_peer)
+                Some(reader_peer.clone())
             )
             .await?,
         Some(Vec::new()),
@@ -1131,7 +1131,7 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     // 3. Unknown peer on known object yields nothing readable (denial)
     assert_eq!(
         store
-            .permitted_parts(big_sync::PartScope::FromObject, obj_id, Some(unknown_peer))
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id.clone(), Some(unknown_peer))
             .await?,
         Some(Vec::new()),
     );
@@ -1145,14 +1145,14 @@ async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     pair.left()
         .repo
         .grant_doc_access(
-            doc_id,
+            doc_id.clone(),
             reader_agent.clone(),
             keyhive_core::access::Access::Read,
         )
         .await?;
     assert_eq!(
         store
-            .permitted_parts(big_sync::PartScope::FromObject, obj_id, Some(reader_peer))
+            .permitted_parts(big_sync::PartScope::FromObject, obj_id.clone(), Some(reader_peer.clone()))
             .await?,
         Some(Vec::new()),
         "a document-level grant must not authorize collection delivery",

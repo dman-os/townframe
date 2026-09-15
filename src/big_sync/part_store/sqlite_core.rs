@@ -281,7 +281,7 @@ impl BucketSummaryRow {
                 self.live_fp = self.live_fp.wrapping_sub(
                     Fingerprint::new(
                         &BUCKET_LIVE_FP_SEED,
-                        &("big-sync-bucket-live-v1", buck_id, obj_id, payload),
+                        &("big-sync-bucket-live-v1", buck_id, obj_id.clone(), payload),
                     )
                     .as_u64(),
                 );
@@ -291,7 +291,7 @@ impl BucketSummaryRow {
                 self.dead_fp = self.dead_fp.wrapping_sub(
                     Fingerprint::new(
                         &BUCKET_DEAD_FP_SEED,
-                        &("big-sync-bucket-dead-v1", buck_id, obj_id),
+                        &("big-sync-bucket-dead-v1", buck_id, obj_id.clone()),
                     )
                     .as_u64(),
                 );
@@ -442,15 +442,15 @@ impl SqliteCore {
     }
 
     pub fn part_from_blob(blob: Vec<u8>) -> PartKey {
-        PartKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+        PartKey::new(blob)
     }
 
     pub fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
-        ObjKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+        ObjKey::new(blob)
     }
 
     pub fn peer_from_blob(blob: Vec<u8>) -> PeerKey {
-        PeerKey(ByteKey::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+        PeerKey::new(blob)
     }
 
     // -----------------------------------------------------------------------
@@ -480,13 +480,16 @@ impl SqliteCore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         obj_id: ObjKey,
     ) -> Res<i64> {
+        let buck_index = i64::from(BuckId::deepest_from_obj_key(&obj_id).index());
         let row = sqlx::query!(
-            "INSERT INTO big_sync_objs(scope_id, obj_id)
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id
+            "INSERT INTO big_sync_objs(scope_id, obj_id, buck_index)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id,
+                                                         buck_index = excluded.buck_index
              RETURNING obj_ref",
             self.scope_id,
-            Self::obj_blob(obj_id)
+            Self::obj_blob(obj_id),
+            buck_index
         )
         .fetch_one(&mut **tx)
         .await?;
@@ -677,8 +680,9 @@ impl SqliteCore {
         new: &MemberState,
     ) -> Res<()> {
         let part_ref = self.ensure_part_ref(tx, part_id).await?;
+        let deepest = BuckId::deepest_from_obj_key(&obj_id);
         let bucket_ids: Vec<_> = (0..=self.bucket_depth)
-            .map(|level| BuckId::from_obj_key(level, &obj_id))
+            .map(|level| deepest.to_level(level))
             .collect();
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT buck_id, changed_at, live_count, dead_count, live_fp, dead_fp
@@ -714,7 +718,7 @@ impl SqliteCore {
         }
         for buck_id in bucket_ids {
             let mut summary = current.remove(&buck_id).unwrap_or_default();
-            summary.apply_transition(buck_id, obj_id, cursor, old, new);
+            summary.apply_transition(buck_id, obj_id.clone(), cursor, old, new);
             sqlx::query!(
                 "INSERT INTO big_sync_buckets(
                     scope_id, part_ref, buck_id, level, changed_at,

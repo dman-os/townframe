@@ -20,10 +20,21 @@ CREATE TABLE IF NOT EXISTS big_sync_objs (
       obj_ref INTEGER PRIMARY KEY
     , scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id)
     , obj_id BLOB NOT NULL
+    -- ADR 012 decision 1: the bucket index is a hash of the object key, computed on the
+    -- write path. It is stored rather than read off the key's prefix because a bucket's
+    -- members are a range of *this* index; it is one column per object, with no fan-out
+    -- across the bucket levels the object is a member of.
+    , buck_index INTEGER NOT NULL
     , payload_json TEXT
     , UNIQUE(scope_id, obj_id)
     , CHECK(payload_json IS NULL OR json_valid(payload_json))
+    , CHECK(buck_index BETWEEN 0 AND 65535)
 ) STRICT;
+
+-- Membership filters on `buck_index` and still orders by `obj_id`, so the filter leads and
+-- the ordering column trails.
+CREATE INDEX IF NOT EXISTS big_sync_objs_buck_index_idx
+    ON big_sync_objs(scope_id, buck_index, obj_id);
 
 CREATE TABLE IF NOT EXISTS big_sync_buckets (
       scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id)

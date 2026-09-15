@@ -40,7 +40,9 @@ pub use part_store::sqlite::{
     SqlitePartStore, open_sqlite_local_revision_reader, open_sqlite_local_revision_reader_all,
 };
 pub use part_store::sqlite_core;
-pub use part_store::{HostPartStore, HostPartStoreConfig, LocalPartRevisionReader, PartScope};
+pub use part_store::{
+    HostPartStore, HostPartStoreConfig, LocalPartRevisionReader, PartScope, bucket_index_bounds,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{

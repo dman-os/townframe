@@ -251,7 +251,7 @@ impl DrawerRepo {
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
             .await?
-            .into_ready(drawer_doc_id)?;
+            .into_ready(drawer_doc_id.clone())?;
 
         let initial_heads = drawer_am_handle
             .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
@@ -260,7 +260,7 @@ impl DrawerRepo {
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
             .subscribe_change_listener(big_repo::BigRepoChangeFilter {
-                doc_id: Some(big_repo::BigRepoDocIdFilter::new(drawer_doc_id)),
+                doc_id: Some(big_repo::BigRepoDocIdFilter::new(drawer_doc_id.clone())),
                 path: vec!["docs".into(), "map".into()],
                 origin: None,
             })
@@ -340,10 +340,10 @@ impl DrawerRepo {
             };
             for branch in entry.branches.values() {
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id, self.content_docs_group.clone())
+                    .add_admin_member_to_doc(branch.branch_doc_id.clone(), self.content_docs_group.clone())
                     .await?;
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id, self.drawer_group.clone())
+                    .add_admin_member_to_doc(branch.branch_doc_id.clone(), self.drawer_group.clone())
                     .await?;
             }
         }
@@ -382,7 +382,7 @@ impl DrawerRepo {
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
                 .set_obj_payload(
-                    branch_doc_id,
+                    branch_doc_id.clone(),
                     serde_json::json!({
                         "heads": heads
                     }),
@@ -403,7 +403,7 @@ impl DrawerRepo {
                 let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
                 if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
                     self.partition_store
-                        .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                        .add_obj_to_parts(branch_ref.branch_doc_id.clone(), vec![part_id.clone()])
                         .await?;
                 }
             }
@@ -418,12 +418,12 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             let part_id = self.replicated_partition_id();
-            let obj_id = big_sync_core::ObjKey::new(*branch_doc_id.as_bytes());
+            let obj_id = big_sync_core::ObjKey::new(branch_doc_id.as_bytes());
             self.partition_store
                 .remove_obj_from_part(obj_id, part_id)
                 .await?;
             self.big_repo
-                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
+                .revoke_doc_access(branch_doc_id.clone(), self.drawer_group.clone())
                 .await?;
             self.big_repo
                 .revoke_doc_access(branch_doc_id, self.content_docs_group.clone())
@@ -478,7 +478,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(heads) = self
-            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "get_branch_heads_for_path", "branch doc heads unavailable");
@@ -534,7 +534,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(handle) = self
-            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "resolve_handle_for_branch_heads", "no handle");
@@ -587,7 +587,7 @@ impl DrawerRepo {
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
     ) -> Res<Option<HashSet<FacetKey>>> {
-        let branch_doc_id = snapshot.branch_doc_id;
+        let branch_doc_id = snapshot.branch_doc_id.clone();
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
@@ -628,7 +628,7 @@ impl DrawerRepo {
                 continue;
             }
             let Some(branch_heads) = self
-                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
                 .await?
             else {
                 continue;

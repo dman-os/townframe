@@ -64,7 +64,7 @@ pub struct ConcurrentDeltaWalker<'a, S, R, K>
 where
     S: RevisionedStore<Revision = u64> + 'a,
     R: DeltaWalkerStateRepo,
-    K: Ord + Copy,
+    K: Ord + Clone,
 {
     reader: S::Reader<'a>,
     state: R,
@@ -78,7 +78,7 @@ impl<'a, S, R, K> ConcurrentDeltaWalker<'a, S, R, K>
 where
     S: RevisionedStore<Revision = u64> + 'a,
     R: DeltaWalkerStateRepo,
-    K: Ord + Copy,
+    K: Ord + Clone,
 {
     /// Take an already-opened reader and the consumer's state repo.
     ///
@@ -145,7 +145,7 @@ where
 
                     self.buffered.extend(entries.into_iter().map(|entry| {
                         let key = (self.key_of)(&entry);
-                        self.watermarks.track((), key, revision, [()], ());
+                        self.watermarks.track((), key.clone(), revision, [()], ());
                         ConcurrentDelta {
                             key,
                             cursor: revision,
@@ -176,13 +176,13 @@ where
         key: K,
         cursor: u64,
     ) -> Result<DeltaAck, ConcurrentDeltaWalkerError<S::Error>> {
-        let settled = self.watermarks.settle(key, cursor, ());
+        let settled = self.watermarks.settle(key.clone(), cursor, ());
         if settled.is_empty() {
             return Ok(DeltaAck::Stale);
         }
 
         let mut through = settled.into_iter().find_map(|((), reached)| reached);
-        for reached in self.watermarks.supersede((), key, cursor, |_| false) {
+        for (_, reached) in self.watermarks.supersede((), key, cursor, |_| false) {
             through = through.max(reached);
         }
         let persisted = self.persist_ready(through).await?;

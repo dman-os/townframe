@@ -38,10 +38,10 @@ where
     F: FutureForm + DocWorkerLoop<F> + 'static,
 {
     let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
-    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
 
     let worker = DocWorker2 {
-        doc_id,
+        doc_id: doc_id.clone(),
         sed_id,
         generation,
         state: DocState::Unloaded,
@@ -110,6 +110,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
         parent_span: tracing::Span,
     ) -> F::Future<'static, eyre::Result<()>> {
         let cancellation = stop_registration.handle();
+        let doc_id_for_span = doc_id.clone();
         F::from_future(
             async move {
                 let result = futures::future::Abortable::new(
@@ -156,7 +157,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             .instrument(tracing::info_span!(
                 parent: &parent_span,
                 "doc_worker mailbox loop",
-                %doc_id
+                %doc_id_for_span
             )),
         )
     }
@@ -474,7 +475,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
-            self.doc_id,
+            self.doc_id.clone(),
             *initial_content,
             false,
             self.causal_epoch,
@@ -484,11 +485,11 @@ impl<F: FutureForm> DocWorker2<F> {
         self.state = DocState::Live(Arc::clone(&bundle));
 
         self.change_manager
-            .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
+            .notify_doc_created(self.doc_id.clone(), Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
+            .notify_local_doc_created(self.doc_id.clone(), Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
+            .notify_local_doc_materialization_ready(self.doc_id.clone(), Arc::clone(&heads))?;
 
         let handle = self
             .wrap_live_handle(bundle, crate::runtime2::DocLeaseKind::Caller)
@@ -511,7 +512,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<LiveDocHandle> {
         let lease = crate::runtime2::DocLease::new(
             self.runtime_cmd_tx.clone(),
-            self.doc_id,
+            self.doc_id.clone(),
             self.generation,
         );
         self.register_bundle_lease().await?;
@@ -570,7 +571,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 };
                 self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
@@ -600,7 +601,7 @@ impl<F: FutureForm> DocWorker2<F> {
         if self
             .runtime_cmd_tx
             .send(crate::runtime2::Runtime2Cmd::RegisterDocLease {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
                 registered: registered_tx,
             })
             .await
@@ -643,7 +644,7 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
-        let doc_id_snapshot = self.doc_id;
+        let doc_id_snapshot = self.doc_id.clone();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -779,7 +780,7 @@ impl<F: FutureForm> DocWorker2<F> {
         LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
-            self.doc_id,
+            self.doc_id.clone(),
             blockers,
             blocked_refs,
         )
@@ -795,7 +796,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Transient(doc) => {
                 self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
@@ -823,7 +824,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.sync_partial_state().await?;
                         self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                         let bundle = Arc::new(LiveDocBundle::new(
-                            self.doc_id,
+                            self.doc_id.clone(),
                             doc,
                             partially_decrypted,
                             self.causal_epoch,
@@ -863,11 +864,11 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         let event = if partial {
             Runtime2Evt::DocWorkerMaterializationPending {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
             }
         } else {
             Runtime2Evt::DocWorkerMaterializationReady {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
             }
         };
         self.evt_tx.send(event).await.wrap_err(ERROR_CHANNEL)?;
@@ -922,7 +923,7 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         // ── 2. Write-access gate ──────────────────────────────────────────
-        match self.io.has_doc_write_access(self.doc_id).await {
+        match self.io.has_doc_write_access(self.doc_id.clone()).await {
             Ok(true) => {}
             Ok(false) => {
                 current
@@ -1023,12 +1024,12 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let heads = Arc::from(heads);
         self.change_manager
-            .notify_sedimentree_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
+            .notify_sedimentree_heads_changed(self.doc_id.clone(), Arc::clone(&heads), origin.clone())
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
         if matches!(&origin, BigRepoChangeOrigin::Local) {
             self.change_manager
-                .notify_local_doc_heads_updated(self.doc_id, Arc::clone(&heads))?;
+                .notify_local_doc_heads_updated(self.doc_id.clone(), Arc::clone(&heads))?;
         }
 
         // Fire patches even if heads didn't change (delta can have content
@@ -1036,7 +1037,7 @@ impl<F: FutureForm> DocWorker2<F> {
         for patch in &patches {
             self.change_manager
                 .notify_doc_changed(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     Arc::new(patch.clone()),
                     Arc::clone(&heads),
                     origin.clone(),
@@ -1110,7 +1111,7 @@ impl<F: FutureForm> DocWorker2<F> {
         self.state = DocState::PendingMaterialization;
         if !was_pending {
             self.change_manager
-                .notify_local_doc_materialization_pending(self.doc_id)?;
+                .notify_local_doc_materialization_pending(self.doc_id.clone())?;
         }
         // A pending doc is by definition partially decrypted: the blocked
         // set is whatever `transition_to_pending`'s caller captured from the
@@ -1129,7 +1130,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         if was_pending {
             self.change_manager
-                .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                .notify_local_doc_materialization_ready(self.doc_id.clone(), heads)?;
         }
         Ok(())
     }
@@ -1283,14 +1284,14 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.blocked_refs.extend(unresolved);
                 self.sync_partial_state().await?;
                 if resolved.is_empty() {
-                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                    self.notif_pending_heads(&mut tree, peer_id.clone()).await?;
                     return self.report_sync_outcome(peer_id, has_caller, reply).await;
                 }
                 if !self.blocked_refs.is_empty() {
-                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                    self.notif_pending_heads(&mut tree, peer_id.clone()).await?;
                 }
 
-                let origin = BigRepoChangeOrigin::Remote { peer_id };
+                let origin = BigRepoChangeOrigin::Remote { peer_id: peer_id.clone() };
                 // Apply the session's decrypted content incrementally; refs
                 // whose Automerge dependencies are still missing stay blocked.
                 let applied = resolved.len();
@@ -1327,7 +1328,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         Arc::from(doc.get_heads())
                     });
                     self.change_manager
-                        .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                        .notify_local_doc_materialization_ready(self.doc_id.clone(), heads)?;
                 }
             }
 
@@ -1352,7 +1353,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// histories need no shadow node, while a missing epoch or uncovered fork
     /// publishes exactly one epoch-specific checkpoint.
     async fn reconcile_causal_coverage(&mut self) -> eyre::Result<bool> {
-        if !self.io.has_doc_write_access(self.doc_id).await? {
+        if !self.io.has_doc_write_access(self.doc_id.clone()).await? {
             debug!(%self.doc_id, "causal coverage skipped: no write access");
             return Ok(true);
         }
@@ -1523,7 +1524,7 @@ impl<F: FutureForm> DocWorker2<F> {
             let patches = if changed
                 && self
                     .change_manager
-                    .has_change_listener_interest(self.doc_id, origin)
+                    .has_change_listener_interest(self.doc_id.clone(), origin)
             {
                 doc.diff(&before, &after)
             } else {
@@ -1542,13 +1543,13 @@ impl<F: FutureForm> DocWorker2<F> {
         origin: &BigRepoChangeOrigin,
     ) -> eyre::Result<()> {
         self.change_manager.notify_sedimentree_heads_changed(
-            self.doc_id,
+            self.doc_id.clone(),
             Arc::clone(&after_heads),
             origin.clone(),
         )?;
         for patch in patches {
             self.change_manager.notify_doc_changed(
-                self.doc_id,
+                self.doc_id.clone(),
                 Arc::new(patch),
                 Arc::clone(&after_heads),
                 origin.clone(),
@@ -1704,7 +1705,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             self.change_manager
                 .notify_cold_sedimentree_heads_updated(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     BigRepoChangeOrigin::Remote { peer_id },
                 )
                 .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
@@ -1890,7 +1891,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         self.change_manager
             .notify_doc_pending_sedimentree_heads_changed(
-                self.doc_id,
+                self.doc_id.clone(),
                 heads,
                 BigRepoChangeOrigin::Remote { peer_id },
             )?;
@@ -2003,13 +2004,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     self.change_manager.notify_sedimentree_heads_changed(
-                        self.doc_id,
+                        self.doc_id.clone(),
                         Arc::clone(&heads),
                         origin.clone(),
                     )?;
                     for patch in patches {
                         self.change_manager.notify_doc_changed(
-                            self.doc_id,
+                            self.doc_id.clone(),
                             Arc::new(patch),
                             Arc::clone(&heads),
                             origin.clone(),
@@ -2242,7 +2243,7 @@ mod tests {
                 })
                 .collect(),
             false,
-            DocumentId::new(*sed_id.as_bytes()),
+            DocumentId::new(sed_id.as_bytes()),
             Vec::new(),
             Vec::new(),
         )
@@ -2530,7 +2531,7 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5a; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         let content_ref = CommitId::new([0x11; 32]);
         let checkpoint = CausalCheckpoint::new([0x77; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2650,7 +2651,7 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5b; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         let content_ref = CommitId::new([0x21; 32]);
         let checkpoint = CausalCheckpoint::new([0x87; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2704,7 +2705,7 @@ mod tests {
             .await?;
         rx.await
             .map_err(|_| ferr!(ERROR_CHANNEL))??
-            .into_ready(worker.doc_id)
+            .into_ready(worker.doc_id.clone())
             .map_err(|err| ferr!("{err:?}"))
     }
 

@@ -31,10 +31,10 @@ impl HostPartStore for SqliteBigRepoStore {
             big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
                 // `permitted_parts` reads the object only for a `FromObject` scope,
                 // so a part is asked about directly.
-                (PartScope::Part(*part_id), ObjKey::new([0u8; 32]))
+                (PartScope::Part(part_id.clone()), ObjKey::new([0u8; 32]))
             }
             big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
-                (PartScope::FromObject, *obj_id)
+                (PartScope::FromObject, obj_id.clone())
             }
         };
         Ok(self
@@ -49,7 +49,7 @@ impl HostPartStore for SqliteBigRepoStore {
         if parts.is_empty() {
             return Ok(Ok(HashMap::new()));
         }
-        let mut hidden: Vec<_> = parts.intersection(&self.hidden_parts).copied().collect();
+        let mut hidden: Vec<_> = parts.intersection(&self.hidden_parts).cloned().collect();
         if !hidden.is_empty() {
             hidden.sort_unstable();
             return Ok(Err(ListPartsError::UnkownParts {
@@ -72,7 +72,7 @@ impl HostPartStore for SqliteBigRepoStore {
         query.push(" AND p.part_id IN (");
         let mut separated = query.separated(", ");
         for part_id in &parts {
-            separated.push_bind(Self::part_blob(*part_id));
+            separated.push_bind(Self::part_blob(part_id.clone()));
         }
         separated.push_unseparated(")");
         let rows = query.build().fetch_all(&self.sql.read_pool).await?;
@@ -82,7 +82,7 @@ impl HostPartStore for SqliteBigRepoStore {
                 .iter()
                 .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
                 .collect();
-            let mut missing: Vec<_> = parts.difference(&found).copied().collect();
+            let mut missing: Vec<_> = parts.difference(&found).cloned().collect();
             missing.sort();
             return Ok(Err(ListPartsError::UnkownParts {
                 unkown_parts: missing,
@@ -143,7 +143,7 @@ impl HostPartStore for SqliteBigRepoStore {
                 )
                 AND txid > ?3",
             self.scope().id(),
-            Self::part_blob(part_id),
+            Self::part_blob(part_id.clone()),
             since
         )
         .fetch_one(&self.sql.read_pool)
@@ -271,7 +271,7 @@ impl HostPartStore for SqliteBigRepoStore {
              FROM big_sync_parts
              WHERE scope_id = ?1 AND part_id = ?2",
             self.scope().id(),
-            Self::part_blob(req.part_id)
+            Self::part_blob(req.part_id.clone())
         )
         .fetch_optional(&self.sql.read_pool)
         .await?;
@@ -293,8 +293,8 @@ impl HostPartStore for SqliteBigRepoStore {
         query.push(" AND part_id = ");
         query.push_bind(Self::part_blob(req.part_id));
         query.push(")");
-        query.push(" AND level = ");
-        query.push_bind(i64::from(req.offset.level()));
+        query.push(" AND level <= ");
+        query.push_bind(i64::from(req.to_level));
         query.push(" AND buck_id >= ");
         query.push_bind(Self::buck_i64(req.offset));
         query.push(" AND changed_at > ");
@@ -354,7 +354,7 @@ impl HostPartStore for SqliteBigRepoStore {
              FROM big_sync_parts
              WHERE scope_id = ?1 AND part_id = ?2",
             self.scope().id(),
-            Self::part_blob(req.part_id)
+            Self::part_blob(req.part_id.clone())
         )
         .fetch_optional(&self.sql.read_pool)
         .await?;
@@ -377,10 +377,10 @@ impl HostPartStore for SqliteBigRepoStore {
 
         // Dynamic IN-list cardinality requires runtime SQL checking here.
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "WITH requested(req_ord, buck_id, lower_id, upper_id, after_id) AS (",
+            "WITH requested(req_ord, buck_id, lower_index, upper_index, after_id) AS (",
         );
         for (req_ord, buck_req) in req.buckets.iter().enumerate() {
-            let (lower_id, upper_id) = obj_id_bounds_for_bucket(buck_req.buck_id);
+            let (lower_index, upper_index) = big_sync::bucket_index_bounds(buck_req.buck_id);
             if req_ord > 0 {
                 query.push(" UNION ALL ");
             }
@@ -389,15 +389,15 @@ impl HostPartStore for SqliteBigRepoStore {
             query.push(" AS req_ord, ");
             query.push_bind(Self::buck_i64(buck_req.buck_id));
             query.push(" AS buck_id, ");
-            query.push_bind(Self::obj_blob(lower_id));
-            query.push(" AS lower_id, ");
-            if let Some(upper_id) = upper_id {
-                query.push_bind(Self::obj_blob(upper_id));
+            query.push_bind(i64::from(lower_index));
+            query.push(" AS lower_index, ");
+            if let Some(upper_index) = upper_index {
+                query.push_bind(i64::from(upper_index));
             } else {
                 query.push("NULL");
             }
-            query.push(" AS upper_id, ");
-            if let Some(after) = buck_req.after {
+            query.push(" AS upper_index, ");
+            if let Some(after) = buck_req.after.clone() {
                 query.push_bind(Self::obj_blob(after));
             } else {
                 query.push("NULL");
@@ -435,8 +435,8 @@ impl HostPartStore for SqliteBigRepoStore {
                  AND s.changed_at > ",
         );
         query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
-        query.push(" WHERE o.obj_id >= r.lower_id");
-        query.push(" AND (r.upper_id IS NULL OR o.obj_id < r.upper_id)");
+        query.push(" WHERE o.buck_index >= r.lower_index");
+        query.push(" AND (r.upper_index IS NULL OR o.buck_index < r.upper_index)");
         query.push(" AND (r.after_id IS NULL OR o.obj_id > r.after_id)");
         query.push(
             "
@@ -469,7 +469,7 @@ impl HostPartStore for SqliteBigRepoStore {
             let fp = if dead {
                 Fingerprint::new(
                     &req.seed,
-                    &("big-sync-obj-fp-v1", obj_id, serde_json::Value::Null),
+                    &("big-sync-obj-fp-v1", obj_id.clone(), serde_json::Value::Null),
                 )
             } else {
                 let payload_json: Option<String> = row.try_get("payload_json")?;
@@ -478,7 +478,7 @@ impl HostPartStore for SqliteBigRepoStore {
                     .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
-                Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id, payload))
+                Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id.clone(), payload))
             };
             page.entries.push(BucketObjPageEntry { obj_id, dead, fp });
         }
@@ -489,7 +489,7 @@ impl HostPartStore for SqliteBigRepoStore {
             let next_after = if done || page.entries.is_empty() {
                 None
             } else {
-                Some(page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id)
+                Some(page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id.clone())
             };
             bucks.insert(
                 page.buck_id,
@@ -507,12 +507,8 @@ impl HostPartStore for SqliteBigRepoStore {
     }
 
     async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
-        let parts = parts
-            .into_iter()
-            .filter(|part_id| *part_id != crate::global_part_id())
-            .collect::<Vec<_>>();
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id).await?;
+        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id.clone()).await?;
         let payload_json: Option<String> = sqlx::query_scalar!(
             "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
             obj_ref
@@ -531,8 +527,8 @@ impl HostPartStore for SqliteBigRepoStore {
         let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
         let mut events = Vec::new();
         for part_id in parts {
-            let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
-            let old = self.load_member_state(&mut tx, part_id, obj_id).await?;
+            let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
+            let old = self.load_member_state(&mut tx, part_id.clone(), obj_id.clone()).await?;
             if matches!(old, MemberState::Live(_)) {
                 continue;
             }
@@ -540,8 +536,8 @@ impl HostPartStore for SqliteBigRepoStore {
             sqlx::query!("INSERT INTO big_sync_members(scope_id,obj_ref,maybe_part_ref,event_type,txid) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(obj_ref,maybe_part_ref) DO UPDATE SET event_type=excluded.event_type,txid=excluded.txid", self.scope().id(), obj_ref, part_ref, EVENT_ADDED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)).execute(&mut *tx).await?;
             self.apply_bucket_transition(
                 &mut tx,
-                part_id,
-                obj_id,
+                part_id.clone(),
+                obj_id.clone(),
                 cursor,
                 &old,
                 &MemberState::Live(payload.clone()),
@@ -561,7 +557,7 @@ impl HostPartStore for SqliteBigRepoStore {
             events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                 cursor,
                 part_id,
-                obj_id,
+                obj_id: obj_id.clone(),
                 payload: payload.clone(),
             }));
         }
@@ -572,13 +568,13 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(obj_ref) = self.core.find_obj_ref(obj_id).await? else {
+        let Some(obj_ref) = self.core.find_obj_ref(obj_id.clone()).await? else {
             tx.commit().await?;
             return Ok(());
         };
-        let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+        let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
         sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-        let old_state = self.load_member_state(&mut tx, part_id, obj_id).await?;
+        let old_state = self.load_member_state(&mut tx, part_id.clone(), obj_id.clone()).await?;
         let MemberState::Live(old_payload) = old_state else {
             tx.commit().await?;
             return Ok(());
@@ -593,8 +589,8 @@ impl HostPartStore for SqliteBigRepoStore {
         self.core
             .apply_bucket_transition(
                 &mut tx,
-                part_id,
-                obj_id,
+                part_id.clone(),
+                obj_id.clone(),
                 cursor,
                 &MemberState::Live(old_payload),
                 &MemberState::Dead,
@@ -711,7 +707,7 @@ impl HostPartStore for SqliteBigRepoStore {
                   ORDER BY m.txid, m.obj_ref",
             )
             .bind(self.scope().id())
-            .bind(Self::part_blob(part_id))
+            .bind(Self::part_blob(part_id.clone()))
             .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
             .bind(i64::from(limit))
             .fetch_all(&self.sql.read_pool)
@@ -733,7 +729,7 @@ impl HostPartStore for SqliteBigRepoStore {
                      ) THEN 1 ELSE 0 END",
                 )
                 .bind(self.scope().id())
-                .bind(Self::part_blob(part_id))
+                .bind(Self::part_blob(part_id.clone()))
                 .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
                 .bind(cutoff)
                 .fetch_one(&self.sql.read_pool)
@@ -753,7 +749,7 @@ impl HostPartStore for SqliteBigRepoStore {
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
                 if enforce_policy
-                    && Self::permitted_parts(self, PartScope::Part(part_id), obj_id, None)
+                    && Self::permitted_parts(self, PartScope::Part(part_id.clone()), obj_id.clone(), None)
                         .await?
                         .is_some_and(|readable| readable.is_empty())
                 {
@@ -762,18 +758,18 @@ impl HostPartStore for SqliteBigRepoStore {
                 events.push(match row.try_get::<i64, _>("event_type")? {
                     EVENT_REMOVED => PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
                         cursor: txid,
-                        part_id,
+                        part_id: part_id.clone(),
                         obj_id,
                     }),
                     EVENT_ADDED => PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                         cursor: txid,
-                        part_id,
+                        part_id: part_id.clone(),
                         obj_id,
                         payload,
                     }),
                     _ => PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor: txid,
-                        part_ids: vec![part_id],
+                        part_ids: vec![part_id.clone()],
                         obj_id,
                         payload,
                     }),
@@ -856,7 +852,7 @@ impl HostPartStore for SqliteBigRepoStore {
         .execute(&mut *tx)
         .await?;
         for (principal, access) in &agents {
-            sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(*principal), encode_access(access), changed_at).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(principal.clone()), encode_access(access), changed_at).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -872,7 +868,7 @@ impl HostPartStore for SqliteBigRepoStore {
         let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
         let changed_at =
             i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
-        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3", self.scope().id(), part_ref, Self::peer_blob(member)).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3", self.scope().id(), part_ref, Self::peer_blob(member.clone())).execute(&mut *tx).await?;
         sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(member), encode_access(&access), changed_at).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())

@@ -369,8 +369,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
         );
         let mut guard = DocSyncWaiterGuard {
             cmd_tx: self.cmd_tx.clone(),
-            doc_id,
-            peer_id,
+            doc_id: doc_id.clone(),
+            peer_id: peer_id.clone(),
             waiter_id,
             completed: false,
         };
@@ -404,7 +404,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
         let mut guard = KeyhiveSyncWaiterGuard {
             cmd_tx: self.cmd_tx.clone(),
-            peer_id,
+            peer_id: peer_id.clone(),
             waiter_id,
             completed: false,
         };
@@ -500,7 +500,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     pub async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> eyre::Result<Vec<Vec<u8>>> {
         let (resp, rx) = futures::channel::oneshot::channel();
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         self.cmd_tx
             .send(Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp })
             .await
@@ -564,8 +564,8 @@ impl Drop for DocSyncWaiterGuard {
     fn drop(&mut self) {
         if !self.completed {
             drop(self.cmd_tx.try_send(Runtime2Cmd::CancelDocSyncWaiter {
-                doc_id: self.doc_id,
-                peer_id: self.peer_id,
+                doc_id: self.doc_id.clone(),
+                peer_id: self.peer_id.clone(),
                 waiter_id: self.waiter_id,
             }));
         }
@@ -583,7 +583,7 @@ impl Drop for KeyhiveSyncWaiterGuard {
     fn drop(&mut self) {
         if !self.completed {
             drop(self.cmd_tx.try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
-                peer_id: self.peer_id,
+                peer_id: self.peer_id.clone(),
                 waiter_id: self.waiter_id,
             }));
         }

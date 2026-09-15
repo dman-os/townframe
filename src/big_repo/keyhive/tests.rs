@@ -105,7 +105,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
         .await?;
     // A reservation is not yet a Keyhive authority: no document exists and
     // no group contains it.
-    assert!(!owner.document_has_content(doc_id).await?);
+    assert!(!owner.document_has_content(doc_id.clone()).await?);
     assert!(
         !owner
             .group_document_ids(&pending_group)
@@ -122,9 +122,9 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     // Finalization creates the document under the reserved identity with the
     // real content heads and the reserved parents.
     owner
-        .finalize_reserved_doc(doc_id, nonempty::nonempty!([7u8; 32]), &protocol, &storage)
+        .finalize_reserved_doc(doc_id.clone(), nonempty::nonempty!([7u8; 32]), &protocol, &storage)
         .await?;
-    assert!(owner.document_has_content(doc_id).await?);
+    assert!(owner.document_has_content(doc_id.clone()).await?);
     assert!(
         owner
             .group_document_ids(&pending_group)
@@ -139,7 +139,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     );
 
     owner
-        .revoke_group_from_doc(&pending_group, doc_id, vec![vec![7; 32]], &protocol)
+        .revoke_group_from_doc(&pending_group, doc_id.clone(), vec![vec![7; 32]], &protocol)
         .await?;
     assert!(
         !owner
@@ -208,7 +208,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .create_doc(vec![core_docs.into()], nonempty![[7; 32]], &protocol)
         .await?;
     let keyhive = owner.clone_keyhive();
-    let kh_doc_id = keyhive_doc_id(doc_id)?;
+    let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
     let doc = keyhive
         .get_document(kh_doc_id)
         .await
