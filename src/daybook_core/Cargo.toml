@@ -46,8 +46,10 @@ sqlx_utils_rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
-sha2 = "0.10.9"
+bytes.workspace = true
+sha2.workspace = true
 blake3.workspace = true
+data-encoding.workspace = true
 semver.workspace = true
 atproto-dasl.workspace = true
 
@@ -126,6 +128,11 @@ iroh-tickets.workspace = true
 iroh-blobs.workspace = true
 
 #
+# crypto (RFC 8188 aes128gcm envelope)
+aes-gcm.workspace = true
+bao-tree.workspace = true
+hkdf.workspace = true
+
 # actors
 irpc-iroh.workspace = true
 irpc.workspace = true

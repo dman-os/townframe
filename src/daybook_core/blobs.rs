@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 use tokio::io::AsyncWriteExt;
 
+pub mod encrypt;
 pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;

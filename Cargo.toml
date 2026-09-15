@@ -40,6 +40,13 @@ repository = ""
 [workspace.dependencies]
 #
 # internal
+#
+# crypto (RFC 8188 aes128gcm envelope)
+aes-gcm = "0.10"
+bao-tree = { version = "0.16", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
+hkdf = "0.12"
+sha2 = "0.10"
+
 utils_rs = { path = "./src/utils_rs", default-features = false }
 sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
@@ -229,6 +236,8 @@ irpc-iroh = "0.17.0"
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+# virtual-blob fork: outboard-only entries served by registered providers
+iroh-blobs = { path = "/home/asdf/repos/rust/iroh-blobs" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
