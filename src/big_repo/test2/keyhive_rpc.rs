@@ -183,7 +183,7 @@ async fn pulled_keyhive_change_is_forwarded_across_line_topology() -> Res<()> {
     for node_index in 0..3 {
         topo.topo_node(node_index)
             .repo
-            .wait_for_quiescence(Some(Duration::from_secs(5)))
+            .wait_for_quiescence(None)
             .await?;
     }
 

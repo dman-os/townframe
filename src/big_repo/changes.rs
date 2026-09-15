@@ -79,16 +79,20 @@ pub enum BigRepoLocalNotification {
 
 #[derive(Debug, Clone)]
 pub enum BigRepoHeadNotification {
-    DocHeadsChanged {
+    SedimentreeHeadsChanged {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
+        origin: BigRepoChangeOrigin,
+    },
+    ColdSedimentreeHeadsUpdated {
+        doc_id: DocumentId,
         origin: BigRepoChangeOrigin,
     },
 }
 
 #[derive(Debug, Clone)]
 pub enum BigRepoPendingHeadNotification {
-    DocPendingHeads {
+    DocPendingSedimentreeHeads {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
         origin: BigRepoChangeOrigin,
@@ -427,16 +431,16 @@ impl ChangeListenerManager {
     }
 
     #[tracing::instrument(skip(self, heads))]
-    pub(super) fn notify_doc_heads_changed(
+    pub(super) fn notify_sedimentree_heads_changed(
         &self,
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         self.ensure_live()?;
-        trace!("queue doc heads notification");
+        trace!("queue sedimentree heads notification");
         self.head_tx
-            .send(vec![BigRepoHeadNotification::DocHeadsChanged {
+            .send(vec![BigRepoHeadNotification::SedimentreeHeadsChanged {
                 doc_id,
                 heads,
                 origin,
@@ -444,21 +448,38 @@ impl ChangeListenerManager {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
+    pub(super) fn notify_cold_sedimentree_heads_updated(
+        &self,
+        doc_id: DocumentId,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        trace!("queue cold sedimentree heads notification");
+        self.head_tx
+            .send(vec![BigRepoHeadNotification::ColdSedimentreeHeadsUpdated {
+                doc_id,
+                origin,
+            }])?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self, heads))]
-    pub(super) fn notify_doc_pending_heads_changed(
+    pub(super) fn notify_doc_pending_sedimentree_heads_changed(
         &self,
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         self.ensure_live()?;
-        trace!("queue doc pending heads notification");
-        self.pending_head_tx
-            .send(vec![BigRepoPendingHeadNotification::DocPendingHeads {
+        trace!("queue doc pending sedimentree heads notification");
+        self.pending_head_tx.send(vec![
+            BigRepoPendingHeadNotification::DocPendingSedimentreeHeads {
                 doc_id,
                 heads,
                 origin,
-            }])?;
+            },
+        ])?;
         Ok(())
     }
 
@@ -1112,7 +1133,8 @@ fn head_notification_matches_filter(
     filter: &HeadFilter,
 ) -> bool {
     let doc_id = match notification {
-        BigRepoHeadNotification::DocHeadsChanged { doc_id, .. } => doc_id,
+        BigRepoHeadNotification::SedimentreeHeadsChanged { doc_id, .. } => doc_id,
+        BigRepoHeadNotification::ColdSedimentreeHeadsUpdated { doc_id, .. } => doc_id,
     };
     !filter
         .doc_id
@@ -1126,7 +1148,7 @@ fn pending_head_notification_matches_filter(
     filter: &PendingHeadFilter,
 ) -> bool {
     let doc_id = match notification {
-        BigRepoPendingHeadNotification::DocPendingHeads { doc_id, .. } => doc_id,
+        BigRepoPendingHeadNotification::DocPendingSedimentreeHeads { doc_id, .. } => doc_id,
     };
     !filter
         .doc_id
@@ -1282,7 +1304,7 @@ mod tests {
             .await?;
 
         drop(registration);
-        manager.notify_doc_heads_changed(doc_id, heads, BigRepoChangeOrigin::Bootstrap)?;
+        manager.notify_sedimentree_heads_changed(doc_id, heads, BigRepoChangeOrigin::Bootstrap)?;
         let closed = timeout(Duration::from_millis(250), rx.recv())
             .await
             .expect("expected receiver to resolve")
@@ -1379,7 +1401,7 @@ mod tests {
             })
             .await?;
 
-        manager.notify_doc_heads_changed(
+        manager.notify_sedimentree_heads_changed(
             doc_id,
             heads,
             BigRepoChangeOrigin::Remote {
@@ -1389,7 +1411,7 @@ mod tests {
         let batch = recv_batch(&mut rx).await;
         assert!(matches!(
             batch.as_slice(),
-            [BigRepoHeadNotification::DocHeadsChanged {
+            [BigRepoHeadNotification::SedimentreeHeadsChanged {
                 doc_id: seen_doc_id,
                 origin: BigRepoChangeOrigin::Remote { .. },
                 ..

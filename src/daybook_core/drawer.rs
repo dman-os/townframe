@@ -219,7 +219,7 @@ impl DrawerRepo {
         if branch_path.is_absolute() {
             return Ok(BranchKind::Replicated);
         }
-        eyre::bail!("invalid branch path '{}'", branch_path)
+        eyre::bail!("invalid branch path '{}'", branch_path);
     }
 
     pub(crate) fn replicated_partition_id(&self) -> PartId {

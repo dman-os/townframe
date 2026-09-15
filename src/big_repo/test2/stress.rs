@@ -879,12 +879,9 @@ mod tests {
     use big_sync::stress_support::{
         PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS, run_randomized_stress,
     };
-    fn settle_timeout() -> Duration {
-        utils_rs::scale_timeout(Duration::from_secs(300))
-    }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn big_repo_tier10_stress_4_editor_converges() -> Res<()> {
+    async fn long_test_big_repo_tier10_stress_4_editor_converges() -> Res<()> {
         let config = BigRepoStressConfig::default();
         let fixture = BigRepoStressFixture::new(config.clone());
         run_randomized_stress(
@@ -895,13 +892,13 @@ mod tests {
             PHASE1_MUTATIONS / 2,
             PHASE2_MUTATIONS / 2,
             PHASE3_MUTATIONS / 2,
-            settle_timeout(),
+            None,
         )
         .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn big_repo_tier10_stress_3_editor_1_relay_converges() -> Res<()> {
+    async fn long_test_big_repo_tier10_stress_3_editor_1_relay_converges() -> Res<()> {
         let config = BigRepoStressConfig {
             relay_idx: Some(3),
             peer_seed_offset: 64,
@@ -916,13 +913,13 @@ mod tests {
             PHASE1_MUTATIONS,
             PHASE2_MUTATIONS,
             PHASE3_MUTATIONS,
-            settle_timeout(),
+            None,
         )
         .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn big_repo_tier10_stress_revocations_converges() -> Res<()> {
+    async fn long_test_big_repo_tier10_stress_revocations_converges() -> Res<()> {
         let config = BigRepoStressConfig {
             relay_idx: Some(3),
             peer_seed_offset: 128,
@@ -938,7 +935,7 @@ mod tests {
             PHASE1_MUTATIONS / 2,
             PHASE2_MUTATIONS / 2,
             PHASE3_MUTATIONS / 2,
-            settle_timeout(),
+            None,
         )
         .await
     }

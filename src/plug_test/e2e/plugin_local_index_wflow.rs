@@ -5,7 +5,8 @@ use sqlx_utils_rs::SqlCtx;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Res<()> {
-    let test_context = crate::e2e::test_cx(utils_rs::function_full!()).await?;
+    let test_context = daybook_core::test_support::test_cx(utils_rs::function_full!()).await?;
+    super::common::import_test_plug_oci(&test_context).await?;
     let note_facet_key = FacetKey::from(WellKnownFacetTag::Note);
     let note_facet_ref = daybook_types::url::build_facet_ref(
         daybook_types::url::FACET_SELF_DOC_ID,
@@ -61,13 +62,13 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
     let index_dispatch_id = test_context
         .rt
         .dispatch(
-            "@daybook/wip",
+            "@daybook/test",
             "index-embedding",
-            crate::rt::DispatchArgs::DocRoutine {
+            daybook_core::rt::DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 heads,
-                invocation: crate::rt::dispatch::RoutineInvocation::Command,
+                invocation: daybook_core::rt::dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: None,
             },
@@ -81,7 +82,7 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
     let sqlite_file_path = test_context
         .rt
         .sqlite_local_state_repo
-        .get_sqlite_file_path("@daybook/wip/doc-embedding-index")
+        .get_sqlite_file_path("@daybook/test/doc-embedding-index")
         .await?;
     let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
     let db = SqlCtx::url(&sqlite_url).await?;

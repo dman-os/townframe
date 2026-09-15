@@ -71,7 +71,7 @@
                 "wasm32-wasip2"
               ]
               ++ (
-                if pkgs.stdenv.isLinux then
+                if pkgs.stdenv.hostPlatform.isLinux then
                   [
                     "x86_64-unknown-linux-gnu"
                     "aarch64-unknown-linux-gnu"
@@ -108,7 +108,7 @@
           };
 
           ndkHostTag =
-            if pkgs.stdenv.isDarwin then
+            if pkgs.stdenv.hostPlatform.isDarwin then
               (
                 if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then
                   "darwin-aarch64"

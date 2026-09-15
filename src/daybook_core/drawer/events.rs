@@ -79,11 +79,7 @@ impl DrawerRepo {
                 // Invalidate caches for updated docs
                 for event in &events {
                     match event {
-                        DrawerEvent::DocUpdated { id, .. } | DrawerEvent::DocAdded { id, .. } => {
-                            self.invalidate_entry_cache(id);
-                            self.invalidate_facet_cache_doc(id);
-                        }
-                        DrawerEvent::DocDeleted { id, .. } => {
+                        DrawerEvent::DocAdded { id, .. } | DrawerEvent::DocDeleted { id, .. } => {
                             self.invalidate_entry_cache(id);
                             self.invalidate_facet_cache_doc(id);
                         }
@@ -182,13 +178,8 @@ impl DrawerRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
         live_origin: Option<&BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        _exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
-        // Live notification path: local writes are emitted by mutators.
-        // Replay/diff paths pass `live_origin = None`.
-        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
-            return Ok(());
-        }
         // Prefix: docs.map
         if !big_repo::big_repo_path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
             return Ok(());
@@ -274,33 +265,6 @@ impl DrawerRepo {
                         drawer_heads: drawer_heads.clone(),
                         origin: event_origin.clone(),
                     });
-                } else {
-                    let previous_heads = new_entry
-                        .previous_version_heads
-                        .as_ref()
-                        .ok_or_eyre("doc update missing previous_version_heads")?;
-                    let old_entry = self
-                        .get_entry_at_heads(&doc_id, previous_heads)
-                        .await?
-                        .unwrap_or_else(|| DocEntry {
-                            branches: HashMap::new(),
-                            branches_deleted: HashMap::new(),
-                            vtag: crate::stores::VersionTag::update(self.local_actor_id.clone()),
-                            previous_version_heads: None,
-                        });
-                    if old_entry.branches != new_entry.branches {
-                        let entry = self
-                            .current_doc_branches(&doc_id)
-                            .await?
-                            .ok_or_eyre("drawer doc updated but branch state missing")?;
-                        out.push(DrawerEvent::DocUpdated {
-                            id: doc_id,
-                            entry,
-                            diff: crate::drawer::DocEntryDiff::new(&old_entry, &new_entry, vec![]),
-                            drawer_heads,
-                            origin: event_origin,
-                        });
-                    }
                 }
             }
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {

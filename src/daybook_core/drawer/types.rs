@@ -106,7 +106,7 @@ impl DocNBranches {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DocEntryDiff {
     pub changed_facet_keys: Vec<FacetKey>,
@@ -156,13 +156,6 @@ pub enum DrawerEvent {
     DocAdded {
         id: DocId,
         entry: DocNBranches,
-        drawer_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
-    DocUpdated {
-        id: DocId,
-        entry: DocNBranches,
-        diff: DocEntryDiff,
         drawer_heads: ChangeHashSet,
         origin: crate::event_origin::SwitchEventOrigin,
     },

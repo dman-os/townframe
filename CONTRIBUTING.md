@@ -83,7 +83,6 @@ cargo x build-plug-oci --plug-root ./src/plug_test/
 
 The following are not in use and possibly dead code.
 
-- `./src/daybook_wflows/`: wflows for daybook.
 - `./src/daybook_sql/`: wit bindings for sql.
 
 ## Style guide

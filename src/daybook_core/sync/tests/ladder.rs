@@ -32,7 +32,7 @@ async fn boot_connected_sync_pair()
     let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
     info!("XXX waiting");
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
     Ok((temp_root, node_a, node_b, endpoint_id_a))
 }
@@ -218,28 +218,24 @@ async fn wait_for_synced_doc_on_both_sides(
     right: &SyncTestNode,
     doc_id: &String,
     branch: &BranchPathBuf,
-    timeout: Duration,
 ) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
-    tokio::time::timeout(utils_rs::scale_timeout(timeout), async {
-        loop {
-            let left_doc = left
-                .drawer
-                .get_doc_bundle_at_branch(doc_id, branch, None)
-                .await?;
-            let right_doc = right
-                .drawer
-                .get_doc_bundle_at_branch(doc_id, branch, None)
-                .await?;
-            if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc)
-                && left_doc.doc.id == right_doc.doc.id
-                && left_doc.doc.facets == right_doc.doc.facets
-            {
-                return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+    loop {
+        let left_doc = left
+            .drawer
+            .get_doc_bundle_at_branch(doc_id, branch, None)
+            .await?;
+        let right_doc = right
+            .drawer
+            .get_doc_bundle_at_branch(doc_id, branch, None)
+            .await?;
+        if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc)
+            && left_doc.doc.id == right_doc.doc.id
+            && left_doc.doc.facets == right_doc.doc.facets
+        {
+            return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
         }
-    })
-    .await?
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -247,7 +243,7 @@ async fn iroh_sync_two_nodes_can_connect() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
     let (_temp_root, node_a, node_b, endpoint_id) = boot_connected_sync_pair().await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id).await?;
 
     node_b.stop().await?;
     node_a.stop().await?;
@@ -297,7 +293,7 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
         let addr_a = node_a.sync_repo.endpoint_addr();
         let endpoint_id_a = addr_a.id;
         node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-        wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
         let doc_on_a = node_a
             .drawer
@@ -385,7 +381,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         let addr_a = node_a.sync_repo.endpoint_addr();
         let endpoint_id_a = addr_a.id;
         node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-        wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
         let doc_on_a = node_a
             .drawer
@@ -435,9 +431,9 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
-            .wait_for_full_sync(&[peer_id_a], &[blob_part], Duration::from_secs(60))
+            .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
             .await?;
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, None).await?;
         assert_eq!(got, payload);
     }
 
@@ -472,7 +468,7 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     let addr_a = node_a.sync_repo.endpoint_addr();
     let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
     {
         let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
@@ -553,7 +549,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     let addr_a = node_a.sync_repo.endpoint_addr();
     let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
     {
         let payload = b"connected sync blob".to_vec();
@@ -587,9 +583,9 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
-            .wait_for_full_sync(&[peer_id_a], &[blob_part], Duration::from_secs(60))
+            .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
             .await?;
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, None).await?;
         assert_eq!(got, payload);
         wait_for_doc_head_parity(
             &node_a,
@@ -846,13 +842,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
         let reopened_b = open_sync_node(&repo_b_path).await?;
         let reopened_endpoint_addr = reopened_b.sync_repo.connect_url(&ticket_a).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &reopened_b,
-            reopened_endpoint_addr.id,
-            Duration::from_secs(20),
-        )
-        .await?;
+        wait_for_sync_convergence(&node_a, &reopened_b, reopened_endpoint_addr.id).await?;
         {
             let Some((_, heads)) = node_a
                 .drawer
@@ -986,34 +976,16 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .connect_endpoint_addr(reopened_addr_a)
             .await?;
 
-        wait_for_sync_convergence(
-            &reopened_a,
-            &node_b,
-            reopened_endpoint_id,
-            Duration::from_secs(60),
-        )
-        .await?;
+        wait_for_sync_convergence(&reopened_a, &node_b, reopened_endpoint_id).await?;
 
         wait_for_doc_presence_with_activity(&reopened_a, &doc_on_a, Duration::from_secs(60))
             .await?;
 
         let branch = BranchPathBuf::from("main");
-        let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(
-            &reopened_a,
-            &node_b,
-            &doc_on_a,
-            &branch,
-            Duration::from_secs(60),
-        )
-        .await?;
-        let (doc_b_on_reopened_a, doc_b_on_b) = wait_for_synced_doc_on_both_sides(
-            &reopened_a,
-            &node_b,
-            &doc_on_b,
-            &branch,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let (doc_a_on_reopened_a, doc_a_on_b) =
+            wait_for_synced_doc_on_both_sides(&reopened_a, &node_b, &doc_on_a, &branch).await?;
+        let (doc_b_on_reopened_a, doc_b_on_b) =
+            wait_for_synced_doc_on_both_sides(&reopened_a, &node_b, &doc_on_b, &branch).await?;
 
         assert_eq!(doc_a_on_reopened_a.id, doc_a_on_b.id);
         assert_eq!(doc_a_on_reopened_a.facets, doc_a_on_b.facets);
@@ -1164,7 +1136,7 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
         .sync_repo
         .connect_endpoint_addr(addr_a.clone())
         .await?;
-    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id, Duration::from_secs(60)).await?;
+    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id).await?;
 
     // Merge feature-a into main on Node A, and feature-b into main on Node B.
     node_a
@@ -1176,17 +1148,11 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
         .merge_from_branch(&doc_id, &main_branch, &branch_b, Some(&user_path_b))
         .await?;
 
-    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id, Duration::from_secs(60)).await?;
+    wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id).await?;
 
     // 7. Verify both nodes reach identical merged facet state on main branch.
-    let (doc_a, doc_b) = wait_for_synced_doc_on_both_sides(
-        &node_a,
-        &reopened_b,
-        &doc_id,
-        &main_branch,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let (doc_a, doc_b) =
+        wait_for_synced_doc_on_both_sides(&node_a, &reopened_b, &doc_id, &main_branch).await?;
 
     assert_eq!(doc_a.id, doc_b.id);
     assert_eq!(doc_a.facets, doc_b.facets);

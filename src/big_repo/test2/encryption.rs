@@ -184,8 +184,8 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, editor_agent, Access::Edit)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Owner writes post-grant content.
     owner_doc
@@ -196,13 +196,8 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
         .await??;
 
     // Sync the post-grant content so the editor can learn about it.
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     // Blobs are encrypted.
     assert_blobs_encrypted(&pair.left().repo, doc_id).await;
@@ -365,8 +360,8 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -378,8 +373,8 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
         .await??;
 
     // Sync pre-revoke content to owner before revoking.
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
     let _owner_sync =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
     drop(_owner_sync);
@@ -390,8 +385,8 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
         .repo
         .revoke_doc_access(doc_id, editor_agent)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Owner writes new content AFTER revocation.
     owner_doc
@@ -481,8 +476,8 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, editor_agent, Access::Edit)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -505,24 +500,14 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
 
     // --- Reconnect and merge.
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Sync bidirectionally: editor pulls owner's fork, owner pulls editor's fork.
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.left()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     // Both sides must see both forks.
     let owner_recheck = pair
@@ -612,8 +597,8 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -638,8 +623,8 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
 
     // Reconnect and sync keyhive (restores membership from archive).
     pair.connect().await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // After archive roundtrip, the right node must be able to materialise
     // the document through the standard sync path (which exercises the full

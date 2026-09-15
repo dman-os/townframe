@@ -1,16 +1,18 @@
-use crate::{blobs::blob_id_to_digest_str, interlude::*};
+use crate::interlude::*;
 
+use daybook_core::blobs::blob_id_to_digest_str;
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ocr_image_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx_with_options(
+    let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
-        crate::e2e::DaybookTestCxOptions {
+        daybook_core::test_support::DaybookTestCxOptions {
             provision_mltools_models: true,
         },
     )
     .await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
 
     let image_bytes = include_bytes!("./sample.jpg");
     let blob_id = test_cx.rt.blobs_repo.put(image_bytes).await?;

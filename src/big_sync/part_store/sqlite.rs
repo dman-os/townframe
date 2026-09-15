@@ -2160,7 +2160,9 @@ mod tests {
                 match timeout(Duration::from_secs(5), rx.recv()).await? {
                     Ok(SubEvent::ReplayComplete) => return Ok(()),
                     Ok(_) => continue,
-                    Err(_) => eyre::bail!("sub channel closed during replay"),
+                    Err(_) => {
+                        eyre::bail!("sub channel closed during replay");
+                    }
                 }
             }
         }
@@ -2413,7 +2415,9 @@ mod tests {
             match timeout(Duration::from_secs(5), rx.recv()).await? {
                 Ok(SubEvent::ReplayComplete) => break,
                 Ok(_) => continue,
-                Err(_) => eyre::bail!("sub channel closed during replay"),
+                Err(_) => {
+                    eyre::bail!("sub channel closed during replay");
+                }
             }
         }
 
@@ -2477,7 +2481,9 @@ mod tests {
             match timeout(Duration::from_secs(5), rx.recv()).await? {
                 Ok(SubEvent::ReplayComplete) => break,
                 Ok(_) => continue,
-                Err(_) => eyre::bail!("sub channel closed during replay"),
+                Err(_) => {
+                    eyre::bail!("sub channel closed during replay");
+                }
             }
         }
 
@@ -2554,7 +2560,9 @@ mod tests {
             match timeout(Duration::from_secs(5), rx.recv()).await? {
                 Ok(SubEvent::ReplayComplete) => break,
                 Ok(_) => continue,
-                Err(_) => eyre::bail!("sub channel closed during replay"),
+                Err(_) => {
+                    eyre::bail!("sub channel closed during replay");
+                }
             }
         }
 
@@ -2628,7 +2636,9 @@ mod tests {
             match timeout(Duration::from_secs(5), rx.recv()).await? {
                 Ok(SubEvent::ReplayComplete) => break,
                 Ok(_) => continue,
-                Err(_) => eyre::bail!("sub channel closed during replay"),
+                Err(_) => {
+                    eyre::bail!("sub channel closed during replay");
+                }
             }
         }
 
@@ -2712,7 +2722,9 @@ mod tests {
             match timeout(Duration::from_secs(5), rx.recv()).await? {
                 Ok(SubEvent::ReplayComplete) => break,
                 Ok(_) => continue,
-                Err(_) => eyre::bail!("sub channel closed during replay"),
+                Err(_) => {
+                    eyre::bail!("sub channel closed during replay");
+                }
             }
         }
 

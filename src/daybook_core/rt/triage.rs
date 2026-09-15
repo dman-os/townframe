@@ -334,6 +334,7 @@ impl DocProcessorTriageListener {
 impl SwitchSink for DocProcessorTriageListener {
     fn interest(&self) -> SwtchSinkInterest {
         SwtchSinkInterest {
+            consume_doc: true,
             consume_drawer: true,
             consume_plugs: true,
             consume_dispatch: true,
@@ -348,6 +349,132 @@ impl SwitchSink for DocProcessorTriageListener {
         ctx: &SwitchSinkCtx<'_>,
     ) -> Res<SwitchSinkOutcome> {
         match event {
+            SwitchEvent::Doc(event) => {
+                let branch_path = BranchPathBuf::from(event.branch_name.as_str());
+                if branch_path.to_string().starts_with("/tmp/") {
+                    return Ok(SwitchSinkOutcome::default());
+                }
+                let rt = ctx
+                    .rt
+                    .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+                let Some(facet_keys_set) = rt
+                    .drawer
+                    .get_facet_keys_if_latest(&event.doc_id, &branch_path, &event.new_heads)
+                    .await?
+                else {
+                    debug!(id = ?event.doc_id, ?branch_path, "skipping triage for stale heads");
+                    return Ok(SwitchSinkOutcome::default());
+                };
+                let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
+                if let Some(diff) = &event.diff {
+                    let non_dmeta_changed: HashSet<FacetKey> = diff
+                        .changed_facet_keys
+                        .iter()
+                        .cloned()
+                        .chain(diff.added_facet_keys.iter().cloned())
+                        .chain(diff.removed_facet_keys.iter().cloned())
+                        .filter(|facet_key| facet_key != &dmeta_key)
+                        .collect();
+                    let has_non_dmeta_change = !non_dmeta_changed.is_empty();
+                    let moved_any_branch = !diff.moved_branch_names.is_empty();
+                    let changed_facet_keys_set: Option<HashSet<FacetKey>> = if has_non_dmeta_change
+                    {
+                        if !changed_intersects_read_set(
+                            &non_dmeta_changed,
+                            &self.triage_read_tags,
+                            &self.triage_read_keys,
+                        ) {
+                            return Ok(SwitchSinkOutcome::default());
+                        }
+                        Some(non_dmeta_changed)
+                    } else if moved_any_branch {
+                        None
+                    } else {
+                        return Ok(SwitchSinkOutcome::default());
+                    };
+                    let added_facet_keys_set: Option<HashSet<FacetKey>> =
+                        if diff.added_facet_keys.is_empty() {
+                            None
+                        } else {
+                            Some(diff.added_facet_keys.iter().cloned().collect())
+                        };
+                    let removed_facet_keys_set: Option<HashSet<FacetKey>> =
+                        if diff.removed_facet_keys.is_empty() {
+                            None
+                        } else {
+                            Some(diff.removed_facet_keys.iter().cloned().collect())
+                        };
+                    let local_changed_facet_keys_set = rt
+                        .drawer
+                        .facet_keys_touched_by_local_actor(
+                            &event.doc_id,
+                            &branch_path,
+                            &event.new_heads,
+                            &diff
+                                .changed_facet_keys
+                                .iter()
+                                .cloned()
+                                .chain(diff.added_facet_keys.iter().cloned())
+                                .chain(diff.removed_facet_keys.iter().cloned())
+                                .filter(|key| *key != dmeta_key)
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
+                    let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
+                    let change_kind = if event.prev_heads.is_none() {
+                        DocChangeKind::Added
+                    } else {
+                        DocChangeKind::Updated
+                    };
+                    self.triage_doc(
+                        ctx,
+                        &event.doc_id,
+                        &event.new_heads,
+                        &meta_doc,
+                        branch_path,
+                        &event.origin,
+                        change_kind,
+                        changed_facet_keys_set.as_ref(),
+                        added_facet_keys_set.as_ref(),
+                        removed_facet_keys_set.as_ref(),
+                        Some(&local_changed_facet_keys_set),
+                    )
+                    .await
+                    .wrap_err("error triaging doc")?;
+                } else {
+                    let changed_facet_keys_set: HashSet<FacetKey> =
+                        facet_keys_set.iter().cloned().collect();
+                    let local_changed_facet_keys_set = rt
+                        .drawer
+                        .facet_keys_touched_by_local_actor(
+                            &event.doc_id,
+                            &branch_path,
+                            &event.new_heads,
+                            &changed_facet_keys_set
+                                .iter()
+                                .filter(|key| **key != dmeta_key)
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
+                    let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
+                    self.triage_doc(
+                        ctx,
+                        &event.doc_id,
+                        &event.new_heads,
+                        &meta_doc,
+                        branch_path,
+                        &event.origin,
+                        DocChangeKind::Added,
+                        Some(&changed_facet_keys_set),
+                        Some(&changed_facet_keys_set),
+                        None,
+                        Some(&local_changed_facet_keys_set),
+                    )
+                    .await
+                    .wrap_err("error triaging doc")?;
+                }
+            }
             SwitchEvent::Plugs(_) => {
                 let rt = ctx
                     .rt
@@ -462,119 +589,6 @@ impl SwitchSink for DocProcessorTriageListener {
                             Some(&changed_facet_keys_set),
                             Some(&changed_facet_keys_set),
                             None,
-                            Some(&local_changed_facet_keys_set),
-                        )
-                        .await
-                        .wrap_err("error triaging doc")?;
-                    }
-                }
-                DrawerEvent::DocUpdated {
-                    id,
-                    entry,
-                    diff,
-                    drawer_heads: _,
-                    origin,
-                } => {
-                    let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-                    let non_dmeta_changed: HashSet<FacetKey> = diff
-                        .changed_facet_keys
-                        .iter()
-                        .cloned()
-                        .chain(diff.added_facet_keys.iter().cloned())
-                        .chain(diff.removed_facet_keys.iter().cloned())
-                        .filter(|facet_key| facet_key != &dmeta_key)
-                        .collect();
-                    let has_non_dmeta_change = !non_dmeta_changed.is_empty();
-                    let moved_any_branch = !diff.moved_branch_names.is_empty();
-                    let changed_facet_keys_set: Option<HashSet<FacetKey>> = if has_non_dmeta_change
-                    {
-                        if !changed_intersects_read_set(
-                            &non_dmeta_changed,
-                            &self.triage_read_tags,
-                            &self.triage_read_keys,
-                        ) {
-                            return Ok(SwitchSinkOutcome::default());
-                        }
-                        Some(non_dmeta_changed)
-                    } else if moved_any_branch {
-                        None
-                    } else {
-                        return Ok(SwitchSinkOutcome::default());
-                    };
-                    let added_facet_keys_set: Option<HashSet<FacetKey>> =
-                        if diff.added_facet_keys.is_empty() {
-                            None
-                        } else {
-                            Some(diff.added_facet_keys.iter().cloned().collect())
-                        };
-                    let removed_facet_keys_set: Option<HashSet<FacetKey>> =
-                        if diff.removed_facet_keys.is_empty() {
-                            None
-                        } else {
-                            Some(diff.removed_facet_keys.iter().cloned().collect())
-                        };
-                    for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPathBuf::from(branch_name.as_str());
-                        if branch_path.to_string().starts_with("/tmp/") {
-                            continue;
-                        }
-                        if branch_name != "main"
-                            && !diff
-                                .moved_branch_names
-                                .iter()
-                                .any(|name| name == branch_name)
-                        {
-                            continue;
-                        }
-                        let rt = ctx
-                            .rt
-                            .ok_or_else(|| ferr!("triage listener context missing rt"))?;
-                        let Some(facet_keys_set) = rt
-                            .drawer
-                            .get_facet_keys_if_latest(id, &branch_path, heads)
-                            .await?
-                        else {
-                            debug!(?id, ?branch_path, "skipping triage for stale heads");
-                            continue;
-                        };
-                        let local_changed_facet_keys_set = rt
-                            .drawer
-                            .facet_keys_touched_by_local_actor(
-                                id,
-                                &branch_path,
-                                heads,
-                                &diff
-                                    .changed_facet_keys
-                                    .iter()
-                                    .cloned()
-                                    .chain(diff.added_facet_keys.iter().cloned())
-                                    .chain(diff.removed_facet_keys.iter().cloned())
-                                    .filter(|key| *key != FacetKey::from(WellKnownFacetTag::Dmeta))
-                                    .collect::<Vec<_>>(),
-                            )
-                            .await?;
-                        if changed_facet_keys_set
-                            .as_ref()
-                            .is_none_or(HashSet::is_empty)
-                            && added_facet_keys_set.as_ref().is_none_or(HashSet::is_empty)
-                            && removed_facet_keys_set
-                                .as_ref()
-                                .is_none_or(HashSet::is_empty)
-                        {
-                            continue;
-                        }
-                        let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
-                        self.triage_doc(
-                            ctx,
-                            id,
-                            heads,
-                            &meta_doc,
-                            branch_path,
-                            origin,
-                            DocChangeKind::Updated,
-                            changed_facet_keys_set.as_ref(),
-                            added_facet_keys_set.as_ref(),
-                            removed_facet_keys_set.as_ref(),
                             Some(&local_changed_facet_keys_set),
                         )
                         .await

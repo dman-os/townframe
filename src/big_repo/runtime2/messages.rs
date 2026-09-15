@@ -140,7 +140,6 @@ pub enum Runtime2Cmd {
         doc_id: DocumentId,
         peer_id: PeerId,
         waiter_id: u64,
-        timeout: Option<std::time::Duration>,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,

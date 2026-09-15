@@ -2,25 +2,18 @@
 slow-timeout = { period = "60s", terminate-after = 2 }
 flaky-result = "fail"
 
-# Heavy/ML tests that legitimately exceed the 120s default terminate
-# (CI runs with UTILS_RS_TIMEOUT_MULTIPLIER=3, scaling every internal wait).
 [[profile.default.overrides]]
-filter = 'test(/stress/)'
-slow-timeout = { period = "60s", terminate-after = 4 }
+filter = 'test(/long_af_test/)'
+slow-timeout = { period = "60s", terminate-after = 16 }
 
 [[profile.default.overrides]]
 filter = 'test(/long_test/)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
-[[profile.default.overrides]]
-filter = 'test(/long_af_test/)'
-slow-timeout = { period = "60s", terminate-after = 16 }
-
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
  
-
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"
 store-failure-output = true

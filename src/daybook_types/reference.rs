@@ -87,7 +87,7 @@ fn parse_json_path_segments(json_path: &str) -> Res<Vec<JsonPathSegment>> {
     eyre::bail!(
         "unsupported json path '{}'; expected JSON pointer '/a/b' or root-dot path '$.a.b'",
         json_path
-    )
+    );
 }
 
 fn select_json_pointer_values<'a>(
@@ -198,7 +198,7 @@ fn resolve_schema_node<'a>(
         };
         current = target;
     }
-    eyre::bail!("schema ref resolution exceeded recursion depth")
+    eyre::bail!("schema ref resolution exceeded recursion depth");
 }
 
 pub fn schema_allows_url_reference(schema_node: &serde_json::Value) -> bool {

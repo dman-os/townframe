@@ -92,7 +92,7 @@ impl SecretRepo {
                     let secret = utils_rs::hash::decode_base58_multibase(&secret)
                         .wrap_err("error decode bs58 secret")?;
                     if secret.len() != 32 {
-                        eyre::bail!("secret corruption, bad length")
+                        eyre::bail!("secret corruption, bad length");
                     }
                     let mut bytes = [0_u8; 32];
                     bytes.copy_from_slice(&secret);

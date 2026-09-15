@@ -203,8 +203,21 @@ fn switch_worker_is_shutting_down(
     worker_cancel_token.is_cancelled() || rt_cancel_token.is_cancelled()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SwitchDocEvent {
+    pub doc_id: DocId,
+    pub branch_name: String,
+    pub prev_heads: Option<ChangeHashSet>,
+    pub new_heads: ChangeHashSet,
+    pub diff: Option<crate::drawer::DocEntryDiff>,
+    pub drawer_heads: Option<ChangeHashSet>,
+    pub origin: crate::event_origin::SwitchEventOrigin,
+}
+
 #[derive(Debug, Clone)]
 pub enum SwitchEvent {
+    Doc(Arc<SwitchDocEvent>),
     Drawer(Arc<DrawerEvent>),
     Plugs(Arc<PlugsEvent>),
     Dispatch(Arc<DispatchEvent>),
@@ -213,6 +226,7 @@ pub enum SwitchEvent {
 
 #[derive(Debug, Clone)]
 pub struct SwtchSinkInterest {
+    pub consume_doc: bool,
     pub consume_drawer: bool,
     pub consume_plugs: bool,
     pub consume_dispatch: bool,
@@ -225,6 +239,7 @@ pub struct SwitchSinkOutcome {
     pub drawer_predicate_update: Option<daybook_types::manifest::DocPredicateClause>,
 }
 
+#[derive(Clone, Copy)]
 pub struct SwitchSinkCtx<'a> {
     // FIXME: why are these optional?
     pub rt: Option<&'a Arc<Rt>>,
@@ -244,6 +259,7 @@ pub trait SwitchSink {
 struct PreparedSwitchSink {
     name: String,
     listener: Box<dyn SwitchSink + Send + Sync>,
+    consume_doc: bool,
     consume_drawer: bool,
     consume_plugs: bool,
     consume_dispatch: bool,
@@ -333,7 +349,7 @@ pub async fn spawn_switch_worker(
                     .await?;
             }
 
-            let docs_partition_id = worker.rt.drawer.replicated_partition_id();
+            let docs_partition_id = big_repo::automerge_docs_part_id();
             let docs_partition_id_text = docs_partition_id.to_string();
             let mut cursor = worker
                 .store
@@ -489,6 +505,7 @@ fn prepare_sinks(
             PreparedSwitchSink {
                 name,
                 listener,
+                consume_doc: interest.consume_doc,
                 consume_drawer: interest.consume_drawer,
                 consume_plugs: interest.consume_plugs,
                 consume_dispatch: interest.consume_dispatch,
@@ -546,10 +563,18 @@ impl SwitchWorker {
         event: &SubEvent,
     ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
         let branch_doc_id: Arc<str> = match event {
-            SubEvent::Added(inner) => inner.obj_id.to_string().into(),
-            SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::ObjectChanged(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Added(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::Changed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::Removed(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
+            SubEvent::ObjectChanged(inner) => big_repo::automerge_obj_to_doc_id(inner.obj_id)
+                .to_string()
+                .into(),
             SubEvent::ReplayComplete => return Ok(None),
         };
         info!(%branch_doc_id, ?event, "SwitchWorker handle_partition_doc_event received");
@@ -588,45 +613,13 @@ impl SwitchWorker {
                     return Ok(None);
                 };
 
-                let payload = match event {
-                    SubEvent::Added(inner) => Some(&inner.payload),
-                    SubEvent::Changed(inner) => Some(&inner.payload),
-                    _ => None,
-                };
-
-                let target_heads: Option<Vec<automerge::ChangeHash>> = payload
-                    .and_then(|p| p.get("heads"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| {
-                        let strings: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-                        am_utils_rs::parse_commit_heads(&strings).ok().map(|h| h.to_vec())
-                    });
-
-                let new_heads = if let Some(target) = target_heads {
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    loop {
-                        let (has_all, heads) = handle
-                            .with_document_read(|doc| {
-                                let has_all = target
-                                    .iter()
-                                    .all(|h| automerge::ReadDoc::get_change_by_hash(doc, h).is_some());
-                                (has_all, ChangeHashSet(doc.get_heads().into()))
-                            })
-                            .await;
-                        if has_all || tokio::time::Instant::now() >= deadline {
-                            break heads;
-                        }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                } else {
-                    ChangeHashSet(
-                        handle
-                            .with_document_read(|doc| doc.get_heads())
-                            .await
-                            .into_iter()
-                            .collect(),
-                    )
-                };
+                let new_heads = ChangeHashSet(
+                    handle
+                        .with_document_read(|doc| doc.get_heads())
+                        .await
+                        .into_iter()
+                        .collect(),
+                );
 
                 let prev_heads = next_state.last_heads.clone();
                 info!(%branch_doc_id, ?prev_heads, ?new_heads, present = next_state.present, "SwitchWorker heads comparison");
@@ -643,35 +636,20 @@ impl SwitchWorker {
                         Some(&new_heads),
                     )
                     .await?;
-                let mut entry = self
-                    .rt
-                    .drawer
-                    .get_doc_branches(&doc_id)
-                    .await?
-                    .ok_or_else(|| ferr!("missing drawer branches for {}", doc_id))?;
-                entry.branches.insert(branch_name.clone(), new_heads.clone());
-                let evt = if !next_state.present {
-                    DrawerEvent::DocAdded {
-                        id: doc_id.clone(),
-                        entry,
-                        drawer_heads: ChangeHashSet::default(),
-                        origin,
-                    }
-                } else {
-                    info!(%doc_id, %branch_doc_id, ?diff, "SwitchWorker dispatching DocUpdated from partition event");
-                    DrawerEvent::DocUpdated {
-                        id: doc_id.clone(),
-                        entry,
-                        diff,
-                        drawer_heads: ChangeHashSet::default(),
-                        origin,
-                    }
-                };
-                let evt = Arc::new(evt);
-                self.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&evt)))
-                    .await?;
-                self.dispatch_to_listeners(&SwitchEvent::Drawer(evt))
-                    .await?;
+                let doc_evt = Arc::new(SwitchDocEvent {
+                    doc_id: doc_id.clone(),
+                    branch_name: branch_name.clone(),
+                    prev_heads: prev_heads.clone(),
+                    new_heads: new_heads.clone(),
+                    diff: Some(diff),
+                    drawer_heads: None,
+                    origin,
+                });
+                info!(%doc_id, %branch_doc_id, ?doc_evt.diff, "SwitchWorker dispatching SwitchDocEvent from partition event");
+                let switch_evt = SwitchEvent::Doc(Arc::clone(&doc_evt));
+                self.track_event_heads(&switch_evt).await?;
+                self.dispatch_to_listeners(&switch_evt).await?;
+                self.rt.registry.notify([doc_evt]);
                 next_state.present = true;
                 next_state.last_heads = Some(new_heads);
             }
@@ -718,10 +696,7 @@ impl SwitchWorker {
         crate::event_origin::SwitchEventOrigin,
         Vec<FacetKey>,
     )> {
-        let dmeta_key = FacetKey {
-            tag: WellKnownFacetTag::Dmeta.into(),
-            id: branch_path.as_str().to_string(),
-        };
+        let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
         let (old_keys, old_updated_at) = if let Some(heads) = prev_heads {
             if let Some(doc) = self
                 .rt
@@ -740,7 +715,9 @@ impl SwitchWorker {
                         WellKnownFacetTag::Dmeta,
                     )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
-                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                        other => {
+                            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+                        }
                     };
                     let mut keys = HashSet::new();
                     let mut updated_at = HashMap::new();
@@ -782,7 +759,9 @@ impl SwitchWorker {
                         WellKnownFacetTag::Dmeta,
                     )? {
                         WellKnownFacet::Dmeta(dmeta) => dmeta,
-                        other => eyre::bail!("expected dmeta facet, got {:?}", other.tag()),
+                        other => {
+                            eyre::bail!("expected dmeta facet, got {:?}", other.tag());
+                        }
                     };
                     let mut keys = HashSet::new();
                     let mut updated_at = HashMap::new();
@@ -853,24 +832,22 @@ impl SwitchWorker {
     #[tracing::instrument(skip(self, event))]
     async fn dispatch_to_listeners(&mut self, event: &SwitchEvent) -> Res<()> {
         for index in 0..self.prepared_sinks.len() {
-            if !self.listener_interested_in_event(index, event).await? {
-                continue;
+            if self.listener_interested_in_event(index, event).await? {
+                let ctx = SwitchSinkCtx {
+                    rt: Some(&self.rt),
+                    store: Some(&self.store),
+                };
+                let outcome = self.prepared_sinks[index]
+                    .listener
+                    .on_event(event, &ctx)
+                    .await?;
+                if let Some(next_predicate) = outcome.drawer_predicate_update {
+                    self.prepared_sinks[index].drawer_predicate = Some(next_predicate);
+                }
+                debug!(listener = %self.prepared_sinks[index].name, "switch listener handled event");
             }
-            let ctx = SwitchSinkCtx {
-                rt: Some(&self.rt),
-                store: Some(&self.store),
-            };
-
-            let listener_name = self.prepared_sinks[index].name.clone();
-            let outcome = self.prepared_sinks[index]
-                .listener
-                .on_event(event, &ctx)
-                .await?;
-            if let Some(next_predicate) = outcome.drawer_predicate_update {
-                self.prepared_sinks[index].drawer_predicate = Some(next_predicate);
-            }
-            debug!(listener = %listener_name, "switch listener handled event");
         }
+
         Ok(())
     }
 
@@ -880,6 +857,14 @@ impl SwitchWorker {
         event: &SwitchEvent,
     ) -> Res<bool> {
         match event {
+            SwitchEvent::Doc(event) => {
+                if !self.prepared_sinks[index].consume_doc {
+                    return Ok(false);
+                }
+                let predicate = self.prepared_sinks[index].drawer_predicate.clone();
+                self.doc_event_matches_listener(event, predicate.as_ref())
+                    .await
+            }
             SwitchEvent::Drawer(event) => {
                 if !self.prepared_sinks[index].consume_drawer {
                     return Ok(false);
@@ -894,40 +879,90 @@ impl SwitchWorker {
         }
     }
 
+    async fn doc_event_matches_listener(
+        &mut self,
+        event: &Arc<SwitchDocEvent>,
+        predicate: Option<&daybook_types::manifest::DocPredicateClause>,
+    ) -> Res<bool> {
+        let Some(predicate) = predicate else {
+            return Ok(true);
+        };
+        let Some(diff) = &event.diff else {
+            return Ok(true);
+        };
+        let referenced_tags = predicate.referenced_tags();
+        let union_changed: HashSet<FacetKey> = diff
+            .changed_facet_keys
+            .iter()
+            .cloned()
+            .chain(diff.added_facet_keys.iter().cloned())
+            .chain(diff.removed_facet_keys.iter().cloned())
+            .collect();
+        if !union_changed.iter().any(|facet_key| {
+            referenced_tags
+                .iter()
+                .any(|tag| tag.0 == facet_key.tag.to_string())
+        }) {
+            return Ok(false);
+        }
+        let branch_path = BranchPathBuf::from(event.branch_name.as_str());
+        let Some(facet_keys_set) = self
+            .rt
+            .drawer
+            .get_facet_keys_if_latest(&event.doc_id, &branch_path, &event.new_heads)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
+        self.predicate_requirements.clear();
+        predicate.append_requirements(&mut self.predicate_requirements);
+        Self::resolve_meta_predicate_requirements(
+            &self.predicate_requirements,
+            &meta_doc,
+            &mut self.predicate_resolved,
+        );
+        Ok(predicate.evaluate(
+            &meta_doc,
+            DocPredicateEvalMode::ApproxInterest,
+            &self.predicate_resolved,
+        ))
+    }
+
+    fn resolve_meta_predicate_requirements(
+        requirements: &HashSet<DocPredicateEvalRequirement>,
+        meta_doc: &Doc,
+        out: &mut HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
+    ) {
+        out.clear();
+        for requirement in requirements {
+            match requirement {
+                DocPredicateEvalRequirement::FacetsOfTag(tag) => {
+                    let source_facets = meta_doc
+                        .facets
+                        .iter()
+                        .filter(|(facet_key, _)| facet_key.tag.to_string() == tag.0)
+                        .map(|(facet_key, facet_raw)| (facet_key.clone(), facet_raw.clone()))
+                        .collect::<Vec<_>>();
+                    out.insert(
+                        requirement.clone(),
+                        DocPredicateEvalResolved::FacetsOfTag(source_facets),
+                    );
+                }
+                DocPredicateEvalRequirement::FullDoc
+                | DocPredicateEvalRequirement::FacetManifest => {
+                    // Switch prefilter stays cheap by default. Missing resolved requirements
+                    // are handled conservatively by predicate evaluation in ApproxInterest mode.
+                }
+            }
+        }
+    }
+
     async fn drawer_event_matches_listener(
         &mut self,
         event: &Arc<DrawerEvent>,
         predicate: Option<&daybook_types::manifest::DocPredicateClause>,
     ) -> Res<bool> {
-        fn resolve_meta_predicate_requirements(
-            requirements: &HashSet<DocPredicateEvalRequirement>,
-            meta_doc: &Doc,
-            out: &mut HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
-        ) {
-            out.clear();
-            for requirement in requirements {
-                match requirement {
-                    DocPredicateEvalRequirement::FacetsOfTag(tag) => {
-                        let source_facets = meta_doc
-                            .facets
-                            .iter()
-                            .filter(|(facet_key, _)| facet_key.tag.to_string() == tag.0)
-                            .map(|(facet_key, facet_raw)| (facet_key.clone(), facet_raw.clone()))
-                            .collect::<Vec<_>>();
-                        out.insert(
-                            requirement.clone(),
-                            DocPredicateEvalResolved::FacetsOfTag(source_facets),
-                        );
-                    }
-                    DocPredicateEvalRequirement::FullDoc
-                    | DocPredicateEvalRequirement::FacetManifest => {
-                        // Switch prefilter stays cheap by default. Missing resolved requirements
-                        // are handled conservatively by predicate evaluation in ApproxInterest mode.
-                    }
-                }
-            }
-        }
-
         let Some(predicate) = predicate else {
             return Ok(true);
         };
@@ -941,7 +976,7 @@ impl SwitchWorker {
                 let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
                 self.predicate_requirements.clear();
                 predicate.append_requirements(&mut self.predicate_requirements);
-                resolve_meta_predicate_requirements(
+                Self::resolve_meta_predicate_requirements(
                     &self.predicate_requirements,
                     &meta_doc,
                     &mut self.predicate_resolved,
@@ -972,60 +1007,7 @@ impl SwitchWorker {
                 let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
                 self.predicate_requirements.clear();
                 predicate.append_requirements(&mut self.predicate_requirements);
-                resolve_meta_predicate_requirements(
-                    &self.predicate_requirements,
-                    &meta_doc,
-                    &mut self.predicate_resolved,
-                );
-                Ok(predicate.evaluate(
-                    &meta_doc,
-                    DocPredicateEvalMode::ApproxInterest,
-                    &self.predicate_resolved,
-                ))
-            }
-            DrawerEvent::DocUpdated {
-                id, entry, diff, ..
-            } => {
-                if diff.moved_branch_names.is_empty() {
-                    return Ok(false);
-                }
-                let referenced_tags = predicate.referenced_tags();
-                let union_changed: HashSet<FacetKey> = diff
-                    .changed_facet_keys
-                    .iter()
-                    .cloned()
-                    .chain(diff.added_facet_keys.iter().cloned())
-                    .chain(diff.removed_facet_keys.iter().cloned())
-                    .collect();
-                if !union_changed.iter().any(|facet_key| {
-                    referenced_tags
-                        .iter()
-                        .any(|tag| tag.0 == facet_key.tag.to_string())
-                }) {
-                    return Ok(false);
-                }
-                let Some((branch_name, heads)) = diff
-                    .moved_branch_names
-                    .iter()
-                    .find_map(|branch| entry.branches.get_key_value(branch))
-                    .or_else(|| entry.branches.get_key_value("main"))
-                    .or_else(|| entry.branches.iter().next())
-                else {
-                    return Ok(false);
-                };
-                let branch_path = BranchPathBuf::from(branch_name.as_str());
-                let Some(facet_keys_set) = self
-                    .rt
-                    .drawer
-                    .get_facet_keys_if_latest(id, &branch_path, heads)
-                    .await?
-                else {
-                    return Ok(false);
-                };
-                let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
-                self.predicate_requirements.clear();
-                predicate.append_requirements(&mut self.predicate_requirements);
-                resolve_meta_predicate_requirements(
+                Self::resolve_meta_predicate_requirements(
                     &self.predicate_requirements,
                     &meta_doc,
                     &mut self.predicate_resolved,
@@ -1059,8 +1041,8 @@ pub fn facet_keys_set_to_meta_doc(doc_id: &DocId, facet_keys_set: &HashSet<Facet
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e::test_cx;
     use crate::rt::dispatch::ActiveDispatch;
+    use crate::test_support::test_cx;
     use daybook_types::doc::{AddDocArgs, DocPatch, WellKnownFacetTag};
     use std::sync::{Arc as StdArc, Mutex};
 
@@ -1141,6 +1123,7 @@ mod tests {
     impl SwitchSink for OriginCaptureListener {
         fn interest(&self) -> SwtchSinkInterest {
             SwtchSinkInterest {
+                consume_doc: true,
                 consume_drawer: true,
                 consume_plugs: true,
                 consume_dispatch: true,
@@ -1155,9 +1138,9 @@ mod tests {
             _ctx: &SwitchSinkCtx<'_>,
         ) -> Res<SwitchSinkOutcome> {
             let origin = match event {
+                SwitchEvent::Doc(event) => event.origin.clone(),
                 SwitchEvent::Drawer(event) => match &**event {
                     DrawerEvent::DocAdded { origin, .. }
-                    | DrawerEvent::DocUpdated { origin, .. }
                     | DrawerEvent::DocDeleted { origin, .. } => origin.clone(),
                 },
                 SwitchEvent::Plugs(event) => match &**event {
@@ -1192,6 +1175,7 @@ mod tests {
     ) -> Res<()> {
         for listener in listeners.iter_mut() {
             let is_interested = match event {
+                SwitchEvent::Doc(_) => listener.consume_doc,
                 SwitchEvent::Drawer(_) => listener.consume_drawer,
                 SwitchEvent::Plugs(_) => listener.consume_plugs,
                 SwitchEvent::Dispatch(_) => listener.consume_dispatch,
@@ -1236,6 +1220,7 @@ mod tests {
     async fn test_switch_worker_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_smoke").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         // Add a doc that should trigger the test-label processor
         let _doc_id = ctx
@@ -1279,6 +1264,7 @@ mod tests {
     async fn test_switch_skip_when_no_processor_read_set_changed() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_skip_unrelated").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1305,7 +1291,7 @@ mod tests {
             }
             if ctx
                 .rt
-                .get_processor_runlog_done(&doc_id, "@daybook/wip/test-label")
+                .get_processor_runlog_done(&doc_id, "@daybook/test/test-label")
                 .await?
                 .is_some()
             {
@@ -1364,6 +1350,7 @@ mod tests {
     async fn test_switch_doc_added_facet_key_matching() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_doc_added").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let _doc_id = ctx
             .drawer_repo
@@ -1389,10 +1376,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        assert!(
-            dispatch_id.is_some(),
-            "DocAdded with Note should trigger test-label via facet-key matching"
-        );
+        let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+        ctx.rt
+            .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
 
         ctx.stop().await?;
         Ok(())
@@ -1403,6 +1390,7 @@ mod tests {
     async fn test_switch_doc_updated_on_custom_branch_triggers_event() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         let ctx = test_cx("switch_custom_branch").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
 
         let doc_id = ctx
             .drawer_repo
@@ -1444,7 +1432,8 @@ mod tests {
                     id: doc_id.clone(),
                     facets_set: [(
                         WellKnownFacetTag::Note.into(),
-                        daybook_types::doc::WellKnownFacet::Note("Hi on draft branch".into()).into(),
+                        daybook_types::doc::WellKnownFacet::Note("Hi on draft branch".into())
+                            .into(),
                     )]
                     .into(),
                     facets_remove: vec![],
@@ -1466,9 +1455,88 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
+        let dispatch_id = dispatch_id.ok_or_eyre("test-label dispatch not found")?;
+        ctx.rt
+            .wait_for_dispatch_end(&dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
+
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// Tests that SwitchStore correctly persists cursors and doc states across worker lifecycle.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_switch_persists_cursor_and_doc_state() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let ctx = test_cx("switch_cursor_resume").await?;
+        crate::test_support::import_test_plug_oci(&ctx).await?;
+
+        let doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    WellKnownFacetTag::Note.into(),
+                    daybook_types::doc::WellKnownFacet::Note("Persisted note".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        // Wait for processor dispatch to confirm switch processed the partition event
+        let mut dispatch_seen = false;
+        for _ in 0..300 {
+            if ctx
+                .dispatch_repo
+                .get_any_by_wflow_key("test-label")
+                .await
+                .is_some()
+            {
+                dispatch_seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(dispatch_seen, "dispatch should be recorded");
+
+        let entry = ctx
+            .drawer_repo
+            .get_entry(&doc_id)
+            .await?
+            .ok_or_eyre("doc entry missing")?;
+        let branch_doc_id = entry
+            .branches
+            .get("main")
+            .ok_or_eyre("main branch ref missing")?
+            .branch_doc_id
+            .to_string();
+        let switch_store = SwitchStore::load(ctx.rt.rcx.sql.clone()).await?;
+        let mut state = None;
+        for _ in 0..300 {
+            if let Some(s) = switch_store
+                .get_doc_state_by_branch_doc_id(&branch_doc_id)
+                .await?
+            {
+                state = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
         assert!(
-            dispatch_id.is_some(),
-            "DocUpdated on non-main branch '/user/draft' should trigger test-label processor"
+            state.is_some(),
+            "doc state must be recorded in switch_store"
+        );
+        let state = state.unwrap();
+        assert_eq!(state.doc_id, doc_id);
+        assert!(state.last_heads.is_some(), "last_heads must be recorded");
+
+        let part_id = big_repo::automerge_docs_part_id().to_string();
+        let cursor = switch_store.get_partition_cursor(&part_id).await?;
+        assert!(
+            cursor > 0,
+            "partition cursor must be advanced in switch_store"
         );
 
         ctx.stop().await?;
@@ -1485,6 +1553,7 @@ mod tests {
                     name: "zeta".to_string(),
                     calls: StdArc::clone(&calls),
                     interest: SwtchSinkInterest {
+                        consume_doc: false,
                         consume_drawer: false,
                         consume_plugs: false,
                         consume_dispatch: true,
@@ -1500,6 +1569,7 @@ mod tests {
                     name: "alpha".to_string(),
                     calls: StdArc::clone(&calls),
                     interest: SwtchSinkInterest {
+                        consume_doc: false,
                         consume_drawer: false,
                         consume_plugs: false,
                         consume_dispatch: true,
@@ -1541,6 +1611,7 @@ mod tests {
                     name: "dispatch_only".to_string(),
                     calls: StdArc::clone(&calls),
                     interest: SwtchSinkInterest {
+                        consume_doc: false,
                         consume_drawer: false,
                         consume_plugs: false,
                         consume_dispatch: true,
@@ -1556,6 +1627,7 @@ mod tests {
                     name: "config_only".to_string(),
                     calls: StdArc::clone(&calls),
                     interest: SwtchSinkInterest {
+                        consume_doc: false,
                         consume_drawer: false,
                         consume_plugs: false,
                         consume_dispatch: false,
@@ -1596,6 +1668,7 @@ mod tests {
                 name: "predicated".to_string(),
                 calls: StdArc::clone(&calls),
                 interest: SwtchSinkInterest {
+                    consume_doc: true,
                     consume_drawer: true,
                     consume_plugs: true,
                     consume_dispatch: false,

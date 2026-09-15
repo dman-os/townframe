@@ -41,7 +41,7 @@ async fn wait_for_claims(
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    eyre::bail!("doc did not reach {expected_count} claim facets after parse-hledger workflow")
+    eyre::bail!("doc did not reach {expected_count} claim facets after parse-hledger workflow");
 }
 
 fn claim_facets_by_txn_index(

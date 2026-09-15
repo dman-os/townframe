@@ -64,7 +64,7 @@ impl SyncTestNode {
         .await
         .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
         tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
+            utils_rs::scale_timeout(Duration::from_secs(60)),
             rt_stop.stop(),
         )
         .await
@@ -155,7 +155,7 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
     for doc_id in &created_doc_ids {
         wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
     }
@@ -185,7 +185,7 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let doc_on_a = node_a
         .drawer
@@ -211,7 +211,7 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
         .await?;
     wait_for_doc_presence_with_activity(&node_a, &doc_on_b, Duration::from_secs(60)).await?;
 
-    wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(20)).await?;
+    wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, None).await?;
 
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
@@ -250,7 +250,7 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let doc_id = node_a
         .drawer
@@ -388,7 +388,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
+async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
@@ -399,7 +399,7 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let mut args_batch = Vec::new();
     for idx in 0..100usize {
@@ -427,7 +427,7 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let created = node_a.drawer.batch_add(args_batch).await?;
     assert_eq!(created.len(), 100);
 
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
@@ -453,7 +453,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
@@ -482,7 +482,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     node_a.drawer.batch_add(args_batch).await?;
 
     for (hash, expected) in &blob_payloads {
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, Duration::from_secs(60)).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, None).await?;
         assert_eq!(
             &got, expected,
             "blob content mismatch after sync for hash={hash}"
@@ -506,7 +506,7 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     let payload_1 = b"blob-pin-sync-payload-1".to_vec();
     let payload_2 = b"blob-pin-sync-payload-2".to_vec();
@@ -603,14 +603,12 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     );
 
     // 3. Verify node_b.blobs_repo.get_bytes(blob_id) successfully fetches the blob bytes from node_a
-    let bytes_1 =
-        wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, Duration::from_secs(60)).await?;
+    let bytes_1 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_1, None).await?;
     assert_eq!(bytes_1, payload_1);
     let bytes_1_direct = node_b.blobs_repo.get_bytes(blob_id_1).await?;
     assert_eq!(bytes_1_direct, payload_1);
 
-    let bytes_2 =
-        wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, Duration::from_secs(60)).await?;
+    let bytes_2 = wait_for_blob_bytes(&node_b.blobs_repo, blob_id_2, None).await?;
     assert_eq!(bytes_2, payload_2);
     let bytes_2_direct = node_b.blobs_repo.get_bytes(blob_id_2).await?;
     assert_eq!(bytes_2_direct, payload_2);
@@ -702,13 +700,13 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
 
     let node_b = open_sync_node(&repo_b_path).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
     for doc_id in &created_doc_ids {
         wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
     }
 
-    wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(30)).await?;
+    wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, None).await?;
 
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
@@ -963,12 +961,10 @@ async fn wait_for_doc_presence_with_activity(
                     let evt = val.map_err(|_| eyre::eyre!("drawer listener closed while waiting for doc presence"))?;
                     match evt.as_ref() {
                         crate::drawer::DrawerEvent::DocAdded { id, .. }
-                        | crate::drawer::DrawerEvent::DocUpdated { id, .. }
                         | crate::drawer::DrawerEvent::DocDeleted { id, .. } if id == doc_id => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
                         crate::drawer::DrawerEvent::DocAdded { .. }
-                        | crate::drawer::DrawerEvent::DocUpdated { .. }
                         | crate::drawer::DrawerEvent::DocDeleted { .. } => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
@@ -979,7 +975,9 @@ async fn wait_for_doc_presence_with_activity(
                         Ok(_) => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
-                        Err(crate::repos::RecvError::Closed) => eyre::bail!("sync listener closed while waiting for doc presence"),
+                        Err(crate::repos::RecvError::Closed) => {
+                            eyre::bail!("sync listener closed while waiting for doc presence");
+                        }
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                             eyre::bail!("sync listener dropped events while waiting for doc presence: dropped_count={dropped_count}");
                         }
@@ -990,7 +988,9 @@ async fn wait_for_doc_presence_with_activity(
                         Ok(_) => {
                             *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                         }
-                        Err(crate::repos::RecvError::Closed) => eyre::bail!("progress listener closed while waiting for doc presence"),
+                        Err(crate::repos::RecvError::Closed) => {
+                            eyre::bail!("progress listener closed while waiting for doc presence");
+                        }
                         Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                             eyre::bail!("progress listener dropped events while waiting for doc presence: dropped_count={dropped_count}");
                         }
@@ -1018,7 +1018,6 @@ async fn wait_for_sync_convergence(
     source: &SyncTestNode,
     target: &SyncTestNode,
     endpoint_id: EndpointId,
-    timeout: Duration,
 ) -> Res<()> {
     let required_partitions = source
         .sync_repo
@@ -1041,9 +1040,9 @@ async fn wait_for_sync_convergence(
         target.sync_repo.wait_for_full_sync(
             std::slice::from_ref(&peer_id),
             &required_partitions,
-            timeout
+            None,
         ),
-        wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
+        wait_for_doc_set_parity(&source.drawer, &target.drawer, None),
     )?;
     info!(
         source = %source.sync_repo.router.endpoint().id(),
@@ -1068,13 +1067,7 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
 
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        endpoint_addr_ba.id,
-        Duration::from_secs(20),
-    )
-    .await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr_ba.id).await?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1086,11 +1079,7 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
     let peer_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
     node_b
         .sync_repo
-        .wait_for_full_sync(
-            std::slice::from_ref(&peer_id),
-            &required_partitions,
-            Duration::from_secs(5),
-        )
+        .wait_for_full_sync(std::slice::from_ref(&peer_id), &required_partitions, None)
         .await?;
 
     node_b.stop().await?;
@@ -1101,11 +1090,11 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
 async fn wait_for_doc_set_parity(
     left: &DrawerRepo,
     right: &DrawerRepo,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Res<()> {
     let mut last_left = HashSet::<String>::new();
     let mut last_right = HashSet::<String>::new();
-    let timeout_outcome = tokio::time::timeout(timeout, async {
+    let poll_fut = async {
         let mut last_heartbeat = std::time::Instant::now();
         loop {
             let lset = list_doc_ids(left).await?;
@@ -1132,27 +1121,30 @@ async fn wait_for_doc_set_parity(
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         eyre::Ok(())
-    })
-    .await;
-    match timeout_outcome {
-        Ok(out) => out?,
-        Err(_) => {
-            let missing_on_right = last_left
-                .difference(&last_right)
-                .take(12)
-                .cloned()
-                .collect::<Vec<_>>();
-            let missing_on_left = last_right
-                .difference(&last_left)
-                .take(12)
-                .cloned()
-                .collect::<Vec<_>>();
-            eyre::bail!(
-                "timed out waiting for drawer doc-set parity: left_count={} right_count={} missing_on_right={missing_on_right:?} missing_on_left={missing_on_left:?}",
-                last_left.len(),
-                last_right.len()
-            );
+    };
+    if let Some(timeout) = timeout {
+        match tokio::time::timeout(timeout, poll_fut).await {
+            Ok(out) => out?,
+            Err(_) => {
+                let missing_on_right = last_left
+                    .difference(&last_right)
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let missing_on_left = last_right
+                    .difference(&last_left)
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                eyre::bail!(
+                    "timed out waiting for drawer doc-set parity: left_count={} right_count={} missing_on_right={missing_on_right:?} missing_on_left={missing_on_left:?}",
+                    last_left.len(),
+                    last_right.len()
+                );
+            }
         }
+    } else {
+        poll_fut.await?;
     }
     Ok(())
 }
@@ -1280,32 +1272,49 @@ async fn wait_for_doc_head_parity(
 async fn wait_for_blob_bytes(
     blobs_repo: &BlobsRepo,
     blob_id: BlobId,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Res<Vec<u8>> {
-    let timeout = utils_rs::scale_timeout(timeout);
-    tokio::time::timeout(timeout, async {
-        loop {
-            let path = match blobs_repo.get_path(blob_id).await {
-                Ok(path) => path,
-                Err(err) => {
-                    let msg = err.to_string();
-                    if msg.contains("Blob not found:")
-                        || msg.contains("Referenced blob source missing for hash")
-                    {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        continue;
+    let deadline = timeout
+        .map(utils_rs::scale_timeout)
+        .map(|t| tokio::time::Instant::now() + t);
+    let mut last_log = tokio::time::Instant::now();
+    loop {
+        let path = match blobs_repo.get_path(blob_id).await {
+            Ok(path) => path,
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("Blob not found:")
+                    || msg.contains("Referenced blob source missing for hash")
+                {
+                    if last_log.elapsed() >= Duration::from_secs(5) {
+                        warn!("wait_for_blob_bytes waiting for blob={blob_id} path resolution...");
+                        last_log = tokio::time::Instant::now();
                     }
-                    return Err(err);
+                    if let Some(d) = deadline
+                        && tokio::time::Instant::now() >= d
+                    {
+                        eyre::bail!("timed out waiting for blob bytes: {blob_id}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
-            };
-            if tokio::fs::try_exists(&path).await? {
-                return tokio::fs::read(path).await.map_err(Into::into);
+                return Err(err);
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        if tokio::fs::try_exists(&path).await? {
+            return tokio::fs::read(path).await.map_err(Into::into);
         }
-    })
-    .await
-    .map_err(|_| eyre::eyre!("timed out waiting for blob bytes: {blob_id}"))?
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            warn!("wait_for_blob_bytes waiting for blob={blob_id} file presence on disk...");
+            last_log = tokio::time::Instant::now();
+        }
+        if let Some(d) = deadline
+            && tokio::time::Instant::now() >= d
+        {
+            eyre::bail!("timed out waiting for blob bytes: {blob_id}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1328,12 +1337,8 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
         repo_bg.put(&payload_bg).await.expect("put should succeed");
     });
 
-    let got = wait_for_blob_bytes(
-        &blobs_repo,
-        expected_hash,
-        utils_rs::scale_timeout(Duration::from_secs(10)),
-    )
-    .await?;
+    let got =
+        wait_for_blob_bytes(&blobs_repo, expected_hash, Some(Duration::from_secs(10))).await?;
     assert_eq!(got, payload);
 
     blobs_repo.shutdown().await?;

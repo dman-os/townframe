@@ -97,22 +97,16 @@ async fn sync_doc_until_ready(
     repo: &std::sync::Arc<crate::BigRepo>,
     doc_id: crate::DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
-    timeout(Duration::from_secs(15), async {
-        loop {
-            repo.wait_for_quiescence(Some(Duration::from_secs(5)))
-                .await?;
-            match repo.get_doc(&doc_id).await? {
-                crate::DocLookup::Ready(handle) => return Ok(handle),
-                crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+    conn.sync_doc_with_peer(doc_id).await?;
+    loop {
+        repo.wait_for_quiescence(None).await?;
+        match repo.get_doc(&doc_id).await? {
+            crate::DocLookup::Ready(handle) => return Ok(handle),
+            crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
-    })
-    .await
-    .map_err(|_| crate::ferr!("doc never materialized (Ready) after sync via conn"))?
+    }
 }
 
 /// Two simultaneous connections between the same pair must both be usable:
@@ -213,7 +207,7 @@ async fn tier5_conn_stop_of_superseded_conn_keeps_replacement_alive() -> Res<()>
         .repo
         .grant_doc_access(id3, agent3.clone(), Access::Read)
         .await?;
-    right_conn2.sync_keyhive_with_peer(None).await?;
+    right_conn2.sync_keyhive_with_peer().await?;
     fixtures::assert_reader_has_access(&pair.right().repo, id3).await?;
     let reader3 = fixtures::sync_doc_expect_ready(&conn2, &pair.right().repo, id3).await?;
     assert_eq!(
@@ -240,8 +234,8 @@ async fn tier5_conn_reconnect_churn_converges_each_cycle() -> Res<()> {
 
     for i in 0..4 {
         pair.connect().await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
+        pair.right_conn().sync_keyhive_with_peer().await?;
 
         let title = format!("churn-{i}");
         let (owner_doc, id) = new_doc(&pair, &title).await?;
@@ -286,10 +280,10 @@ async fn tier5_conn_sync_on_closed_conn_fails_fast() -> Res<()> {
     old_left.stop().await?;
     assert!(conn.is_closed(), "stopped connection must report closed");
 
-    let res = conn.sync_keyhive_with_peer(None).await;
+    let res = conn.sync_keyhive_with_peer().await;
     assert!(res.is_err(), "keyhive sync on closed conn must error");
 
-    let res = conn.sync_doc_with_peer(id, None).await;
+    let res = conn.sync_doc_with_peer(id).await;
     assert!(res.is_err(), "doc sync on closed conn must error");
 
     Ok(())
@@ -338,8 +332,8 @@ async fn tier5_conn_cross_dial_registers_both_sides() -> Res<()> {
 
     pair.left_conn = Some(lconn);
     pair.right_conn = Some(rconn);
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let (owner_doc, id) = new_doc(&pair, "cross-dial").await?;
     let reader_doc = grant_and_sync(&pair, id, Access::Read).await?;

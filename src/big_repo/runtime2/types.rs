@@ -163,6 +163,13 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
+    pub latest_commit_row_id: std::sync::atomic::AtomicI64,
+    #[educe(Debug(ignore))]
+    #[allow(dead_code)]
+    pub latest_keyhive_seq: std::sync::atomic::AtomicI64,
+    #[educe(Debug(ignore))]
+    pub barrier_notify: Arc<tokio::sync::Notify>,
+    #[educe(Debug(ignore))]
     _runtime2_lease: Option<crate::runtime2::DocLease>,
 }
 
@@ -179,6 +186,9 @@ impl LiveDocBundle {
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
+            latest_commit_row_id: std::sync::atomic::AtomicI64::new(0),
+            latest_keyhive_seq: std::sync::atomic::AtomicI64::new(0),
+            barrier_notify: Arc::new(tokio::sync::Notify::new()),
             _runtime2_lease: Some(lease),
         }
     }
@@ -199,6 +209,7 @@ impl LiveDocBundle {
     pub(crate) fn mark_broken(&self) {
         self.broken
             .store(true, std::sync::atomic::Ordering::Release);
+        self.barrier_notify.notify_waiters();
     }
 
     /// Whether some locally stored Sedimentree heads are not represented in
@@ -211,6 +222,57 @@ impl LiveDocBundle {
     pub(crate) fn set_partially_decrypted(&self, partial: bool) {
         self.partially_decrypted
             .store(partial, std::sync::atomic::Ordering::Release);
+    }
+
+    #[allow(dead_code)]
+    pub fn update_commit_watermark(&self, row_id: i64) {
+        self.latest_commit_row_id
+            .fetch_max(row_id, std::sync::atomic::Ordering::Release);
+        self.barrier_notify.notify_waiters();
+    }
+
+    #[allow(dead_code)]
+    pub fn update_keyhive_watermark(&self, seq: i64) {
+        self.latest_keyhive_seq
+            .fetch_max(seq, std::sync::atomic::Ordering::Release);
+        self.barrier_notify.notify_waiters();
+    }
+
+    pub async fn await_commit_watermark(&self, target_row_id: i64) -> Res<()> {
+        loop {
+            let notified = self.barrier_notify.notified();
+            tokio::pin!(notified);
+            if self
+                .latest_commit_row_id
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= target_row_id
+            {
+                return Ok(());
+            }
+            if self.is_broken() {
+                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
+            }
+            notified.await;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn await_keyhive_watermark(&self, target_seq: i64) -> Res<()> {
+        loop {
+            let notified = self.barrier_notify.notified();
+            tokio::pin!(notified);
+            if self
+                .latest_keyhive_seq
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= target_seq
+            {
+                return Ok(());
+            }
+            if self.is_broken() {
+                return Err(ferr!("doc bundle marked broken while awaiting watermark"));
+            }
+            notified.await;
+        }
     }
 }
 

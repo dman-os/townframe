@@ -44,7 +44,7 @@ pub async fn run(sync_urls: Vec<String>, exit_when_synced: bool) -> Res<ExitCode
         }
         sync_repo
             // TODO: parametrize timeout
-            .wait_until_peers_sync(&peer_ids, std::time::Duration::from_secs(120))
+            .wait_until_peers_sync(&peer_ids, Some(std::time::Duration::from_secs(120)))
             .await?;
     } else {
         let listener = sync_repo.subscribe(daybook_core::repos::SubscribeOpts::new(512));

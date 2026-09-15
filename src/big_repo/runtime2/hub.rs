@@ -573,7 +573,6 @@ where
                 doc_id,
                 peer_id,
                 waiter_id,
-                timeout: _,
                 resp,
             } => {
                 let request_id = subduction_core::connection::message::RequestId {

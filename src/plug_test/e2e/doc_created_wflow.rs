@@ -1,11 +1,12 @@
 use crate::interlude::*;
 
-use crate::rt::dispatch::FacetRoutineArgs;
+use daybook_core::rt::dispatch::{ActiveDispatchArgs, FacetRoutineArgs};
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_labeler_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
+    let test_cx = daybook_core::test_support::test_cx(utils_rs::function_full!()).await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
 
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
@@ -83,7 +84,8 @@ async fn test_labeler_workflow() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_staging_branch_workflow() -> Res<()> {
-    let test_cx = crate::e2e::test_cx(utils_rs::function_full!()).await?;
+    let test_cx = daybook_core::test_support::test_cx(utils_rs::function_full!()).await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
 
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
@@ -109,15 +111,12 @@ async fn test_staging_branch_workflow() -> Res<()> {
             .get_any_by_wflow_key("test-label")
             .await
         {
-            if !matches!(
-                &dispatch.args,
-                crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(_)
-            ) {
+            if !matches!(&dispatch.args, ActiveDispatchArgs::FacetRoutine(_)) {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
             dispatch_id = Some(id.clone());
-            let crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 staging_branch_path: path,
                 ..
             }) = &dispatch.args;
@@ -208,7 +207,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     let staging_dispatches = final_dispatches
         .into_iter()
         .filter(|(_id, dispatch)| match &dispatch.args {
-            crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(args) => {
+            ActiveDispatchArgs::FacetRoutine(args) => {
                 args.branch_path == "/tmp" || args.branch_path.starts_with("/tmp/")
             }
         })

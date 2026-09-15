@@ -6,8 +6,8 @@ use daybook_types::view::{ViewActionV1, ViewNodeKindV1, ViewSpec, ViewSpecV1};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn render_plug_test_stateless_view() -> Res<()> {
-    let test_cx = crate::test_support::test_cx("render_plug_test_stateless_view").await?;
-    crate::test_support::import_test_plug_oci(&test_cx).await?;
+    let test_cx = daybook_core::test_support::test_cx("render_plug_test_stateless_view").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
 
     let doc_id = test_cx
         .drawer_repo

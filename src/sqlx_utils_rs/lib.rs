@@ -10,12 +10,18 @@ pub struct SqlCtx {
     pub read_pool: SqlitePool,
 }
 
+static MEM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl SqlCtx {
     pub async fn memory() -> Res<Self> {
-        let connect_options =
-            SqliteConnectOptions::from_str("sqlite::memory:")?.disable_statement_logging();
+        let id = MEM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let uri = format!("file:memdb_{pid}_{id}?mode=memory&cache=shared");
+        let connect_options = SqliteConnectOptions::from_str(&uri)?
+            .create_if_missing(true)
+            .disable_statement_logging();
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(5)
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_with(connect_options)

@@ -13,7 +13,7 @@ async fn long_af_test_image_label_fallback_nomic_pipeline() -> Res<()> {
     .await?;
     super::common::import_plabels_oci(&test_cx).await?;
 
-    let image_bytes = include_bytes!("../../daybook_core/e2e/sample-receipt.jpg");
+    let image_bytes = include_bytes!("../../plug_test/e2e/sample-receipt.jpg");
     let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
 
     let blob_facet = Blob {

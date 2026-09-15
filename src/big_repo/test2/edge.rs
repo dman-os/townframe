@@ -24,7 +24,6 @@ use crate::SyncDocError;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
-use std::time::Duration;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -85,8 +84,8 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Clone the left connection, stop the clone, then try to use the
     // original — the `closed` flag is shared via `Arc<AtomicBool>`.
@@ -96,7 +95,7 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
     // keyhive sync on closed connection must fail.
     let kh_err = pair
         .left_conn()
-        .sync_keyhive_with_peer(None)
+        .sync_keyhive_with_peer()
         .await
         .expect_err("keyhive sync on closed connection must fail");
     let kh_msg = format!("{kh_err}");
@@ -108,7 +107,7 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
     // doc sync on closed connection must fail.
     let doc_err = pair
         .left_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(5)))
+        .sync_doc_with_peer(doc_id)
         .await
         .expect_err("doc sync on closed connection must fail");
     assert!(
@@ -148,8 +147,8 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     let intruder_owner_conn = guard.node(2).accepted_connection().await;
 
     // Keyhive sync: Owner learns both Reader's and Intruder's agents.
-    owner_reader_conn.sync_keyhive_with_peer(None).await?;
-    owner_intruder_conn.sync_keyhive_with_peer(None).await?;
+    owner_reader_conn.sync_keyhive_with_peer().await?;
+    owner_intruder_conn.sync_keyhive_with_peer().await?;
 
     let reader_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(1)).await?;
 
@@ -168,16 +167,14 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
         .await?;
 
     // Sync keyhive to both Reader and Intruder.
-    owner_reader_conn.sync_keyhive_with_peer(None).await?;
-    reader_owner_conn.sync_keyhive_with_peer(None).await?;
-    owner_intruder_conn.sync_keyhive_with_peer(None).await?;
-    intruder_owner_conn.sync_keyhive_with_peer(None).await?;
+    owner_reader_conn.sync_keyhive_with_peer().await?;
+    reader_owner_conn.sync_keyhive_with_peer().await?;
+    owner_intruder_conn.sync_keyhive_with_peer().await?;
+    intruder_owner_conn.sync_keyhive_with_peer().await?;
 
     // Reader can sync and materialise.
     let reader_doc = {
-        reader_owner_conn
-            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-            .await?;
+        reader_owner_conn.sync_doc_with_peer(doc_id).await?;
         guard.node(1).repo.wait_for_quiescence(None).await?;
         match guard.node(1).repo.get_doc(&doc_id).await? {
             crate::DocLookup::Ready(h) => h,
@@ -196,9 +193,7 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     drop(reader_doc);
 
     // Intruder must NOT materialise plaintext.
-    let intruder_sync = intruder_owner_conn
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await;
+    let intruder_sync = intruder_owner_conn.sync_doc_with_peer(doc_id).await;
     match intruder_sync {
         Ok(()) => {
             let lookup = guard.node(2).repo.get_doc(&doc_id).await?;
@@ -268,7 +263,7 @@ async fn tier9_missing_doc_sync_returns_unauthorized() -> crate::Res<()> {
     // Attempting to sync a non-existent doc returns the remote Unauthorized result.
     let err = pair
         .left_conn()
-        .sync_doc_with_peer(fake_doc_id, Some(Duration::from_secs(10)))
+        .sync_doc_with_peer(fake_doc_id)
         .await
         .expect_err("syncing a non-existent doc must fail");
     assert!(
@@ -304,25 +299,20 @@ async fn tier9_duplicate_concurrent_sync_converges() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Fire two concurrent doc syncs and wait for both.
     let (r1, r2) = tokio::join!(
-        pair.right_conn()
-            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10))),
-        pair.right_conn()
-            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10))),
+        pair.right_conn().sync_doc_with_peer(doc_id),
+        pair.right_conn().sync_doc_with_peer(doc_id),
     );
 
     // Both must succeed.
     r1.map_err(|e| crate::ferr!("first concurrent sync failed: {e:?}"))?;
     r2.map_err(|e| crate::ferr!("second concurrent sync failed: {e:?}"))?;
 
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(Duration::from_secs(10)))
-        .await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     // Verify the doc is fully materialized once and readable.
     let reader_doc = pair
@@ -371,8 +361,8 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -393,8 +383,8 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
     pair.right_conn = Some(new_right);
 
     // Sync keyhive to the new connection — the reader must catch up.
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // The OLD handle must still be valid and able to read content.
     let title = read_text(&reader_doc, "title").await;
@@ -413,13 +403,8 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
         })
         .await??;
 
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     let phase = read_text(&reader_doc, "phase").await;
     assert_eq!(
@@ -455,8 +440,8 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // --- Make the connection fail by cloning and stopping one side.
     // The `closed` flag is shared via `Arc<AtomicBool>` so stopping the
@@ -467,7 +452,7 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
     // Attempt sync on the now-closed connection — must fail with IoError.
     let fail_err = pair
         .left_conn()
-        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(5)))
+        .sync_doc_with_peer(doc_id)
         .await
         .expect_err("sync on closed connection must fail");
     assert!(
@@ -486,8 +471,8 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
     pair.right_conn = Some(new_right);
 
     // Sync keyhive on the new connection.
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Retry the doc sync — must succeed.
     let reader_doc =
@@ -563,19 +548,14 @@ async fn tier9_r2_relay_sync_materializes_in_transient_worker() -> crate::Res<()
         .repo
         .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Sync document content WITHOUT acquiring a live handle on the reader.
     // The runtime creates a transient worker to materialize and reconcile the
     // persisted session even though no public handle exists.
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     // Before any handle acquisition: the transient worker performed the cold
     // materialization path.
@@ -651,16 +631,11 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         .await?;
 
     // Propagate keyhive: Owner→Relay so relay learns the doc exists.
-    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
 
     // Relay pulls doc from Owner — stores encrypted blobs, can't decrypt.
-    topo.topo_conn(1, 0)
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    topo.topo_node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id).await?;
+    topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     // A transient worker exists after sync even without a live handle so key
     // changes can drive materialization and causal healing.
@@ -710,20 +685,12 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         .await?;
 
     // Keyhive sync delivers the decryption key.
-    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
-    topo.topo_node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
+    topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     // Re-sync the doc now that keys are available → must become Ready.
-    topo.topo_conn(1, 0)
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    topo.topo_node(1)
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id).await?;
+    topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
     match lookup {
@@ -767,8 +734,8 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
             keyhive_core::access::Access::Read,
         )
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
 
@@ -780,8 +747,8 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
         .repo
         .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Relay)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     owner_doc
         .with_document(|doc| {
@@ -789,13 +756,8 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
                 .map_err(|err| crate::ferr!("failed writing owner update: {err:?}"))
         })
         .await??;
-    pair.right_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
-    pair.right()
-        .repo
-        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
+    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
 
     assert!(
         reader_doc.is_partially_decrypted(),
@@ -860,8 +822,8 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Race: doc sync (delivers content) vs handle acquisition (creates worker).
     // The sync triggers SyncSessionObserved → ApplyReceivedContent on the worker.
@@ -870,10 +832,8 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     let repo = Arc::clone(&pair.right().repo);
 
     let sync_fut = async move {
-        conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
-        repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-            .await
+        conn.sync_doc_with_peer(doc_id).await?;
+        repo.wait_for_quiescence(None).await
     };
     let get_fut = pair.right().repo.get_doc(&doc_id);
 
@@ -881,27 +841,16 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     sync_result?;
 
     // After both race, poll for Ready (sync delivery + worker converge).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let ready = loop {
+    let handle = loop {
         match pair.right().repo.get_doc(&doc_id).await? {
-            crate::runtime2::types::DocLookup::Ready(handle) => break Some(handle),
+            crate::runtime2::types::DocLookup::Ready(handle) => break handle,
             crate::runtime2::types::DocLookup::PendingMaterialization
             | crate::runtime2::types::DocLookup::Missing => {
-                if std::time::Instant::now() >= deadline {
-                    break None;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
     };
-    match ready {
-        Some(handle) => drop(handle),
-        None => {
-            return Err(crate::ferr!(
-                "racing handle acquisition never converged to Ready (10s timeout)"
-            ));
-        }
-    }
+    drop(handle);
 
     drop(owner_doc);
     Ok(())

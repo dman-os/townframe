@@ -413,7 +413,9 @@ fn schema_type(
             alias = AsPascalCase(&name[..]),
             other = cx.rust_name(*ty).expect("unregistered inner type")
         )?,
-        ty => eyre::bail!("found unsupported schema type: {ty:?}"),
+        ty => {
+            eyre::bail!("found unsupported schema type: {ty:?}");
+        }
     };
     Ok(())
 }
@@ -742,7 +744,7 @@ fn input_type(
                             if length_validations.0.is_some() {
                                 eyre::bail!(
                                     "duplicate min length validations: {len} && {length_validations:?}"
-                                )
+                                );
                             }
                             length_validations.0 = Some(len);
                         }
@@ -750,7 +752,7 @@ fn input_type(
                             if length_validations.1.is_some() {
                                 eyre::bail!(
                                     "duplicate max length validations: {len} && {length_validations:?}"
-                                )
+                                );
                             }
                             length_validations.1 = Some(len);
                         }
