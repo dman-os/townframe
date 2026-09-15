@@ -7,7 +7,7 @@ edition = "2021"
 dioxus = { workspace = true, features = ["router"] }
 ui = { workspace = true }
 
-dioxus-native = { version = "0.8.0-alpha.1", features = ["scrollbars", "skia"] }
+dioxus-native = { version = "0.8.0-alpha.1", features = ["scrollbars"] }
 anyrender = { version = "0.13.0" }
 anyrender_skia = { version = "0.11.0" }
 anyrender_vello = { version = "0.14.0" }

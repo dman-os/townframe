@@ -237,11 +237,15 @@ dioxus = { version = "0.8.0-alpha.1" }
 ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
+[workspace.metadata.townframe.dioxus]
+repository = "https://github.com/DioxusLabs/dioxus"
+revision = "ada3b67c73c1c5484dd2e8408cb21c470b200423"
+
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { path = "../dioxus/packages/dioxus" }
-dioxus-native = { path = "../dioxus/packages/native" }
+dioxus = { git = "https://github.com/DioxusLabs/dioxus", rev = "ada3b67c73c1c5484dd2e8408cb21c470b200423" }
+dioxus-native = { git = "https://github.com/DioxusLabs/dioxus", rev = "ada3b67c73c1c5484dd2e8408cb21c470b200423" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }

@@ -1,0 +1,8 @@
+[application]
+name = "mobile"
+android_main_activity = "MainActivity.kt"
+
+[android]
+compile_sdk = 36
+target_sdk = 36
+min_sdk = 28

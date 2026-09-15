@@ -21,6 +21,14 @@ fn main() {
     dioxus::launch(App);
 }
 
+#[cfg(target_os = "android")]
+#[no_mangle]
+fn android_main(app: dioxus_native::AndroidApp) {
+    dioxus_native::set_android_app(app);
+    dioxus::launch(App);
+}
+
+
 #[component]
 fn App() -> Element {
     // Build cool things ✌️
