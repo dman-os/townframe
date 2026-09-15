@@ -122,6 +122,12 @@ impl PlugsRepo {
                             last_enabled_version: Some(version),
                         },
                     );
+                    // ADR 007 §2: the core plug's config doc is the repo config
+                    // doc itself; record the mapping so the invariant "an enabled
+                    // plug always has a config doc" holds for core too.
+                    config
+                        .plug_config_doc_ids
+                        .insert(CORE_PLUG_ID.to_string(), self.doc_config_id.to_string());
                 })
                 .await?,
         );

@@ -18,6 +18,7 @@ use clap::*;
 mod cmds;
 mod config;
 mod context;
+mod e2e;
 mod lazy;
 
 fn main() -> Res<ExitCode> {
@@ -162,10 +163,10 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         return Ok(code);
     }
 
-    // let ctx = Box::pin(lazy::repo_ctx()).await?;
-    // let drawer = Box::pin(lazy::drawer_repo()).await?;
-    // let plugs_repo = Box::pin(lazy::plugs_repo()).await?;
-
+    // The plug cache is materialized when the drawer boots. Without this
+    // boot, exec's Ctx::new() below sees an un-populated cache and
+    // registers no plug commands.
+    lazy::drawer_repo().await?;
     let exec_cmd = cmds::exec::Ctx::new().await?;
 
     root_cmd = root_cmd.subcommand(exec_cmd.subcmd());
