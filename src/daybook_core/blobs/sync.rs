@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::blobs::{BlobId, BlobUseHints, BlobsRepo, blob_id_to_iroh_hash};
+use crate::blobs::{BlobId, BlobsRepo, blob_id_to_iroh_hash};
 use big_repo::SharedPartStore;
 
 use big_sync::{SyncBackend, SyncTaskRunOutcome};
@@ -37,75 +37,6 @@ impl BlobSyncBackend {
             let (mut map, _key) = key.lock(&self.peer_addrs);
             map.insert(peer_id, addr);
         });
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Err(err) = this.reconcile_missing_local_blobs_with_peer(peer_id).await {
-                tracing::warn!(%peer_id, ?err, "error reconciling missing local blobs with peer");
-            }
-        });
-    }
-
-    pub async fn reconcile_missing_local_blobs_with_peer(&self, peer_id: PeerId) -> Res<()> {
-        let parts = vec![
-            crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
-            crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
-        ];
-        for part_id in parts {
-            let items = self.list_all_objs_in_part(part_id).await?;
-            for obj_id in items {
-                let blob_id = BlobId::new(*obj_id.as_bytes());
-                if !self.blobs_repo.has_blob_on_disk(blob_id).await?
-                    && let Err(err) = self.ensure_local_blob(peer_id, blob_id).await
-                {
-                    tracing::warn!(%peer_id, %blob_id, ?err, "failed downloading missing local blob from peer");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn list_all_objs_in_part(&self, part_id: PartId) -> Res<Vec<ObjId>> {
-        let mut objs = Vec::new();
-        let buckets_res = self
-            .part_store
-            .get_changed_buckets(big_sync_core::rpc::GetChangedBucketsRequest {
-                part_id,
-                offset: big_sync_core::BuckId::ROOT,
-                since: 0,
-                limit_hint: 1000,
-            })
-            .await?;
-        let Ok(buckets) = buckets_res else {
-            return Ok(objs);
-        };
-        let leaf_reqs: Vec<_> = buckets
-            .into_iter()
-            .map(|buck| big_sync_core::rpc::LeafBucketRequest {
-                buck_id: buck.id,
-                after: None,
-            })
-            .collect();
-        if leaf_reqs.is_empty() {
-            return Ok(objs);
-        }
-        let leaf_res = self
-            .part_store
-            .leaf_buckets(big_sync_core::rpc::LeafBucketsRequest {
-                part_id,
-                since: 0,
-                buckets: leaf_reqs,
-                seed: big_sync_core::FingerprintSeed::new(0x1234, 0x5678),
-                limit_hint: 1000,
-            })
-            .await?;
-        if let Ok(leaf_result) = leaf_res {
-            for buck in leaf_result.bucks {
-                for item in buck.1.entries {
-                    objs.push(item.obj_id);
-                }
-            }
-        }
-        Ok(objs)
     }
 
     pub fn active_peer_ids(&self) -> Vec<PeerId> {
@@ -129,9 +60,7 @@ impl BlobSyncBackend {
 
         let iroh_hash = blob_id_to_iroh_hash(blob_id);
         if self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
-            self.blobs_repo
-                .put_from_store(blob_id, BlobUseHints::Unknown)
-                .await?;
+            self.blobs_repo.put_from_store(blob_id).await?;
             return Ok(());
         }
 
@@ -152,9 +81,7 @@ impl BlobSyncBackend {
             eyre::eyre!("failed downloading blob {blob_id} from peer {peer_id}: {err:?}")
         })?;
 
-        self.blobs_repo
-            .put_from_store(blob_id, BlobUseHints::Unknown)
-            .await?;
+        self.blobs_repo.put_from_store(blob_id).await?;
 
         Ok(())
     }
@@ -215,7 +142,6 @@ impl SyncBackend for BlobSyncBackend {
 mod tests {
     use super::*;
 
-    use crate::blobs::NoopPartitionMembershipWriter;
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
     use big_sync::backend::contract::{
@@ -246,7 +172,6 @@ mod tests {
         let blobs_repo = BlobsRepo::new(
             temp_root.path().to_path_buf(),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
         let part_store: big_repo::SharedPartStore = Arc::new(MemoryPartStore::new());
@@ -351,33 +276,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn blob_sync_backend_contract() -> Res<()> {
         let (backend, part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
-        let noop_blob_id = blobs_repo
-            .put(b"blob-sync-contract-noop", BlobUseHints::Unknown)
-            .await?;
+        let noop_blob_id = blobs_repo.put(b"blob-sync-contract-noop").await?;
         let noop_missing_remote_blob_id = blobs_repo
-            .put(
-                b"blob-sync-contract-noop-missing-remote",
-                BlobUseHints::Unknown,
-            )
+            .put(b"blob-sync-contract-noop-missing-remote")
             .await?;
-        let changed_blob_id = blobs_repo
-            .put(b"blob-sync-contract-changed", BlobUseHints::Unknown)
-            .await?;
+        let changed_blob_id = blobs_repo.put(b"blob-sync-contract-changed").await?;
         let changed_empty_hints_blob_id = blobs_repo
-            .put(
-                b"blob-sync-contract-changed-empty-hints",
-                BlobUseHints::Unknown,
-            )
+            .put(b"blob-sync-contract-changed-empty-hints")
             .await?;
         let changed_multi_hints_blob_id = blobs_repo
-            .put(
-                b"blob-sync-contract-changed-multi-hints",
-                BlobUseHints::Unknown,
-            )
+            .put(b"blob-sync-contract-changed-multi-hints")
             .await?;
-        let added_blob_id = blobs_repo
-            .put(b"blob-sync-contract-added", BlobUseHints::Unknown)
-            .await?;
+        let added_blob_id = blobs_repo.put(b"blob-sync-contract-added").await?;
         let harness = BlobSyncBackendContractHarness {
             backend,
             store: part_store,
@@ -421,14 +331,12 @@ mod tests {
         let blobs_repo_a = BlobsRepo::new(
             dir_a.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
         let blobs_repo_b = BlobsRepo::new(
             dir_b.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/test-user/test-device"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
@@ -448,7 +356,7 @@ mod tests {
         );
 
         let payload = b"hello direct blob transfer".to_vec();
-        let hash = blobs_repo_a.put(&payload, BlobUseHints::Docs).await?;
+        let hash = blobs_repo_a.put(&payload).await?;
 
         let addr_a = iroh::EndpointAddr::from_parts(
             endpoint_a.id(),
@@ -495,14 +403,12 @@ mod tests {
         let blobs_repo_a = BlobsRepo::new(
             dir_a.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/user-a/device-a"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
         let blobs_repo_b = BlobsRepo::new(
             dir_b.join("blobs"),
             daybook_types::doc::UserPathBuf::from("/user-b/device-b"),
-            Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
 
@@ -533,7 +439,7 @@ mod tests {
 
         // Case 1: Remote Blob Added — Node B is missing blob bytes and sync_obj materializes it from Node A over iroh downloader
         let payload_added = b"contract-multi-node-added-blob".to_vec();
-        let hash_added = blobs_repo_a.put(&payload_added, BlobUseHints::Docs).await?;
+        let hash_added = blobs_repo_a.put(&payload_added).await?;
         let obj_id_added = ObjId::new(*hash_added.as_bytes());
 
         assert!(!blobs_repo_b.has_hash(hash_added).await?);
@@ -574,21 +480,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn blob_sync_backend_stress_contract() -> Res<()> {
+    async fn multi_node_chain_blob_sync_stress() -> Res<()> {
         struct TestNode {
-            _dir: PathBuf,
-            endpoint: iroh::Endpoint,
             blobs_repo: Arc<BlobsRepo>,
+            endpoint: iroh::Endpoint,
+            _address_lookup: iroh::address_lookup::MemoryLookup,
+            backend: BlobSyncBackend,
             _part_store: big_repo::SharedPartStore,
-            backend: Arc<BlobSyncBackend>,
             router: iroh::protocol::Router,
         }
 
         let temp_dir = tempfile::tempdir()?;
+        let num_nodes = 3;
         let mut nodes = Vec::new();
 
-        for ii in 0..3 {
-            let dir = temp_dir.path().join(format!("node_{ii}"));
+        for i in 0..num_nodes {
+            let dir = temp_dir.path().join(format!("node_{i}"));
             let address_lookup = iroh::address_lookup::MemoryLookup::default();
             let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
                 .address_lookup(address_lookup.clone())
@@ -599,8 +506,7 @@ mod tests {
 
             let blobs_repo = BlobsRepo::new(
                 dir.join("blobs"),
-                daybook_types::doc::UserPathBuf::from(format!("/user-{ii}/device-{ii}")),
-                Arc::new(NoopPartitionMembershipWriter),
+                daybook_types::doc::UserPathBuf::from(format!("/user-{i}/device-{i}")),
             )
             .await?;
 
@@ -612,29 +518,29 @@ mod tests {
                 .spawn();
 
             let part_store: big_repo::SharedPartStore = Arc::new(MemoryPartStore::new());
-            let backend = Arc::new(BlobSyncBackend::new(
+            let backend = BlobSyncBackend::new(
                 Arc::clone(&blobs_repo),
                 Arc::clone(&part_store),
                 endpoint.clone(),
-                address_lookup,
-            ));
-            blobs_repo.set_sync_backend((*backend).clone());
+                address_lookup.clone(),
+            );
+            blobs_repo.set_sync_backend(backend.clone());
 
             nodes.push(TestNode {
-                _dir: dir,
-                endpoint,
                 blobs_repo,
-                _part_store: part_store,
+                endpoint,
+                _address_lookup: address_lookup,
                 backend,
+                _part_store: part_store,
                 router,
             });
         }
 
-        // Register peer addresses in mesh topology
-        for i in 0..nodes.len() {
-            for j in 0..nodes.len() {
+        // Register peer addresses
+        for i in 0..num_nodes {
+            for j in 0..num_nodes {
                 if i != j {
-                    let addr_j = iroh::EndpointAddr::from_parts(
+                    let addr = iroh::EndpointAddr::from_parts(
                         nodes[j].endpoint.id(),
                         nodes[j]
                             .endpoint
@@ -642,8 +548,8 @@ mod tests {
                             .into_iter()
                             .map(iroh::TransportAddr::Ip),
                     );
-                    let peer_id_j = PeerId::new(*nodes[j].endpoint.id().as_bytes());
-                    nodes[i].backend.register_peer_addr(peer_id_j, addr_j);
+                    let peer_id = PeerId::new(*nodes[j].endpoint.id().as_bytes());
+                    nodes[i].backend.register_peer_addr(peer_id, addr);
                 }
             }
         }
@@ -656,10 +562,7 @@ mod tests {
                 "x".repeat(1024 * (idx + 1))
             )
             .into_bytes();
-            let hash = nodes[0]
-                .blobs_repo
-                .put(&payload, BlobUseHints::Docs)
-                .await?;
+            let hash = nodes[0].blobs_repo.put(&payload).await?;
             created_blobs.push((hash, payload));
         }
 
@@ -689,10 +592,7 @@ mod tests {
                 "y".repeat(2048 * (idx + 1))
             )
             .into_bytes();
-            let hash = nodes[1]
-                .blobs_repo
-                .put(&payload, BlobUseHints::Docs)
-                .await?;
+            let hash = nodes[1].blobs_repo.put(&payload).await?;
             created_blobs.push((hash, payload));
         }
 

@@ -13,11 +13,7 @@ async fn test_ocr_image_workflow() -> Res<()> {
     .await?;
 
     let image_bytes = include_bytes!("./sample.jpg");
-    let blob_id = test_cx
-        .rt
-        .blobs_repo
-        .put(image_bytes, crate::blobs::BlobUseHints::Docs)
-        .await?;
+    let blob_id = test_cx.rt.blobs_repo.put(image_bytes).await?;
     let digest = blob_id_to_digest_str(blob_id);
 
     let blob_facet = Blob {

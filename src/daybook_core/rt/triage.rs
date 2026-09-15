@@ -476,24 +476,27 @@ impl SwitchSink for DocProcessorTriageListener {
                     origin,
                 } => {
                     let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
-                    let has_non_dmeta_change = diff
+                    let non_dmeta_changed: HashSet<FacetKey> = diff
                         .changed_facet_keys
                         .iter()
-                        .any(|facet_key| facet_key != &dmeta_key);
-                    let moved_main = diff.moved_branch_names.iter().any(|name| name == "main");
+                        .cloned()
+                        .chain(diff.added_facet_keys.iter().cloned())
+                        .chain(diff.removed_facet_keys.iter().cloned())
+                        .filter(|facet_key| facet_key != &dmeta_key)
+                        .collect();
+                    let has_non_dmeta_change = !non_dmeta_changed.is_empty();
+                    let moved_any_branch = !diff.moved_branch_names.is_empty();
                     let changed_facet_keys_set: Option<HashSet<FacetKey>> = if has_non_dmeta_change
                     {
-                        let changed_set: HashSet<FacetKey> =
-                            diff.changed_facet_keys.iter().cloned().collect();
                         if !changed_intersects_read_set(
-                            &changed_set,
+                            &non_dmeta_changed,
                             &self.triage_read_tags,
                             &self.triage_read_keys,
                         ) {
                             return Ok(SwitchSinkOutcome::default());
                         }
-                        Some(changed_set)
-                    } else if moved_main {
+                        Some(non_dmeta_changed)
+                    } else if moved_any_branch {
                         None
                     } else {
                         return Ok(SwitchSinkOutcome::default());

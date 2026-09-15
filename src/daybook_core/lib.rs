@@ -100,9 +100,14 @@ pub(crate) fn peer_id_from_label(label: &str) -> PeerId {
     PeerId::new(bytes)
 }
 
-pub(crate) fn part_id_from_label(label: &str) -> PartId {
+pub fn part_id_from_label(label: &str) -> PartId {
     let digest = blake3::hash(label.as_bytes());
     PartId::new(*digest.as_bytes())
 }
+
+pub use blobs::{
+    BlobPinWorkItem, BlobPinWorker, BlobPinsPartEvent, BlobPinsPartWorker, blob_inventory_part_id,
+    blob_inventory_part_id_from_doc_id,
+};
 
 pub mod app;

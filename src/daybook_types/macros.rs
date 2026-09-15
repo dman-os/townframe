@@ -61,8 +61,8 @@ macro_rules! domain_name {
         $domain_key_opt
     };
     (or $key_sure:ident) => {
-        pastey::paste! {
-            stringify!([<$key_sure:lower>])
+        $crate::pastey::paste! {
+            stringify!([<$key_sure:lower_camel>])
         }
     };
 }

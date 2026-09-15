@@ -16,7 +16,7 @@ path = "lib.rs"
 [features]
 default = ["uniffi"]
 uniffi = ["dep:uniffi"]
-test-support = ["dep:tempfile", "big_sync/test-support", "big_repo/test-support"]
+test-support = ["dep:tempfile", "big_repo/test-support", "big_sync/test-support"]
 
 [dependencies]
 #

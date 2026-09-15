@@ -47,10 +47,6 @@
 
           ghjkDevEnv = {
             GDK_SCALE = "2";
-            KANIDM_URL = "https://localhost:8443";
-            KANIDM_SKIP_HOSTNAME_VERIFICATION = "true";
-            KANIDM_ACCEPT_INVALID_CERTS = "true";
-            WASMCLOUD_OCI_ALLOWED_INSECURE = "localhost:5000";
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           };
@@ -68,7 +64,7 @@
 
           # Rust toolchain for CI (wasm32 + native Linux targets)
           rustRust = pkgs.rust-bin.nightly.${rustVersion}.default.override {
-            extensions = [ "rust-src" ];
+            extensions = [ "rust-src" "llvm-tools-preview" ];
             targets =
               [
                 "wasm32-unknown-unknown"
@@ -204,11 +200,14 @@
 
             libarchive
             prek
+            zizmor
           ];
 
           rustLintInputs = with pkgs; [
             cargo-udeps
             cargo-nextest
+            cargo-llvm-cov
+            cargo-machete
           ];
 
           kotliLintTools = with pkgs; [

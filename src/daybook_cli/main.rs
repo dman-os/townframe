@@ -384,14 +384,8 @@ mod tests {
             "cli-test-device".into(),
         )
         .await?;
-        let blobs_repo = BlobsRepo::new(
-            ctx.layout.blobs_root.clone(),
-            ctx.local_user_path.clone(),
-            Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&ctx.part_store),
-            )),
-        )
-        .await?;
+        let blobs_repo =
+            BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),

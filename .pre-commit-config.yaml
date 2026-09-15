@@ -33,26 +33,50 @@ repos:
   - repo: local
     hooks:
       - id: deno-fmt-x
-        name: Formt scripts
+        name: format scripts
         language: system
         entry: deno fmt ./x/
+        files: |
+          (?x)^(
+              ./x/
+          )$
         pass_filenames: false
       - id: deno-lint-x
-        name: Lint scripts
+        name: lint scripts
         language: system
         entry: deno lint ./x/
         pass_filenames: false
+        files: |
+          (?x)^(
+              ./x/
+          )$
       - id: deno-check-x
-        name: Check scripts
+        name: check scripts
         language: system
         entry: deno check ./x/
         pass_filenames: false
+        files: |
+          (?x)^(
+              ./x/
+          )$
+      - id: zizmor 
+        name: check CI config
+        language: system
+        entry: zizmor .github/
+        pass_filenames: false
+        files: |
+          (?x)^(
+              ./.github
+          )$
       - id: detekt-kotlin
-        name: Detekt Kotlin
+        name: detekt Kotlin
         language: system
         entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
         pass_filenames: false
-        files: \.kt$
+        files: |
+          (?x)^(
+              ./src/daybook_compose/
+          )$
       - id: syncpack-fmt
         name: syncpack format
         language: system
@@ -87,7 +111,6 @@ repos:
         language: system
         entry: pnpm lint
         pass_filenames: false
-
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

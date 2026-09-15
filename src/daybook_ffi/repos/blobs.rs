@@ -18,9 +18,6 @@ impl BlobsRepoFfi {
             .do_on_rt(daybook_core::blobs::BlobsRepo::new(
                 fcx.rcx.layout.blobs_root.to_path_buf(),
                 fcx.rcx.local_user_path.clone(),
-                Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                    Arc::clone(&fcx.rcx.part_store),
-                )),
             ))
             .await?;
         Ok(Arc::new(Self { fcx, repo }))
@@ -31,7 +28,7 @@ impl BlobsRepoFfi {
         let this = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move {
-                this.put(&data, daybook_core::blobs::BlobUseHints::Unknown)
+                this.put(&data)
                     .await
                     .map(|blob_id| blob_id.to_string())
                     .map_err(FfiError::from)

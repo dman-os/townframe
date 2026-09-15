@@ -10,7 +10,7 @@ class FacetParsingTest {
     fun `decode body facet parses order urls`() {
         val raw =
             """
-            {"order":["db+facet:///self/org.example.daybook.imagemetadata/main#","db+facet:///self/org.example.daybook.note/main#abc"]}
+            {"order":["db+facet:///self/org.example.daybook.imageMetadata/main#","db+facet:///self/org.example.daybook.note/main#abc"]}
             """.trimIndent()
 
         val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
@@ -18,7 +18,7 @@ class FacetParsingTest {
         assertTrue(decoded.isSuccess, decoded.exceptionOrNull()?.stackTraceToString() ?: "decode failed")
         assertEquals(
             listOf(
-                "db+facet:///self/org.example.daybook.imagemetadata/main#",
+                "db+facet:///self/org.example.daybook.imageMetadata/main#",
                 "db+facet:///self/org.example.daybook.note/main#abc",
             ),
             decoded.getOrThrow().v1.order,
@@ -33,17 +33,17 @@ class FacetParsingTest {
               "createdAt":"2026-02-23T03:36:25.187859494Z",
               "facetUuids":{
                 "37f9dac6-bbec-4afa-9938-3f2de43124a8":"org.example.daybook.note/main",
-                "88fed038-2410-482d-9a16-7e07025a2b2a":"org.example.daybook.imagemetadata/main",
-                "c6e73c65-7df5-4347-beba-2025644cd85a":"org.example.daybook.titlegeneric/main",
+                "88fed038-2410-482d-9a16-7e07025a2b2a":"org.example.daybook.imageMetadata/main",
+                "c6e73c65-7df5-4347-beba-2025644cd85a":"org.example.daybook.titleGeneric/main",
                 "e11f2202-1eff-4d65-a8d8-d97e306d584e":"org.example.daybook.body/main",
                 "fca7891a-a2ae-49a8-86c9-d7f1d0692969":"org.example.daybook.blob/main"
               },
               "facets":{
                 "org.example.daybook.blob/main":{"createdAt":"2026-02-23T03:36:25.187859494Z","updatedAt":["2026-02-23T03:36:25.187859494Z"],"uuid":["fca7891a-a2ae-49a8-86c9-d7f1d0692969"]},
                 "org.example.daybook.body/main":{"createdAt":"2026-02-23T03:36:36Z","updatedAt":["2026-02-23T04:24:26Z"],"uuid":["e11f2202-1eff-4d65-a8d8-d97e306d584e"]},
-                "org.example.daybook.imagemetadata/main":{"createdAt":"2026-02-23T03:36:25.187859494Z","updatedAt":["2026-02-23T03:36:25.187859494Z"],"uuid":["88fed038-2410-482d-9a16-7e07025a2b2a"]},
+                "org.example.daybook.imageMetadata/main":{"createdAt":"2026-02-23T03:36:25.187859494Z","updatedAt":["2026-02-23T03:36:25.187859494Z"],"uuid":["88fed038-2410-482d-9a16-7e07025a2b2a"]},
                 "org.example.daybook.note/main":{"createdAt":"2026-02-23T03:36:36Z","updatedAt":["2026-02-23T04:24:37Z"],"uuid":["37f9dac6-bbec-4afa-9938-3f2de43124a8"]},
-                "org.example.daybook.titlegeneric/main":{"createdAt":"2026-02-23T03:59:43Z","updatedAt":["2026-02-23T03:59:43Z"],"uuid":["c6e73c65-7df5-4347-beba-2025644cd85a"]}
+                "org.example.daybook.titleGeneric/main":{"createdAt":"2026-02-23T03:59:43Z","updatedAt":["2026-02-23T03:59:43Z"],"uuid":["c6e73c65-7df5-4347-beba-2025644cd85a"]}
               },
               "id":"2ErkecXNEtWXiSDtmbqzexRxroaD",
               "updatedAt":["2026-02-23T04:24:37Z"]

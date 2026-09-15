@@ -16,6 +16,8 @@ impl SqlCtx {
             SqliteConnectOptions::from_str("sqlite::memory:")?.disable_statement_logging();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect_with(connect_options)
             .await
             .wrap_err("failed opening sqlite memory context")?;
@@ -40,11 +42,15 @@ impl SqlCtx {
 
         let read_pool = SqlitePoolOptions::new()
             .max_connections(4)
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect_with(connect_options.clone())
             .await
             .wrap_err_with(|| format!("failed opening sqlite read pool: {url}"))?;
         let write_pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect_with(connect_options)
             .await
             .wrap_err_with(|| format!("failed opening sqlite write pool: {url}"))?;

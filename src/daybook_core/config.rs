@@ -13,6 +13,14 @@ pub struct ConfigStore {
     pub users: HashMap<String, Versioned<ThroughJson<UserMeta>>>,
     pub users_deleted: HashMap<String, Vec<VersionTag>>,
     pub mltools: Versioned<ThroughJson<mltools::Config>>,
+    pub blob_inventories: Option<Versioned<ThroughJson<AppBlobInventories>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AppBlobInventories {
+    pub core_inventory_doc_id: DocumentId,
+    pub docs_inventory_doc_id: DocumentId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
@@ -74,6 +82,7 @@ impl Default for ConfigStore {
                 }
                 .into(),
             },
+            blob_inventories: None,
         }
     }
 }
@@ -313,6 +322,7 @@ impl ConfigRepo {
                         store.users = new_store.users;
                         store.users_deleted = new_store.users_deleted;
                         store.mltools = new_store.mltools;
+                        store.blob_inventories = new_store.blob_inventories;
                     })
                     .await?;
 
@@ -437,7 +447,10 @@ impl ConfigRepo {
                     live_origin,
                 );
 
-                if matches!(section_key.as_ref(), "facet_display" | "users" | "mltools") {
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display" | "users" | "mltools" | "blob_inventories"
+                ) {
                     out.push(ConfigEvent::Changed {
                         heads,
                         origin: event_origin.clone(),
@@ -599,6 +612,44 @@ impl ConfigRepo {
         Ok(())
     }
 
+    pub async fn get_blob_inventories(&self) -> Option<AppBlobInventories> {
+        self.store
+            .query_sync(|store| {
+                store
+                    .blob_inventories
+                    .as_ref()
+                    .map(|entry| entry.val.0.clone())
+            })
+            .await
+    }
+
+    pub async fn set_blob_inventories(&self, inventories: AppBlobInventories) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+
+        let (_, changed) = self
+            .store
+            .mutate_sync(move |store| {
+                if let Some(existing) = store.blob_inventories.as_mut() {
+                    existing.replace(self.local_actor_id.clone(), inventories.into());
+                } else {
+                    store.blob_inventories = Some(Versioned::mint(
+                        self.local_actor_id.clone(),
+                        inventories.into(),
+                    ));
+                }
+            })
+            .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(())
+    }
+
     pub async fn get_actor_user_path(
         &self,
         actor_id: &automerge::ActorId,
@@ -705,21 +756,16 @@ mod tests {
     #[tokio::test]
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, _big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let app_doc_handle = big_repo.create_doc(app_doc).await?;
         let app_doc_id = app_doc_handle.document_id();
 
         let temp = tempfile::tempdir()?;
-        let blobs_repo = crate::blobs::BlobsRepo::new(
-            temp.path().join("blobs"),
-            local_user_path.clone(),
-            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&big_sync_host.store),
-            )),
-        )
-        .await?;
+        let blobs_repo =
+            crate::blobs::BlobsRepo::new(temp.path().join("blobs"), local_user_path.clone())
+                .await?;
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),

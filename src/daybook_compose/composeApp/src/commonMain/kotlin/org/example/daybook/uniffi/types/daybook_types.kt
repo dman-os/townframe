@@ -1289,6 +1289,39 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 
 
+data class BlobPin (
+    var `lengthOctets`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBlobPin: FfiConverterRustBuffer<BlobPin> {
+    override fun read(buf: ByteBuffer): BlobPin {
+        return BlobPin(
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BlobPin) = (
+            FfiConverterULong.allocationSize(value.`lengthOctets`)
+    )
+
+    override fun write(value: BlobPin, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`lengthOctets`, buf)
+    }
+}
+
+
+
 @Serializable
 data class Body (
     var `order`: List<Url>
@@ -3421,6 +3454,15 @@ sealed class WellKnownFacet {
         companion object
     }
     
+    data class BlobPin(
+        val v1: org.example.daybook.uniffi.types.BlobPin) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
     data class ImageMetadata(
         val v1: org.example.daybook.uniffi.types.ImageMetadata) : WellKnownFacet()
         
@@ -3491,13 +3533,16 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             9 -> WellKnownFacet.Blob(
                 FfiConverterTypeBlob.read(buf),
                 )
-            10 -> WellKnownFacet.ImageMetadata(
+            10 -> WellKnownFacet.BlobPin(
+                FfiConverterTypeBlobPin.read(buf),
+                )
+            11 -> WellKnownFacet.ImageMetadata(
                 FfiConverterTypeImageMetadata.read(buf),
                 )
-            11 -> WellKnownFacet.OcrResult(
+            12 -> WellKnownFacet.OcrResult(
                 FfiConverterTypeOcrResult.read(buf),
                 )
-            12 -> WellKnownFacet.Embedding(
+            13 -> WellKnownFacet.Embedding(
                 FfiConverterTypeEmbedding.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -3566,6 +3611,13 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             (
                 4UL
                 + FfiConverterTypeBlob.allocationSize(value.v1)
+            )
+        }
+        is WellKnownFacet.BlobPin -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeBlobPin.allocationSize(value.v1)
             )
         }
         is WellKnownFacet.ImageMetadata -> {
@@ -3638,18 +3690,23 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
                 FfiConverterTypeBlob.write(value.v1, buf)
                 Unit
             }
-            is WellKnownFacet.ImageMetadata -> {
+            is WellKnownFacet.BlobPin -> {
                 buf.putInt(10)
+                FfiConverterTypeBlobPin.write(value.v1, buf)
+                Unit
+            }
+            is WellKnownFacet.ImageMetadata -> {
+                buf.putInt(11)
                 FfiConverterTypeImageMetadata.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.OcrResult -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterTypeOcrResult.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Embedding -> {
-                buf.putInt(12)
+                buf.putInt(13)
                 FfiConverterTypeEmbedding.write(value.v1, buf)
                 Unit
             }
@@ -3673,6 +3730,7 @@ enum class WellKnownFacetTag {
     BODY,
     NOTE,
     BLOB,
+    BLOB_PIN,
     IMAGE_METADATA,
     OCR_RESULT,
     EMBEDDING;

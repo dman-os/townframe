@@ -196,21 +196,21 @@ async fn test_full_command_capability_report() -> Res<()> {
     assert!(
         facet_keys
             .iter()
-            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+            .any(|k| k.starts_with("org.example.daybook.labelGeneric"))
     );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
     assert!(
         tag_keys
             .iter()
-            .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note")
+            .any(|k| k == "org.example.daybook.labelGeneric" || k == "org.example.daybook.note")
     );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
     let label_key = facet_keys
         .iter()
-        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .find(|k| k.starts_with("org.example.daybook.labelGeneric"))
         .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),
@@ -294,14 +294,14 @@ async fn test_full_processor_capability_report() -> Res<()> {
     assert!(
         facet_keys
             .iter()
-            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+            .any(|k| k.starts_with("org.example.daybook.labelGeneric"))
     );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
     let label_key = facet_keys
         .iter()
-        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .find(|k| k.starts_with("org.example.daybook.labelGeneric"))
         .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("UPDATE"),
@@ -322,7 +322,7 @@ async fn test_full_processor_capability_report() -> Res<()> {
     assert!(
         tag_keys
             .iter()
-            .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note")
+            .any(|k| k == "org.example.daybook.labelGeneric" || k == "org.example.daybook.note")
     );
 
     let config_facet_keys: Vec<Vec<String>> =
@@ -395,14 +395,14 @@ async fn test_minimal_command_capability_report() -> Res<()> {
     assert!(
         facet_keys
             .iter()
-            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+            .any(|k| k.starts_with("org.example.daybook.labelGeneric"))
     );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
     let label_key = facet_keys
         .iter()
-        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .find(|k| k.starts_with("org.example.daybook.labelGeneric"))
         .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),
@@ -461,14 +461,14 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     assert!(
         facet_keys
             .iter()
-            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+            .any(|k| k.starts_with("org.example.daybook.labelGeneric"))
     );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
     let label_key = facet_keys
         .iter()
-        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .find(|k| k.starts_with("org.example.daybook.labelGeneric"))
         .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),

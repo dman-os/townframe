@@ -1,7 +1,7 @@
 use crate::{interlude::*, wit};
 
 use crate::doc::{
-    Blob, Body, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag,
+    Blob, BlobPin, Body, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag,
 };
 use std::collections::HashMap;
 
@@ -158,5 +158,33 @@ fn test_doc_with_all_prop_types() -> Res<()> {
         let conv_val = back.facets.get(key).unwrap();
         assert_eq!(orig_val, conv_val);
     }
+    Ok(())
+}
+
+#[test]
+fn test_doc_with_blob_pin() -> Res<()> {
+    assert_eq!(
+        WellKnownFacetTag::BlobPin.as_str(),
+        "org.example.daybook.blobPin"
+    );
+
+    let mut props = HashMap::new();
+    let blob_pin = BlobPin {
+        length_octets: 12345,
+    };
+    props.insert(
+        FacetKey::from("org.example.daybook.blobPin/hash123"),
+        FacetRaw::from(WellKnownFacet::BlobPin(blob_pin)),
+    );
+
+    let root_doc = Doc {
+        id: "blob-pin-doc".to_string(),
+        facets: props,
+    };
+
+    let wit_doc: wit::doc::Doc = root_doc.clone().into();
+    let back: Doc = wit_doc.try_into()?;
+
+    assert_eq!(back.facets, root_doc.facets);
     Ok(())
 }

@@ -28,13 +28,11 @@ impl DrawerRepo {
         if args.branch_path != "main" {
             Err(ferr!("new docs must be created on main"))?;
         }
-        let mut doc_am = automerge::Automerge::new();
-        {
-            let mut tx = doc_am.transaction();
-            tx.put(automerge::ROOT, "__seed", true)
-                .expect("seed write failed");
-            tx.commit();
-        }
+        let doc_am = {
+            let bytes = crate::drawer::doc_version_updates::version_latest()?;
+            automerge::Automerge::load(&bytes)
+                .map_err(|err| ferr!("error loading doc_version_updates: {err:?}"))?
+        };
         let handle = match self
             .big_repo
             .create_doc_with_parents(
@@ -65,12 +63,12 @@ impl DrawerRepo {
             .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction();
-                tx.delete(automerge::ROOT, "__seed")?;
-                tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
                 tx.put(automerge::ROOT, "id", &doc_id)?;
 
-                let facets_obj =
-                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?,
+                };
 
                 for (key, value) in &args.facets {
                     let key_str = key.to_string();
@@ -257,12 +255,13 @@ impl DrawerRepo {
         let facet_keys_set: Vec<_> = patch.facets_set.keys().cloned().collect();
         let facet_keys_remove = patch.facets_remove.clone();
 
-        let (handle, branch_doc_id) = if let Some(branch_ref) = existing_branch_ref {
+        let (handle, branch_doc_id, branch_kind) = if let Some(branch_ref) = existing_branch_ref {
             (
                 self.get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
                     .await?
                     .ok_or_else(|| ferr!("missing branch doc '{}'", branch_ref.branch_doc_id))?,
                 branch_ref.branch_doc_id,
+                branch_ref.branch_kind,
             )
         } else {
             return Err(DrawerError::BranchNotFound {
@@ -295,7 +294,7 @@ impl DrawerRepo {
             .await?;
 
         // 1. Update content doc
-        let (_new_heads, invalidated_uuids) = handle
+        let (new_heads, invalidated_uuids) = handle
             .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc
@@ -337,6 +336,10 @@ impl DrawerRepo {
             })
             .await??;
 
+        // 2. Update partition store
+        self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &new_heads)
+            .await?;
+
         // 3. Update caches and notify
         self.invalidate_entry_cache(&patch.id);
 
@@ -348,6 +351,24 @@ impl DrawerRepo {
             let (mut handles, _key) = key.lock(&self.branch_handles);
             handles.insert(handle.document_id(), handle);
         });
+
+        let updated_entry = self
+            .current_doc_branches(&patch.id)
+            .await?
+            .ok_or_eyre("branch state missing after update_at_heads")?;
+        let drawer_heads = self.get_drawer_heads();
+        self.registry.notify([DrawerEvent::DocUpdated {
+            id: patch.id.clone(),
+            entry: updated_entry,
+            diff: DocEntryDiff {
+                changed_facet_keys: patch.facets_set.keys().cloned().collect(),
+                added_facet_keys: Vec::new(),
+                removed_facet_keys: patch.facets_remove.clone(),
+                moved_branch_names: vec![branch_path.to_string()],
+            },
+            drawer_heads,
+            origin: self.local_origin(),
+        }]);
 
         Ok(())
     }

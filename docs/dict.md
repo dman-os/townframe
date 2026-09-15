@@ -28,7 +28,7 @@ Some examples of facets:
 {
   "org.example.daybook.title/main": "hello world",
   "org.example.daybook.path/main": "/hello.txt",
-  // all docs in the document drawer dmeta facet
+  // all docs in the document drawer contain a dmeta facet
   "org.example.daybook.dmeta/main": {
     id: "<the id that the drawer knows it by>",
     createdAt: "timestamp",
@@ -44,16 +44,20 @@ Documents are stored using the Automerge data structure, a JSON based CRDT imple
 CRDTs are a family of data structures allowing concurrent edits across devices that can then be resolved to a final, merged state in a repeatable and unsupervised manner.
 The design of Automerge requires the full history of the document is kept which can be a feature or a burden depending on the usecase. 
 
+Note that the automerge CRDT is actually called a document but to avoid confusion, it'll be called the CRDT on this document.
+
 #### Heads
 
 In automerge, instead of line diffs as seen in git, we have operations describing changes to JSON objects.
-These operations are bunched up together into transactions or changes as they're called.
+These operations are bunched up together into transactions or *changes* as they're called.
 A change can be thought of as a single git commit with a hash used to refer to it, the change hash.
-But unlike git, automerge avoids ambiguity merge conflicts at the JSON layer.
-All changes concurrently resolve to the same outcome for all replicas.
-This allows us to avoid the need of creating merge commits to refer to a state of the document at a point in time.
-We instead use the set of the concurrent hashes as a commit reference.
-In most cases, a point in time for a doc only has a single hash in the set but under concurrent changes, we get a set so we default to that.
+Unlike git, Automerge ensures replicas converge deterministically while concurrent conflicting values may still coexist and remain accessible through conflict handling.
+These rules ensure changes concurrently resolve to the same outcome for all replicas.
+
+This allows us to avoid the need of creating merge commits to refer to a resolved state of the CRDT at a conflicted point in time.
+We instead use the set of the concurrent hashes as a commit reference (the heads frontier) which logically represents a deterministically merged state anyway.
+The next change will refer to the current frontier heads as its parents and produce heads that has a single change hash.
+I.e. in most cases, a point in time for a doc only has a single hash in the set but under concurrent changes, we get a set.
 
 ### Branches
 
@@ -62,6 +66,8 @@ But in some cases, we need to delay sending changes to others and keep working o
 Branches allow us to create a fork from a doc at some point and work on it.
 If satisfied, we can merge it back to the `main` branch.
 If not, it can be discarded.
+
+Each branch is stored as a separate Automerge CRDT, sharing the same genesis change, which makes them different versions of the same logical document.
 
 Note that branches by convention have path based names.
 Any branches in the `/tmp` path will never leave that device.
@@ -72,8 +78,8 @@ All other branches are replicated.
 ### Drawer
 
 The drawer is where we keep track of documents and their branches.
-It maintains this information in an automerge document that is replicated to all peers.
-It's also the gatekeeper for all docs weather it's reads or writes.
+It contains information like which automerge CRDT correspond to which branches.
+It's thus the gatekeeper for all docs whether it's reads or writes.
 We can read or update multiple facets at once from a single doc.
 
 When changing facets, we send in the full JSON value of the facet to the drawer.
