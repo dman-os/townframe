@@ -37,7 +37,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
     let restored = BigKeyhiveHandle::restore_from_storage_archive(seed, &storage, listener.clone())
         .await?
         .ok_or_eyre("baseline archive is missing")?;
-    restored.ingest_from_storage(&storage).await?;
+    subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_pairs: BTreeMap<ShareKey, ShareSecretKey> =
         bincode::deserialize(&restored.clone_keyhive().export_prekey_secrets().await?)?;
     assert_eq!(
@@ -76,12 +76,18 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
     owner.save_prekey_secrets(&storage).await?;
+    let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+        owner.clone_keyhive(),
+        storage.clone(),
+        owner.keyhive_peer_id(),
+        owner.contact_card().clone(),
+    ));
 
     let (repo_agents, _repo_hashes) = owner
-        .create_group_with_parents(Vec::new(), &storage)
+        .create_group_with_parents(Vec::new(), &protocol)
         .await?;
     let (core_docs, _core_hashes) = owner
-        .create_group_with_parents(Vec::new(), &storage)
+        .create_group_with_parents(Vec::new(), &protocol)
         .await?;
     let owner_agent = owner
         .get_agent_by_peer_id(&owner.keyhive_peer_id())
@@ -93,7 +99,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
             &repo_agents,
             Access::Admin,
             BTreeMap::new(),
-            &storage,
+            &protocol,
         )
         .await?;
     owner
@@ -102,13 +108,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
             &core_docs,
             Access::Admin,
             BTreeMap::new(),
-            &storage,
+            &protocol,
         )
         .await?;
 
     let initial_ref = vec![7; 32];
     let (doc_id, _doc_hashes) = owner
-        .create_doc(vec![core_docs.into()], nonempty![[7; 32]], &storage)
+        .create_doc(vec![core_docs.into()], nonempty![[7; 32]], &protocol)
         .await?;
     let keyhive = owner.clone_keyhive();
     let kh_doc_id = keyhive_doc_id(doc_id)?;
@@ -120,7 +126,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .try_encrypt_content(doc, &initial_ref, &Vec::new(), b"initial")
         .await?;
     if let Some(update) = encrypted.update_op().cloned() {
-        persist_cgka_update_ops(&storage, vec![update]).await?;
+        persist_cgka_update_ops(&protocol, vec![update]).await?;
     }
     subduction_keyhive::compact(
         owner.clone_keyhive().as_ref(),
@@ -152,7 +158,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
             &repo_agents,
             Access::Admin,
             BTreeMap::from([(doc_id, vec![initial_ref.clone()])]),
-            &storage,
+            &protocol,
         )
         .await?;
 
@@ -178,6 +184,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .copied()
         .ok_or_eyre("authority checkpoint must expose its private leaf key")?;
     crate::runtime2::support::persist_cgka_updates_durably(
+        &protocol,
         &storage,
         vec![update],
         vec![local_secret],
@@ -187,7 +194,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .await?
         .ok_or_eyre("owner archive is missing")?;
     restored.import_prekey_secrets(&storage).await?;
-    restored.ingest_from_storage(&storage).await?;
+    subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_keyhive = restored.clone_keyhive();
     let restored_doc = restored_keyhive
         .get_document(kh_doc_id)

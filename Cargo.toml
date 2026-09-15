@@ -149,18 +149,18 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "824c4a03c724ba663e43c0e7ee53b588b8d73d02" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "f27daebda888c4ac343b91ebc85a29fc167178ef" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "65ef136008e4b1a839b2f20bf59548bec858ddd8" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "ec8aa7f0cdb24fb355bd5f0d1cc29bde04c9960d" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -224,14 +224,13 @@ irpc-iroh = "0.17.0"
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
 # leptos_router = { path = "../leptos/router/" }
 # leptos_axum = { path = "../leptos/integrations/axum/" }
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
-# #
+
 # [patch."https://github.com/dman-os/subduction"]
 # subduction_core = { path = "../subduction/subduction_core" }
 # subduction_iroh = { path = "../subduction/subduction_iroh" }
@@ -241,7 +240,7 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
 # subduction_crypto = { path = "../subduction/subduction_crypto" }
 # subduction_keyhive = { path = "../subduction/subduction_keyhive" }
-
+#
 # [patch."https://github.com/dman-os/keyhive"]
 # keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
 # keyhive_core = { path = "../keyhive/keyhive_core" }

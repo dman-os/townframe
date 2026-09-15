@@ -146,11 +146,6 @@ pub(crate) async fn ensure(
         default_drawer,
         blob_inventories,
     };
-    big_repo.set_automerge_source_parts([
-        auth.core_docs_part_id(),
-        auth.content_docs_part_id(),
-        auth.default_drawer_part_id(),
-    ])?;
 
     Ok(auth)
 }

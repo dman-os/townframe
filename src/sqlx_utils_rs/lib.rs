@@ -3,42 +3,48 @@ use sqlx::ConnectOptions;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct SqlCtx {
     pub write_pool: SqlitePool,
     pub read_pool: SqlitePool,
+    _ephemeral_directory: Option<Arc<tempfile::TempDir>>,
 }
 
-static MEM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 impl SqlCtx {
+    /// Open an isolated process-local SQLite database.
+    ///
+    /// The name is retained for API compatibility, but this deliberately uses
+    /// a temporary file rather than `sqlite::memory:`. SQLx may replace an
+    /// invalidated pooled in-memory connection; replacing that connection
+    /// silently creates a fresh empty database. Keeping the temporary file
+    /// alive across cloned contexts gives both pools a stable database while
+    /// retaining ephemeral lifetime and cleanup.
     pub async fn memory() -> Res<Self> {
-        let id = MEM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pid = std::process::id();
-        let uri = format!("file:memdb_{pid}_{id}?mode=memory&cache=shared");
-        let connect_options = SqliteConnectOptions::from_str(&uri)?
-            .create_if_missing(true)
-            .disable_statement_logging();
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .idle_timeout(None)
-            .max_lifetime(None)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed opening sqlite memory context")?;
+        Self::ephemeral_file().await
+    }
 
-        Ok(Self {
-            write_pool: pool.clone(),
-            read_pool: pool,
-        })
+    /// Open an isolated file-backed SQLite database that is removed when all
+    /// clones of this context are dropped.
+    pub async fn ephemeral_file() -> Res<Self> {
+        let directory =
+            Arc::new(tempfile::tempdir().wrap_err("failed creating sqlite temp directory")?);
+        let path = directory.path().join("database.sqlite");
+        let url = format!("sqlite://{}", path.display());
+        let mut context = Self::open_file_url(&url).await?;
+        context._ephemeral_directory = Some(directory);
+        Ok(context)
     }
 
     pub async fn url(url: &str) -> Res<Self> {
         if is_memory_url(url) {
             return Self::memory().await;
         }
+        Self::open_file_url(url).await
+    }
 
+    async fn open_file_url(url: &str) -> Res<Self> {
         let connect_options = SqliteConnectOptions::from_str(url)
             .wrap_err_with(|| format!("failed parsing sqlite url: {url}"))?
             .create_if_missing(true)
@@ -64,6 +70,7 @@ impl SqlCtx {
         Ok(Self {
             write_pool,
             read_pool,
+            _ephemeral_directory: None,
         })
     }
 }

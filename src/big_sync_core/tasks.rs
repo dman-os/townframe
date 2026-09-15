@@ -58,6 +58,7 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub struct SyncTask {
         pub id: TaskId,
+        pub kind: SyncTaskKind,
         pub part_hints: Set<PartId>,
         pub deets: struct SyncTaskDeets {
             #![derive(Clone)]
@@ -69,8 +70,19 @@ structstruck::strike! {
     }
 }
 
+/// What a spawned sync-pipeline task should do. `Sync` fetches/converges the
+/// object contents with the peer; `RemoveFromParts` asks the backend to evict
+/// the object's membership hints. Both replay through the same keyed
+/// scheduling/coalescing machinery and retry transient failures identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTaskKind {
+    Sync,
+    RemoveFromParts,
+}
+
 structstruck::strike! {
     pub struct SyncTaskSeed {
+        pub kind: SyncTaskKind,
         pub part_hints: Set<PartId>,
         pub deets: SyncTaskDeets,
     }
@@ -178,6 +190,7 @@ impl Tasks {
         match seed {
             TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
                 id,
+                kind: seed.kind,
                 part_hints: seed.part_hints,
                 deets: seed.deets,
             }),
@@ -234,6 +247,7 @@ impl Tasks {
             match seed {
                 TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
                     id,
+                    kind: seed.kind,
                     part_hints: seed.part_hints,
                     deets: seed.deets,
                 }),

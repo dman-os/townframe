@@ -299,7 +299,8 @@ impl DrawerRepo {
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
 
-    async fn get_branch_heads_by_doc_id(
+    // TEMP-INSTRUMENTATION: pub(crate) for the stress diag resolution probe.
+    pub(crate) async fn get_branch_heads_by_doc_id(
         &self,
         branch_doc_id: DocumentId,
     ) -> Res<Option<ChangeHashSet>> {
@@ -350,7 +351,18 @@ impl DrawerRepo {
                 Ok(Some(handle))
             }
             other => {
-                debug!(%document_id, lookup = ?other, op = "get_handle_by_branch_doc_id", "branch doc not ready");
+                // TEMP-INSTRUMENTATION: classify live resolution failures.
+                let variant = match &other {
+                    big_repo::DocLookup::Ready(_) => "Ready",
+                    big_repo::DocLookup::PendingMaterialization => "PendingMaterialization",
+                    big_repo::DocLookup::Missing => "Missing",
+                };
+                tracing::warn!(
+                    %document_id,
+                    lookup = variant,
+                    op = "get_handle_by_branch_doc_id",
+                    "branch doc not ready"
+                );
                 Ok(None)
             }
         }

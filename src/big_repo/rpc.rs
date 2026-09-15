@@ -286,7 +286,9 @@ mod tests {
             storage: StorageConfig::Memory,
             scope_key: Arc::from("rpc-ready"),
             hidden_parts: Default::default(),
-            automerge_source_parts: None,
+            automerge_frontier_scope: Default::default(),
+            causal_checkpoint_scope: Default::default(),
+            group_part_scope: Default::default(),
         })
         .await?;
         let endpoint = test_endpoint().await?;
@@ -327,7 +329,9 @@ mod tests {
             storage: StorageConfig::Memory,
             scope_key: Arc::from("rpc-reconnect"),
             hidden_parts: Default::default(),
-            automerge_source_parts: None,
+            automerge_frontier_scope: Default::default(),
+            causal_checkpoint_scope: Default::default(),
+            group_part_scope: Default::default(),
         })
         .await?;
         let endpoint = test_endpoint().await?;

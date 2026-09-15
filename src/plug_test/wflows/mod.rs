@@ -58,7 +58,10 @@ pub(crate) fn resolve_facet_write_target<'a>(
         .iter()
         .find(|token| token.tag() == facet_tag && token.rights().contains(FacetRights::CREATE))
     {
-        return Ok(FacetWriteTarget::Create(token, crate::facet_helper::facet_key_id(facet_key)));
+        return Ok(FacetWriteTarget::Create(
+            token,
+            crate::facet_helper::facet_key_id(facet_key),
+        ));
     }
 
     Err(wflow_sdk::JobErrorX::Terminal(ferr!(

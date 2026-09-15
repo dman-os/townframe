@@ -285,7 +285,8 @@ impl DrawerRepo {
                 .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
-                debug!(
+                // TEMP-INSTRUMENTATION: warn so convergence hangs name the offender.
+                tracing::warn!(
                     %doc_id,
                     %branch_name,
                     bdoc_id = %branch_ref.branch_doc_id,

@@ -1,6 +1,8 @@
 use crate::interlude::*;
 
-use crate::{DocumentId, keyhive_listener::BigRepoKeyhiveListener};
+use crate::{
+    DocumentId, handler::BigRepoKeyhiveProtocol, keyhive_listener::BigRepoKeyhiveListener,
+};
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
@@ -208,16 +210,6 @@ impl BigKeyhiveHandle {
         }))
     }
 
-    pub(crate) async fn ingest_from_storage(
-        &self,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<()> {
-        subduction_keyhive::ingest_from_storage(self.keyhive.as_ref(), storage)
-            .await
-            .map_err(|err| ferr!("error ingesting keyhive storage: {err}"))?;
-        Ok(())
-    }
-
     pub(crate) async fn import_prekey_secrets(
         &self,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
@@ -410,6 +402,44 @@ impl BigKeyhiveHandle {
         out
     }
 
+    pub(crate) async fn document_ids_containing_group(
+        &self,
+        group_id: Identifier,
+    ) -> BTreeSet<DocumentId> {
+        self.keyhive
+            .document_ids_containing_group(KhGroupId::from(group_id))
+            .await
+            .into_iter()
+            .map(|id| DocumentId::new(id.to_bytes()))
+            .collect()
+    }
+
+    pub(crate) async fn group_ids_containing_document(
+        &self,
+        doc_id: DocumentId,
+    ) -> BTreeSet<[u8; 32]> {
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            .expect("document id must be a valid Ed25519 point");
+        let kh_doc_id = KhDocumentId::from(Identifier::from(verifying_key));
+        let Some(doc) = self.keyhive.get_document(kh_doc_id).await else {
+            return BTreeSet::new();
+        };
+        let transitive = Membered::Document(kh_doc_id, doc)
+            .transitive_members()
+            .await;
+        let group_ids: Vec<KhGroupId> =
+            self.keyhive.groups().lock().await.keys().copied().collect();
+        group_ids
+            .into_iter()
+            .filter_map(|group_id| {
+                let group_identifier: Identifier = group_id.into();
+                transitive
+                    .contains_key(&group_identifier)
+                    .then_some(group_id.to_bytes())
+            })
+            .collect()
+    }
+
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
         &self.contact_card
     }
@@ -439,7 +469,7 @@ impl BigKeyhiveHandle {
         &self,
         parents: Vec<BigKeyhiveAuthority>,
         initial_content_heads: NonEmpty<[u8; 32]>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(DocumentId, Vec<EventHash>)> {
         let coparents = parents
             .into_iter()
@@ -475,9 +505,11 @@ impl BigKeyhiveHandle {
                     .collect::<Vec<_>>(),
             )
         };
-        let mut hashes = persist_cgka_update_ops(storage, cgka_ops).await?;
+        let mut hashes = persist_cgka_update_ops(protocol, cgka_ops).await?;
         for delegation in delegations {
-            hashes.push(persist_delegation(storage, delegation).await?);
+            if let Some(hash) = persist_delegation(protocol, delegation).await? {
+                hashes.push(hash);
+            }
         }
         Ok((DocumentId::new(doc_id), hashes))
     }
@@ -485,7 +517,7 @@ impl BigKeyhiveHandle {
     pub(crate) async fn create_group_with_parents(
         &self,
         parents: Vec<BigKeyhiveAuthority>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(BigKeyhiveGroup, Vec<EventHash>)> {
         let coparents = parents
             .into_iter()
@@ -509,7 +541,9 @@ impl BigKeyhiveHandle {
         };
         let mut hashes = Vec::new();
         for delegation in delegations {
-            hashes.push(persist_delegation(storage, delegation).await?);
+            if let Some(hash) = persist_delegation(protocol, delegation).await? {
+                hashes.push(hash);
+            }
         }
         Ok((BigKeyhiveGroup { id, inner: group }, hashes))
     }
@@ -529,7 +563,7 @@ impl BigKeyhiveHandle {
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
         after_content: BTreeMap<DocumentId, Vec<Vec<u8>>>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(BTreeSet<DocumentId>, Vec<EventHash>)> {
         use keyhive_core::principal::membered::Membered;
 
@@ -554,8 +588,10 @@ impl BigKeyhiveHandle {
             .iter()
             .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
             .collect();
-        let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        hashes.push(persist_delegation(storage, update.delegation).await?);
+        let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
+        if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
+            hashes.push(hash);
+        }
         Ok((affected_docs, hashes))
     }
 
@@ -566,7 +602,7 @@ impl BigKeyhiveHandle {
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
         after_content: Vec<Vec<u8>>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
@@ -585,8 +621,10 @@ impl BigKeyhiveHandle {
             )
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
-        let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        hashes.push(persist_delegation(storage, update.delegation).await?);
+        let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
+        if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
+            hashes.push(hash);
+        }
         Ok(hashes)
     }
 
@@ -597,7 +635,7 @@ impl BigKeyhiveHandle {
         doc_id: DocumentId,
         retain_all_other_members: bool,
         after_content: Vec<Vec<u8>>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
 
@@ -616,12 +654,16 @@ impl BigKeyhiveHandle {
             )
             .await
             .map_err(|err| ferr!("revoke failed: {err}"))?;
-        let mut hashes = persist_cgka_update_ops(storage, update.cgka_ops().to_vec()).await?;
+        let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops().to_vec()).await?;
         for revocation in update.revocations() {
-            hashes.push(persist_revocation(storage, Arc::clone(revocation)).await?);
+            if let Some(hash) = persist_revocation(protocol, Arc::clone(revocation)).await? {
+                hashes.push(hash);
+            }
         }
         for redelegation in update.redelegations() {
-            hashes.push(persist_delegation(storage, Arc::clone(redelegation)).await?);
+            if let Some(hash) = persist_delegation(protocol, Arc::clone(redelegation)).await? {
+                hashes.push(hash);
+            }
         }
         Ok(hashes)
     }
@@ -649,9 +691,9 @@ fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::
 }
 
 async fn persist_delegation(
-    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    protocol: &BigRepoKeyhiveProtocol,
     delegation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveDelegation>>,
-) -> Res<EventHash> {
+) -> Res<Option<EventHash>> {
     let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
         future_form::Sendable,
         MemorySigner,
@@ -659,17 +701,18 @@ async fn persist_delegation(
         BigRepoKeyhiveListener,
     >::Delegated(delegation)
     .into();
-    let (hash, _) =
-        subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event, None)
-            .await
-            .map_err(|err| ferr!("failed saving keyhive delegation event: {err}"))?;
-    Ok(hash.0)
+    Ok(protocol
+        .persist_local_events(vec![event])
+        .await
+        .map_err(|err| ferr!("failed persisting keyhive delegation event: {err}"))?
+        .into_iter()
+        .next())
 }
 
 async fn persist_revocation(
-    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    protocol: &BigRepoKeyhiveProtocol,
     revocation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveRevocation>>,
-) -> Res<EventHash> {
+) -> Res<Option<EventHash>> {
     let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
         future_form::Sendable,
         MemorySigner,
@@ -677,28 +720,27 @@ async fn persist_revocation(
         BigRepoKeyhiveListener,
     >::Revoked(revocation)
     .into();
-    let (hash, _) =
-        subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event, None)
-            .await
-            .map_err(|err| ferr!("failed saving keyhive revocation event: {err}"))?;
-    Ok(hash.0)
+    Ok(protocol
+        .persist_local_events(vec![event])
+        .await
+        .map_err(|err| ferr!("failed persisting keyhive revocation event: {err}"))?
+        .into_iter()
+        .next())
 }
 
 async fn persist_cgka_update_ops(
-    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    protocol: &BigRepoKeyhiveProtocol,
     cgka_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
 ) -> Res<Vec<EventHash>> {
-    let mut hashes = Vec::with_capacity(cgka_ops.len());
-    for cgka_op in cgka_ops {
-        let event = StaticEvent::CgkaOperation(Box::new(cgka_op));
-        let (hash, _) = subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(
-            storage, &event, None,
+    protocol
+        .persist_local_events(
+            cgka_ops
+                .into_iter()
+                .map(|op| StaticEvent::CgkaOperation(Box::new(op)))
+                .collect(),
         )
         .await
-        .map_err(|err| ferr!("failed saving cgka update op: {err}"))?;
-        hashes.push(hash.0);
-    }
-    Ok(hashes)
+        .map_err(|err| ferr!("failed persisting cgka update ops: {err}"))
 }
 
 struct ExploreNode {

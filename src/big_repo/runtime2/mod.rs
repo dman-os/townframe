@@ -1,13 +1,21 @@
 use crate::interlude::*;
 use future_form::FutureForm;
 
-mod group_part_worker;
-pub(crate) use group_part_worker::group_part_id;
 pub(crate) mod automerge_frontier_worker;
-pub use automerge_frontier_worker::{
-    automerge_doc_obj_id, automerge_docs_part_id, automerge_obj_to_doc_id,
-};
 mod causal_checkpoint_worker;
+pub(crate) mod driver;
+mod group_part_worker;
+
+pub use automerge_frontier_worker::{
+    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_docs_part_id,
+    automerge_obj_to_doc_id, spawn_automerge_frontier_worker,
+};
+pub(crate) use causal_checkpoint_worker::{
+    CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,
+};
+pub(crate) use group_part_worker::{
+    GroupPartWorkerStopToken, group_part_id, spawn_group_part_worker,
+};
 mod io;
 pub(crate) mod keyhive_dispatcher;
 mod lease;
@@ -30,8 +38,8 @@ pub use lease::{
     TrackedWorkGuard,
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
-pub(crate) use native::KeyhiveChangeNotifier;
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
+pub use types::WorkerGroupScope;
 
 mod doc_worker;
 mod handle;
@@ -65,9 +73,6 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
     /// `ChannelTransport` in tests; websocket in wasm. The blocking-out carries
     /// the addr as `Box<dyn Any + Send>`; the implementing model pins the type.
     pub connect: std::sync::Arc<dyn TransportConnect<F>>,
-    /// Shared Keyhive state-generation counter. The hub bumps it on state
-    /// advances; the group-part worker full-rebuilds and acks generations.
-    pub keyhive_state_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Event bus supplied by IO backends that receive protocol events from
     /// outside the runtime machine (for example Subduction's observer).
     /// When absent, runtime2 creates a private bus.
