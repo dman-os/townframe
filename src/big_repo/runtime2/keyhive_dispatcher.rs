@@ -128,11 +128,13 @@ pub(crate) struct SpawnedKeyhiveDispatcher<F: FutureForm> {
     pub(crate) run: F::Future<'static, eyre::Result<()>>,
 }
 
-/// TEMP-DIAGNOSTIC: `DAYB_KEYHIVE_DIAG` gates the dispatcher's per-batch
-/// instrumentation warns (classification outcome, dropped notifications).
+/// TEMP-DIAGNOSTIC: the dispatcher's per-batch instrumentation (classification
+/// outcome, dropped notifications) logs at debug level, so `RUST_LOG` — or
+/// `RUST_LOG_TEST=debug` for tests — turns it on. Diagnostic-only computations
+/// below are guarded by this same check so nothing is built when the level is
+/// off.
 fn dispatch_diag() -> bool {
-    static DIAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DIAG.get_or_init(|| std::env::var_os("DAYB_KEYHIVE_DIAG").is_some())
+    tracing::enabled!(tracing::Level::DEBUG)
 }
 
 /// Spawn the dispatcher task.
@@ -242,7 +244,7 @@ async fn classify_rows(
     });
     if connected.is_empty() {
         if dispatch_diag() {
-            tracing::warn!(
+            tracing::debug!(
                 rows = rows.len(),
                 "KEYHIVE_DISPATCH_DIAG classify skipped: no connected subscribers"
             );
@@ -313,7 +315,7 @@ async fn classify_rows(
                     changed: &changed,
                 })
                 .await?;
-            tracing::warn!(
+            tracing::debug!(
                 stable = targets.published_generation == after.published_generation,
                 generation = after.published_generation,
                 cached_peers = after.peers.len(),
@@ -331,27 +333,38 @@ async fn classify_rows(
         // Unattributable hashes (prekey/contact-card ops) wake everyone:
         // the visibility projection has no narrower audience for them.
         let unattributed = !targets.unclassified.is_empty();
-        let changed_prefixes = changed
-            .iter()
-            .map(|hash| {
-                format!(
-                    "{:02x}{:02x}{:02x}{:02x}",
-                    hash[0], hash[1], hash[2], hash[3]
-                )
-            })
-            .collect::<Vec<_>>();
-        let unclassified_prefixes = targets
-            .unclassified
-            .iter()
-            .map(|hash| {
-                format!(
-                    "{:02x}{:02x}{:02x}{:02x}",
-                    hash[0], hash[1], hash[2], hash[3]
-                )
-            })
-            .collect::<Vec<_>>();
-        if dispatch_diag() {
-            tracing::warn!(
+        let diag = dispatch_diag();
+        // Diagnostic-only prefixes: skip the per-batch allocations when the
+        // diagnostics are off.
+        let changed_prefixes: Vec<String> = if diag {
+            changed
+                .iter()
+                .map(|hash| {
+                    format!(
+                        "{:02x}{:02x}{:02x}{:02x}",
+                        hash[0], hash[1], hash[2], hash[3]
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let unclassified_prefixes: Vec<String> = if diag {
+            targets
+                .unclassified
+                .iter()
+                .map(|hash| {
+                    format!(
+                        "{:02x}{:02x}{:02x}{:02x}",
+                        hash[0], hash[1], hash[2], hash[3]
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if diag {
+            tracing::debug!(
                 source = ?source,
                 changed = changed.len(),
                 ?changed_prefixes,
@@ -369,7 +382,7 @@ async fn classify_rows(
             let source_suppressed = is_source && unattributed && !visibility_selected;
             let fallback_selected = unattributed && !is_source;
             let selected = visibility_selected || fallback_selected;
-            if dispatch_diag() {
+            if diag {
                 let reason = if source_suppressed {
                     "source_suppressed"
                 } else if visibility_selected {
@@ -379,7 +392,7 @@ async fn classify_rows(
                 } else {
                     "not_visible"
                 };
-                tracing::warn!(
+                tracing::debug!(
                     source = ?source,
                     peer = ?peer,
                     selected,
@@ -395,6 +408,10 @@ async fn classify_rows(
                     "KEYHIVE_DISPATCH_DIAG fanout decision"
                 );
             }
+            // Peers the visibility projection cannot attribute are already
+            // folded into `targets.peers` by the classifier, so a peer that is
+            // neither selected nor covered by the unattributed fallback is a
+            // peer the cache proved is not a recipient.
             if selected {
                 let peer_id = PeerId::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
@@ -411,7 +428,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
     }
     if dispatch_diag() {
         let due_peers: Vec<String> = due.iter().map(|(peer, ())| peer.to_string()).collect();
-        tracing::warn!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
+        tracing::debug!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
     }
     let targets: Vec<(
         PeerId,
@@ -424,7 +441,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
             .filter_map(|(peer_id, ())| {
                 let found = subs.get(&peer_id).map(|entry| (peer_id, entry.id, entry.tx.clone()));
                 if dispatch_diag() && found.is_none() {
-                    tracing::warn!(
+                    tracing::debug!(
                         peer = %peer_id,
                         "KEYHIVE_DISPATCH_DIAG due peer has no subscription; notification dropped"
                     );
@@ -440,7 +457,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
             .is_err()
         {
             if dispatch_diag() {
-                tracing::warn!(
+                tracing::debug!(
                     %peer_id,
                     sub_id = ?sub_id,
                     outcome = "send_error",
@@ -450,7 +467,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
             Some((peer_id, sub_id))
         } else {
             if dispatch_diag() {
-                tracing::warn!(
+                tracing::debug!(
                     %peer_id,
                     sub_id = ?sub_id,
                     outcome = "delivered",

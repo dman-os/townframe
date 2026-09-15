@@ -89,6 +89,7 @@ pub enum Runtime2Cmd {
     },
     GetDocHandle {
         doc_id: DocumentId,
+        lease: crate::runtime2::DocLeaseKind,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>,
@@ -357,6 +358,7 @@ pub enum DocWorkerMsg {
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
     AcquireHandle {
+        lease: crate::runtime2::DocLeaseKind,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>,
@@ -445,7 +447,7 @@ pub fn fresh_waiter_id(counter: &AtomicU64) -> u64 {
 }
 
 /// Classification of a tracked finite background future, for diagnostics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrackedWorkKind {
     CreateDoc,
     SyncDoc,

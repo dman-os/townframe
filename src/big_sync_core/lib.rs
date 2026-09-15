@@ -1334,11 +1334,22 @@ impl BigSyncMachine {
         };
         let Some(worker) = &mut peer_state.replay_worker else {
             // there is no worker in ba sing se
+            tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                "big sync dropped peer replay event: no replay worker",
+            );
             return;
         };
         if worker.task_id != msg.task_id {
             // stale peer, ignore the message to avoid dupe events
             // from two peers
+            tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                active_task_id = worker.task_id,
+                "big sync dropped peer replay event: stale task id",
+            );
             return;
         }
 
@@ -1352,6 +1363,35 @@ impl BigSyncMachine {
             );
             self.stat_machine.mark_peer_replay_done(msg.peer_id, true);
             return;
+        }
+        match &msg.evt {
+            SubEvent::Changed(evt) => tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                ?evt.obj_id,
+                ?evt.cursor,
+                part_ids = ?evt.part_ids,
+                has_payload = !evt.payload.is_null(),
+                "big sync received peer replay Changed event",
+            ),
+            SubEvent::Added(evt) => tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                ?evt.obj_id,
+                ?evt.cursor,
+                ?evt.part_id,
+                has_payload = !evt.payload.is_null(),
+                "big sync received peer replay Added event",
+            ),
+            SubEvent::Removed(evt) => tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                ?evt.obj_id,
+                ?evt.cursor,
+                ?evt.part_id,
+                "big sync received peer replay Removed event",
+            ),
+            SubEvent::ReplayComplete => unreachable!(),
         }
         peer_state
             .cursor_machine
@@ -1447,6 +1487,11 @@ impl BigSyncMachine {
                         payload = !remote_payload.is_null(),
                         "machine SyncObj command",
                     );
+                    // A null payload means "no advertised payload" (the store
+                    // strips payloads from advance notices a peer lost access
+                    // to), never an object payload: keep it absent so the sync
+                    // task fetches instead of decoding it as content.
+                    let remote_payload = (!remote_payload.is_null()).then_some(remote_payload);
                     let (cursors, part_hints, remote_payload) =
                         if let Some(mut worker) = peer_state.sync_workers.remove(&obj_id) {
                             let _state = self
@@ -1459,13 +1504,13 @@ impl BigSyncMachine {
                             (
                                 worker.cursors,
                                 worker.part_hints,
-                                Some(remote_payload).or(worker.remote_payload),
+                                remote_payload.or(worker.remote_payload),
                             )
                         } else {
                             (
                                 [cursor].into(),
                                 parts.iter().copied().collect(),
-                                Some(remote_payload),
+                                remote_payload,
                             )
                         };
                     // Cancel any in-flight removal for the hinted parts. If one

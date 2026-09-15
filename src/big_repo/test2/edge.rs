@@ -759,13 +759,29 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
             })
         })
         .await;
-    let published_payload = pair
-        .right()
-        .repo
-        .frontier_part_store()
-        .obj_payload(crate::automerge_doc_obj_id(doc_id))
-        .await?
-        .ok_or_else(|| crate::ferr!("automerge frontier payload was not published"))?;
+    // Runtime quiescence does not fence the AutomergeFrontierWorker: it
+    // publishes off its own scheduler and reports no tracked work, so the
+    // payload can land just after both hubs go idle. Wait for the publication
+    // itself, then assert its content strictly.
+    let publication_deadline =
+        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
+    let published_payload = loop {
+        let payload = pair
+            .right()
+            .repo
+            .frontier_part_store()
+            .obj_payload(crate::automerge_doc_obj_id(doc_id))
+            .await?;
+        if let Some(payload) = payload {
+            break payload;
+        }
+        if tokio::time::Instant::now() >= publication_deadline {
+            return Err(crate::ferr!(
+                "automerge frontier payload was not published within the fence window"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
     assert_eq!(
         published_payload, expected_payload,
         "frontier publication must observe heads unlocked by the Keyhive admission"

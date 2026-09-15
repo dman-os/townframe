@@ -148,6 +148,12 @@ pub mod contract {
             None => {}
         }
 
+        // Read the object's payload around the call: the outcome is compared
+        // against a snapshot taken before `sync_obj`, so a case that already
+        // converged (for example because a subscription delivered the remote
+        // payload while the case was being prepared) must be visible in the
+        // failure report.
+        let local_payload_before = store.obj_payload(case.obj_id).await?;
         let outcome = harness
             .backend()
             .sync_obj(
@@ -157,6 +163,7 @@ pub mod contract {
                 case.remote_payload.clone(),
             )
             .await?;
+        let local_payload_after = store.obj_payload(case.obj_id).await?;
 
         match (&case.expected_outcome, outcome) {
             (
@@ -164,16 +171,29 @@ pub mod contract {
                 crate::SyncTaskRunOutcome::Completion(completion),
             ) => {
                 assert_eq!(
-                    completion.deets, *expected_deets,
-                    "unexpected sync completion outcome for case {}",
-                    case.name
+                    completion.deets,
+                    *expected_deets,
+                    "unexpected sync completion outcome for case {}: \
+                     local payload before={:?} after={:?} remote={:?} parts={:?}",
+                    case.name,
+                    local_payload_before,
+                    local_payload_after,
+                    case.remote_payload,
+                    case.initial_parts
                 );
             }
             (SyncBackendOutcome::Stale, crate::SyncTaskRunOutcome::Stale) => {}
             (expected, got) => {
                 panic!(
-                    "unexpected sync outcome for case {}: expected {:?}, got {:?}",
-                    case.name, expected, got
+                    "unexpected sync outcome for case {}: expected {:?}, got {:?}; \
+                     local payload before={:?} after={:?} remote={:?} parts={:?}",
+                    case.name,
+                    expected,
+                    got,
+                    local_payload_before,
+                    local_payload_after,
+                    case.remote_payload,
+                    case.initial_parts
                 );
             }
         }

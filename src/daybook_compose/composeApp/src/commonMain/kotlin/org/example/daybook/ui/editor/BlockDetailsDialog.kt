@@ -80,7 +80,6 @@ private val noteEditorConfigJson =
         isLenient = true
     }
 
-private const val CORE_PLUG_ID = "@daybook/core"
 private const val NOTE_EDITOR_CONFIG_FACET_TAG = "org.example.daybook.note-editor-config"
 private const val NOTE_EDITOR_CONFIG_FACET_ID = "main"
 private const val CURRENT_CUSTOM_NOTE_FORMAT_LABEL = "Current custom format"

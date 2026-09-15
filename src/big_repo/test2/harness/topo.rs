@@ -169,18 +169,11 @@ impl Node {
             )
             .await?,
         );
-        let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
-            [255_u8.wrapping_sub(seed); 32],
-        ));
-        store
-            .set_obj_payload(
-                part_init_obj,
-                serde_json::json!({ "heads": Vec::<String>::new() }),
-            )
-            .await?;
-        store
-            .remove_obj_from_part(part_init_obj, stress_support::test_part())
-            .await?;
+        // The stress test part must exist before membership is written to it. It
+        // must not be seeded with a synthetic object payload: every object in the
+        // document scope has to be a document, which the frontier worker asserts
+        // in test builds.
+        store.ensure_part(stress_support::test_part()).await?;
         store.ensure_part(crate::GLOBAL_PART_ID).await?;
         Self::boot_with_store(
             seed,

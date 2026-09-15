@@ -13,7 +13,10 @@ use crate::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
 use std::sync::Mutex;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,6 +273,9 @@ pub struct ChangeListenerManager {
     domain_listeners: Mutex<Vec<DomainListener>>,
     domain_tx: mpsc::UnboundedSender<Vec<BigRepoDomainNotification>>,
     cancel_token: CancellationToken,
+    /// Fence channel: the switchboard answers a fence only after every
+    /// notification admitted before it has been dispatched to listeners.
+    fence_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
 pub struct ChangeListenerManagerStopToken {
@@ -336,6 +342,7 @@ impl ChangeListenerManager {
         let (local_tx, local_rx) = mpsc::unbounded_channel();
         let (pending_head_tx, pending_head_rx) = mpsc::unbounded_channel();
         let (domain_tx, domain_rx) = mpsc::unbounded_channel();
+        let (fence_tx, fence_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners: default(),
@@ -349,6 +356,7 @@ impl ChangeListenerManager {
             domain_listeners: default(),
             domain_tx,
             cancel_token: cancel_token.clone(),
+            fence_tx,
         };
         let out = Arc::new(out);
         let handle = Arc::clone(&out).spawn_switchboard(
@@ -357,6 +365,7 @@ impl ChangeListenerManager {
             local_rx,
             pending_head_rx,
             domain_rx,
+            fence_rx,
         );
 
         (
@@ -372,6 +381,31 @@ impl ChangeListenerManager {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("ChangeListenerManager is stopped");
         }
+        Ok(())
+    }
+
+    /// Wait until every notification already admitted to the switchboard
+    /// has been dispatched to the listeners registered at that point.
+    ///
+    /// `wait_for_quiescence` calls this after the runtime reports a quiescent
+    /// hub: runtime quiescence only proves the workers stopped emitting, and
+    /// the switchboard is a separate task, so a listener registered right
+    /// after that wait could otherwise still receive a batch admitted before
+    /// it. A stopped switchboard has nothing in flight and reports success.
+    pub async fn fence_notifications(&self, timeout: Option<Duration>) -> Res<()> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.fence_tx.send(ack_tx).is_err() {
+            return Ok(());
+        }
+        let waited = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, ack_rx)
+                .await
+                .map_err(|_| ferr!("change notification fence timed out"))?,
+            None => ack_rx.await,
+        };
+        // The switchboard exiting before answering means it can no longer
+        // dispatch anything, which is exactly the state this call waits for.
+        waited.ok();
         Ok(())
     }
 
@@ -817,6 +851,7 @@ impl ChangeListenerManager {
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
         mut pending_head_rx: mpsc::UnboundedReceiver<Vec<BigRepoPendingHeadNotification>>,
         mut domain_rx: mpsc::UnboundedReceiver<Vec<BigRepoDomainNotification>>,
+        mut fence_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
@@ -827,6 +862,7 @@ impl ChangeListenerManager {
                     Local(Vec<BigRepoLocalNotification>),
                     PendingHeads(Vec<BigRepoPendingHeadNotification>),
                     Domain(Vec<BigRepoDomainNotification>),
+                    Fence(oneshot::Sender<()>),
                 }
                 let input = tokio::select! {
                     biased;
@@ -867,6 +903,15 @@ impl ChangeListenerManager {
                             break;
                         };
                         SwitchboardInput::Domain(val)
+                    },
+                    // Must stay last: `biased` polls the notification
+                    // channels first, so a fence is only answered once every
+                    // notification admitted before it has been dispatched.
+                    val = fence_rx.recv() => {
+                        let Some(val) = val else {
+                            break;
+                        };
+                        SwitchboardInput::Fence(val)
                     }
                 };
 
@@ -1044,6 +1089,12 @@ impl ChangeListenerManager {
                             listeners
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
+                    }
+                    SwitchboardInput::Fence(ack) => {
+                        // Every input queued before this fence has already
+                        // been dispatched above; a dropped receiver just means
+                        // the caller stopped waiting (e.g. its own timeout).
+                        ack.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                     }
                 }
             }
@@ -1294,6 +1345,101 @@ mod tests {
         Ok(())
     }
 
+    /// The switchboard is a task outside the hub, so runtime quiescence alone
+    /// does not prove a notification was dispatched: a listener registering
+    /// after the wait could still receive a batch admitted before it (the
+    /// `tier7_noop_mutation_emits_nothing` flake hit exactly that). The fence
+    /// closes that gap: it is answered only after every admitted batch has
+    /// been fanned out.
+    #[tokio::test]
+    async fn fence_notifications_dispatches_admitted_batches_before_returning() -> Res<()> {
+        let (manager, stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, _patch) = make_change_fixture();
+
+        // A batch admitted while a matching listener is registered is already
+        // in that listener's channel when the fence is answered, without
+        // assuming anything about scheduler order.
+        let (_registration, mut rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+                origin: None,
+                path: Vec::new(),
+            })
+            .await?;
+        manager.notify_doc_created(doc_id, heads)?;
+        manager.fence_notifications(None).await?;
+        assert!(
+            matches!(rx.try_recv(), Ok(batch) if batch.len() == 1),
+            "the fence must be answered only after the admitted batch was dispatched"
+        );
+
+        // A batch admitted with no matching listener must not leak into a
+        // listener that registers after the fence.
+        let (late_doc_id, late_heads, _patch) = make_change_fixture();
+        manager.notify_doc_created(late_doc_id, late_heads)?;
+        manager.fence_notifications(None).await?;
+        let (_late_registration, mut late_rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(late_doc_id)),
+                origin: None,
+                path: Vec::new(),
+            })
+            .await?;
+        assert!(
+            matches!(
+                late_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "a batch admitted before the fence must not reach a later listener"
+        );
+
+        stop.stop().await?;
+        Ok(())
+    }
+
+    /// The ordering half of the contract, made strict: the fence must wait
+    /// out a fan-out that is already in flight. Parking the switchboard on
+    /// the listener lock reproduces the exact gap behind the
+    /// `tier7_noop_mutation_emits_nothing` flake — dispatch still running
+    /// after the listener set was read.
+    ///
+    /// Multi-thread flavour: the switchboard must be free to reach the
+    /// lock and park there while this task keeps running.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the switchboard must stay parked mid-dispatch while the fence is polled"
+    )]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fence_notifications_waits_for_in_flight_dispatch() -> Res<()> {
+        let (manager, stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, _patch) = make_change_fixture();
+        let (_registration, mut rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+                origin: None,
+                path: Vec::new(),
+            })
+            .await?;
+
+        let parked = manager.listeners.lock().expect(ERROR_MUTEX);
+        manager.notify_doc_created(doc_id, heads)?;
+        let fence = manager.fence_notifications(None);
+        tokio::pin!(fence);
+        assert!(
+            futures::poll!(fence.as_mut()).is_pending(),
+            "the fence must not resolve while a dispatch is in flight"
+        );
+
+        drop(parked);
+        fence.await?;
+        assert!(
+            matches!(rx.try_recv(), Ok(batch) if batch.len() == 1),
+            "the parked dispatch must have completed before the fence resolved"
+        );
+
+        stop.stop().await?;
+        Ok(())
+    }
     #[tokio::test]
     async fn head_listener_drop_unregisters_listener() -> Res<()> {
         let (manager, _stop) = ChangeListenerManager::boot();

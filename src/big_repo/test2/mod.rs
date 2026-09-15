@@ -14,6 +14,9 @@ mod ephemeral;
 mod fragmentation;
 mod freeze;
 mod harness;
+// Shared with the older `test` tree, which needs the same ingestion-ledger
+// diagnostic when a grant never reaches a peer.
+pub(crate) use harness::keyhive::describe_ledger;
 mod keyhive_rpc;
 mod ladder;
 mod notifications;

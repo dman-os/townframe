@@ -38,6 +38,62 @@ TEST_SEED=<seed> DAYB_STRESS_DIAGNOSTIC_TIMEOUT_SECS=20 RUST_LOG_TEST=debug \
 
 The diagnostic timeout is an evidence path, not a production timeout increase. Record the emitted seed before rerunning.
 
+## Hunt loop
+
+A hunt is a fail-fast load run whose only job is to surface the next defect.
+
+- Never run a single test in isolation to reproduce a load race. These failures do not occur
+  without concurrent load, and a green isolated run proves nothing.
+- Never combine a long `--stress-duration` with `--no-fail-fast`: that burns the whole duration
+  after the first failure. Fail fast, read the failure, fix or instrument, relaunch.
+- Launch hunts detached, redirecting to a per-hunt log (`/tmp/hunt<n>.log`), and wait on a loop
+  that exits as soon as the run reaches a terminal state or the log already holds the answer.
+  Do not poll with fixed `sleep`s; it wastes wall clock once the need is met.
+- Keep the log of the hunt that failed, and use a fresh name per hunt so a later run cannot
+  overwrite the evidence.
+- Discard runs that died for environmental reasons instead of reading them: bulk
+  `FAIL [0.015s]` spawn errors mean the runner ran out of disk (the target dir was pruned under
+  you), and `SIGTERM`, `[double-spawn] failed to exec`, or a mid-run reboot mean harness death.
+
+## Attribution discipline
+
+Every failure a hunt surfaces is pinned or instrumented in the same turn. "Pre-existing",
+"unrelated", "probably the same flake", and "my change did not cause it" are not findings, they
+are refusals to investigate. Two clean iterations after a change attribute nothing either: keep
+hunting until the failure is gone or its mechanism is named.
+
+## Instrumenting the forks
+
+`../keyhive` and `../subduction` are ours to instrument. Ask before concluding a bug is upstream,
+not before adding a log line.
+
+- Uncomment the matching `[patch."https://github.com/dman-os/<fork>"]` block in the root
+  `Cargo.toml` and restore the `rev` pins once the patch is no longer needed.
+- Gate new logging behind the existing env switches (`DAYB_KEYHIVE_DIAG`, `INSTR`-style vars) so
+  the hot path stays silent by default. Mark suspicious sites even when they are only suspected.
+- Keep instrumentation in its own commit, separate from fixes. Upstream forks move, and a pin
+  bump must be able to drop the instrumentation and re-apply only the real fixes on top; a hunt
+  whose instrumentation is interleaved with fixes cannot be rebased or pushed cleanly.
+- `.agents/skills/fork-pinning-and-upstream-sync/SKILL.md` covers the pin/repin/push procedure.
+
+## Diagnostics already in the tree
+
+Reach for these before adding new logging; they were added for exactly these hunts.
+
+- Keyhive event ledger, per node: logged and admitted counts, admission head, and unapplied events
+  grouped by source peer. `unapplied=0` means every durable event received was admitted, so a
+  missing event was never delivered rather than still in flight.
+- Fixed-point stuck events: hash, variant, exact error, document, causal predecessors, and `Add`
+  predecessors.
+- Receive-order logs: delegation issuer/delegate/access/proof/document linkage, CGKA op and
+  predecessors, batch index/order, source peer.
+- Policy rejection detail: document existence, resolved subject and public access, member count,
+  hive generation, nested-store counters, durable ledger state.
+- Quiescence stalls: active Keyhive rounds, waiters, tracked work by kind, pending document
+  syncs/materializations, admission and group-part cursors.
+- Cache/direct comparison under `DAYB_KEYHIVE_DIAG=1`: cache generation, changed hashes, per-peer
+  selection reason, source suppression, delivery outcome.
+
 ## Establish the blocked fence
 
 Do not start with subsystem hypotheses. Determine which awaited condition failed:
@@ -160,3 +216,32 @@ If logs show `creating doc` without `created doc`, correlate `Document::finish_g
 - the prekey janitor held the active principal while `rotate_prekey()` awaited `csprng` (`active -> csprng`).
 
 Fix by releasing `csprng` before group generation/prekey selection and reacquiring it only around operations that consume randomness. The regression test `document_generation_does_not_invert_active_and_csprng_locks` deterministically holds `active`, starts document generation, and proves `csprng` remains acquirable. Boundary tracing showed delegation insertion/listeners/rebuild all completed before the stall; do not misdiagnose this signature as a delegation-store deadlock.
+
+### Empty prekey set aborts the whole CGKA operation
+
+`index to be in range` at `keyhive_core/src/principal/individual.rs` (`pick_prekey` ->
+`pseudorandom_in_range(seed, prekeys_len)` -> `nth(idx).expect(..)`) means an individual reached in
+`Agent::pick_individual_prekeys` has **zero** ingested `Add`/`Rotate` prekey ops: `max == 0` yields
+`idx == 0` and `nth(0)` panics on the empty set. It is not an off-by-one (`raw_max < max` whenever
+`max >= 1`). The panic unwinds out of the caller that was minting CGKA ops, so there is no retry
+path, and skipping the member is not an option because that mints an epoch it cannot read. It is
+rare under load (once in six runs, then sixteen clean passes), so one occurrence is still a real
+defect. The fix belongs upstream: a `MissingPrekeys` typed error plus a caller-side retry. The
+current pin already carries the rotation variant of this guard.
+
+### Stale event projection from unshared keyhive generation counters
+
+When Subduction's cached projection looks stale after a membership change, check the counter wiring
+before the cache. Normal Keyhive construction used to give the delegation/revocation, group and
+document head, and principal stores *private* generation counters while archive restoration shared
+the hive's `Arc<AtomicU64>`, so a mutation could change membership without invalidating the cache.
+`note_direct_mutation()` is the manual escape hatch with exactly one call site; it is not the
+general mechanism. Regression tests: `shared_stores_carry_the_hive_generation` and
+`principal_stores_carry_the_hive_generation`.
+
+### Every probe needs a positive control
+
+A diagnostic that has never been shown to fire is not evidence. Pair each probe with a control that
+must produce a positive result, and let it falsify your assumption. A hash-to-object mapping probe
+in this repo decoded fine but matched nothing; the control is what exposed the mapping as wrong
+before it was used to explain a failure.

@@ -13,7 +13,6 @@ import kotlinx.coroutines.launch
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
-import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
 import java.util.concurrent.ConcurrentHashMap
@@ -26,10 +25,7 @@ private data class DocEditorSessionEntry(
     var lastTouchedMs: Long = Clock.System.now().toEpochMilliseconds(),
 )
 
-class DocEditorStoreViewModel(
-    private val drawerRepo: DrawerRepoFfi,
-    private val rt: RtFfi? = null,
-) : ViewModel() {
+class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
     private val sessions = ConcurrentHashMap<String, DocEditorSessionEntry>()
 
     private val _selectedDocId = MutableStateFlow<String?>(null)
@@ -53,6 +49,7 @@ class DocEditorStoreViewModel(
                             _selectedController.value = null
                         }
                     }
+
                     is DrawerEvent.DocAdded -> {}
                 }
             }

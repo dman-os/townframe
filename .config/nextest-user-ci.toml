@@ -1,0 +1,26 @@
+# nextest *user* configuration for CI, passed explicitly with
+# `cargo nextest run --user-config-file .config/nextest-user-ci.toml`.
+#
+# nextest deliberately keeps the record store settings out of repository configuration
+# (`.config/nextest.toml`), so this file exists only to make CI recording reproducible.
+#
+# Recording writes every test's captured stdout/stderr to the record store, which the
+# `rust tests` job exports as a portable recording artifact when it fails. This complements
+# `profile.ci.junit.store-failure-output` in `.config/nextest.toml`, which carries failure
+# output inside the JUnit report (the nextest store directory itself is deprecated and only
+# holds JUnit output now).
+
+[experimental]
+record = true
+
+[record]
+enabled = true
+
+# Cap per stdout/stderr stream. nextest elides the *middle* of oversized output, so panics and
+# assertion failures at the end of a stream survive truncation.
+max-output-size = "256KB"
+
+# Retention is LRU by last write, and a single run larger than `max-total-size` evicts itself,
+# so keep the ceiling comfortably above the largest plausible CI run.
+max-records = 3
+max-total-size = "2GB"

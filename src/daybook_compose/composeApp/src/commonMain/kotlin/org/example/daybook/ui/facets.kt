@@ -15,6 +15,7 @@ import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.ImageMetadata
 import org.example.daybook.uniffi.types.Note
 import org.example.daybook.uniffi.types.WellKnownFacet
+import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 @PublishedApi
 internal val facetJsonCodec = Json {
@@ -101,25 +102,28 @@ fun buildNoteFacet(content: String, mime: String = "text/plain"): WellKnownFacet
 
 fun buildBodyFacet(order: List<String>): WellKnownFacet.Body = WellKnownFacet.Body(Body(order = order))
 
-fun wellKnownFacetTagCanonicalString(tag: org.example.daybook.uniffi.types.WellKnownFacetTag): String = when (tag) {
-    org.example.daybook.uniffi.types.WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refGeneric"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelGeneric"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titleGeneric"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathGeneric"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.BODY -> "org.example.daybook.body"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE -> "org.example.daybook.note"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.BLOB_PIN -> "org.example.daybook.blobPin"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imageMetadata"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrResult"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.PLUG_MANIFEST -> "org.example.daybook.plugManifest"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.PLUGS_CONFIG -> "org.example.daybook.plugsConfig"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.BRANCH -> "org.example.daybook.branch"
-    org.example.daybook.uniffi.types.WellKnownFacetTag.BRANCHES -> "org.example.daybook.branches"
-}
+// Canonical tag strings are a fixed data table rather than logic: one entry per WellKnownFacetTag.
+private val wellKnownFacetTagCanonicalStrings: Map<WellKnownFacetTag, String> = mapOf(
+    WellKnownFacetTag.DMETA to "org.example.daybook.dmeta",
+    WellKnownFacetTag.REF_GENERIC to "org.example.daybook.refGeneric",
+    WellKnownFacetTag.LABEL_GENERIC to "org.example.daybook.labelGeneric",
+    WellKnownFacetTag.TITLE_GENERIC to "org.example.daybook.titleGeneric",
+    WellKnownFacetTag.PATH_GENERIC to "org.example.daybook.pathGeneric",
+    WellKnownFacetTag.PENDING to "org.example.daybook.pending",
+    WellKnownFacetTag.BODY to "org.example.daybook.body",
+    WellKnownFacetTag.NOTE to "org.example.daybook.note",
+    WellKnownFacetTag.BLOB to "org.example.daybook.blob",
+    WellKnownFacetTag.BLOB_PIN to "org.example.daybook.blobPin",
+    WellKnownFacetTag.IMAGE_METADATA to "org.example.daybook.imageMetadata",
+    WellKnownFacetTag.OCR_RESULT to "org.example.daybook.ocrResult",
+    WellKnownFacetTag.EMBEDDING to "org.example.daybook.embedding",
+    WellKnownFacetTag.PLUG_MANIFEST to "org.example.daybook.plugManifest",
+    WellKnownFacetTag.PLUGS_CONFIG to "org.example.daybook.plugsConfig",
+    WellKnownFacetTag.BRANCH to "org.example.daybook.branch",
+    WellKnownFacetTag.BRANCHES to "org.example.daybook.branches",
+)
+
+fun wellKnownFacetTagCanonicalString(tag: WellKnownFacetTag): String = wellKnownFacetTagCanonicalStrings.getValue(tag)
 
 fun buildSelfFacetRefUrl(key: FacetKey): String {
     val tagString =

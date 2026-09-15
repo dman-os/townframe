@@ -159,16 +159,34 @@ jobs:
 
       - name: rust tests
         run: |
-          # Plug crates are excluded while automatic triage is broken.
+          # Plug crates are excluded while automatic triage is broken. `daybook_cli` is excluded
+          # because its e2e tests need the built binary and run in the dedicated CLI job.
+          #
+          # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
+          # implies `--no-clean`, so the earlier run's data survives) and the final `report`
+          # invocation turns the whole lot into a single lcov file.
           nix develop .#ci-rust --command cargo llvm-cov --no-report nextest \
             --color=always --workspace --all-targets --profile ci \
+            --user-config-file .config/nextest-user-ci.toml \
             --exclude daybook_cli --exclude plug_test --exclude plug_dayledger --exclude plug_plabels
-          nix develop .#ci-rust --command cargo llvm-cov --no-report --doc
-          nix develop .#ci-rust --command cargo llvm-cov --doctests --lcov --output-path lcov.info
+          # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
+          # `--doctests`, which persists the doctest binaries the coverage report needs.
+          nix develop .#ci-rust --command cargo llvm-cov --no-report --doc --workspace \
+            --exclude daybook_cli --exclude plug_test --exclude plug_dayledger --exclude plug_plabels
+          # `report` only merges the collected profile data and writes lcov; it runs no tests.
+          # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
+          nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info
+          # Bail out loudly rather than upload an empty lcov to codecov: this file goes silently
+          # empty when the test runs and the report disagree about `--doctests`.
+          grep -q '^SF:' lcov.info || { echo 'lcov.info has no coverage records' >&2; exit 1; }
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
-          # RUST_LOG_TEST: debug
+          RUST_LOG_TEST: debug
+          # Record every captured stdout/stderr stream so a failed job can attach the full test
+          # output as an artifact instead of relying on a truncated CI log.
+          NEXTEST_EXPERIMENTAL_RECORD: 1
+          NEXTEST_STATE_DIR: ${{ github.workspace }}/nextest-state
 
       - uses: actions/upload-artifact@v6
         if: always()
@@ -176,6 +194,24 @@ jobs:
           name: nextest-results
           path: '**/nextest/ci/results.xml'
 
+      - name: export nextest recording
+        if: failure()
+        run: |
+          if nix develop .#ci-rust --command cargo nextest store list | grep -qE '^ +[0-9a-f]{8} '; then
+            nix develop .#ci-rust --command cargo nextest store export latest --archive-file nextest-run.zip
+          else
+            echo 'no recorded nextest run to export (the job died before nextest started)' >&2
+          fi
+        env:
+          NEXTEST_EXPERIMENTAL_RECORD: 1
+          NEXTEST_STATE_DIR: ${{ github.workspace }}/nextest-state
+
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: nextest-recording
+          path: nextest-run.zip
+          if-no-files-found: ignore
       - name: Publish Test Summary
         uses: test-summary/action@v2
         if: always()

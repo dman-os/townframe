@@ -113,12 +113,26 @@ pub struct BigRepoRpcProtocolHandler {
 impl ProtocolHandler for BigRepoRpcProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let endpoint_id = conn.remote_id();
-        let peer_id = self
-            .peer_map
-            .read()
-            .expect(ERROR_MUTEX)
-            .lookup(endpoint_id)
-            .unwrap_or_else(|| PeerId::new(*endpoint_id.as_bytes()));
+        let peer_id = match self.peer_map.read().expect(ERROR_MUTEX).lookup(endpoint_id) {
+            Some(peer_id) => peer_id,
+            None => {
+                // The transport identity is not the application identity: this
+                // subscriber's notifications are classified against the peer's
+                // Keyhive agent, so an unresolved mapping degrades delivery to
+                // the classifier's conservative "cannot attribute" path. That
+                // path still notifies, but the misconfiguration must be visible
+                // rather than silent — embedders register the mapping from the
+                // repo-sync connection (`BigRepoRpcHandle::register_peer`).
+                let peer_id = PeerId::new(*endpoint_id.as_bytes());
+                tracing::warn!(
+                    %endpoint_id,
+                    %peer_id,
+                    "BigRepo RPC subscriber has no registered application peer identity; \
+                     Keyhive change notifications for it fall back to conservative fan-out",
+                );
+                peer_id
+            }
+        };
         loop {
             let msg = match irpc_iroh::read_request::<RepoSyncRpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -214,13 +228,28 @@ async fn handle_rpc_message(
             let sub_id = big_repo.subscribe_keyhive_changes(peer_id, tx).await;
             let cancel = cancel_token.child_token();
             let repo = Arc::clone(&big_repo);
-            let _task = subscription_tasks
-                .spawn(async move {
-                    cancel.cancelled().await;
-                    repo.unsubscribe_keyhive_changes(&peer_id, sub_id).await;
-                })
-                .expect(ERROR_TOKIO);
-            tracing::debug!(%peer_id, "registered direct Keyhive change stream");
+            let cleanup_repo = Arc::clone(&big_repo);
+            match subscription_tasks.spawn(async move {
+                cancel.cancelled().await;
+                repo.unsubscribe_keyhive_changes(&peer_id, sub_id).await;
+            }) {
+                Ok(_) => {
+                    tracing::debug!(%peer_id, "registered direct Keyhive change stream");
+                }
+                Err(error) if cancel_token.is_cancelled() => {
+                    cleanup_repo
+                        .unsubscribe_keyhive_changes(&peer_id, sub_id)
+                        .await;
+                    tracing::debug!(
+                        %peer_id,
+                        %error,
+                        "cleaned Keyhive subscription registered during RPC shutdown",
+                    );
+                }
+                Err(error) => panic!(
+                    "failed spawning Keyhive subscription cleanup while RPC is active: {error}"
+                ),
+            }
         }
     }
 }

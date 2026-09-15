@@ -141,6 +141,94 @@ async fn remote_subscription_delivers_removal_after_policy_revocation() -> Res<(
     Ok(())
 }
 
+/// A peer that loses fetch access must still learn that the object moved: it
+/// gets exactly one payload-free advance so it attempts a sync and is rejected
+/// at the wire with `Unauthorized`, rather than the revocation being
+/// undiscoverable because every later event is filtered out. Peers that never
+/// had access stay in the dark, and content is never delivered.
+#[tokio::test]
+async fn revoke_delivers_one_payload_free_advance_on_live_subscription() -> Res<()> {
+    let store = SqliteBigRepoStore::new(
+        SqlCtx::memory().await?,
+        "big-repo-sqlite-revocation-notice",
+        BuckId::MAX_LEVEL,
+    )
+    .await?;
+    let part = PartId(Byte32Id::new([231; 32]));
+    let obj = ObjId(Byte32Id::new([232; 32]));
+    let peer = PeerId(Byte32Id::new([233; 32]));
+    let stranger = PeerId(Byte32Id::new([234; 32]));
+    HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 1})).await?;
+    store.ensure_part(part).await?;
+    store
+        .reconcile_group_part_batch(
+            &[GroupPartReconciliation {
+                doc: obj,
+                agents: HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                managed_group_parts: HashSet::from([part]),
+                desired_group_parts: HashSet::from([part]),
+                desired_global: false,
+            }],
+            1,
+            true,
+        )
+        .await?;
+
+    let subscription_request = |cursor| SubPartsRequest {
+        lower_bound: 0,
+        targets: HashSet::from([SubscriptionTarget::Part {
+            part_id: part,
+            cursor,
+        }]),
+    };
+    let rx = HostPartStore::subscribe(&store, subscription_request(0), peer).await??;
+    assert!(matches!(rx.recv().await?, SubEvent::Added(added) if added.obj_id == obj));
+    assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
+    let stranger_rx = HostPartStore::subscribe(&store, subscription_request(0), stranger).await??;
+    assert!(matches!(
+        stranger_rx.recv().await?,
+        SubEvent::ReplayComplete
+    ));
+
+    // Revoke without dropping the doc out of the part, so no removal event
+    // announces the access change: the notice is the only signal the peer gets.
+    store
+        .reconcile_group_part_batch(
+            &[GroupPartReconciliation {
+                doc: obj,
+                agents: HashMap::new(),
+                managed_group_parts: HashSet::from([part]),
+                desired_group_parts: HashSet::from([part]),
+                desired_global: false,
+            }],
+            2,
+            true,
+        )
+        .await?;
+
+    HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 2})).await?;
+    match rx.recv().await? {
+        SubEvent::Changed(changed) => {
+            assert_eq!(changed.obj_id, obj);
+            assert_eq!(changed.part_ids, vec![part]);
+            assert!(
+                changed.payload.is_null(),
+                "revocation notice must not carry object content: {:?}",
+                changed.payload
+            );
+        }
+        other => panic!("expected payload-free revocation notice, got {other:?}"),
+    }
+    assert!(stranger_rx.try_recv().is_err());
+    assert!(rx.try_recv().is_err());
+
+    // The notice is one-shot: later advances stay filtered.
+    HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 3})).await?;
+    assert!(rx.try_recv().is_err());
+    assert!(stranger_rx.try_recv().is_err());
+    Ok(())
+}
+
 #[tokio::test]
 async fn grant_resurrects_denied_added_on_live_subscription() -> Res<()> {
     let store = SqliteBigRepoStore::new(

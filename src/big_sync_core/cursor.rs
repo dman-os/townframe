@@ -151,10 +151,21 @@ impl CursorSyncMachine {
             // Replay/live handoff is at-least-once. A replacement immutable
             // subscription can repeat an event whose cursor was already
             // durably advanced by the previous generation.
+            tracing::debug!(
+                ?part_id,
+                ?cursor,
+                ?state.last_emitted_cursor,
+                "cursor machine ignored event: cursor not newer than emitted cursor",
+            );
             return false;
         }
         if let Some(_old) = state.slots.get_mut(&cursor) {
             // duplicate cursor
+            tracing::debug!(
+                ?part_id,
+                ?cursor,
+                "cursor machine ignored event: duplicate pending cursor",
+            );
             return false;
         }
         state.slots.insert(cursor, CursorSlotState::Pending);
@@ -186,6 +197,12 @@ impl CursorSyncMachine {
                 if parts.is_empty() {
                     let last_cursor = self.object_cursors.entry(evt.obj_id).or_default();
                     if evt.cursor <= *last_cursor {
+                        tracing::debug!(
+                            ?evt.obj_id,
+                            ?evt.cursor,
+                            ?last_cursor,
+                            "cursor machine ignored object-only event: cursor not newer",
+                        );
                         return;
                     }
                     *last_cursor = evt.cursor;

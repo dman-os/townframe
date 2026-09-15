@@ -147,6 +147,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     frontier_store: SharedPartStore,
     #[educe(Debug(ignore))]
+    derived_store: SharedPartStore,
+    #[educe(Debug(ignore))]
     sqlite_store: SqliteBigRepoStore,
     #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
@@ -246,6 +248,12 @@ impl BigRepo {
         Arc::clone(&self.frontier_store)
     }
 
+    /// Return the local-only partition store for consumer-derived objects that
+    /// are not documents. Never registered with the big-sync RPC server.
+    pub fn derived_part_store(&self) -> SharedPartStore {
+        Arc::clone(&self.derived_store)
+    }
+
     /// The SQLite context backing this BigRepo's storage. Consumers that need
     /// additional scopes in the same database (e.g. the blob partitions)
     /// construct their scoped store from this context.
@@ -269,7 +277,6 @@ impl BigRepo {
         .len();
         Ok(snapshot)
     }
-    #[cfg(test)]
     pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
         self.sqlite_store.clone()
     }
@@ -309,6 +316,20 @@ impl BigRepo {
             SqliteBigRepoStore::new_with_config(
                 store.sql.clone(),
                 format!("{scope_key}:automerge-frontier"),
+                big_sync_core::BuckId::MAX_LEVEL,
+                big_sync::HostPartStoreConfig::default(),
+            )
+            .await?,
+        );
+        // Consumer-local derived objects (state that is not a document, e.g.
+        // daybook's processor-runlog items) live in their own scope so their ids
+        // can never reach the main scope's match-all part stream, which the
+        // automerge frontier worker reads as documents. Local-only: never
+        // registered with the big-sync RPC server, so nothing here replicates.
+        let derived_store: SharedPartStore = Arc::new(
+            SqliteBigRepoStore::new_with_config(
+                store.sql.clone(),
+                format!("{scope_key}:derived"),
                 big_sync_core::BuckId::MAX_LEVEL,
                 big_sync::HostPartStoreConfig::default(),
             )
@@ -396,6 +417,7 @@ impl BigRepo {
             sync_policy,
             big_sync_store,
             frontier_store,
+            derived_store,
             sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
@@ -625,9 +647,22 @@ impl BigRepo {
 
     /// Wait until finite runtime work currently admitted to this repository
     /// has drained. Pending materialization due to unavailable keys is allowed.
+    ///
+    /// Notification dispatch is part of the wait: notification delivery lives
+    /// in the change switchboard, a task outside the hub, so it is fenced
+    /// separately. When this returns, every notification admitted before the
+    /// call has been fanned out and a listener registered right after cannot
+    /// observe a batch that predates it.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
-        self.runtime.wait_for_quiescence(timeout).await
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        self.runtime.wait_for_quiescence(timeout).await?;
+        self.change_manager
+            .fence_notifications(
+                deadline
+                    .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now())),
+            )
+            .await
     }
 
     /// Like [`BigRepo::wait_for_quiescence`], but freezes the hub once
@@ -638,7 +673,16 @@ impl BigRepo {
         &self,
         timeout: Option<std::time::Duration>,
     ) -> Res<()> {
-        self.runtime.wait_for_quiescence_freeze(timeout, true).await
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        self.runtime
+            .wait_for_quiescence_freeze(timeout, true)
+            .await?;
+        self.change_manager
+            .fence_notifications(
+                deadline
+                    .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now())),
+            )
+            .await
     }
 
     /// Resume event/command processing after a frozen quiescence wait.

@@ -119,6 +119,22 @@ pub enum PutDocError {
     Other(#[from] eyre::Report),
 }
 
+// ─── DocLeaseKind ──────────────────────────────────────────────────────────────
+
+/// Whether an acquired document handle counts as a live *caller*.
+///
+/// Caller handles are user-facing leases: their presence is what makes a
+/// document "live", which is the condition for routing received content into
+/// the materialized bundle and for emitting user-visible change notifications.
+/// Background workers that merely need the bundle (the Automerge frontier
+/// publisher) use [`DocLeaseKind::Internal`] so a document nobody holds stays
+/// un-live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocLeaseKind {
+    Caller,
+    Internal,
+}
+
 // ─── DocLookup ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]

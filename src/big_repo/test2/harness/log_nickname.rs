@@ -20,9 +20,23 @@ fn registry() -> &'static std::sync::Mutex<HashMap<[u8; 32], String>> {
 }
 
 /// Register `name` for `peer_id`. Idempotent.
+///
+/// Also logs the mapping at boot: the runtime's own logs (Keyhive/Subduction)
+/// print Keyhive peer ids, which are the same key in a different encoding, so
+/// without this every interleaved multi-node failure report is unreadable.
 pub fn register(peer_id: PeerId, name: impl Into<String>) {
+    let name = name.into();
+    let bytes = peer_id.as_bytes();
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let keyhive_peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(*bytes);
+    tracing::info!(
+        nickname = %name,
+        repo_peer_hex = %hex,
+        keyhive_peer_id = %keyhive_peer_id,
+        "node nickname registered"
+    );
     let mut map = registry().lock().expect("nickname registry poisoned");
-    map.insert(*peer_id.as_bytes(), name.into());
+    map.insert(*bytes, name);
 }
 
 /// Render `peer_id` as its registered nickname, or a short hex prefix if none.

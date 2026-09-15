@@ -35,6 +35,11 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── change manager ─────────────────────────────────────────────────────
     change_manager: Arc<crate::changes::ChangeListenerManager>,
 
+    /// Span owned by this hub. Long-lived workers spawned by the hub parent
+    /// their own spans here so their logs cannot masquerade as children of
+    /// whichever command happened to spawn them.
+    span: tracing::Span,
+
     // ── task sets ──────────────────────────────────────────────────────────
     /// Child/background tasks (construction-time, keyhive syncs, lease
     /// waiters, doc-workers). Stopped first on shutdown (children before
@@ -101,6 +106,13 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// yet completed. The quiescence predicate waits for this to drain, so
     /// in-flight work started before a probe cannot resolve it early (A2/A5).
     tracked_in_flight: u64,
+    /// Per-kind breakdown of `tracked_in_flight`, so a stalled quiescence fence
+    /// can name the work that never reported instead of only its count.
+    tracked_work: HashMap<crate::runtime2::TrackedWorkKind, u64>,
+    /// When the current quiescence wait started, and when to next report the
+    /// stall. Both cleared as soon as quiescence resolves.
+    quiescence_stall_since: Option<std::time::Instant>,
+    next_quiescence_stall_report: Option<std::time::Instant>,
     // ── doc-worker registry ────────────────────────────────────────────────
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
     pending_materialization: HashSet<DocumentId>,
@@ -108,16 +120,80 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// state generation at retry start. A `Pending` completion whose walk ran
     /// against a generation older than the current one is re-verified (B6).
     materialization_retries_in_flight: HashMap<DocumentId, u64>,
+    /// Documents whose materialization retry request arrived while another walk
+    /// was already in flight. That walk had read its inputs before the request, so
+    /// it cannot observe what triggered it; the request is latched here and
+    /// re-issued when the in-flight walk completes. Dropping it instead leaves the
+    /// document labelled one CGKA operation behind with no further wakeup.
+    materialization_retries_requested: HashSet<DocumentId>,
     next_doc_worker_generation: u64,
 }
 
 struct ConnDeets {
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
+/// Test-only orphan-round detector.
+///
+/// A round is retired by the protocol completion, protocol error, or
+/// connection-loss paths. A round that outlives this bound means one of those
+/// silently failed; a test must surface that instead of hanging on it.
+#[cfg(any(test, feature = "test-support"))]
+const KEYHIVE_SYNC_ROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Production slow-round reporting threshold.
+///
+/// There is deliberately no internal round timeout outside tests: we expect to
+/// run on slow networks, and an application-level deadline belongs to the
+/// caller, which can cancel a `sync_keyhive` call safely — the caller's waiter
+/// guard removes the waiter, so a cancelled call never cascades a follow-up
+/// round. A round that outlives this bound is suspicious, so report it once and
+/// keep waiting rather than failing a transfer the peer may still complete.
+#[cfg(not(any(test, feature = "test-support")))]
+const KEYHIVE_SYNC_SLOW_ROUND_WARN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A Keyhive sync round that outlived its reporting threshold, captured so the
+/// janitor can report it without holding a borrow on the round map.
+struct UnresolvedKeyhiveRound {
+    round_id: u64,
+    request_id: subduction_keyhive::message::RequestId,
+    elapsed_secs: u64,
+    admitted_waiters: usize,
+}
+
+impl KeyhiveSyncRound {
+    /// Latch and describe this round when it has outlived `threshold` and was
+    /// not reported yet. Latching keeps a stuck round from being reported on
+    /// every janitor tick; `None` means "not reportable".
+    fn latch_if_unresolved(
+        &mut self,
+        now: std::time::Instant,
+        threshold: std::time::Duration,
+    ) -> Option<UnresolvedKeyhiveRound> {
+        if self.slow_warned {
+            return None;
+        }
+        let elapsed = now.saturating_duration_since(self.started_at);
+        if elapsed < threshold {
+            return None;
+        }
+        self.slow_warned = true;
+        Some(UnresolvedKeyhiveRound {
+            round_id: self.round_id,
+            request_id: self.request_id.clone(),
+            elapsed_secs: elapsed.as_secs(),
+            admitted_waiters: self.admitted_ids.len(),
+        })
+    }
+}
 
 struct KeyhiveSyncRound {
     round_id: u64,
+    started_at: std::time::Instant,
     request_id: subduction_keyhive::message::RequestId,
+    /// Latches the one-shot slow-round report so a stuck round warns once
+    /// instead of on every janitor tick. Tests read it too: a round that was
+    /// already reported is not the orphan their panic detector looks for.
+    slow_warned: bool,
     /// Ids of the waiters queued when this round started; the round resolves
     /// them on completion. Waiters admitted during the round cascade.
     admitted_ids: std::collections::HashSet<u64>,
@@ -212,6 +288,10 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
+/// How long a quiescence fence may stall before the hub reports what is still
+/// in flight. Diagnostic only: the fence itself has no timeout.
+const QUIESCENCE_STALL_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[future_form::future_form(Sendable, Local)]
 impl<F: FutureForm> HubCommandFuture<F> for F {
     fn allocate_doc(
@@ -269,6 +349,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                     cmd_tx
                         .send(Runtime2Cmd::GetDocHandle {
                             doc_id,
+                            lease: crate::runtime2::DocLeaseKind::Caller,
                             resp: handle_resp,
                         })
                         .await
@@ -447,6 +528,11 @@ where
     ) -> eyre::Result<()> {
         self.freeze_on_resolve |= freeze;
         self.quiescence_waiters.push(resp);
+        if self.quiescence_stall_since.is_none() {
+            self.quiescence_stall_since = Some(self.clock.instant());
+            self.next_quiescence_stall_report =
+                Some(self.clock.instant() + QUIESCENCE_STALL_REPORT_INTERVAL);
+        }
         if self.quiescence_probe.is_none() {
             self.start_quiescence_probe()?;
         }
@@ -528,6 +614,8 @@ where
         );
         let barrier_id = probe.barrier_id;
         self.quiescence_probe = None;
+        self.quiescence_stall_since = None;
+        self.next_quiescence_stall_report = None;
         if self.freeze_on_resolve {
             self.freeze_on_resolve = false;
             self.frozen = true;
@@ -624,10 +712,18 @@ where
                     ),
                 )?;
             }
-            Runtime2Cmd::GetDocHandle { doc_id, resp } => {
+            Runtime2Cmd::GetDocHandle {
+                doc_id,
+                lease,
+                resp,
+            } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
-                    .send(DocWorkerMsg::AcquireHandle { resp, _lease })
+                    .send(DocWorkerMsg::AcquireHandle {
+                        lease,
+                        resp,
+                        _lease,
+                    })
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::CommitDelta {
@@ -815,6 +911,18 @@ where
                 let entry = self.keyhive_waiters.entry(peer_id).or_default();
                 entry.ids.insert(waiter_id);
                 entry.waiters.push((waiter_id, resp));
+                let queued_waiters = entry.waiters.len();
+                tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
+                    %peer_id,
+                    waiter_id,
+                    queued_waiters,
+                    connected = self.connected_peers.contains_key(&peer_id),
+                    active_round = self.active_keyhive_syncs.contains_key(&peer_id),
+                    admitted_head = self.admitted_head,
+                    group_part_settled_seq = self.group_part_settled_seq,
+                    "keyhive sync waiter enqueued"
+                );
                 // A reconnect can expose the public connection handle before
                 // the hub has processed its ConnEstablished event. Do not
                 // initiate against the old/missing Keyhive peer in that gap;
@@ -1046,9 +1154,10 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 {
                     Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {
                         // TEMP-DIAGNOSTIC: rounds completing with an empty exchange
-                        // (serving side sends 0 for an explicit hash request) are
-                        // invisible at debug level; surface every round here.
-                        tracing::warn!(
+                        // (serving side sends 0 for an explicit hash request) leave no
+                        // trace of the round at default levels; log every round start,
+                        // visible under `RUST_LOG_TEST=debug`.
+                        tracing::debug!(
                             %peer_id,
                             nonce = request_id.nonce,
                             "KEYHIVE_DIAG keyhive sync round initiated"
@@ -1240,7 +1349,16 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            match connect.connect(peer, addr).await {
+            let dial_started = std::time::Instant::now();
+            tracing::debug!(%peer, "dialing peer");
+            let dial_result = connect.connect(peer, addr).await;
+            tracing::debug!(
+                %peer,
+                elapsed_ms = dial_started.elapsed().as_millis() as u64,
+                ok = dial_result.is_ok(),
+                "dial returned"
+            );
+            match dial_result {
                 Ok((handshake_peer, closed, end_fut)) => {
                     if handshake_peer != peer {
                         // The connector has already authenticated the peer;
@@ -1550,6 +1668,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + 'static, R: TaskRuntime<F>> Runtim
             return Ok(abort);
         }
         self.tracked_in_flight = self.tracked_in_flight.wrapping_add(1);
+        *self.tracked_work.entry(kind).or_insert(0) += 1;
         self.child_tasks
             .spawn(F::track_work(kind, fut, self.evt_tx.clone()))
     }
@@ -1690,6 +1809,15 @@ where
                     "keyhive admission head advanced"
                 );
                 self.try_resolve_quiescence()?;
+                // Admitted Keyhive state (CGKA ops, delegations, keys) can
+                // unblock a doc that entered the pending set before its
+                // material landed. The exchange triggers cover sync rounds;
+                // this covers admissions that arrive without one (ephemeral
+                // notifications, peer pushes), which otherwise leave a doc
+                // pending with nothing left to wake it.
+                if !self.pending_materialization.is_empty() {
+                    self.reattempt_pending_materialization()?;
+                }
             }
             Runtime2Evt::GroupPartWorkerSettled { seq } => {
                 self.group_part_settled_seq = self.group_part_settled_seq.max(seq);
@@ -1719,6 +1847,7 @@ where
                 self.doc_workers.remove(&doc_id);
                 self.pending_materialization.remove(&doc_id);
                 self.materialization_retries_in_flight.remove(&doc_id);
+                self.materialization_retries_requested.remove(&doc_id);
                 if let Some(probe) = self.quiescence_probe.as_mut() {
                     probe.pending_docs.remove(&doc_id);
                 }
@@ -1772,16 +1901,46 @@ where
                         self.pending_materialization.insert(doc_id);
                         debug!(
                             %doc_id,
+                            stale,
                             "materialization retry remains partially decrypted"
                         );
+                        if stale {
+                            // The walk ran against an older Keyhive state: the
+                            // operation admitted mid-walk may be exactly what
+                            // supplied the missing document keys. Re-verify with
+                            // the fresher state, otherwise the bundle's causal
+                            // count stalls below the live CGKA count and the
+                            // frontier publish barrier waits for a wakeup that
+                            // never comes.
+                            debug!(%doc_id, "re-verifying stale partial materialization retry");
+                            self.retry_existing_doc_materialization(doc_id)?;
+                        }
                     }
                     crate::runtime2::MaterializationStatus::Missing
                     | crate::runtime2::MaterializationStatus::Ready {
                         partially_decrypted: false,
                     } => {
                         self.pending_materialization.remove(&doc_id);
-                        debug!(%doc_id, ?status, "materialization retry reached a terminal state");
+                        debug!(
+                            %doc_id,
+                            ?status,
+                            stale,
+                            "materialization retry reached a terminal state"
+                        );
+                        if stale {
+                            debug!(%doc_id, "re-verifying stale terminal materialization retry");
+                            self.retry_existing_doc_materialization(doc_id)?;
+                        }
                     }
+                }
+                // A request that arrived while this walk was running could not be
+                // coalesced into it: the walk had already read the projection before
+                // that change landed. Re-issue it now, or the change is only observed
+                // by whatever happens to run next — which, for a document that just
+                // left the pending set, may be nothing at all.
+                if self.materialization_retries_requested.remove(&doc_id) {
+                    debug!(%doc_id, "re-issuing latched materialization retry");
+                    self.retry_existing_doc_materialization(doc_id)?;
                 }
             }
             // --- Keyhive event listener handlers ---
@@ -1871,6 +2030,12 @@ where
                     "TrackedWorkDone without a matching spawn_tracked increment"
                 );
                 self.tracked_in_flight -= 1;
+                if let Some(count) = self.tracked_work.get_mut(&kind) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.tracked_work.remove(&kind);
+                    }
+                }
                 debug!(
                     local_peer_id = %self.local_peer_id,
                     kind = ?kind,
@@ -1986,7 +2151,8 @@ where
     // ─── connection lifecycle ──────────────────────────────────────────────
 
     /// Handle an established connection: register peer in `connected_peers`,
-    /// then schedule the initial keyhive sync.
+    /// then schedule the initial keyhive sync and start a round for any waiter
+    /// that was queued before this event was processed.
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn handle_connection_established(
         &mut self,
@@ -1999,7 +2165,19 @@ where
                 closed: Arc::clone(&closed),
             },
         );
-        if self.keyhive_sync_on_connect {
+        // `SyncKeyhiveWithPeer` is polled ahead of events, so it can be
+        // processed before this one even though `open_connection_and_watch`
+        // queues `ConnEstablished` before it resolves the caller's connect
+        // response. That handler defers the round to this one while the peer is
+        // unregistered, so a waiter queued in that gap must start its round
+        // here even when connect-time syncing is disabled — otherwise nothing
+        // ever resolves it and the connection stays healthy, so no `ConnLost`
+        // backstop fires.
+        let queued_waiters = self
+            .keyhive_waiters
+            .get(&peer_id)
+            .is_some_and(|waiters| !waiters.waiters.is_empty());
+        if self.keyhive_sync_on_connect || queued_waiters {
             self.start_keyhive_sync(peer_id)?;
         }
         Ok(())
@@ -2050,7 +2228,9 @@ where
             peer_id,
             KeyhiveSyncRound {
                 round_id,
+                started_at: self.clock.instant(),
                 request_id: request_id.clone(),
+                slow_warned: false,
                 admitted_ids,
             },
         );
@@ -2253,10 +2433,10 @@ where
         Ok(())
     }
 
-    /// Targeted retry for one document (B6). The in-flight entry records the
-    /// Keyhive state generation at retry start; `forward_materialization_retry`
-    /// acks the worker's status back through `DocWorkerMaterializationRetryCompleted`,
-    /// where a stale `Pending` (state advanced while the walk ran) re-verifies.
+    /// Targeted retries remember the Keyhive admission head at retry start.
+    /// `DocWorkerMaterializationRetryCompleted` re-runs any result produced while
+    /// admission advanced, because even an apparently complete snapshot may have
+    /// materialized one fewer CGKA operation than the now-current document state.
     fn retry_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
         let (worker, lease) = self.doc_worker_handle(doc_id)?;
         self.send_materialization_retry(doc_id, worker, lease)
@@ -2280,8 +2460,14 @@ where
         lease: DocWorkerInternalLease,
     ) -> eyre::Result<()> {
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
+            self.materialization_retries_requested.insert(doc_id);
+            debug!(
+                %doc_id,
+                "latching materialization retry behind the in-flight walk"
+            );
             return Ok(());
         }
+        self.materialization_retries_requested.remove(&doc_id);
         let start_seq = self.admitted_head;
         self.materialization_retries_in_flight
             .insert(doc_id, start_seq);
@@ -2434,6 +2620,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             self.cmd_tx.clone(),
             self.evt_tx.clone(),
             generation,
+            self.span.clone(),
         );
         let handle = worker.handle;
         let stop = worker.stop;
@@ -2516,8 +2703,113 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
     /// Periodic eviction of idle doc-workers. Driven by the machine loop's
     /// `Timer::tick(doc_worker_idle_ttl)`.
+    /// Report what a stalled quiescence fence is waiting for, every
+    /// [`QUIESCENCE_STALL_REPORT_INTERVAL`] while it stays stalled.
+    ///
+    /// Quiescence is the harness's universal "everything drained" fence, so a
+    /// wedged fence otherwise only surfaces as an opaque test timeout. Naming
+    /// the in-flight work, the docs still fenced, and the cursors that have not
+    /// caught up is what makes the stall attributable.
+    fn report_quiescence_stall(&mut self, now: std::time::Instant) {
+        let Some(since) = self.quiescence_stall_since else {
+            return;
+        };
+        let Some(next_report) = self.next_quiescence_stall_report else {
+            return;
+        };
+        if now < next_report {
+            return;
+        }
+        self.next_quiescence_stall_report = Some(now + QUIESCENCE_STALL_REPORT_INTERVAL);
+        let probe = self.quiescence_probe.as_ref();
+        let mut pending_docs: Vec<String> = self
+            .pending_materialization
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        pending_docs.sort();
+        warn!(
+            local_peer_id = %self.local_peer_id,
+            stalled_secs = since.elapsed().as_secs(),
+            quiescence_waiters = self.quiescence_waiters.len(),
+            probe_barrier = probe.map(|probe| probe.barrier_id),
+            probe_pending_docs = probe.map_or(0, |probe| probe.pending_docs.len()),
+            probe_generation = probe.map(|probe| probe.activity_generation),
+            activity_generation = self.activity_generation,
+            frozen = self.frozen,
+            tracked_in_flight = self.tracked_in_flight,
+            tracked_work = ?self.tracked_work,
+            doc_workers = self.doc_workers.len(),
+            pending_materialization = pending_docs.len(),
+            pending_docs = ?pending_docs,
+            retries_in_flight = self.materialization_retries_in_flight.len(),
+            pending_doc_syncs = self.pending_doc_syncs.len(),
+            keyhive_waiters = self.keyhive_waiters.len(),
+            active_keyhive_syncs = self.active_keyhive_syncs.len(),
+            admitted_head = self.admitted_head,
+            group_part_settled_seq = self.group_part_settled_seq,
+            "quiescence fence stalled",
+        );
+    }
+
+    /// Report unresolved Keyhive sync rounds.
+    ///
+    /// Production: report each round once when it outlives
+    /// `KEYHIVE_SYNC_SLOW_ROUND_WARN` and keep waiting — we run on slow
+    /// networks and an application-level deadline belongs to the caller, who
+    /// can cancel `sync_keyhive` safely because the waiter guard removes the
+    /// waiter (so a cancelled call never cascades a follow-up round).
+    ///
+    /// Tests: panic on `KEYHIVE_SYNC_ROUND_TIMEOUT` so a stress run surfaces a
+    /// round that no completion, protocol error, or connection loss retired
+    /// instead of hanging on it.
+    fn report_unresolved_keyhive_round(&mut self, now: std::time::Instant) {
+        #[cfg(any(test, feature = "test-support"))]
+        let threshold = KEYHIVE_SYNC_ROUND_TIMEOUT;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let threshold = KEYHIVE_SYNC_SLOW_ROUND_WARN;
+
+        let unresolved = self
+            .active_keyhive_syncs
+            .iter_mut()
+            .filter_map(|(peer_id, round)| {
+                round
+                    .latch_if_unresolved(now, threshold)
+                    .map(|report| (*peer_id, report))
+            })
+            .collect::<Vec<_>>();
+
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((peer_id, report)) = unresolved.first() {
+            panic!(
+                "Keyhive sync round timed out without response, protocol error, or connection loss: peer={peer_id} request={:?} round={} elapsed_secs={} admitted_waiters={}",
+                report.request_id, report.round_id, report.elapsed_secs, report.admitted_waiters
+            );
+        }
+
+        #[cfg(not(any(test, feature = "test-support")))]
+        for (peer_id, report) in unresolved {
+            warn!(
+                %peer_id,
+                round_id = report.round_id,
+                request_id = ?report.request_id,
+                elapsed_secs = report.elapsed_secs,
+                slow_after_secs = threshold.as_secs(),
+                connected = self.connected_peers.contains_key(&peer_id),
+                admitted_waiters = report.admitted_waiters,
+                pending_waiters = self
+                    .keyhive_waiters
+                    .get(&peer_id)
+                    .map_or(0, |waiters| waiters.waiters.len()),
+                "Keyhive sync round unresolved; still waiting"
+            );
+        }
+    }
+
     fn janitor_tick(&mut self) {
         let now = self.clock.instant();
+        self.report_quiescence_stall(now);
+        self.report_unresolved_keyhive_round(now);
         let expired: Vec<DocumentId> = self
             .doc_workers
             .iter()
@@ -2569,7 +2861,9 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
 /// Stop token for the runtime. Generic over the async form `F` and the
 /// concrete [`TaskRuntime`] backend `R`. Holds two independent task sets:
-/// - `child_tasks` — construction-time workers and dynamic background jobs.
+/// - `worker_tasks` — construction-time background workers, joined before the
+///   commands channel closes so they never send into a dead hub.
+/// - `child_tasks` — dynamic background jobs and long-lived support tasks.
 /// - `machine_tasks` — the hub's dispatcher loop, stopped last so it can
 ///   drain in-flight tracked work before exiting.
 pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
@@ -2577,6 +2871,19 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
     pub(crate) child_tasks: R::Tasks,
     pub(crate) machine_tasks: R::Tasks,
+    /// Dedicated set for the construction-time background workers (group part,
+    /// prekey janitor, causal checkpoint, automerge frontier, keyhive
+    /// dispatcher). They are joined *before* the commands channel closes: the
+    /// hub constructs that channel, so it must outlive every worker that sends
+    /// into it, otherwise a worker cancelled mid-flight observes a dead actor
+    /// and fails a task that is really being shut down.
+    pub(crate) worker_tasks: R::Tasks,
+    /// Keeps the event channel open until every child holding an `evt_tx`
+    /// clone has been joined. The machine-loop future owns the other
+    /// receiver, so without this guard the channel closes the moment that
+    /// future is dropped — while children can still be mid-send. Never read;
+    /// it exists to be dropped last by [`Self::stop`].
+    _evt_rx_guard: async_channel::Receiver<Runtime2Evt>,
     pub group_part_stop: Option<crate::runtime2::GroupPartWorkerStopToken>,
     pub causal_checkpoint_stop: Option<crate::runtime2::CausalCheckpointWorkerStopToken>,
     pub automerge_frontier_stop: Option<crate::runtime2::AutomergeFrontierWorkerStopToken>,
@@ -2592,7 +2899,9 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
     /// is observed even while the hub, handle and in-flight children still
     /// hold sender clones) makes the machine loop stop admitting new
     /// background work, drain in-flight tracked work (processing their
-    /// events, so no child ever reports into a closed channel) and exit.
+    /// events) and exit. The event channel stays open until every child that
+    /// holds an `evt_tx` clone has been joined (see `_evt_rx_guard`), so no
+    /// child ever reports into a closed channel.
     /// Senders that still hold a `cmd_tx` clone treat the closed channel as
     /// the shutdown signal. Only if the drain does not complete within
     /// `timeout` is the machine loop aborted outright.
@@ -2615,6 +2924,17 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
             stop.cancel();
         }
 
+        // Join the cancelled construction-time workers before closing the
+        // commands channel. The hub constructs that channel, so it must
+        // outlive its senders: a worker aborted mid-flight (for example the
+        // causal checkpoint worker awaiting `EnsureCausalCoverage`) would
+        // otherwise observe a closed channel or an unanswered command and
+        // fail a task that is only shutting down.
+        if self.worker_tasks.stop(timeout).await.is_err() {
+            tracing::warn!("runtime2 workers did not stop within the shutdown timeout; aborting");
+            self.worker_tasks.abort();
+        }
+
         // Close the commands channel: no `Stop` message, no ack — the
         // receiver observes the closure after draining buffered commands.
         self.cmd_tx.close();
@@ -2634,6 +2954,9 @@ impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
         // child scope only after the machine loop has exited, then join it.
         self.child_tasks.abort();
         self.child_tasks.stop(timeout).await?;
+        // `_evt_rx_guard` drops with `self` here — after every child holding
+        // an `evt_tx` clone has been joined — so a child can never send into a
+        // closed channel.
         Ok(())
     }
 }
@@ -2662,7 +2985,7 @@ impl<
         registration: futures::future::AbortRegistration,
     ) -> F::Future<'static, eyre::Result<()>> {
         let _cancellation = registration.handle();
-        let span = tracing::info_span!("runtime2_hub", local_peer_id = %hub.local_peer_id);
+        let span = hub.span.clone();
         F::from_future(
             async move {
                 let result = futures::future::Abortable::new(
@@ -2822,11 +3145,15 @@ where
     // Create two independent task sets for reverse-order shutdown.
     let child_tasks = tasks.task_set();
     let machine_tasks = tasks.task_set();
+    let worker_tasks = tasks.task_set();
 
     let (runtime_abort, runtime_registration) = futures::future::AbortHandle::new_pair();
 
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Runtime2Cmd>();
     let (evt_tx, evt_rx) = event_channel.unwrap_or_else(async_channel::unbounded::<Runtime2Evt>);
+    // The stop token keeps a receiver clone so the channel cannot close while
+    // a child may still be reporting into it (see `Runtime2StopToken::stop`).
+    let evt_rx_guard = evt_rx.clone();
 
     // The handle generates waiter ids; the hub tracks waiters per peer/doc
     // with its own round/request-id state (no hub-side watermark needed).
@@ -2835,6 +3162,7 @@ where
 
     let hub: Runtime2Hub<F, R> = Runtime2Hub {
         local_peer_id,
+        span: tracing::info_span!("runtime2_hub", local_peer_id = %local_peer_id),
         sync_policy,
         runtime_io: Arc::clone(&runtime_io),
         connect,
@@ -2865,8 +3193,12 @@ where
         activity_generation: 0,
         tracked_in_flight: 0,
         doc_workers: HashMap::new(),
+        tracked_work: HashMap::new(),
+        quiescence_stall_since: None,
+        next_quiescence_stall_report: None,
         pending_materialization: HashSet::new(),
         materialization_retries_in_flight: HashMap::new(),
+        materialization_retries_requested: HashSet::new(),
         next_doc_worker_generation: 1,
     };
 
@@ -2896,6 +3228,8 @@ where
             cmd_tx,
             child_tasks,
             machine_tasks,
+            worker_tasks,
+            _evt_rx_guard: evt_rx_guard,
             group_part_stop: None,
             causal_checkpoint_stop: None,
             automerge_frontier_stop: None,
@@ -2931,5 +3265,37 @@ mod tests {
             waiters.waiters.is_empty(),
             &mut notification_pending,
         ));
+    }
+
+    #[test]
+    fn unresolved_keyhive_round_is_reported_once() {
+        let now = std::time::Instant::now();
+        let threshold = std::time::Duration::from_secs(30);
+        let round = |elapsed: std::time::Duration| super::KeyhiveSyncRound {
+            round_id: 4,
+            started_at: now - elapsed,
+            request_id: subduction_keyhive::message::RequestId {
+                requestor: subduction_keyhive::KeyhivePeerId::from_bytes([9; 32]),
+                nonce: 4,
+            },
+            slow_warned: false,
+            admitted_ids: std::collections::HashSet::from([7]),
+        };
+
+        // A fresh round is not reportable, and must not be latched by asking.
+        let mut fresh = round(std::time::Duration::from_secs(29));
+        assert!(fresh.latch_if_unresolved(now, threshold).is_none());
+        assert!(!fresh.slow_warned);
+
+        // A stale round reports its age and admitted waiters exactly once: the
+        // janitor ticks on a fixed cadence and must not repeat the report.
+        let mut stale = round(std::time::Duration::from_secs(31));
+        let report = stale
+            .latch_if_unresolved(now, threshold)
+            .expect("a stale round is reported");
+        assert_eq!(report.round_id, 4);
+        assert_eq!(report.elapsed_secs, 31);
+        assert_eq!(report.admitted_waiters, 1);
+        assert!(stale.latch_if_unresolved(now, threshold).is_none());
     }
 }

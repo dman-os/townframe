@@ -198,6 +198,12 @@ pub fn spawn_automerge_frontier_worker(
                 outbox: Outbox::default(),
                 wake_docs: HashSet::new(),
             };
+            tracing::debug!(
+                keyhive_admission_cursor = kh_read_cursor,
+                admission_durable_cursor = admission_durable,
+                part_durable_cursor = part_durable,
+                "AFW started"
+            );
 
             match futures::future::Abortable::new(worker.machine_loop(), abort_registration).await {
                 Ok(result) => result,
@@ -257,15 +263,38 @@ async fn publish_heads(
     keyhive_watermark: Option<u64>,
     scope: &WorkerGroupScope,
 ) -> Res<PublishOutcome> {
-    let Ok(crate::runtime2::types::DocLookup::Ready(handle)) = runtime.get_doc_handle(doc_id).await
+    tracing::debug!(
+        %doc_id,
+        keyhive_watermark = ?keyhive_watermark,
+        "AFW publish task started"
+    );
+    // Internal acquisition: publishing a frontier must not make a document
+    // nobody holds look live (that would apply received content into the
+    // materialized bundle and emit user-visible change notifications for it).
+    let Ok(crate::runtime2::types::DocLookup::Ready(handle)) =
+        runtime.acquire_internal_doc_handle(doc_id).await
     else {
+        tracing::debug!(%doc_id, "AFW publish deferred: document bundle not ready");
         return Ok(PublishOutcome::Deferred);
     };
+    tracing::debug!(
+        %doc_id,
+        bundle_id = handle.bundle.id(),
+        bundle_ops_count = handle.bundle.materialized_cgka_ops_count(),
+        partially_decrypted = handle.bundle.is_partially_decrypted(),
+        "AFW acquired live document bundle"
+    );
     if keyhive_watermark.is_some() {
         // The admission's CGKA op advances the per-document operation count; the
         // hub forwards it to the doc worker, which re-materializes and updates
         // the bundle. Await the bundle to catch up before advertising heads.
         let target_ops_count = keyhive.current_cgka_ops_count(doc_id).await?;
+        tracing::debug!(
+            %doc_id,
+            target_ops_count,
+            bundle_ops_count = handle.bundle.materialized_cgka_ops_count(),
+            "AFW waiting for bundle CGKA materialization"
+        );
         match tokio::time::timeout(
             MATERIALIZATION_WAIT_TIMEOUT,
             handle.bundle.await_cgka_ops_count(target_ops_count),
@@ -282,6 +311,12 @@ async fn publish_heads(
                 return Ok(PublishOutcome::Deferred);
             }
         }
+        tracing::debug!(
+            %doc_id,
+            target_ops_count,
+            bundle_ops_count = handle.bundle.materialized_cgka_ops_count(),
+            "AFW bundle CGKA materialization barrier satisfied"
+        );
     }
     let causal_epoch = handle.bundle.current_causal_epoch();
     let heads = surelock::key::lock_scope(|key| {
@@ -295,6 +330,11 @@ async fn publish_heads(
         "causal_epoch": causal_epoch,
     });
     frontier_store.set_obj_payload(am_obj_id, payload).await?;
+    tracing::debug!(
+        %doc_id,
+        head_count = heads.len(),
+        "AFW frontier payload written"
+    );
     let desired_parts = big_sync_store
         .obj_parts(am_obj_id)
         .await?
@@ -307,6 +347,7 @@ async fn publish_heads(
             .add_obj_to_parts(am_obj_id, desired_parts.clone())
             .await?;
     }
+    let current_part_count = current_parts.len();
     for part_id in current_parts {
         if !desired_parts.contains(&part_id) {
             frontier_store
@@ -314,6 +355,12 @@ async fn publish_heads(
                 .await?;
         }
     }
+    tracing::debug!(
+        %doc_id,
+        desired_part_count = desired_parts.len(),
+        current_part_count,
+        "AFW frontier publication complete"
+    );
     Ok(PublishOutcome::Published)
 }
 
@@ -538,6 +585,12 @@ impl<'a> Worker<'a> {
         Ok(())
     }
     fn start_task(&mut self, key: FrontierKey, task: FrontierTask) -> Res<()> {
+        tracing::debug!(
+            key = ?key,
+            task = ?task,
+            active_tasks = self.tasks.active_count(),
+            "AFW scheduling keyed task"
+        );
         let future = run_concurrent_frontier_task(
             task.clone(),
             self.runtime.clone(),
@@ -547,10 +600,19 @@ impl<'a> Worker<'a> {
             self.scope.clone(),
         );
         self.tasks.replace(key, task, future)?;
+        tracing::debug!(?key, "AFW keyed task accepted by scheduler");
         Ok(())
     }
 
     fn start_publish(&mut self, doc_id: crate::DocumentId) -> Res<()> {
+        tracing::debug!(
+            %doc_id,
+            active_tasks = self.tasks.active_count(),
+            pending_admission = ?self.pending_admission.get(&doc_id),
+            pending_part_source = ?self.pending_part_sources.get(&doc_id),
+            pending_part_count = self.pending_parts.get(&doc_id).map_or(0, |parts| parts.len()),
+            "AFW preparing frontier publish"
+        );
         self.start_task(
             FrontierKey::Document(doc_id),
             FrontierTask::Publish {
@@ -581,6 +643,12 @@ impl<'a> Worker<'a> {
             SourceKind::Admission => self.admission.ack(source.key, source.cursor).await?,
             SourceKind::Parts => self.parts.ack(source.key, source.cursor).await?,
         };
+        tracing::debug!(
+            source = ?source.source,
+            source_cursor = source.cursor,
+            ack = ?ack,
+            "AFW acknowledged source"
+        );
         if source.source == SourceKind::Admission
             && let DeltaAck::Accepted {
                 through: Some(through),
@@ -603,6 +671,10 @@ impl<'a> Worker<'a> {
             key: delta.key,
             cursor: delta.cursor,
         };
+        tracing::debug!(
+            source_cursor = source.cursor,
+            "AFW consumed Keyhive admission delta"
+        );
         match delta.key {
             // The walker's `key_of` already decoded the event: Cgka
             // operations key by document and go straight to publication.
@@ -615,6 +687,12 @@ impl<'a> Worker<'a> {
                         }
                     })
                     .or_insert(source);
+                tracing::debug!(
+                    %doc_id,
+                    source_cursor = source.cursor,
+                    pending_admission_cursor = ?self.pending_admission.get(&doc_id),
+                    "AFW queued admission for document publish"
+                );
                 self.start_publish(doc_id)
             }
             // Admission rows with no document payload only gate the cursor.
@@ -631,9 +709,14 @@ impl<'a> Worker<'a> {
             key: delta.key,
             cursor: delta.cursor,
         };
+        tracing::debug!(
+            source_cursor = source.cursor,
+            "AFW consumed part revision delta"
+        );
         match delta.entry {
             SubEvent::Added(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
+                tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped added part revision to document");
                 self.remember_part_source(doc_id, source);
                 self.pending_parts
                     .entry(doc_id)
@@ -644,6 +727,7 @@ impl<'a> Worker<'a> {
             SubEvent::Changed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
                 self.remember_part_source(doc_id, source);
+                tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped changed part revision to document");
                 let parts = self.pending_parts.entry(doc_id).or_default();
                 for part_id in event.part_ids {
                     parts.insert(part_id, event.cursor);
@@ -652,6 +736,7 @@ impl<'a> Worker<'a> {
             }
             SubEvent::Removed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
+                tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped removed part revision to document");
                 let empty = self.pending_parts.get_mut(&doc_id).is_some_and(|parts| {
                     parts.remove(&event.part_id);
                     parts.is_empty()
@@ -677,10 +762,15 @@ impl<'a> Worker<'a> {
     }
 
     fn on_local_notifications(&mut self, notifications: Vec<BigRepoLocalNotification>) {
+        tracing::debug!(
+            notification_count = notifications.len(),
+            "AFW received local notifications"
+        );
         for notification in notifications {
             match notification {
                 BigRepoLocalNotification::DocMaterializationReady { doc_id, .. }
                 | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => {
+                    tracing::debug!(%doc_id, "AFW waking document after local notification");
                     self.wake_docs.insert(doc_id);
                 }
                 BigRepoLocalNotification::DocCreated { .. }
@@ -707,6 +797,13 @@ impl<'a> Worker<'a> {
                 },
                 Ok(ConcurrentTaskOutput::Published { through }),
             ) => {
+                tracing::debug!(
+                    %doc_id,
+                    through,
+                    admission = ?admission,
+                    part_source = ?part_source,
+                    "AFW publish task completed"
+                );
                 if let Some(source) = admission {
                     self.acknowledge_source(source).await?;
                     if self.pending_admission.get(&doc_id).copied() == Some(source) {
@@ -747,9 +844,17 @@ impl<'a> Worker<'a> {
                 self.pending_parts.remove(&doc_id);
             }
             (task @ FrontierTask::Publish { doc_id, .. }, Ok(ConcurrentTaskOutput::Deferred)) => {
+                tracing::debug!(
+                    %doc_id,
+                    task = ?task,
+                    "AFW publish task deferred/parked"
+                );
                 self.tasks.park(FrontierKey::Document(doc_id), task);
             }
-            (_, Err(error)) => panic!("automerge frontier task failed: {error:?}"),
+            (task, Err(error)) => {
+                tracing::error!(task = ?task, error = ?error, "AFW task failed");
+                panic!("automerge frontier task failed: {error:?}");
+            }
         }
         Ok(())
     }
@@ -794,7 +899,9 @@ impl<'a> Worker<'a> {
 
     fn start_ready_document_work(&mut self) -> Res<()> {
         for doc_id in std::mem::take(&mut self.wake_docs) {
+            tracing::debug!(%doc_id, active_tasks = self.tasks.active_count(), "AFW considering woken document");
             if !self.tasks.has_capacity_for(FrontierKey::Document(doc_id)) {
+                tracing::debug!(%doc_id, "AFW retaining woken document: scheduler at capacity");
                 self.wake_docs.insert(doc_id);
                 continue;
             }
@@ -822,17 +929,27 @@ async fn run_concurrent_frontier_task(
             part_cursor,
             ..
         } => {
-            // A scoped worker only processes documents whose live keyhive
-            // group membership intersects its scope. Eligibility is checked
-            // here so part events for documents that joined/left the scope
-            // are handled by the same path as admission events.
+            tracing::debug!(
+                scoped = scope.groups().is_some(),
+                "AFW physical publish task entered"
+            );
+            // This scope carries documents only: non-document derived state
+            // lives in its own scope (see `BigRepo::derived_part_store`). Tests
+            // assert that boundary so a new non-document producer is surfaced
+            // here instead of quietly consuming a document worker.
+            #[cfg(any(test, feature = "test-support"))]
+            assert!(
+                crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id),
+                "non-document object reached the automerge frontier source: obj_id={doc_id}. \
+                 State that is not a document belongs in the derived scope, not the document scope"
+            );
             if scope.groups().is_some() {
-                // The match-all part stream also carries non-document
-                // part-store objects; `group_ids_containing_document` maps
-                // their invalid ids to an empty group set (never in scope),
-                // while real keyhive errors propagate and crash the worker
-                // per the house error policy.
+                // Eligibility is checked against live Keyhive membership so part
+                // events for documents that joined or left the scope are handled
+                // by the same path as admission events.
+                tracing::debug!(%doc_id, "AFW checking live document scope membership");
                 let doc_groups = keyhive.group_ids_containing_document(doc_id).await?;
+                tracing::debug!(%doc_id, doc_groups = ?doc_groups, "AFW resolved live document scope membership");
                 if !scope.admits_doc_groups(&doc_groups) {
                     // The document left the worker's scope: tear down its
                     // frontier mirror so nothing stale is advertised to peers.

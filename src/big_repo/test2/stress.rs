@@ -4,6 +4,7 @@
 //! documents, performs mutations on nodes that are already ready, and checks
 //! the resulting durable frontier after the runner reconnects the full mesh.
 
+use super::harness::fixtures::wait_for_agent;
 use super::harness::topo::Node;
 use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
@@ -21,7 +22,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 
@@ -180,15 +180,7 @@ impl BigRepoStressFixture {
                 if peer_id == node.peer_id() {
                     continue;
                 }
-                let keyhive_peer = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-                let agent = node
-                    .repo
-                    .keyhive()
-                    .get_agent_by_peer_id(&keyhive_peer)
-                    .await?
-                    .ok_or_else(|| {
-                        crate::ferr!("agent {peer_id} is not available on {}", node.peer_id())
-                    })?;
+                let agent = wait_for_agent(&node.repo, peer_id).await?;
                 node.repo
                     .add_member_to_group(agent, &group, Access::Edit)
                     .await?;
@@ -429,13 +421,9 @@ impl StressFixture for BigRepoStressFixture {
             if peer_id == group_owner.peer_id() {
                 continue;
             }
-            let keyhive_peer = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-            let agent = group_owner
-                .repo
-                .keyhive()
-                .get_agent_by_peer_id(&keyhive_peer)
-                .await?
-                .ok_or_else(|| crate::ferr!("agent {peer_id} not discovered during bootstrap"))?;
+            // The mesh connection only *triggers* the keyhive handshake; the
+            // owner's view of this editor's agent may still be in flight.
+            let agent = wait_for_agent(&group_owner.repo, peer_id).await?;
             group_owner
                 .repo
                 .add_member_to_group(agent, &group, Access::Edit)
@@ -446,15 +434,7 @@ impl StressFixture for BigRepoStressFixture {
         // group membership is the primitive that makes the relay subscribe to
         // and forward the group part.
         for relay_peer_id in self.relay_peer_ids.lock().await.iter() {
-            let keyhive_peer = KeyhivePeerId::from_bytes(*relay_peer_id.as_bytes());
-            let relay_agent = group_owner
-                .repo
-                .keyhive()
-                .get_agent_by_peer_id(&keyhive_peer)
-                .await?
-                .ok_or_else(|| {
-                    crate::ferr!("relay agent {relay_peer_id} not discovered during bootstrap")
-                })?;
+            let relay_agent = wait_for_agent(&group_owner.repo, *relay_peer_id).await?;
             group_owner
                 .repo
                 .add_member_to_group(relay_agent, &group, Access::Relay)
