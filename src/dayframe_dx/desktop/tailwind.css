@@ -1,0 +1,177 @@
+@import "tailwindcss";
+@source "../ui/src/**/*.rs";
+
+@layer components {
+  .tile-line-group {
+    border-radius: 12px;
+    transition:
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+  .tile-line-group:hover,
+  .tile-line-group:focus-within {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+  .tile-line:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 4px;
+  }
+  /* A spawner keeps its surface under the pointer: the highlight *is* the lineage
+     marker, so losing it on hover breaks the join at exactly the moment someone
+     is following it. The hover is a lift, not a replacement. */
+  .tile-line-group.surface-1:hover,
+  .tile-widget-group.surface-1:hover {
+    background: rgba(129, 140, 248, 0.17);
+  }
+  .tile-line-group.surface-2:hover,
+  .tile-widget-group.surface-2:hover {
+    background: rgba(52, 211, 153, 0.17);
+  }
+  .tile-line-group.surface-3:hover,
+  .tile-widget-group.surface-3:hover {
+    background: rgba(251, 191, 36, 0.17);
+  }
+  /* The strip: one row of columns. A nested list is a column here like any other,
+     so nothing about it is special-cased and nothing can disagree with the peers. */
+  .tile-strip {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .tile-column {
+    /* Whatever the window gave the strip, split evenly. The strip never asks how
+       wide it is, so there is no width to get wrong. */
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 74vh;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.022);
+  }
+  /* A nested column is joined to the column it came from: the gap between them is
+     closed by pulling it left, the tint matches the tile that spawned it, and the
+     two inner corners are squared so the pair reads as one shape rather than two
+     cards that happen to be adjacent. */
+  .tile-column.column-nested {
+    margin-left: -24px;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  .tile-column.column-spawns {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  /* The nested surfaces. A column wears `surface-n` and so does the tile that
+     spawned it, so one class carries both halves of the join. */
+  .surface-1 {
+    background: rgba(129, 140, 248, 0.10);
+  }
+  .surface-2 {
+    background: rgba(52, 211, 153, 0.10);
+  }
+  .surface-3 {
+    background: rgba(251, 191, 36, 0.10);
+  }
+  .strip-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 8px;
+    color: #9ca3af;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .strip-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .strip-count {
+    flex: none;
+    color: #4b5563;
+    font-variant-numeric: tabular-nums;
+  }
+  .strip-scroll {
+    /* `min-height: 0` is what lets a flex child scroll instead of growing to fit
+       its contents, and `flex: 1` is what gives it a definite height to scroll
+       within. Without both, a long list stretches the column and the scroll never
+       engages. This is what lets a 64-entry sublist be a column of its own. */
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 8px 12px;
+  }
+  .path-back {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    padding: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #9ca3af;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .path-back:hover,
+  .path-back:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f3f4f6;
+  }
+  .column-navigation {
+    width:100%;
+    max-width:1200px;
+    margin:0 auto 12px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    flex-wrap:nowrap;
+  }
+  .column-pager {
+    display:flex;
+    align-items:center;
+    gap:3px;
+    padding:4px 6px;
+    border-radius:999px;
+    background:rgba(255,255,255,0.04);
+  }
+  .column-dot {
+    width:10px;
+    height:10px;
+    padding:0;
+    border:0;
+    border-radius:999px;
+    background:#4b5563;
+    cursor:pointer;
+    transition:all 180ms ease;
+  }
+  /* The whole visible window is current, so a window shows as a run of lit dots
+     rather than a single position. */
+  .column-dot[aria-current="true"] {
+    width:18px;
+    background:#f3f4f6;
+  }
+  .column-arrow {
+    width:32px;
+    height:32px;
+    border:0;
+    border-radius:999px;
+    background:transparent;
+    color:#9ca3af;
+    font-size:22px;
+    cursor:pointer;
+  }
+  .column-arrow:hover:not(:disabled),
+  .column-arrow:focus-visible {
+    background:rgba(255,255,255,0.08);
+    color:#f3f4f6;
+  }
+}

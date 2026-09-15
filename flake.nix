@@ -149,6 +149,7 @@
             wayland-scanner
 
             at-spi2-atk
+            at-spi2-core
             atkmm
             gdk-pixbuf
             glib
@@ -301,6 +302,7 @@
             vulkan-loader
             pulseaudio
             alsa-lib
+            at-spi2-core
           ];
 
           desktopRuntimeLibraryPath = pkgs.lib.makeLibraryPath (
@@ -380,7 +382,7 @@
               buildInputs = devShellBuildInputs;
 
               shellHook = ''
-                export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:$XDG_DATA_DIRS
+                export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:${pkgs.at-spi2-core}/share:$XDG_DATA_DIRS
                 ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
                 ''}

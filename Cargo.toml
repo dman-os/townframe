@@ -27,6 +27,10 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/dayframe_dx/ui",
+  "./src/dayframe_dx/web",
+  "./src/dayframe_dx/desktop",
+  "./src/dayframe_dx/mobile",
 ]
 
 [workspace.package]
@@ -224,11 +228,15 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
+dioxus = { version = "0.8.0-alpha.1" }
+ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+dioxus = { path = "../dioxus/packages/dioxus" }
+dioxus-native = { path = "../dioxus/packages/native" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
@@ -236,6 +244,154 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # leptos_axum = { path = "../leptos/integrations/axum/" }
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
+
+
+# Keep the application debuggable while optimizing the native UI hot path in dev.
+# These overrides apply to desktop/native builds only; the app and shared UI remain
+# at the normal dev profile for fast iteration and useful debug information.
+[profile.dev.package."accesskit"]
+opt-level = 3
+[profile.dev.package."anyrender"]
+opt-level = 3
+[profile.dev.package."anyrender_vello"]
+opt-level = 3
+[profile.dev.package."anyrender_vello_cpu"]
+opt-level = 3
+[profile.dev.package."anyrender_vello_hybrid"]
+opt-level = 3
+[profile.dev.package."blitz-dom"]
+opt-level = 3
+[profile.dev.package."blitz-html"]
+opt-level = 3
+[profile.dev.package."blitz-net"]
+opt-level = 3
+[profile.dev.package."blitz-paint"]
+opt-level = 3
+[profile.dev.package."blitz-shell"]
+opt-level = 3
+[profile.dev.package."blitz-traits"]
+opt-level = 3
+[profile.dev.package."dioxus-native"]
+opt-level = 3
+[profile.dev.package."dioxus-native-dom"]
+opt-level = 3
+[profile.dev.package."stylo"]
+opt-level = 3
+[profile.dev.package."stylo_taffy"]
+opt-level = 3
+[profile.dev.package."taffy"]
+opt-level = 3
+[profile.dev.package."vello"]
+opt-level = 3
+[profile.dev.package."vello_common"]
+opt-level = 3
+[profile.dev.package."vello_cpu"]
+opt-level = 3
+[profile.dev.package."vello_hybrid"]
+opt-level = 3
+[profile.dev.package."wgpu"]
+opt-level = 3
+[profile.dev.package."wgpu-core"]
+opt-level = 3
+[profile.dev.package."wgpu-hal"]
+opt-level = 3
+[profile.dev.package."wgpu-types"]
+opt-level = 3
+[profile.dev.package."wgpu_context"]
+opt-level = 3
+[profile.dev.package."winit"]
+opt-level = 3
+
+# dx serve uses this profile for the native desktop development binary.
+[profile.desktop-dev]
+inherits = "dev"
+
+[profile.desktop-dev.package."accesskit"]
+opt-level = 3
+[profile.desktop-dev.package."accesskit_xplat"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_svg"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello_cpu"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello_hybrid"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-dom"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-html"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-net"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-paint"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-shell"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-traits"]
+opt-level = 3
+[profile.desktop-dev.package."dioxus-native"]
+opt-level = 3
+[profile.desktop-dev.package."dioxus-native-dom"]
+opt-level = 3
+[profile.desktop-dev.package."stylo"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_atoms"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_derive"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_dom"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_malloc_size_of"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_static_prefs"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_taffy"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_traits"]
+opt-level = 3
+[profile.desktop-dev.package."taffy"]
+opt-level = 3
+[profile.desktop-dev.package."vello"]
+opt-level = 3
+[profile.desktop-dev.package."vello_common"]
+opt-level = 3
+[profile.desktop-dev.package."vello_cpu"]
+opt-level = 3
+[profile.desktop-dev.package."vello_encoding"]
+opt-level = 3
+[profile.desktop-dev.package."vello_hybrid"]
+opt-level = 3
+[profile.desktop-dev.package."vello_shaders"]
+opt-level = 3
+[profile.desktop-dev.package."vello_sparse_shaders"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu_context"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-core"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-core-deps-windows-linux-android"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-hal"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-naga-bridge"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-types"]
+opt-level = 3
+[profile.desktop-dev.package."winit"]
+opt-level = 3
+[profile.desktop-dev.package."winit-common"]
+opt-level = 3
+[profile.desktop-dev.package."winit-core"]
+opt-level = 3
+[profile.desktop-dev.package."winit-wayland"]
+opt-level = 3
+[profile.desktop-dev.package."winit-x11"]
+opt-level = 3
 
 
 # Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
