@@ -288,7 +288,11 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
     let active = (*focus.read()).round().clamp(0.0, (count - 1) as f64) as usize;
     // A zero-sized window happens before the shell reports a real size; fall
     // back so the rest layout is still sane rather than NaN-ridden.
-    let (width, height) = if viewport.1 > 0.0 { viewport } else { (viewport.0, FALLBACK_HEIGHT) };
+    let (width, height) = if viewport.1 > 0.0 {
+        viewport
+    } else {
+        (viewport.0, FALLBACK_HEIGHT)
+    };
     let spacing = spacing(height);
     let top = top_inset(spacing, count, height);
 
@@ -356,7 +360,14 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
     // Scaled by `settle` so the pull decays back to nothing on release.
     let anchor = anchor_y(*focus.read(), spacing, top, *pull.read() * settle_now);
 
-    let placed = place(&items.read(), *focus.read(), spacing, floor, limit, settle_now);
+    let placed = place(
+        &items.read(),
+        *focus.read(),
+        spacing,
+        floor,
+        limit,
+        settle_now,
+    );
     let active_label = items.read()[active];
     let active_dy = (active as f64 - *focus.read()) * spacing;
 
@@ -526,10 +537,16 @@ mod tests {
     fn resting_strip_is_flat_and_uniform() {
         let placed = placed(0.0);
 
-        assert!(placed.iter().all(|p| p.push == 0.0), "idle list must not bow");
+        assert!(
+            placed.iter().all(|p| p.push == 0.0),
+            "idle list must not bow"
+        );
 
         let steps: Vec<f64> = placed.windows(2).map(|w| w[1].dy - w[0].dy).collect();
-        assert!(steps.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9), "uneven: {steps:?}");
+        assert!(
+            steps.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
+            "uneven: {steps:?}"
+        );
     }
 
     /// The label under the thumb moves furthest, and the push decays away from
@@ -552,7 +569,11 @@ mod tests {
         // And flat beyond it: a label out of reach is not dragged along.
         for fraction in [1.0, 3.0, 100.0] {
             let distance = fraction * reach;
-            assert_eq!(push_at(distance, floor, limit, reach), floor, "moved at {distance}");
+            assert_eq!(
+                push_at(distance, floor, limit, reach),
+                floor,
+                "moved at {distance}"
+            );
         }
     }
 
@@ -606,7 +627,11 @@ mod tests {
         // A drag short enough that the gap is under the cap leaves the far end
         // completely alone: the strip is dented, not shifted.
         for limit in [PUSH_CLEARANCE, 120.0, MAX_DIFF] {
-            assert_eq!(push_floor(limit), 0.0, "far end moved at a limit of {limit}");
+            assert_eq!(
+                push_floor(limit),
+                0.0,
+                "far end moved at a limit of {limit}"
+            );
         }
 
         // Past the cap it comes along, and the gap stops growing.
@@ -614,7 +639,10 @@ mod tests {
             let floor = push_floor(limit);
             assert_eq!(floor, limit - MAX_DIFF, "far end did not follow at {limit}");
             assert_eq!(limit - floor, MAX_DIFF, "gap was not capped at {limit}");
-            assert!(floor < limit, "the picked breakpoint must still move furthest");
+            assert!(
+                floor < limit,
+                "the picked breakpoint must still move furthest"
+            );
         }
     }
 
@@ -691,12 +719,23 @@ mod tests {
 
         // And the press moves nothing: the anchor is exactly where the pointer
         // already was, so nothing shifts under the finger.
-        let anchor = anchor_y(l, spacing, top, pull_for(press_y, top, spacing, count, HEIGHT));
-        assert!((anchor - press_y).abs() < 1e-9, "press moved the list to {anchor}");
+        let anchor = anchor_y(
+            l,
+            spacing,
+            top,
+            pull_for(press_y, top, spacing, count, HEIGHT),
+        );
+        assert!(
+            (anchor - press_y).abs() < 1e-9,
+            "press moved the list to {anchor}"
+        );
 
         // Presses outside the index clamp rather than running off the ends.
         assert_eq!(focus_at(-500.0, top, spacing, count), 0.0);
-        assert_eq!(focus_at(HEIGHT + 500.0, top, spacing, count), (count - 1) as f64);
+        assert_eq!(
+            focus_at(HEIGHT + 500.0, top, spacing, count),
+            (count - 1) as f64
+        );
     }
 
     /// The regression this model exists to fix: inside the index the list must
@@ -741,7 +780,12 @@ mod tests {
         for step in 0..=860 {
             let y = step as f64;
             let focus = focus_at(y, top, spacing, count);
-            let anchor = anchor_y(focus, spacing, top, pull_for(y, top, spacing, count, HEIGHT));
+            let anchor = anchor_y(
+                focus,
+                spacing,
+                top,
+                pull_for(y, top, spacing, count, HEIGHT),
+            );
             assert!(
                 (anchor - y).abs() < 1e-9,
                 "picked breakpoint sat at {anchor} for a thumb at {y}"
@@ -764,12 +808,23 @@ mod tests {
         for step in -200..=1060 {
             let y = step as f64;
             let focus = focus_at(y, top, spacing, count);
-            let anchor = anchor_y(focus, spacing, top, pull_for(y, top, spacing, count, HEIGHT));
+            let anchor = anchor_y(
+                focus,
+                spacing,
+                top,
+                pull_for(y, top, spacing, count, HEIGHT),
+            );
 
             let first = anchor - focus * spacing;
             let last = first + span;
-            assert!(first >= -1e-9, "top left the window with the thumb at {y}: {first}");
-            assert!(last <= HEIGHT + 1e-9, "bottom left the window with the thumb at {y}");
+            assert!(
+                first >= -1e-9,
+                "top left the window with the thumb at {y}: {first}"
+            );
+            assert!(
+                last <= HEIGHT + 1e-9,
+                "bottom left the window with the thumb at {y}"
+            );
         }
     }
 

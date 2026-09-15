@@ -6,6 +6,7 @@ use std::sync::Arc;
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 use ui::arc_index::ArcIndex;
+use ui::canvas_probe::CanvasProbe;
 use ui::tiles::TilesDemo;
 
 fn main() {
@@ -33,11 +34,21 @@ fn App() -> Element {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         div {
             style: "position:relative; min-height:100vh;",
-            TilesDemo {}
+            TilesDemo { viewport: viewport() }
             // Arc index experiment overlaid on the tiles surface.
             ArcIndex { viewport: viewport() }
+            // Infinite-canvas probe (throwaway). Opt-in, so the tile and index
+            // surfaces stay usable: run with DAYFRAME_PROBE=1.
+            if probe_enabled() {
+                CanvasProbe { viewport: viewport() }
+            }
         }
     }
+}
+
+/// Whether to mount the infinite-canvas probe over the app.
+fn probe_enabled() -> bool {
+    std::env::var("DAYFRAME_PROBE").is_ok()
 }
 
 /// The window's inner size in logical px, i.e. CSS units.
