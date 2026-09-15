@@ -13,6 +13,9 @@ members = [
   "./src/daybook_types",
   "./src/mltools/",
   "./src/pauperfuse/",
+  "./src/pauperfuse_daybook/",
+  "./src/pauperfuse_virtual_fs/",
+  "./src/pauperfuse_wasi/",
   "./src/plug_dayledger/",
   "./src/secrets_rs",
   "./src/plug_plabels/",
@@ -41,6 +44,8 @@ repository = ""
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
+pauperfuse = { path = "./src/pauperfuse", default-features = false }
+pauperfuse_daybook = { path = "./src/pauperfuse_daybook" }
 sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }

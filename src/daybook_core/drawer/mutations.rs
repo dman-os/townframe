@@ -18,6 +18,12 @@ use daybook_types::doc::{
     WellKnownFacetTag,
 };
 
+#[derive(Clone, Copy)]
+enum BranchAuthority {
+    Document,
+    Checkout,
+}
+
 struct PreparedAddDoc {
     doc_id: DocId,
     handle: big_repo::BigDocHandle,
@@ -595,6 +601,49 @@ impl DrawerRepo {
         from_heads: &ChangeHashSet,
         user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
+        self.create_branch(
+            id,
+            to_branch,
+            from_branch,
+            from_heads,
+            user_path,
+            BranchAuthority::Document,
+        )
+        .await
+    }
+
+    /// Retains the source history in a locally administered, unshared checkout branch.
+    /// Unlike ordinary temporary branches, it does not inherit document authority.
+    pub async fn create_checkout_branch(
+        &self,
+        id: &DocId,
+        to_branch: &daybook_types::doc::BranchPath,
+        from_branch: &daybook_types::doc::BranchPath,
+        from_heads: &ChangeHashSet,
+    ) -> Result<(), DrawerError> {
+        if self.branch_kind_for_path(to_branch)? != BranchKind::Local {
+            return Err(ferr!("checkout branch must have a local /tmp path").into());
+        }
+        self.create_branch(
+            id,
+            to_branch,
+            from_branch,
+            from_heads,
+            None,
+            BranchAuthority::Checkout,
+        )
+        .await
+    }
+
+    async fn create_branch(
+        &self,
+        id: &DocId,
+        to_branch: &daybook_types::doc::BranchPath,
+        from_branch: &daybook_types::doc::BranchPath,
+        from_heads: &ChangeHashSet,
+        user_path: Option<&daybook_types::doc::UserPath>,
+        authority: BranchAuthority,
+    ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
                 inner: ferr!("repo is stopped"),
@@ -695,12 +744,17 @@ impl DrawerRepo {
                 }
             })
             .await?;
-        let mut allocation_parents = vec![
-            self.pending_documents_group.clone().into(),
-            self.content_docs_group.clone().into(),
-        ];
-        if branch_kind == BranchKind::Replicated {
-            allocation_parents.push(self.drawer_group.clone().into());
+        let mut allocation_parents = vec![self.pending_documents_group.clone().into()];
+        match authority {
+            BranchAuthority::Document => {
+                allocation_parents.push(self.content_docs_group.clone().into());
+                if branch_kind == BranchKind::Replicated {
+                    allocation_parents.push(self.drawer_group.clone().into());
+                }
+            }
+            BranchAuthority::Checkout => {
+                allocation_parents.push(self.big_repo.local_keyhive_agent().await?.into());
+            }
         }
         let branch_doc_id = self
             .big_repo

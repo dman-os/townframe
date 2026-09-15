@@ -135,6 +135,9 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Server => {
             return cmds::server::run().await;
         }
+        StaticCommands::Checkout { command } => {
+            return cmds::checkout::run(command).await;
+        }
         _ => {}
     }
 
@@ -153,7 +156,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Init {}
         | StaticCommands::Clone { .. }
         | StaticCommands::Completions { .. }
-        | StaticCommands::Server => unreachable!(),
+        | StaticCommands::Server
+        | StaticCommands::Checkout { .. } => unreachable!(),
         StaticCommands::Dump => cmds::dump::run().await,
         StaticCommands::Ls => cmds::ls::run().await,
         StaticCommands::Cat { id, branch } => cmds::cat::run(id, branch).await,
@@ -275,6 +279,11 @@ enum StaticCommands {
         source: String,
         /// Destination directory path (must be empty or non-existent)
         destination: String,
+    },
+    /// Project a text document into a checkout or inspect an existing checkout
+    Checkout {
+        #[clap(subcommand)]
+        command: cmds::checkout::CheckoutCommands,
     },
     /// Dump full automerge contents
     Dump,

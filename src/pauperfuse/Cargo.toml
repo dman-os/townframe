@@ -10,39 +10,31 @@ workspace = true
 name = "pauperfuse"
 path = "lib.rs"
 
+[features]
+# Unix-local observed trees, with historical migrations in `sql/`. Off by default.
+sqlite = ["dep:sqlx"]
+
 [dependencies]
 #
 # internal
 utils_rs = { workspace = true, default-features = false }
 
 #
-# ds
-surelock.workspace = true
-
-#
 # async
-# async-trait.workspace = true
-futures-buffered.workspace = true
-
-#
-# errors
-thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 
 #
 # encoding
 blake3.workspace = true
 
 #
-# fs
-notify = "9.0.0-rc.2"
-# camino = "1.2.2"
-filetime = "0.2.27"
-jwalk = "0.8.1"
+# error
+thiserror.workspace = true
+displaydoc.workspace = true
 
 #
-# sql
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
-sqlx_utils_rs.workspace = true
+# db
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -50,7 +50,19 @@ lens. This is what keeps 010/011 honest about agnosticism.
    source content changed (the O(changed docs) projection cost that 010's
    commit cycle assumes).
 
+4 and 6 are the same rule seen from both ends, and they are in tension in a way
+the deployment has to resolve: the field that #4 compares is the recipe, and #6
+only holds if that recipe is **per path**. A doc that reports one state token for
+the whole document changes every path's recipe on every edit, which makes #4
+re-render everything and #6 dead letter. So the recipe a path carries is the
+state of the facet *that path* renders from, not of the doc. The comparison is
+against the recipe and never against the digest: a lens version bump can produce
+identical bytes, and the digest in hand would be the old render's (ADR 010 §2.3).
+
 ## 3. The lens API (shape)
+
+> All code samples in here are rough advisory sketches and not
+> prescriptions of using traits or any constructs.
 
 ```rust
 #[async_trait]
@@ -82,6 +94,30 @@ trait Lens: Send + Sync {
   the crate is a bridge; lens *implementations* are deployment property).
 - `EntryDelta` is vtree-shaped (010 §3.1): path, kind, `ContentRef` —
   rendered content arrives as streams, chunks assigned lazily (010 §2.4).
+
+### 3.1 What the lens layer owes the bridge
+
+Lenses are the deployment's, but three of their answers cross into the bridge,
+and all three are given in the deployment's own vocabulary (ADR 010 §4.5):
+
+- **An identity per rendered path, encoded by this layer.** It is a token in the
+  deployment's scheme — a doc, the state of the facet *that path* renders from, a
+  lens id and its version, encoded however the deployment likes — plus a claim
+  built from the same parts, minus the state, because an edit does not change who
+  owns a path (010 §8.6). The bridge stores and compares these bytes and never
+  reads them.
+- **`report`: identities, not digests.** A producer is the authority for its own
+  output, so its report compares the identity it would report now against the one
+  recorded — a lens version bump may produce identical bytes, and only the
+  producer knows the identity moved (010 §4.1, §2.3).
+- **`accept`: does the checkout already hold what I would produce?** Usually this
+  is "compare the offered digest with the recorded one", because a digest is the
+  one identity both sides can produce. It answers `Bytes` whenever it *cannot*
+  know — a lens has to run to know what it renders, so a bumped identity carries
+  no digest and the bytes travel. That is the honest answer, and it is also why
+  ingesting an edit re-renders that path once: the doc's identity for it moved,
+  and for a canonicalizing lens that pass is where a user's bytes become the
+  doc's rendering.
 
 ## 4. Ingest & render cycles (pseudocode)
 

@@ -100,7 +100,13 @@ Syntax rules:
 
 ### 2. The dpath facet
 
-A dpath is declared by a facet in the claiming document:
+A dpath is declared by a facet in the claiming document. The facet key is the
+dpath tag followed by the dpath itself, so its id begins with the dpath's own
+`/` — `org.example.daybook.dpath//photos/beach.jpg`. A facet-ref URL carries
+that faithfully: the key id is *everything after the tag*, slashes and all
+(`db+facet:///<doc-id>/org.example.daybook.dpath//photos/beach.jpg`).
+Addressing a *field inside* a facet (`…/<facet-id>/<field>`) is not expressible
+yet and is left to a later URL design.
 
 ```jsonc
 {
@@ -112,9 +118,9 @@ A dpath is declared by a facet in the claiming document:
   // Selective claim (only these facets materialize at this path):
   "org.example.daybook.dpath//photos/beach.jpg": {
     "targets": [
-      { "facetRef": "db+facet://self/org.example.daybook.blob/main" },
+      { "facetRef": "db+facet:///self/org.example.daybook.blob/main" },
       {
-        "facetRef": "db+facet://self/org.example.daybook.imagemetadata/main",
+        "facetRef": "db+facet:///self/org.example.daybook.imagemetadata/main",
         "refHeads": []
       }
     ]
@@ -124,7 +130,7 @@ A dpath is declared by a facet in the claiming document:
   // access to (read-only adoption). The dpath facet lives in OUR doc;
   // the target may be any doc in the node.
   "org.example.daybook.dpath//DCIM/other.jpg": {
-    "facetRef": "db+facet://<doc-id>/org.example.daybook.blob/main",
+    "facetRef": "db+facet:///<doc-id>/org.example.daybook.blob/main",
     "refHeads": ["<hash>"]
   }
 }

@@ -1,0 +1,1 @@
+DROP TABLE pauperfuse_tree_conversion;

@@ -1,5 +1,6 @@
 pub mod batching;
 pub mod census;
+pub mod byte_key;
 #[cfg(feature = "downloader")]
 pub mod downloader;
 pub mod lru;
