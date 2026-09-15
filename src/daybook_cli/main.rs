@@ -138,6 +138,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             exit_when_synced,
         } => cmds::sync::run(sync_urls, exit_when_synced).await,
         StaticCommands::Devices { command } => cmds::devices::run(command).await,
+        StaticCommands::Plugs { command } => cmds::plugs::run(command).await,
     }
 }
 
@@ -207,6 +208,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Cat { .. })
         | Ok(StaticCommands::Ed { .. })
         | Ok(StaticCommands::Devices { .. })
+        | Ok(StaticCommands::Plugs { .. })
         | Ok(StaticCommands::Sync { .. })
         | Ok(StaticCommands::Server) => {
             unreachable!("static_cli will prevent these");
@@ -278,6 +280,11 @@ enum StaticCommands {
     Devices {
         #[clap(subcommand)]
         command: cmds::devices::DevicesCommands,
+    },
+    /// Manage plugs (ADR 007)
+    Plugs {
+        #[clap(subcommand)]
+        command: cmds::plugs::PlugsCommands,
     },
     /// Run the btress_auth service host (playground)
     Server,

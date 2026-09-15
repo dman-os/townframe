@@ -28,8 +28,8 @@ struct PreparedProcessor {
     read_keys: HashSet<FacetKey>,
 }
 
-#[derive(Default)]
 struct DocProcessorTriageListener {
+    rt: Arc<Rt>,
     cached_processors: Vec<PreparedProcessor>,
     triage_read_tags: HashSet<String>,
     triage_read_keys: HashSet<FacetKey>,
@@ -64,7 +64,8 @@ impl DocProcessorTriageListener {
 
     #[tracing::instrument(skip(self, rt))]
     async fn refresh_processors(&mut self, rt: &Arc<Rt>) -> Res<()> {
-        let plugs = rt.plugs_repo.list_plugs().await;
+        // ADR 007 §6: processors register for active plugs only.
+        let plugs = rt.plugs_repo.list_active_plugs().await;
         self.cached_processors.clear();
         let mut triage_read_tags = HashSet::new();
         let mut triage_read_keys = HashSet::new();
@@ -129,10 +130,9 @@ impl DocProcessorTriageListener {
     }
 
     #[expect(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, doc, doc_heads, ctx))]
+    #[tracing::instrument(skip(self, doc, doc_heads))]
     async fn triage_doc(
         &mut self,
-        ctx: &SwitchSinkCtx<'_>,
         doc_id: &DocId,
         doc_heads: &ChangeHashSet,
         doc: &Doc,
@@ -144,9 +144,7 @@ impl DocProcessorTriageListener {
         removed_facet_keys: Option<&HashSet<FacetKey>>,
         local_changed_facet_keys: Option<&HashSet<FacetKey>>,
     ) -> Res<()> {
-        let rt = ctx
-            .rt
-            .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+        let rt = &self.rt;
         debug!(
             processor_count = self.cached_processors.len(),
             "triaging doc"
@@ -346,7 +344,7 @@ impl SwitchSink for DocProcessorTriageListener {
     async fn on_event(
         &mut self,
         event: &SwitchEvent,
-        ctx: &SwitchSinkCtx<'_>,
+        _ctx: &SwitchSinkCtx<'_>,
     ) -> Res<SwitchSinkOutcome> {
         match event {
             SwitchEvent::Doc(event) => {
@@ -354,9 +352,7 @@ impl SwitchSink for DocProcessorTriageListener {
                 if branch_path.to_string().starts_with("/tmp/") {
                     return Ok(SwitchSinkOutcome::default());
                 }
-                let rt = ctx
-                    .rt
-                    .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+                let rt = &self.rt;
                 let Some(facet_keys_set) = rt
                     .drawer
                     .get_facet_keys_if_latest(&event.doc_id, &branch_path, &event.new_heads)
@@ -427,7 +423,6 @@ impl SwitchSink for DocProcessorTriageListener {
                         DocChangeKind::Updated
                     };
                     self.triage_doc(
-                        ctx,
                         &event.doc_id,
                         &event.new_heads,
                         &meta_doc,
@@ -459,7 +454,6 @@ impl SwitchSink for DocProcessorTriageListener {
                         .await?;
                     let meta_doc = facet_keys_set_to_meta_doc(&event.doc_id, &facet_keys_set);
                     self.triage_doc(
-                        ctx,
                         &event.doc_id,
                         &event.new_heads,
                         &meta_doc,
@@ -476,10 +470,8 @@ impl SwitchSink for DocProcessorTriageListener {
                 }
             }
             SwitchEvent::Plugs(_) => {
-                let rt = ctx
-                    .rt
-                    .ok_or_else(|| ferr!("triage listener context missing rt"))?;
-                self.refresh_processors(rt).await?;
+                let rt = Arc::clone(&self.rt);
+                self.refresh_processors(&rt).await?;
             }
             SwitchEvent::Config(_) => {}
             SwitchEvent::Dispatch(event) => match &**event {
@@ -487,9 +479,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     self.clear_inflight_dispatch(id);
                 }
                 DispatchEvent::DispatchUpdated { id, .. } => {
-                    let rt = ctx
-                        .rt
-                        .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+                    let rt = &self.rt;
                     let Some(dispatch) = rt.dispatch_repo.get_any(id).await else {
                         self.clear_inflight_dispatch(id);
                         return Ok(SwitchSinkOutcome::default());
@@ -525,7 +515,6 @@ impl SwitchSink for DocProcessorTriageListener {
                     let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
                     let pseudo_branch = BranchPathBuf::from("main");
                     self.triage_doc(
-                        ctx,
                         id,
                         drawer_heads,
                         &meta_doc,
@@ -551,9 +540,7 @@ impl SwitchSink for DocProcessorTriageListener {
                         if branch_path.to_string().starts_with("/tmp/") {
                             continue;
                         }
-                        let rt = ctx
-                            .rt
-                            .ok_or_else(|| ferr!("triage listener context missing rt"))?;
+                        let rt = &self.rt;
                         let Some(facet_keys_set) = rt
                             .drawer
                             .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -579,7 +566,6 @@ impl SwitchSink for DocProcessorTriageListener {
                             .await?;
                         let meta_doc = facet_keys_set_to_meta_doc(id, &facet_keys_set);
                         self.triage_doc(
-                            ctx,
                             id,
                             heads,
                             &meta_doc,
@@ -676,8 +662,18 @@ fn make_processor_done_token(
     utils_rs::hash::blake3_hash_bytes_multibase(fingerprint.as_bytes())
 }
 
-pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {
-    Box::<DocProcessorTriageListener>::default()
+pub fn doc_processor_triage_listener(rt: Arc<Rt>) -> Box<dyn SwitchSink + Send + Sync> {
+    Box::new(DocProcessorTriageListener {
+        rt,
+        cached_processors: Vec::new(),
+        triage_read_tags: HashSet::new(),
+        triage_read_keys: HashSet::new(),
+        facet_reference_specs: Arc::new(HashMap::new()),
+        predicate_requirements: HashSet::new(),
+        predicate_resolved: HashMap::new(),
+        dispatch_to_job: HashMap::new(),
+        job_to_dispatch: HashMap::new(),
+    })
 }
 
 #[cfg(test)]

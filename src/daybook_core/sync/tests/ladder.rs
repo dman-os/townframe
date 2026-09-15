@@ -41,12 +41,10 @@ async fn wait_for_facet_manifest(node: &SyncTestNode, tag: WellKnownFacetTag) ->
     let tag_str = daybook_types::doc::FacetTag::from(tag).to_string();
     tokio::time::timeout(utils_rs::scale_timeout(Duration::from_secs(30)), async {
         loop {
-            if node
-                .plugs_repo
-                .get_facet_manifest_by_tag(&tag_str)
-                .await
-                .is_some()
-            {
+            if matches!(
+                node.plugs_repo.get_facet_manifest_by_tag(&tag_str).await,
+                crate::plugs::FacetManifestLookup::Found(_)
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

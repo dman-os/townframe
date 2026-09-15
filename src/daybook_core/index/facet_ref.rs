@@ -10,7 +10,7 @@ use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 use tokio_util::sync::CancellationToken;
 
-const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/wip/doc-facet-ref-index";
+const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-ref-index";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocFacetRefEdge {

@@ -159,11 +159,14 @@ async fn wait_for_proposal_set(
     test_cx: &daybook_core::test_support::DaybookTestContext,
     timeout_secs: u64,
 ) -> Res<crate::types::PseudoLabelCandidatesFacet> {
+    // ADR 007 §2: the config doc is created at enablement; the plabels plug
+    // is enabled by the test setup, so the mapping is present.
     let config_doc_id = test_cx
         .rt
         .plugs_repo
-        .get_or_init_plug_config_doc_id("@daybook/plabels", &test_cx.drawer_repo)
-        .await?;
+        .get_plug_config_doc_id("@daybook/plabels")
+        .await
+        .ok_or_eyre("@daybook/plabels has no config doc; expected one at enablement")?;
     let proposal_set_key = crate::types::pseudo_label_candidates_key(PROPOSAL_SET_CONFIG_FACET_ID);
 
     let start = std::time::Instant::now();

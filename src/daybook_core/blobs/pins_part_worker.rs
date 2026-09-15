@@ -7,7 +7,7 @@ use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
-pub const DOC_BLOB_PINS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blob-pins-index";
+pub const DOC_BLOB_PINS_LOCAL_STATE_ID: &str = "@daybook/core/doc-blob-pins-index";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobPinsPartEvent {

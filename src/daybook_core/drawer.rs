@@ -76,8 +76,8 @@ struct ValidatedReference {
 }
 
 #[derive(Debug, Clone)]
-struct BranchRefRow {
-    branch_doc_id: DocumentId,
+pub(crate) struct BranchRefRow {
+    pub(crate) branch_doc_id: DocumentId,
     branch_kind: BranchKind,
 }
 
@@ -94,6 +94,10 @@ struct BranchStateRow {
 impl DrawerRepo {
     pub fn drawer_doc_id(&self) -> &DocumentId {
         &self.drawer_doc_id
+    }
+
+    pub fn meta_store_sql(&self) -> &SqlCtx {
+        &self.meta_store_sql
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -154,10 +158,17 @@ impl DrawerRepo {
             drawer_doc_handle: drawer_am_handle,
             meta_store_sql: meta_db_pool,
             #[cfg(not(test))]
-            plugs_repo: Some(plugs_repo),
+            plugs_repo: Some(Arc::clone(&plugs_repo)),
             #[cfg(test)]
-            plugs_repo,
+            plugs_repo: plugs_repo.clone(),
         });
+        // ADR 007 §2: the plugs repo is loaded before the drawer (the drawer
+        // needs it for facet validation); attach the drawer back so the plugs
+        // repo can read manifest docs and write the plugg config facet through
+        // it.
+        if let Some(plugs_repo) = &repo.plugs_repo {
+            plugs_repo.attach_drawer(Arc::clone(&repo)).await?;
+        }
         repo.ensure_local_branch_schema().await?;
         repo.migrate_content_doc_authority().await?;
         repo.ensure_replicated_branch_partitions().await?;
@@ -287,7 +298,7 @@ impl DrawerRepo {
         Ok(())
     }
 
-    fn content_actor_id(
+    pub(crate) fn content_actor_id(
         &self,
         user_path: Option<&daybook_types::doc::UserPath>,
         branch_doc_id: DocumentId,
@@ -298,8 +309,18 @@ impl DrawerRepo {
             .join(branch_doc_id.to_string());
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
+    /// The content actor a write to the given doc/branch (user_path None)
+    /// would use — the author of the store's own writes. None until the
+    /// doc's branch is registered.
+    pub(crate) async fn resolve_content_actor(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+    ) -> Option<ActorId> {
+        let branch_ref = self.get_branch_ref(doc_id, branch_path).await.ok()??;
+        Some(self.content_actor_id(None, branch_ref.branch_doc_id))
+    }
 
-    // TEMP-INSTRUMENTATION: pub(crate) for the stress diag resolution probe.
     pub(crate) async fn get_branch_heads_by_doc_id(
         &self,
         branch_doc_id: DocumentId,
@@ -492,12 +513,24 @@ impl DrawerRepo {
     async fn facet_manifest_for_tag(
         &self,
         facet_tag: &str,
-    ) -> Option<daybook_types::manifest::FacetManifest> {
+    ) -> Res<Option<daybook_types::manifest::FacetManifest>> {
         if let Some(plugs_repo) = &self.plugs_repo {
-            return plugs_repo.get_facet_manifest_by_tag(facet_tag).await;
+            return match plugs_repo.get_facet_manifest_by_tag(facet_tag).await {
+                crate::plugs::FacetManifestLookup::Found(facet_manifest) => {
+                    Ok(Some(facet_manifest))
+                }
+                crate::plugs::FacetManifestLookup::PlugDisabled { plug_id } => {
+                    eyre::bail!(
+                        "facet tag '{}' is owned by disabled plug '{}'",
+                        facet_tag,
+                        plug_id
+                    );
+                }
+                crate::plugs::FacetManifestLookup::UnknownTag => Ok(None),
+            };
         }
-
-        // FIXME: I hate this
+        // Drawer tests load without a plugs repo; fall back to the system plugs'
+        // facet manifests (ADR 007: only the enabled set gates production paths).
         if cfg!(test) {
             static SYSTEM_FACET_MANIFESTS: std::sync::OnceLock<
                 HashMap<String, daybook_types::manifest::FacetManifest>,
@@ -505,16 +538,15 @@ impl DrawerRepo {
             let system_facet_manifests = SYSTEM_FACET_MANIFESTS.get_or_init(|| {
                 let mut out = HashMap::new();
                 for plug_manifest in crate::plugs::system_plugs() {
-                    for facet_manifest in plug_manifest.facets {
-                        out.insert(facet_manifest.key_tag.to_string(), facet_manifest);
+                    for facet_manifest in &plug_manifest.facets {
+                        out.insert(facet_manifest.key_tag.to_string(), facet_manifest.clone());
                     }
                 }
                 out
             });
-            system_facet_manifests.get(facet_tag).cloned()
-        } else {
-            None
+            return Ok(system_facet_manifests.get(facet_tag).cloned());
         }
+        Ok(None)
     }
 
     pub async fn validate_facets(
@@ -524,7 +556,7 @@ impl DrawerRepo {
     ) -> Res<()> {
         for (facet_key, facet_value) in incoming_facets {
             let facet_tag = facet_key.tag.to_string();
-            let Some(facet_manifest) = self.facet_manifest_for_tag(&facet_tag).await else {
+            let Some(facet_manifest) = self.facet_manifest_for_tag(&facet_tag).await? else {
                 eyre::bail!(
                     "facet tag '{}' has no registered manifest in plugs repo",
                     facet_tag

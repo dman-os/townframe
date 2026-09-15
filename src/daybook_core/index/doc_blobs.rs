@@ -9,7 +9,7 @@ use daybook_types::doc::{
 use sqlx::QueryBuilder;
 use tokio_util::sync::CancellationToken;
 
-const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blobs-index";
+const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/core/doc-blobs-index";
 
 #[derive(Debug, Clone)]
 pub struct DocBlobMembership {

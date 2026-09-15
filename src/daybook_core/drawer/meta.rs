@@ -226,7 +226,7 @@ impl DrawerRepo {
         Ok(Some((branch_ref.clone(), branch_kind)))
     }
 
-    pub(super) async fn get_branch_ref(
+    pub(crate) async fn get_branch_ref(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,

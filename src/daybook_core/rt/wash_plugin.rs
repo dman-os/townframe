@@ -156,6 +156,24 @@ mod binds_guest {
                         .collect(),
                 })
             }
+            root_doc::WellKnownFacet::PlugManifest(val) => wit_doc::WellKnownFacet::PlugManifest(
+                serde_json::to_string(&val).expect(ERROR_JSON),
+            ),
+            root_doc::WellKnownFacet::PlugsConfig(val) => {
+                wit_doc::WellKnownFacet::PlugsConfig(wit_doc::PlugsConfig {
+                    enabled: val
+                        .enabled
+                        .into_iter()
+                        .map(|(key, url)| (key, url.to_string()))
+                        .collect(),
+                    known_plugs: val
+                        .known_plugs
+                        .into_iter()
+                        .map(|(key, track)| (key, wit_doc::KnownPlug::from(&track)))
+                        .collect(),
+                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
+                })
+            }
         }
     }
 
@@ -311,6 +329,24 @@ mod binds_guest {
             wit_doc::WellKnownFacet::BlobPin(blob_pin) => {
                 root_doc::WellKnownFacet::BlobPin(root_doc::BlobPin {
                     length_octets: blob_pin.length_octets,
+                })
+            }
+            wit_doc::WellKnownFacet::PlugManifest(json) => {
+                root_doc::WellKnownFacet::PlugManifest(serde_json::from_str(&json)?)
+            }
+            wit_doc::WellKnownFacet::PlugsConfig(val) => {
+                root_doc::WellKnownFacet::PlugsConfig(root_doc::PlugsConfig {
+                    enabled: val
+                        .enabled
+                        .into_iter()
+                        .map(|(key, url)| Ok((key, url.parse()?)))
+                        .collect::<Result<_, eyre::Report>>()?,
+                    known_plugs: val
+                        .known_plugs
+                        .into_iter()
+                        .map(|(key, track)| Ok((key, root_doc::KnownPlug::try_from(track)?)))
+                        .collect::<Result<_, eyre::Report>>()?,
+                    plug_config_doc_ids: val.plug_config_doc_ids.into_iter().collect(),
                 })
             }
         })
@@ -814,12 +850,12 @@ impl facet_routine::Host for SharedWashCtx {
                     } else {
                         let config_doc_id = dayook_plugin
                         .plugs_repo
-                        .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
+                        .get_plug_config_doc_id(&owner_plug_id)
                         .await
-                        .map_err(|err| {
+                        .ok_or_else(|| {
                             wasmtime_err(format!(
-                            "error getting/initializing config doc for plug {owner_plug_id}: {err}"
-                        ))
+                                "plug {owner_plug_id} has no config doc; expected one at enablement"
+                            ))
                         })?;
                         let config_heads = dayook_plugin
                             .drawer_repo

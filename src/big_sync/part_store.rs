@@ -1601,10 +1601,11 @@ pub mod host_contract {
 
             fn cursor(&mut self, cursor: CursorIndex) {
                 if let Some(last) = self.last_cursor
-                    && cursor < last {
-                        self.violations
-                            .push(format!("cursor regressed from {last} to {cursor}"));
-                    }
+                    && cursor < last
+                {
+                    self.violations
+                        .push(format!("cursor regressed from {last} to {cursor}"));
+                }
                 self.last_cursor = Some(self.last_cursor.map_or(cursor, |last| last.max(cursor)));
             }
 

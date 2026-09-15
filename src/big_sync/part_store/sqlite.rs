@@ -1592,10 +1592,11 @@ impl HostPartStore for SqlitePartStore {
                             });
                             if let Some(changed) = entry {
                                 if let Some(part) = part_match
-                                    && !changed.part_ids.contains(&part) {
-                                        changed.part_ids.push(part);
-                                        changed.part_ids.sort_unstable();
-                                    }
+                                    && !changed.part_ids.contains(&part)
+                                {
+                                    changed.part_ids.push(part);
+                                    changed.part_ids.sort_unstable();
+                                }
                             } else {
                                 output.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                                     cursor: candidate.txid,
