@@ -10,12 +10,34 @@ workspace = true
 name = "pauperfuse"
 path = "lib.rs"
 
+[features]
+# The SQLite store, schema in `sql/`. Off by default: the core, the memory store and the
+# filesystem backend need no database.
+sqlite = ["dep:sqlx", "dep:sqlx_utils_rs"]
+
 [dependencies]
-utils_rs = { workspace = true, default-features = false }
+#
+# internal
+utils_rs = { workspace = true, default-features = false, features = ["hash"] }
+
+#
+# async
 async-trait.workspace = true
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+
+#
+# encoding
 blake3.workspace = true
-sqlx_utils_rs.workspace = true
+
+#
+# error
+thiserror.workspace = true
+displaydoc.workspace = true
+
+#
+# db
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
+sqlx_utils_rs = { workspace = true, default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
