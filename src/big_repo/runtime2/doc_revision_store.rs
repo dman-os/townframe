@@ -120,9 +120,10 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
                             part_id,
                             cursor: after,
                         },
-                        AutomergeFrontierTarget::Object { obj_id } => {
-                            SubscriptionTarget::Object { obj_id }
-                        }
+                        AutomergeFrontierTarget::Object { obj_id } => SubscriptionTarget::Object {
+                            obj_id,
+                            cursor: after,
+                        },
                     })
                     .collect(),
             };

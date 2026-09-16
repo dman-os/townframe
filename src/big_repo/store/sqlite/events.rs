@@ -240,7 +240,13 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(head))
     }
 
-    #[cfg(test)]
+    /// The sequence through which the admission log has been pruned, i.e. the
+    /// floor below which this scope's tombstoned wake-ups are gone.
+    ///
+    /// A consumer whose durable cursor sits below this floor can never be woken
+    /// for the gap (ADR 013 §9): it must rebuild its sinks from live Keyhive
+    /// state and resume here instead of replaying a history it cannot be told
+    /// about. Set by `prune_admitted_events`, which runs during maintenance.
     pub(crate) async fn archived_through(&self) -> Res<u64> {
         let seq: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"seq!: i64\" FROM big_repo_keyhive_archived_through WHERE scope_id = ?",
             self.scope().id()

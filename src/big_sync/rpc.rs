@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::part_store::HostPartStore;
+use crate::part_store::{HostPartStore, ReadTarget};
 
 use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
@@ -20,6 +20,45 @@ pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
 /// events answers at once, and the caller re-issues either way. A protocol knob,
 /// not a measured threshold.
 const MAX_PAGE_HOLD: Duration = Duration::from_secs(15);
+
+/// The largest page a caller may ask for.
+///
+/// `limit` is untrusted wire input, so it is capped where it arrives: without a
+/// cap a peer can ask for `u32::MAX` and make the responder buffer a whole part
+/// in one reply, which defeats paging-as-flow-control. The cap is the asking
+/// side's own page size (1024 events, the measured value behind
+/// `ReplayPageTask::LIMIT`), so a well-behaved caller is never refused; raising
+/// that page size means raising this one. A request at or above the cap gets the
+/// cap rather than an error. A protocol knob, not a measured threshold.
+const MAX_PAGE_LIMIT: u32 = 1024;
+
+/// Apply [`MAX_PAGE_LIMIT`] to an untrusted page request.
+fn page_limit(requested: u32) -> u32 {
+    requested.min(MAX_PAGE_LIMIT)
+}
+
+/// The largest page a caller may ask a bucket endpoint for.
+///
+/// `limit_hint` is untrusted wire input, exactly as `ReplayPageRequest::limit` is,
+/// so it is capped where it arrives: without a cap a peer can ask for `u32::MAX`
+/// and make the responder buffer a whole part's bucket summaries, or a whole
+/// bucket's entries, in one reply. The cap is the asking side's own leaf page size
+/// (`BucketMachine::LEAF_BUCKET_LIMIT_HINT` = 1024, the same number as
+/// [`MAX_PAGE_LIMIT`]); that side asks for 128 changed buckets
+/// (`BucketMachine::GET_BUCKET_LIMIT_HINT` = 8 × `BuckId::ARITY`), so a well-behaved
+/// caller is never refused. A request at or above the cap gets the cap rather than
+/// an error.
+///
+/// The cap bounds the hint only, never the answer: both stores add `BuckId::ARITY`
+/// of headroom on top of the hint for the last bucket's changed siblings, and that
+/// arithmetic runs after this cap, so the sibling-group guarantee survives a capped
+/// request. A protocol knob, not a measured threshold.
+const MAX_BUCKET_LIMIT: u32 = 1024;
+
+/// Apply [`MAX_BUCKET_LIMIT`] to an untrusted bucket page hint.
+fn bucket_limit(requested: u32) -> u32 {
+    requested.min(MAX_BUCKET_LIMIT)
+}
 
 /// How many rpc requests may be handled at once.
 ///
@@ -401,33 +440,70 @@ impl BigSyncRpcWorker {
                     .ok();
                     return;
                 };
+                // An unauthenticated caller is refused on every arm: this surface has
+                // no local caller to serve, and a local in-process caller reaches the
+                // store directly. Refused as unknown rather than empty, so "not for
+                // you" cannot be told apart from "no such part".
+                let Some(asker) = authenticated_peer else {
+                    warn!(scope_key = %inner.scope_key, "rejecting unauthenticated peer_summary request");
+                    tx.send(Err(ListPartsError::UnkownParts {
+                        unkown_parts: inner.inner.parts.into_iter().collect(),
+                    }))
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                };
                 let out = {
                     // The count is a fact about the asker, so the responder counts it
-                    // against the cursor the asker advertised. `authenticated_peer` is
-                    // the asker's principal; `None` there is the local in-process
-                    // caller, which access rows do not gate.
+                    // against the cursor the asker advertised.
                     let PeerSummaryRequest {
                         parts,
                         asker_part_cursors,
                     } = inner.inner;
-                    match store.summarize_parts(parts).await.unwrap() {
-                        Ok(parts) => {
-                            let mut summaries = HashMap::new();
-                            for (part_id, summary) in parts {
-                                let since = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-                                let dirty = store
-                                    .part_dirty_count(
-                                        part_id.clone(),
-                                        authenticated_peer.clone(),
-                                        since,
-                                    )
-                                    .await
-                                    .unwrap();
-                                summaries.insert(part_id, summary.into_strat_summaries(dirty));
-                            }
-                            Ok(PeerSummaryResult { parts: summaries })
+                    // The access half, asked for every named part before anything is
+                    // summarized: a part the asker may not read has to look exactly like
+                    // one this scope does not know, so it is folded into the same
+                    // `UnkownParts` answer rather than omitted from it.
+                    let mut unreadable = Vec::new();
+                    let mut readable = HashSet::new();
+                    for part_id in parts {
+                        if store
+                            .read_denied(ReadTarget::Part(part_id.clone()), asker.clone())
+                            .await
+                            .unwrap()
+                        {
+                            unreadable.push(part_id);
+                        } else {
+                            readable.insert(part_id);
                         }
-                        Err(err) => Err(err),
+                    }
+                    if !unreadable.is_empty() {
+                        unreadable.sort_unstable();
+                        Err(ListPartsError::UnkownParts {
+                            unkown_parts: unreadable,
+                        })
+                    } else {
+                        match store.summarize_parts(readable).await.unwrap() {
+                            Ok(parts) => {
+                                let mut summaries = HashMap::new();
+                                for (part_id, summary) in parts {
+                                    let since =
+                                        asker_part_cursors.get(&part_id).copied().unwrap_or(0);
+                                    let dirty = store
+                                        .part_dirty_count(
+                                            part_id.clone(),
+                                            Some(asker.clone()),
+                                            since,
+                                        )
+                                        .await
+                                        .unwrap();
+                                    summaries.insert(part_id, summary.into_strat_summaries(dirty));
+                                }
+                                Ok(PeerSummaryResult { parts: summaries })
+                            }
+                            Err(err) => Err(err),
+                        }
                     }
                 };
                 tx.send(out)
@@ -458,7 +534,7 @@ impl BigSyncRpcWorker {
                 let out = store
                     .replay_page(
                         inner.inner.target,
-                        inner.inner.limit,
+                        page_limit(inner.inner.limit),
                         subscriber,
                         Duration::from_millis(u64::from(inner.inner.hold_ms)).min(MAX_PAGE_HOLD),
                     )
@@ -481,7 +557,24 @@ impl BigSyncRpcWorker {
                     .ok();
                     return;
                 };
-                let out = store.get_changed_buckets(inner.inner).await.unwrap();
+                // As in `ReplayPage`: an unauthenticated caller is unauthorized, and
+                // says so in the shape a refused part has.
+                let Some(subscriber) = authenticated_peer else {
+                    warn!(scope_key = %inner.scope_key, "rejecting unauthenticated get_changed_buckets request");
+                    tx.send(Err(ListPartsError::UnkownParts {
+                        unkown_parts: vec![inner.inner.part_id.clone()],
+                    }))
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                };
+                let mut request = inner.inner;
+                request.limit_hint = bucket_limit(request.limit_hint);
+                let out = store
+                    .get_changed_buckets(request, subscriber)
+                    .await
+                    .unwrap();
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -497,7 +590,17 @@ impl BigSyncRpcWorker {
                         .ok();
                     return;
                 };
-                let out = store.leaf_buckets(inner.inner).await.unwrap();
+                let Some(subscriber) = authenticated_peer else {
+                    warn!(scope_key = %inner.scope_key, "rejecting unauthenticated leaf_buckets request");
+                    tx.send(Err(LeafBucketsError::UnkownPart))
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
+                    return;
+                };
+                let mut request = inner.inner;
+                request.limit_hint = bucket_limit(request.limit_hint);
+                let out = store.leaf_buckets(request, subscriber).await.unwrap();
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -513,9 +616,64 @@ mod tests {
 
     use crate::part_store::HostPartStore;
     use crate::part_store::memory::MemoryPartStore;
+    use big_sync_core::rpc::{LeafBucketRequest, PartEvent, ReplayPageRequest, SubscriptionTarget};
     use big_sync_core::{BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey};
     use iroh::protocol::Router;
+    use keyhive_core::access::Access;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn an_untrusted_page_limit_is_capped() {
+        // A zero limit is a zero-event page and must pass through the cap
+        // untouched: the cap is a ceiling, not a floor.
+        assert_eq!(page_limit(0), 0);
+        assert_eq!(page_limit(1), 1);
+        assert_eq!(page_limit(MAX_PAGE_LIMIT), MAX_PAGE_LIMIT);
+        assert_eq!(
+            page_limit(MAX_PAGE_LIMIT.saturating_add(1)),
+            MAX_PAGE_LIMIT,
+            "one above the cap asks for the cap; it is not an error"
+        );
+        assert_eq!(page_limit(u32::MAX), MAX_PAGE_LIMIT);
+        // The cap may only lower a request, never raise one: a `max` here would
+        // turn a caller's own page size into an amplification.
+        for requested in [0, 1, 2, MAX_PAGE_LIMIT - 1, MAX_PAGE_LIMIT, u32::MAX] {
+            assert!(
+                page_limit(requested) <= requested,
+                "capping {requested} must not raise it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_bucket_limit_is_capped() {
+        // As for a page: the cap is a ceiling, not a floor, so a hint of zero stays
+        // "no preference" and is decided by the store.
+        assert_eq!(bucket_limit(0), 0);
+        assert_eq!(bucket_limit(1), 1);
+        assert_eq!(bucket_limit(MAX_BUCKET_LIMIT), MAX_BUCKET_LIMIT);
+        assert_eq!(
+            bucket_limit(MAX_BUCKET_LIMIT.saturating_add(1)),
+            MAX_BUCKET_LIMIT,
+            "one above the cap asks for the cap; it is not an error"
+        );
+        assert_eq!(bucket_limit(u32::MAX), MAX_BUCKET_LIMIT);
+        for requested in [0, 1, 2, MAX_BUCKET_LIMIT - 1, MAX_BUCKET_LIMIT, u32::MAX] {
+            assert!(
+                bucket_limit(requested) <= requested,
+                "capping {requested} must not raise it"
+            );
+        }
+        // A well-behaved caller asks for less than the cap on both endpoints —
+        // `GET_BUCKET_LIMIT_HINT` (8 buckets per `BuckId::ARITY` siblings) and
+        // `LEAF_BUCKET_LIMIT_HINT` — so no correct caller is ever refused.
+        let asking_side_changed_hint = 8 * u32::from(BuckId::ARITY);
+        assert_eq!(
+            bucket_limit(asking_side_changed_hint),
+            asking_side_changed_hint
+        );
+        assert_eq!(bucket_limit(1024), 1024);
+    }
 
     fn test_part() -> PartKey {
         PartKey(ByteKey::new([
@@ -554,90 +712,227 @@ mod tests {
         Ok(())
     }
 
+    /// A connected client endpoint for this test, bound locally.
+    async fn test_endpoint() -> Res<iroh::Endpoint> {
+        Ok(iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await?)
+    }
+
+    /// Which client one caller of the peer-facing read arms uses.
+    ///
+    /// A connected peer is authenticated by its connection. The unauthenticated caller
+    /// is `spawn_big_sync_rpc`'s local channel, which stamps no peer key at all.
+    #[derive(Clone, Copy)]
+    enum Caller<'a> {
+        Peer(&'a IrohBigSyncRpcClient),
+        Unauthenticated(&'a irpc::Client<BigSyncIrpc>),
+    }
+
+    /// What one caller is entitled to on every arm.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Entitlement {
+        /// The asker holds Read on the part.
+        Permitted,
+        /// The asker holds nothing, or the surface did not authenticate it at all.
+        Refused,
+    }
+
+    async fn summary_answer(
+        caller: Caller<'_>,
+        req: ScopedRequest<PeerSummaryRequest>,
+    ) -> Res<Result<PeerSummaryResult, ListPartsError>> {
+        Ok(match caller {
+            Caller::Peer(client) => client.peer_summary(req).await??,
+            Caller::Unauthenticated(client) => client.rpc(req).await?,
+        })
+    }
+
+    async fn changed_buckets_answer(
+        caller: Caller<'_>,
+        req: ScopedRequest<GetChangedBucketsRequest>,
+    ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
+        Ok(match caller {
+            Caller::Peer(client) => client.get_changed_buckets(req).await??,
+            Caller::Unauthenticated(client) => client.rpc(req).await?,
+        })
+    }
+
+    async fn leaf_buckets_answer(
+        caller: Caller<'_>,
+        req: ScopedRequest<LeafBucketsRequest>,
+    ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+        Ok(match caller {
+            Caller::Peer(client) => client.leaf_buckets(req).await??,
+            Caller::Unauthenticated(client) => client.rpc(req).await?,
+        })
+    }
+
+    async fn replay_page_answer(
+        caller: Caller<'_>,
+        req: ScopedRequest<ReplayPageRequest>,
+    ) -> Res<ReplayPageOutcome> {
+        Ok(match caller {
+            Caller::Peer(client) => client.replay_page(req).await??,
+            Caller::Unauthenticated(client) => client.rpc(req).await?,
+        })
+    }
+
+    /// A permitted asker gets the part's own summary; a refused one gets the part named
+    /// as unknown, which is the same answer an unknown part gets.
+    async fn assert_peer_summary_arm(
+        caller: Caller<'_>,
+        caller_label: &str,
+        entitlement: Entitlement,
+        part_id: &PartKey,
+        req: ScopedRequest<PeerSummaryRequest>,
+        expected: &PeerSummaryResult,
+    ) -> Res<()> {
+        let answer = summary_answer(caller, req).await?;
+        match (entitlement, answer) {
+            (Entitlement::Permitted, Ok(answer)) => assert_eq!(
+                &answer, expected,
+                "{caller_label}: a permitted asker gets the store's own summary"
+            ),
+            (Entitlement::Refused, Err(ListPartsError::UnkownParts { unkown_parts })) => {
+                assert_eq!(
+                    unkown_parts,
+                    vec![part_id.clone()],
+                    "{caller_label}: the refusal names the part it will not answer for"
+                );
+            }
+            (entitlement, answer) => {
+                panic!("{caller_label}: {entitlement:?} peer_summary answered {answer:?}")
+            }
+        }
+        Ok(())
+    }
+
+    /// A permitted asker gets the store's own bucket page; a refused one gets the part
+    /// named as unknown rather than an empty page.
+    async fn assert_changed_buckets_arm(
+        caller: Caller<'_>,
+        caller_label: &str,
+        entitlement: Entitlement,
+        part_id: &PartKey,
+        req: ScopedRequest<GetChangedBucketsRequest>,
+        expected: &[BucketSummary],
+    ) -> Res<()> {
+        let answer = changed_buckets_answer(caller, req).await?;
+        match (entitlement, answer) {
+            (Entitlement::Permitted, Ok(answer)) => {
+                assert_eq!(
+                    answer, expected,
+                    "{caller_label}: a permitted asker gets the store's own bucket walk"
+                );
+                assert!(
+                    !answer.is_empty(),
+                    "{caller_label}: the permitted walk is not an empty page"
+                );
+            }
+            (Entitlement::Refused, Err(ListPartsError::UnkownParts { unkown_parts })) => {
+                assert_eq!(
+                    unkown_parts,
+                    vec![part_id.clone()],
+                    "{caller_label}: the refusal names the part it will not answer for"
+                );
+            }
+            (entitlement, answer) => {
+                panic!("{caller_label}: {entitlement:?} get_changed_buckets answered {answer:?}")
+            }
+        }
+        Ok(())
+    }
+
+    /// As above for the leaf walk, whose refusal is its own variant.
+    async fn assert_leaf_buckets_arm(
+        caller: Caller<'_>,
+        caller_label: &str,
+        entitlement: Entitlement,
+        req: ScopedRequest<LeafBucketsRequest>,
+        expected: &LeafBucketResult,
+    ) -> Res<()> {
+        let answer = leaf_buckets_answer(caller, req).await?;
+        match (entitlement, answer) {
+            (Entitlement::Permitted, Ok(answer)) => {
+                assert_eq!(
+                    answer, *expected,
+                    "{caller_label}: a permitted asker gets the store's own leaf page"
+                );
+                let page = answer
+                    .bucks
+                    .get(&BuckId::ROOT)
+                    .expect("the requested bucket has a page");
+                assert!(
+                    !page.entries.is_empty(),
+                    "{caller_label}: the permitted page carries the bucket's entries"
+                );
+            }
+            (Entitlement::Refused, Err(LeafBucketsError::UnkownPart)) => {}
+            (entitlement, answer) => {
+                panic!("{caller_label}: {entitlement:?} leaf_buckets answered {answer:?}")
+            }
+        }
+        Ok(())
+    }
+
+    /// The page arm refuses with `Unauthorized`, which is not an empty page: an empty
+    /// page is the caught-up answer, and a caller must not have to infer a denial from
+    /// it.
+    ///
+    /// A permitted page is re-issued while it comes back empty, because the
+    /// subscription a page drains is produced by a spawned task: a first page can be
+    /// answered before that task has delivered anything, and re-issuing from the
+    /// returned cursor is how a caller is meant to resume.
+    async fn assert_replay_page_arm(
+        caller: Caller<'_>,
+        caller_label: &str,
+        entitlement: Entitlement,
+        req: ScopedRequest<ReplayPageRequest>,
+        expected_events: &[PartEvent],
+    ) -> Res<()> {
+        const ATTEMPTS: u8 = 8;
+        let mut outcome = replay_page_answer(caller, req.clone()).await?;
+        match entitlement {
+            Entitlement::Refused => match outcome {
+                ReplayPageOutcome::Unauthorized => Ok(()),
+                other => panic!("{caller_label}: a refused page answered {other:?}"),
+            },
+            Entitlement::Permitted => {
+                for _ in 0..ATTEMPTS {
+                    match outcome {
+                        ReplayPageOutcome::Events(page) if page.events == expected_events => {
+                            return Ok(());
+                        }
+                        ReplayPageOutcome::Events(_) => {
+                            outcome = replay_page_answer(caller, req.clone()).await?;
+                        }
+                        other => panic!("{caller_label}: a permitted page answered {other:?}"),
+                    }
+                }
+                panic!("{caller_label}: no page carried the granted events");
+            }
+        }
+    }
+
+    /// The peer-facing read arms are authorized in one place, and this table is what
+    /// keeps them unified: every arm answers a permitted peer with its own read, and
+    /// answers an unpermitted peer and an unauthenticated caller with its refusal.
+    /// A refusal is never an empty or partial answer, because an omission still
+    /// confirms that the part exists.
     #[tokio::test(flavor = "multi_thread")]
-    async fn real_iroh_rpc_roundtrip_matches_store() -> Res<()> {
+    async fn every_read_arm_refuses_what_the_asker_may_not_read() -> Res<()> {
         let part_id = test_part();
         let store = Arc::new(MemoryPartStore::new());
         seed_test_store(&store, part_id.clone()).await?;
 
-        // The same expectation is asserted for the in-process call and the network
-        // call. They agree because this store holds no access rows, so the access half
-        // is 0 for the local principal and for the connecting peer alike, and the
-        // member half does not depend on who is asking.
-        let expected_peer_summary = {
-            let mut summaries = HashMap::new();
-            for (part_id, summary) in store
-                .summarize_parts([part_id.clone()].into_iter().collect())
-                .await?
-                .unwrap()
-            {
-                let dirty =
-                    HostPartStore::part_dirty_count(store.as_ref(), part_id.clone(), None, 0)
-                        .await?;
-                summaries.insert(part_id, summary.into_strat_summaries(dirty));
-            }
-            PeerSummaryResult { parts: summaries }
-        };
-        let expected_changed_buckets = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part_id.clone(),
-                offset: BuckId::ROOT,
-                to_level: BuckId::MAX_LEVEL,
-                since: 0,
-                limit_hint: 16,
-            })
-            .await?
-            .unwrap();
-        let expected_leaf_buckets = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part_id.clone(),
-                since: 0,
-                buckets: vec![big_sync_core::rpc::LeafBucketRequest {
-                    buck_id: BuckId::ROOT,
-                    after: None,
-                }],
-                seed: FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd),
-                limit_hint: 16,
-            })
-            .await?
-            .unwrap();
-        // The in-process call and the network call must answer the same page.
-        // They agree because this store holds no access rows, so the member half
-        // is the same for both and neither is denied.
-        let page_target = big_sync_core::rpc::SubscriptionTarget::Part {
-            part_id: part_id.clone(),
-            cursor: 0,
-        };
-        let expected_page = store
-            .replay_page(
-                page_target.clone(),
-                16,
-                PeerKey::new([0u8; 32]),
-                Duration::from_millis(250),
-            )
-            .await?;
-
-        let rpc_store = Arc::<MemoryPartStore>::clone(&store);
-        let rpc_store: Arc<dyn HostPartStore> = rpc_store;
+        let rpc_store: Arc<dyn HostPartStore> = Arc::<MemoryPartStore>::clone(&store) as _;
         let (rpc_handle, rpc_stop) =
             spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), rpc_store)])).await?;
-        let local_peer_summary: Result<PeerSummaryResult, ListPartsError> = rpc_handle
-            .client
-            .rpc(ScopedRequest {
-                scope_key: Arc::from("test-scope"),
-                inner: PeerSummaryRequest {
-                    parts: [part_id.clone()].into_iter().collect(),
-                    asker_part_cursors: HashMap::from([(part_id.clone(), 0)]),
-                },
-            })
-            .await?;
-        assert_eq!(local_peer_summary, Ok(expected_peer_summary.clone()));
 
-        let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-            .relay_mode(iroh::RelayMode::Disabled)
-            .bind()
-            .await?;
+        let server_endpoint = test_endpoint().await?;
         let router = Router::builder(server_endpoint.clone())
             .accept(BIG_SYNC_RPC_ALPN, rpc_handle.protocol_handler())
             .spawn();
@@ -646,68 +941,169 @@ mod tests {
             !server_addr.addrs.is_empty(),
             "server endpoint address should expose at least one transport address"
         );
-        let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-            .relay_mode(iroh::RelayMode::Disabled)
-            .bind()
+
+        // Two connected peers: the granted one is the permitted asker, the other is
+        // authenticated and holds nothing. The responder learns a peer's key from its
+        // connection, so the granted key is read off that peer's own endpoint.
+        let granted_endpoint = test_endpoint().await?;
+        let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
+        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr.clone());
+        let refused_endpoint = test_endpoint().await?;
+        let refused_peer = PeerKey::new(*refused_endpoint.id().as_bytes());
+        let refused = IrohBigSyncRpcClient::new(refused_endpoint, server_addr.clone());
+        assert_ne!(granted_peer, refused_peer, "two endpoints, two identities");
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(granted_peer.clone(), Access::Read)]),
+            )
             .await?;
-        let client = IrohBigSyncRpcClient::new(client_endpoint, server_addr);
 
-        let peer_summary = client
-            .peer_summary(ScopedRequest {
-                scope_key: Arc::from("test-scope"),
-                inner: PeerSummaryRequest {
-                    parts: [part_id.clone()].into_iter().collect(),
-                    asker_part_cursors: HashMap::from([(part_id.clone(), 0)]),
-                },
-            })
+        let summary_request = || ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: PeerSummaryRequest {
+                parts: [part_id.clone()].into_iter().collect(),
+                asker_part_cursors: HashMap::from([(part_id.clone(), 0)]),
+            },
+        };
+        let changed_request = || ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: GetChangedBucketsRequest {
+                part_id: part_id.clone(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::MAX_LEVEL,
+                since: 0,
+                limit_hint: 16,
+            },
+        };
+        let leaf_request = || ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: LeafBucketsRequest {
+                part_id: part_id.clone(),
+                since: 0,
+                buckets: vec![LeafBucketRequest {
+                    buck_id: BuckId::ROOT,
+                    after: None,
+                }],
+                seed: FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd),
+                limit_hint: 16,
+            },
+        };
+        let page_target = SubscriptionTarget::Part {
+            part_id: part_id.clone(),
+            cursor: 0,
+        };
+        let page_request = || ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: ReplayPageRequest {
+                target: page_target.clone(),
+                limit: 16,
+                hold_ms: 50,
+            },
+        };
+
+        // What the permitted asker is entitled to, taken from the store itself: what
+        // the arms are checked against is the store's own answer, not a second
+        // implementation of it in the test.
+        let expected_summary = {
+            let mut summaries = HashMap::new();
+            for (part_id, summary) in store
+                .summarize_parts([part_id.clone()].into_iter().collect())
+                .await?
+                .expect("a granted part summarizes")
+            {
+                let dirty = store
+                    .part_dirty_count(part_id.clone(), Some(granted_peer.clone()), 0)
+                    .await?;
+                summaries.insert(part_id, summary.into_strat_summaries(dirty));
+            }
+            PeerSummaryResult { parts: summaries }
+        };
+        let expected_changed = store
+            .get_changed_buckets(changed_request().inner, granted_peer.clone())
+            .await?
+            .expect("a granted part answers a bucket walk");
+        assert!(
+            !expected_changed.is_empty(),
+            "the seeded part has changed buckets to compare against"
+        );
+        let expected_leaf = store
+            .leaf_buckets(leaf_request().inner, granted_peer.clone())
+            .await?
+            .expect("a granted part answers a leaf walk");
+        let expected_page = store
+            .replay_page(
+                page_target.clone(),
+                16,
+                granted_peer.clone(),
+                Duration::from_millis(250),
+            )
             .await?;
-        assert_eq!(peer_summary, Ok(Ok(expected_peer_summary)));
+        let ReplayPageOutcome::Events(expected_page) = expected_page else {
+            panic!("a granted part answers a page, got {expected_page:?}");
+        };
+        assert!(
+            !expected_page.events.is_empty(),
+            "the granted page carries the seeded events"
+        );
 
-        let changed_buckets = client
-            .get_changed_buckets(ScopedRequest {
-                scope_key: Arc::from("test-scope"),
-                inner: GetChangedBucketsRequest {
-                    part_id: part_id.clone(),
-                    offset: BuckId::ROOT,
-                    to_level: BuckId::MAX_LEVEL,
-                    since: 0,
-                    limit_hint: 16,
-                },
-            })
+        // The table: one row per caller, and every arm is asserted for that caller.
+        // A new arm belongs in every row, which is what makes "unified" a property of
+        // this test rather than of a review.
+        let callers = [
+            (
+                "granted peer",
+                Caller::Peer(&granted),
+                Entitlement::Permitted,
+            ),
+            (
+                "authenticated peer without access",
+                Caller::Peer(&refused),
+                Entitlement::Refused,
+            ),
+            (
+                "unauthenticated caller",
+                Caller::Unauthenticated(&rpc_handle.client),
+                Entitlement::Refused,
+            ),
+        ];
+        for (caller_label, caller, entitlement) in callers {
+            assert_peer_summary_arm(
+                caller,
+                caller_label,
+                entitlement,
+                &part_id,
+                summary_request(),
+                &expected_summary,
+            )
             .await?;
-        assert_eq!(changed_buckets, Ok(Ok(expected_changed_buckets)));
-
-        let leaf_buckets = client
-            .leaf_buckets(ScopedRequest {
-                scope_key: Arc::from("test-scope"),
-                inner: LeafBucketsRequest {
-                    part_id,
-                    since: 0,
-                    buckets: vec![big_sync_core::rpc::LeafBucketRequest {
-                        buck_id: BuckId::ROOT,
-                        after: None,
-                    }],
-                    seed: FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd),
-                    limit_hint: 16,
-                },
-            })
+            assert_changed_buckets_arm(
+                caller,
+                caller_label,
+                entitlement,
+                &part_id,
+                changed_request(),
+                &expected_changed,
+            )
             .await?;
-        assert_eq!(leaf_buckets, Ok(Ok(expected_leaf_buckets)));
+            assert_leaf_buckets_arm(
+                caller,
+                caller_label,
+                entitlement,
+                leaf_request(),
+                &expected_leaf,
+            )
+            .await?;
+            assert_replay_page_arm(
+                caller,
+                caller_label,
+                entitlement,
+                page_request(),
+                &expected_page.events,
+            )
+            .await?;
+        }
 
-        let page = client
-            .replay_page(ScopedRequest {
-                scope_key: Arc::from("test-scope"),
-                inner: big_sync_core::rpc::ReplayPageRequest {
-                    hold_ms: 50,
-                    target: page_target,
-                    limit: 16,
-                },
-            })
-            .await??;
-        assert_eq!(page, expected_page);
-
-        drop(client);
         rpc_stop.stop().await?;
         router.shutdown().await?;
         server_endpoint.close().await;

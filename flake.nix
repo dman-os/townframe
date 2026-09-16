@@ -58,6 +58,41 @@
           androidApiLevel = "31";
           rustVersion = "2026-08-16";
 
+          # Nixpkgs' playwright-webkit at the pinned rev links libWPEWebKit against
+          # libmanette (gamepad support) but webkit.nix does not list it in buildInputs, so
+          # autoPatchelfHook dies with `could not satisfy dependency libmanette-0.2.so.0`.
+          # Upstream fixed this by adding libmanette to webkit.nix (NixOS/nixpkgs#563824,
+          # commit 67bf9043b1) -- master only, nixos-unstable had not picked it up yet.
+          # Re-link the browser farm with a webkit that carries the dependency; the other
+          # browsers keep nixpkgs' derivations (so their built store paths are reused).
+          # This resolves to nixpkgs' own browsers, bit for bit, once the pinned nixpkgs
+          # lists libmanette, so it can be deleted at any point after that.
+          playwrightBrowsers =
+            let
+              playwright-driver = pkgs.playwright-driver;
+              webkit = playwright-driver.passthru.components.webkit;
+            in
+            if
+              !pkgs.stdenv.hostPlatform.isLinux
+              || builtins.any (input: (input.outPath or null) == pkgs.libmanette.outPath) webkit.buildInputs
+            then
+              playwright-driver.browsers
+            else
+              let
+                inherit (playwright-driver.passthru) browsersJSON;
+                components = playwright-driver.passthru.components // {
+                  webkit = webkit.overrideAttrs (previousAttrs: {
+                    buildInputs = previousAttrs.buildInputs ++ [ pkgs.libmanette ];
+                  });
+                };
+              in
+              pkgs.linkFarm "playwright-browsers" (
+                pkgs.lib.mapAttrsToList (name: path: {
+                  name = "${pkgs.lib.replaceStrings [ "-" ] [ "_" ] name}-${browsersJSON.${name}.revision}";
+                  inherit path;
+                }) components
+              );
+
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
             CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
@@ -67,7 +102,7 @@
           ghjkDevEnv = {
             GDK_SCALE = "2";
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
-            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
           };
 
           # Android SDK/NDK without Studio (for CI)
@@ -215,7 +250,7 @@
             nodejs_24
             biome
             playwright-driver
-            playwright-driver.browsers
+            playwrightBrowsers
 
             libarchive
             prek

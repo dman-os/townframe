@@ -343,6 +343,31 @@ impl Node {
             )
             .await
     }
+
+    /// Authorize this node to pull `parts` from `remote`.
+    ///
+    /// Part access is explicit: nothing derives it from a document-level grant, and
+    /// `/seds` in particular is a mirror-grade grant that a document grant must never
+    /// imply. A topology whose peers are `/seds` readers therefore has to say so — and
+    /// must say so *before* the routes are registered, because a page denied at
+    /// registration backs off rather than retrying once the grant lands.
+    pub(crate) async fn allow_part_pull(
+        &self,
+        remote: &Self,
+        parts: &[big_sync_core::PartKey],
+    ) -> crate::Res<()> {
+        for part in parts {
+            remote
+                .store
+                .add_part_member(
+                    part.clone(),
+                    self.peer_id(),
+                    keyhive_core::access::Access::Read,
+                )
+                .await?;
+        }
+        Ok(())
+    }
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
     async fn connect_with_keyhive_notifications(
@@ -577,6 +602,15 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // These peers read `/seds`, the store-wide enumeration part. Part access is
+        // explicit and a page denied at registration backs off for the whole
+        // unauthorized window, so the grant has to precede the routes.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .await?;
         pair.connect().await?;
         // The contact-card exchange rides the first keyhive protocol round;
         // with the notification subscription unwired nothing starts one
@@ -736,6 +770,14 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // The frontier peers read `/seds` (store-wide enumeration): grant it before
+        // the routes are registered, or the reader's first page is denied and backs off.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
         Ok(pair)

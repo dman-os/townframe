@@ -283,7 +283,10 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
         WorkCounters::bump(&self.world.work.rpc_get_changed_buckets, 1);
-        let response = self.target_part_store.get_changed_buckets(req).await?;
+        let response = self
+            .target_part_store
+            .get_changed_buckets(req, self.source_peer_id.clone())
+            .await?;
         if let Ok(summaries) = &response {
             WorkCounters::bump(
                 &self.world.work.bucket_summaries_returned,
@@ -309,7 +312,10 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
         WorkCounters::bump(&self.world.work.rpc_leaf_buckets, 1);
-        let res = self.target_part_store.leaf_buckets(req).await??;
+        let res = self
+            .target_part_store
+            .leaf_buckets(req, self.source_peer_id.clone())
+            .await??;
         let returned = res
             .bucks
             .values()
@@ -764,27 +770,39 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
             .add_obj_to_parts(obj_id.clone(), vec![test_part()])
             .await?;
     }
+    // A bucket walk is a peer-facing read, so both stores are walked as a granted
+    // peer rather than as a local caller.
+    let subscriber_a =
+        crate::part_store::contract::grant_bucket_read(&store_a, [test_part()]).await?;
+    let subscriber_b =
+        crate::part_store::contract::grant_bucket_read(&store_b, [test_part()]).await?;
 
     let a_initial = store_a
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id: test_part(),
-            offset: BuckId::ROOT,
-            to_level: BuckId::ROOT.level(),
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
+        .get_changed_buckets(
+            GetChangedBucketsRequest {
+                part_id: test_part(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::ROOT.level(),
+                since: 0,
+                limit_hint: 8 * u32::from(BuckId::ARITY),
+            },
+            subscriber_a.clone(),
+        )
         .await??
         .into_iter()
         .next()
         .expect(ERROR_IMPOSSIBLE);
     let b_initial = store_b
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id: test_part(),
-            offset: BuckId::ROOT,
-            to_level: BuckId::ROOT.level(),
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
+        .get_changed_buckets(
+            GetChangedBucketsRequest {
+                part_id: test_part(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::ROOT.level(),
+                since: 0,
+                limit_hint: 8 * u32::from(BuckId::ARITY),
+            },
+            subscriber_b.clone(),
+        )
         .await??
         .into_iter()
         .next()
@@ -803,25 +821,31 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
         .await?;
 
     let a_final = store_a
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id: test_part(),
-            offset: BuckId::ROOT,
-            to_level: BuckId::ROOT.level(),
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
+        .get_changed_buckets(
+            GetChangedBucketsRequest {
+                part_id: test_part(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::ROOT.level(),
+                since: 0,
+                limit_hint: 8 * u32::from(BuckId::ARITY),
+            },
+            subscriber_a,
+        )
         .await??
         .into_iter()
         .next()
         .expect(ERROR_IMPOSSIBLE);
     let b_final = store_b
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id: test_part(),
-            offset: BuckId::ROOT,
-            to_level: BuckId::ROOT.level(),
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
+        .get_changed_buckets(
+            GetChangedBucketsRequest {
+                part_id: test_part(),
+                offset: BuckId::ROOT,
+                to_level: BuckId::ROOT.level(),
+                since: 0,
+                limit_hint: 8 * u32::from(BuckId::ARITY),
+            },
+            subscriber_b,
+        )
         .await??
         .into_iter()
         .next()

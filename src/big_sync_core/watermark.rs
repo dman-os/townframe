@@ -244,6 +244,20 @@ where
         new_streams
     }
 
+    /// Whether `(job, cursor)` still owes `lane`.
+    ///
+    /// The waiter is the authority on what is owed: [`Self::supersede`] and
+    /// [`Self::drop_stream`] can drop a lane after the work that would settle it
+    /// was already scheduled, and a freed waiter owes nothing at all. A
+    /// completion must ask this before [`Self::settle`], which panics by design
+    /// when the lane it settles was never owed.
+    pub fn owes_lane(&self, job: &JobKey, cursor: Cursor, lane: &Lane) -> bool {
+        self.jobs
+            .get(job)
+            .and_then(|entry| entry.get(&cursor))
+            .is_some_and(|waiter| waiter.lanes.iter().any(|candidate| candidate == lane))
+    }
+
     /// Settle one lane of `(job, cursor)` (mirrors `on_obj_sync_job_evt`).
     /// Returns the streams referenced by the waiter when it fully settled —
     /// those streams may now be able to advance. Returns an empty vec while
@@ -603,6 +617,15 @@ where
         out
     }
 
+    /// Whether the `(job, cursor)` waiter still owes `lane` on any stream.
+    ///
+    /// See [`JobBoard::owes_lane`]: a lane can be dropped by a supersede after
+    /// the work that settles it is in flight, so a completion has to check what
+    /// is still owed before settling it.
+    pub fn owes_lane(&self, job: &JobKey, cursor: Cursor, lane: &Lane) -> bool {
+        self.jobs.owes_lane(job, cursor, lane)
+    }
+
     /// Current emitted watermark for a stream.
     pub fn watermark(&self, stream: &StreamId) -> Option<Cursor> {
         self.streams.get(stream).and_then(WatermarkBook::watermark)
@@ -737,6 +760,30 @@ mod tests {
         assert_eq!(advanced, vec![("p", Some(11))]);
         assert_eq!(m.watermark(&"p"), Some(11));
         assert!(m.is_settled(&"p"));
+    }
+
+    /// A completion must be able to ask what is still owed: the lane it would
+    /// settle can be dropped (here by a supersede) while the work already
+    /// scheduled for that lane lives on, and settling it then panics.
+    #[test]
+    fn owes_lane_reports_only_lanes_the_waiter_still_holds() {
+        let mut m = Machine::default();
+        m.admit("p", 7);
+        m.track("p", 42, 7, [Lane::Membership, Lane::Sync], ());
+        assert!(m.owes_lane(&42, 7, &Lane::Membership));
+        assert!(m.owes_lane(&42, 7, &Lane::Sync));
+
+        // The supersede sheds the sync lane for a cursor below the bound.
+        m.supersede("p", 42, 8, |lane| lane == Lane::Membership);
+        assert!(m.owes_lane(&42, 7, &Lane::Membership));
+        assert!(!m.owes_lane(&42, 7, &Lane::Sync));
+
+        m.settle(42, 7, Lane::Membership);
+        // Fully settled: the waiter is gone, so nothing is owed at all.
+        assert!(!m.owes_lane(&42, 7, &Lane::Membership));
+        assert!(!m.owes_lane(&42, 7, &Lane::Sync));
+        // An untracked cursor owes nothing either.
+        assert!(!m.owes_lane(&42, 6, &Lane::Sync));
     }
 
     #[test]

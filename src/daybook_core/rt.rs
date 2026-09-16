@@ -101,6 +101,7 @@ pub struct RtStopToken {
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: crate::repos::RepoStopToken,
     blob_pins_part_worker_stop: crate::repos::RepoStopToken,
+    blob_inventory_permission_stop: crate::repos::RepoStopToken,
     doc_facet_set_index_stop: crate::repos::RepoStopToken,
     plugs_config_consumer_stop: crate::repos::RepoStopToken,
     plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
@@ -129,6 +130,12 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.blob_inventory_permission_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_inventory_permission_writer during shutdown - continuing"
             );
         }
         if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
@@ -309,6 +316,20 @@ impl Rt {
             rcx.docs_inventory_doc_id.clone(),
             doc_facet_set_index_repo.revision_store(),
             Arc::clone(&plugs_repo),
+            cancel_token.clone(),
+        )
+        .await?;
+        // The blob-inventory permission writer borrows the blob part store and the
+        // repository, so it is constructed after the pin machines and stopped before
+        // them (shutdown order is the reverse of construction).
+        let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
+            Arc::clone(&rcx.blob_part_store),
+            Arc::clone(&sqlite_local_state_repo),
+            Arc::clone(&rcx.big_repo),
+            vec![
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
+            ],
             cancel_token.clone(),
         )
         .await?;
@@ -532,6 +553,7 @@ impl Rt {
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
+                blob_inventory_permission_stop,
                 doc_facet_set_index_stop,
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,

@@ -5,7 +5,7 @@ use big_sync::sqlite_core::{
     EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
     SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
 };
-use big_sync::{HostPartStore, PartScope};
+use big_sync::{HostPartStore, PartScope, ReadTarget};
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,

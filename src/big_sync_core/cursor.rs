@@ -48,10 +48,16 @@ structstruck::strike! {
 structstruck::strike! {
 #[derive(Debug, Default)]
 pub struct CursorSyncMachine {
-    /// Object-target events have no real part cursor to advance. Keep the
-    /// last cursor locally so duplicate deliveries do not schedule the same
-    /// object sync twice; durable replay bounds remain request-level.
-    object_cursors: HashMap<ObjKey, CursorIndex>,
+    /// What each object-target's *content* replay has reached. An object
+    /// target has no part cursor to advance, so the object's own cursor orders
+    /// the replay — and the sync backend acknowledges it by completing the
+    /// sync. The machine may not infer that from having emitted the trigger:
+    /// an emitted-but-unacknowledged replay is still outstanding, so a
+    /// re-delivery of the *same* cursor still has to reach the backend. Keeping
+    /// the emitted cursor here instead let one replay whose job died strand the
+    /// object for good — every later delivery read as "not newer" and nothing
+    /// re-emitted it.
+    object_replays: HashMap<ObjKey, ObjectReplay>,
     /// Per-part slot bookkeeping AND the obj-job aggregation gating it: the
     /// [`WatermarkMachine`] primitive rather than a machine-local copy, so
     /// "what is outstanding, what has settled, when may the cursor advance"
@@ -68,11 +74,73 @@ pub struct CursorSyncMachine {
     jobs: WatermarkMachine<PartKey, ObjKey, CursorJobCompletionKind, (), CursorIndex>,
     }
 }
+/// One object target's replay state: what the sync backend has *acknowledged*,
+/// and what is emitted but not acknowledged yet.
+///
+/// `acknowledged` is the newest cursor whose replay the backend completed. It is
+/// the only cursor that may suppress a re-delivery: the backend observed that
+/// replay and decided what the object needed. It is also the position an object
+/// route resumes from — the route carries it to the store, which would otherwise
+/// replay the object's derived part from the start on every page.
+///
+/// `in_flight` is the newest cursor emitted and still owed. It only collapses a
+/// burst of duplicate deliveries of the *same* cursor into one job; the claim is
+/// released by the acknowledgement, or by [`CursorSyncMachine::abandon_obj_sync`]
+/// when the job dies without one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ObjectReplay {
+    acknowledged: CursorIndex,
+    in_flight: Option<CursorIndex>,
+}
 
 impl CursorSyncMachine {
     pub(crate) fn remove_part(&mut self, part_id: PartKey) {
         // Drops the part's slot book and every waiter that gated only it.
         self.jobs.retire_stream(part_id);
+    }
+
+    /// Release the *claim* an object's replay held because the job that owed it is
+    /// gone.
+    ///
+    /// A dropped job never acknowledges, and the machine must not keep a claim it
+    /// can no longer settle: releasing it re-owes the object, so the next delivery
+    /// (or the abandoned one, re-delivered) reaches the backend again and the
+    /// backend decides afresh whether the object needs anything. The acknowledged
+    /// position is *not* forgotten — it records what the backend has observed, and
+    /// a dropped job does not un-observe it. Forgetting it would also send the
+    /// object route back to the start of its replay.
+    pub(crate) fn abandon_obj_sync(&mut self, obj_id: &ObjKey) {
+        if let Some(replay) = self.object_replays.get_mut(obj_id) {
+            replay.in_flight = None;
+        }
+    }
+
+    /// Where an object route's replay must resume.
+    ///
+    /// An object route has no part cursor of its own to advance, so this has to
+    /// travel with the route. A store that is not told it replays the object's
+    /// derived part from the start on every page, which re-reads the first page
+    /// forever and never reaches the second.
+    pub(crate) fn obj_resume_cursor(&self, obj_id: &ObjKey) -> CursorIndex {
+        self.object_replays
+            .get(obj_id)
+            .map(|replay| replay.acknowledged)
+            .unwrap_or_default()
+    }
+
+    /// Whether `(obj_id, cursor)` still owes `kind` on some part.
+    ///
+    /// A completion must ask this before settling: the waiter is the authority on
+    /// what is owed, and [`Self::supersede_obj_part`] drops a cursor's sync lane
+    /// when a removal supersedes it, while the sync task already scheduled for
+    /// that cursor stays in flight.
+    pub(crate) fn owes_obj_job_lane(
+        &self,
+        obj_id: &ObjKey,
+        cursor: CursorIndex,
+        kind: CursorJobCompletionKind,
+    ) -> bool {
+        self.jobs.owes_lane(obj_id, cursor, &kind)
     }
 
     pub(crate) fn supersede_obj_part(
@@ -143,17 +211,29 @@ impl CursorSyncMachine {
                     parts.push(part_id.clone());
                 }
                 if parts.is_empty() {
-                    let last_cursor = self.object_cursors.entry(evt.obj_id.clone()).or_default();
-                    if evt.cursor <= *last_cursor {
+                    let replay = self.object_replays.entry(evt.obj_id.clone()).or_default();
+                    if evt.cursor <= replay.acknowledged {
                         tracing::debug!(
                             ?evt.obj_id,
                             ?evt.cursor,
-                            ?last_cursor,
-                            "cursor machine ignored object-only event: cursor not newer",
+                            acknowledged = ?replay.acknowledged,
+                            "cursor machine dropped an object-only event the backend already acknowledged",
                         );
                         return;
                     }
-                    *last_cursor = evt.cursor;
+                    if replay
+                        .in_flight
+                        .is_some_and(|in_flight| evt.cursor <= in_flight)
+                    {
+                        tracing::trace!(
+                            ?evt.obj_id,
+                            ?evt.cursor,
+                            in_flight = ?replay.in_flight,
+                            "cursor machine collapsed a duplicate object-only event into the replay in flight",
+                        );
+                        return;
+                    }
+                    replay.in_flight = Some(evt.cursor);
                     out.push(CursorMachineCommand::SyncObj {
                         obj_id: evt.obj_id,
                         remote_payload: evt.payload,
@@ -209,6 +289,27 @@ impl CursorSyncMachine {
         kind: CursorJobCompletionKind,
         out: &mut Vec<CursorMachineCommand>,
     ) {
+        // A *sync* completion is the backend acknowledging a replay: it observed
+        // the replay and decided what the object needed, so only now may the
+        // object's replay position advance. A part-scoped sync of the same object
+        // proves the same thing about its content, so that advances it too.
+        //
+        // A membership completion is not that evidence: it reports a part
+        // membership mutation being applied, so treating it as a content
+        // acknowledgement would suppress a content replay the backend never saw.
+        if kind == CursorJobCompletionKind::Sync
+            && let Some(replay) = self.object_replays.get_mut(&obj_id)
+        {
+            if cursor > replay.acknowledged {
+                replay.acknowledged = cursor;
+            }
+            if replay
+                .in_flight
+                .is_some_and(|in_flight| cursor >= in_flight)
+            {
+                replay.in_flight = None;
+            }
+        }
         // A completion for a job/cursor that is not tracked is stale, not an
         // error; the primitive returns nothing for it. A completion for a lane
         // the waiter never owed still panics inside the primitive.
@@ -275,6 +376,17 @@ mod tests {
         SubEvent::Changed(ObjChanged {
             cursor,
             part_ids: parts.to_vec(),
+            obj_id: obj_id.clone(),
+            payload: serde_json::json!({ "k": cursor }),
+        })
+    }
+
+    /// A touch that names no part cursor: the object is the target, so its own
+    /// cursor is the only thing that can order the replay.
+    fn touched_obj_only(cursor: CursorIndex, obj_id: &ObjKey) -> SubEvent {
+        SubEvent::Changed(ObjChanged {
+            cursor,
+            part_ids: Vec::new(),
             obj_id: obj_id.clone(),
             payload: serde_json::json!({ "k": cursor }),
         })
@@ -354,6 +466,159 @@ mod tests {
             settle(&mut machine, &o, 5, CursorJobCompletionKind::Sync),
             vec![set_cursor(&p, 5), idle(&p)]
         );
+    }
+
+    /// Regression guard: an object-target touch is deduped against the replay the
+    /// sync backend has *acknowledged*, never against one we merely emitted.
+    ///
+    /// An emitted-but-unacknowledged replay is still outstanding, so a touch that
+    /// arrives while it runs (a duplicate delivery, or a change that landed
+    /// meanwhile) must still reach the backend. Deduping on emission let one lost
+    /// notification strand the object for good: every later touch read as "not
+    /// newer" and nothing re-emitted the sync.
+    #[test]
+    fn an_object_touch_is_deduped_against_acknowledged_replays_only() {
+        let o = obj(9);
+        let mut machine = CursorSyncMachine::default();
+
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(3, &o)),
+            vec![sync_obj(&o, 3, Vec::new())],
+            "a touch naming no part cursor schedules the object sync"
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(3, &o)),
+            Vec::<CursorMachineCommand>::new(),
+            "a duplicate of the in-flight replay collapses into it"
+        );
+        assert_eq!(
+            settle(&mut machine, &o, 3, CursorJobCompletionKind::Sync),
+            Vec::<CursorMachineCommand>::new(),
+            "an object-only replay gates no part cursor"
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(4, &o)),
+            vec![sync_obj(&o, 4, Vec::new())],
+            "a later touch is admitted once the previous replay was acknowledged"
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(4, &o)),
+            Vec::<CursorMachineCommand>::new(),
+            "and that acknowledgement dedups its own duplicates"
+        );
+    }
+
+    /// A part-scoped sync of the same object fetches the object's content, so its
+    /// completion acknowledges the object cursor as well: a later object-only touch
+    /// at or below it is a duplicate.
+    #[test]
+    fn a_part_scoped_completion_acknowledges_the_object_too() {
+        let (o, p) = (obj(10), part(11));
+        let mut machine = CursorSyncMachine::default();
+
+        // The object was delivered as a target once, so the machine tracks it.
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(5, &o)),
+            vec![sync_obj(&o, 5, Vec::new())]
+        );
+        // A part-scoped sync of the same object completes at a higher cursor. That
+        // replay fetched the object's content, so it acknowledges the object too.
+        assert_eq!(
+            feed(&mut machine, touched(7, &o, std::slice::from_ref(&p))),
+            vec![sync_obj(&o, 7, vec![p.clone()])]
+        );
+        assert_eq!(
+            settle(&mut machine, &o, 7, CursorJobCompletionKind::Sync),
+            vec![set_cursor(&p, 7), idle(&p)]
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(7, &o)),
+            Vec::<CursorMachineCommand>::new(),
+            "the acknowledged replay is not repeated for the object target"
+        );
+    }
+
+    /// Regression guard: the claim an emitted replay holds is released when the job
+    /// that owed it dies, so the same cursor is replayed again instead of being
+    /// suppressed forever. Without the release the object is owed a replay nobody
+    /// will ever acknowledge, and every later delivery reads as a duplicate.
+    #[test]
+    fn an_abandoned_object_replay_is_owed_again() {
+        let o = obj(12);
+        let mut machine = CursorSyncMachine::default();
+
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(6, &o)),
+            vec![sync_obj(&o, 6, Vec::new())]
+        );
+
+        machine.abandon_obj_sync(&o);
+
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(6, &o)),
+            vec![sync_obj(&o, 6, Vec::new())],
+            "the re-delivery of an abandoned replay reaches the backend again"
+        );
+
+        // The acknowledged position is what the object route resumes from, and a job
+        // dying does not un-observe it: only the claim is released.
+        assert_eq!(
+            settle(&mut machine, &o, 6, CursorJobCompletionKind::Sync),
+            Vec::<CursorMachineCommand>::new(),
+        );
+        machine.abandon_obj_sync(&o);
+        assert_eq!(
+            machine.obj_resume_cursor(&o),
+            6,
+            "an abandoned replay keeps the position it reached; forgetting it would \
+             send the object route back to the start of its replay",
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(7, &o)),
+            vec![sync_obj(&o, 7, Vec::new())],
+            "and a later touch is still admitted"
+        );
+    }
+
+    /// A membership completion is not evidence about the object's *content*: it
+    /// reports a part-membership mutation being applied. Counting it as an
+    /// acknowledgement would advance the object route past a content replay the
+    /// backend never observed.
+    #[test]
+    fn a_membership_completion_does_not_acknowledge_the_object_replay() {
+        let (o, p) = (obj(13), part(14));
+        let mut machine = CursorSyncMachine::default();
+
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(6, &o)),
+            vec![sync_obj(&o, 6, Vec::new())]
+        );
+        assert_eq!(
+            feed(&mut machine, removed(7, &o, &p)),
+            vec![removal_command(&o, &p, 7)]
+        );
+        assert!(
+            settle(&mut machine, &o, 7, CursorJobCompletionKind::Membership)
+                .contains(&set_cursor(&p, 7)),
+            "the removal's own cursor still advances on its membership completion",
+        );
+
+        assert_eq!(
+            machine.obj_resume_cursor(&o),
+            0,
+            "a membership completion must not advance the object route's position",
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(6, &o)),
+            Vec::<CursorMachineCommand>::new(),
+            "and the content replay at 6 is still the claim in flight"
+        );
+        assert_eq!(
+            settle(&mut machine, &o, 6, CursorJobCompletionKind::Sync),
+            Vec::<CursorMachineCommand>::new(),
+            "only a sync completion settles the object's own replay"
+        );
+        assert_eq!(machine.obj_resume_cursor(&o), 6);
     }
 
     /// Regression guard: a touch spanning several parts is one object sync listing them in
@@ -491,6 +756,55 @@ mod tests {
                 CursorMachineCommand::SetPartCursor { part_id, .. } if *part_id == b
             )),
             "the other part is still gated by the object's outstanding sync: {after:?}"
+        );
+    }
+
+    /// The supersede rule at its hardest: a waiter owing *both* halves of one cursor
+    /// across two parts. Superseding one part frees that part's cursor at once while
+    /// the waiter keeps gating the other, so the surviving part cannot advance until
+    /// the membership write and the sync have both landed.
+    #[test]
+    fn a_supersede_leaves_a_two_lane_waiter_gating_its_other_part_on_both_halves() {
+        let (o, p, q) = (obj(19), part(20), part(21));
+        let mut machine = CursorSyncMachine::default();
+
+        // One cursor, both halves: the object's content in part q, and the membership
+        // mutation that removes it from part p.
+        assert_eq!(
+            feed(&mut machine, touched(5, &o, std::slice::from_ref(&q))),
+            vec![sync_obj(&o, 5, vec![q.clone()])]
+        );
+        assert_eq!(
+            feed(&mut machine, removed(5, &o, &p)),
+            vec![removal_command(&o, &p, 5)]
+        );
+
+        // A later removal supersedes q, the part the sync was fetching.
+        let superseded = feed(&mut machine, removed(9, &o, &q));
+        assert!(
+            superseded.contains(&set_cursor(&q, 5)),
+            "the superseded part's cursor is freed immediately: {superseded:?}"
+        );
+        assert!(
+            !superseded.iter().any(|cmd| matches!(
+                cmd,
+                CursorMachineCommand::SetPartCursor { part_id, .. } if *part_id == p
+            )),
+            "the surviving part is still gated: {superseded:?}"
+        );
+
+        let after_sync = settle(&mut machine, &o, 5, CursorJobCompletionKind::Sync);
+        assert!(
+            !after_sync.iter().any(|cmd| matches!(
+                cmd,
+                CursorMachineCommand::SetPartCursor { part_id, .. } if *part_id == p
+            )),
+            "the membership half is still owed, so the surviving part cannot advance: {after_sync:?}"
+        );
+        let after_membership = settle(&mut machine, &o, 5, CursorJobCompletionKind::Membership);
+        assert!(
+            after_membership.contains(&set_cursor(&p, 5)),
+            "both halves landed, so the surviving part advances: {after_membership:?}"
         );
     }
 

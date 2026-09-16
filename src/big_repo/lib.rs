@@ -34,6 +34,10 @@ pub use runtime2::doc_revision_store::{
     AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
     AutomergeFrontierTarget,
 };
+pub use runtime2::keyhive_access_stream::{
+    AccessSubject, AccessSubjectSet, KeyhiveAccessDelta, KeyhiveAccessMemory,
+    KeyhiveAccessRevisionStore, KeyhiveAccessSelector,
+};
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, GroupScopeController, GroupScopeHandle,
     KeyhiveSyncCancelled, PutDocError, SyncDocError, SyncDocOutcome, SyncDocPolicyError,

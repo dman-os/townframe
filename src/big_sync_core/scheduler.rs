@@ -149,6 +149,12 @@ impl<Seed> Scheduler<Seed> {
     /// (floored by `min_delay`, capped by `max_backoff`; a zero cap falls
     /// back to one minute).
     ///
+    /// Note the cap is the embedder's pacing knob and it wins over the floor: the
+    /// daybook tests clamp it to 500ms so a route whose grant is still in flight is
+    /// picked up quickly. A caller that must not be paced that fast has to be paced
+    /// by something other than the task ladder (see `Unauthorized` in the replay
+    /// page handler, which is where this was first noticed).
+    ///
     /// Contract, made unrepresentable-to-violate: `prev_id` must have been
     /// [`Self::stop`]ped first — the real machine always pairs them
     /// (`handle_evt(SyncFailed)` runs `stop_task(task_id)` before respawning

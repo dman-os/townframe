@@ -37,6 +37,7 @@ use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
 };
 use big_sync_core::rpc::SubEvent;
+use big_sync_core::scheduler::Retry;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -50,6 +51,15 @@ enum PublishOutcome {
 }
 
 const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Minimum delay before a publish that came back deferred is re-armed.
+///
+/// The deferral itself is not work applied: the document's bundle could not
+/// reach the keyhive operation count within [`MATERIALIZATION_WAIT_TIMEOUT`],
+/// or it was invalidated while waiting. A re-arm therefore has to be cheap but
+/// not immediate — the scheduler doubles this delay per attempt up to its own
+/// ceiling, and this worker's timer arm ticks the resulting deadline.
+const DEFERRED_PUBLISH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The frontier payload object id for a document.
 ///
@@ -300,6 +310,16 @@ async fn publish_heads(
         )
         .await
         {
+            // The internal handle holds no lease, so the doc worker can be evicted —
+            // invalidating this bundle — while this wait is in flight. Defer, exactly as
+            // for a timeout: a later event publishes a fresh bundle.
+            Ok(_) if handle.bundle.is_broken() => {
+                tracing::debug!(
+                    %doc_id,
+                    "AFW publish deferred: document bundle invalidated while awaiting materialization"
+                );
+                return Ok(PublishOutcome::Deferred);
+            }
             Ok(result) => result?,
             Err(_) => {
                 tracing::warn!(
@@ -317,6 +337,15 @@ async fn publish_heads(
             "AFW bundle CGKA materialization barrier satisfied"
         );
     }
+    // Never advertise heads from an invalidated bundle: its in-memory document may hold
+    // mutations that never persisted (the worker was evicted, or a commit from it was
+    // rejected), so publishing would advertise state that cannot be served. Failing the
+    // task instead of deferring would take the worker down over a race that eviction is
+    // allowed to win, which is why this is a defer and not an error.
+    if handle.bundle.is_broken() {
+        tracing::debug!(%doc_id, "AFW publish deferred: document bundle invalidated");
+        return Ok(PublishOutcome::Deferred);
+    }
     let causal_epoch = handle.bundle.current_causal_epoch();
     let heads = surelock::key::lock_scope(|key| {
         let (doc, _key) = key.lock(&handle.bundle.doc);
@@ -328,6 +357,20 @@ async fn publish_heads(
         "heads": heads_formatted,
         "causal_epoch": causal_epoch,
     });
+    // The check above only covers the read: eviction is allowed to win while this task is
+    // blocked on the document lock or building the payload, and `mark_broken` is an atomic
+    // store that takes no lock, so it can land at any instant. Re-check with no await between
+    // the check and the write, so a bundle invalidated in that window defers instead of
+    // publishing heads that cannot be served. (A break during the write itself needs no
+    // handling here: the write is already issued, and the materialization that follows a
+    // re-acquisition re-triggers a keyed replacement publish that overwrites stale heads.)
+    if handle.bundle.is_broken() {
+        tracing::debug!(
+            %doc_id,
+            "AFW publish deferred: document bundle invalidated before writing frontier payload"
+        );
+        return Ok(PublishOutcome::Deferred);
+    }
     frontier_store
         .set_obj_payload(am_obj_id.clone(), payload)
         .await?;
@@ -592,16 +635,66 @@ impl<'a> Worker<'a> {
             active_tasks = self.tasks.active_count(),
             "AFW scheduling keyed task"
         );
-        let future = run_concurrent_frontier_task(
+        let future = self.task_future(&task);
+        self.tasks.replace(key.clone(), task, future)?;
+        tracing::debug!(?key, "AFW keyed task accepted by scheduler");
+        Ok(())
+    }
+
+    /// The publish command built from the newest work known for `doc_id`.
+    fn publish_task(&self, doc_id: crate::DocumentId) -> FrontierTask {
+        FrontierTask::Publish {
+            doc_id: doc_id.clone(),
+            admission: self.pending_admission.get(&doc_id).cloned(),
+            part_source: self.pending_part_sources.get(&doc_id).cloned(),
+            part_cursor: self
+                .pending_parts
+                .get(&doc_id)
+                .and_then(|parts| parts.values().copied().max()),
+        }
+    }
+
+    fn task_future(
+        &self,
+        task: &FrontierTask,
+    ) -> impl std::future::Future<Output = Res<ConcurrentTaskOutput>> + Send + 'static {
+        run_concurrent_frontier_task(
             task.clone(),
             self.runtime.clone(),
             Arc::clone(&self.big_sync_store),
             Arc::clone(&self.frontier_store),
             self.keyhive.clone(),
             self.scope.clone(),
+        )
+    }
+
+    /// Re-arm a publish that came back `Deferred`, after a backoff.
+    ///
+    /// A deferred publish applied nothing: the bundle did not reach the keyhive
+    /// operation count in time, or it was invalidated while waiting. Its
+    /// admission and part-source cursors therefore stay unacked — deliberately,
+    /// because a source is acked only once the effect it covers is durable, and
+    /// this task has no effect to show. What must not happen is a park with no
+    /// re-drive: parking is re-armed only by an external wake (a newer event for
+    /// the same document), so a document whose next event never arrives would
+    /// leave those cursors unacked forever and, since the walker advances only
+    /// over a contiguous settled prefix, stall every document behind it.
+    ///
+    /// The scheduler owns the backoff: each attempt doubles the delay up to its
+    /// own ceiling, and `machine_loop`'s timer arm ticks the resulting deadline,
+    /// so this cannot spin. A newer event for the document stays the fast path:
+    /// the wake path (`start_ready_document_work` -> `start_publish`) replaces
+    /// the pending retry and publishes immediately.
+    fn retry_publish(&mut self, doc_id: crate::DocumentId, retry: Retry) -> Res<()> {
+        let key = FrontierKey::Document(doc_id.clone());
+        let task = self.publish_task(doc_id);
+        let future = self.task_future(&task);
+        rearm_deferred_publish(&mut self.tasks, key.clone(), task, retry, future)?;
+        tracing::debug!(
+            ?key,
+            attempt_no = retry.attempt_no + 1,
+            "AFW re-armed a deferred publish"
         );
-        self.tasks.replace(key.clone(), task, future)?;
-        tracing::debug!(?key, "AFW keyed task accepted by scheduler");
         Ok(())
     }
 
@@ -614,18 +707,8 @@ impl<'a> Worker<'a> {
             pending_part_count = self.pending_parts.get(&doc_id).map_or(0, |parts| parts.len()),
             "AFW preparing frontier publish"
         );
-        self.start_task(
-            FrontierKey::Document(doc_id.clone()),
-            FrontierTask::Publish {
-                doc_id: doc_id.clone(),
-                admission: self.pending_admission.get(&doc_id).cloned(),
-                part_source: self.pending_part_sources.get(&doc_id).cloned(),
-                part_cursor: self
-                    .pending_parts
-                    .get(&doc_id)
-                    .and_then(|parts| parts.values().copied().max()),
-            },
-        )
+        let task = self.publish_task(doc_id.clone());
+        self.start_task(FrontierKey::Document(doc_id), task)
     }
 
     fn remember_part_source(&mut self, doc_id: crate::DocumentId, source: SourceCursor) {
@@ -778,6 +861,10 @@ impl<'a> Worker<'a> {
             ConcurrentTaskOutput,
         >,
     ) -> Res<()> {
+        // Captured before the match moves the command: the scheduler hands each
+        // completion the retry bookkeeping of the attempt it just ran, which is
+        // what a re-arm needs to advance its backoff.
+        let retry = completion.retry;
         match (completion.command, completion.result) {
             (
                 FrontierTask::Publish {
@@ -841,10 +928,10 @@ impl<'a> Worker<'a> {
                 tracing::debug!(
                     %doc_id,
                     task = ?task,
-                    "AFW publish task deferred/parked"
+                    attempt_no = retry.attempt_no,
+                    "AFW publish task deferred; re-arming after a backoff"
                 );
-                self.tasks
-                    .park(FrontierKey::Document(doc_id.clone()), task.clone());
+                self.retry_publish(doc_id.clone(), retry)?;
             }
             (task, Err(error)) => {
                 tracing::error!(task = ?task, error = ?error, "AFW task failed");
@@ -909,6 +996,30 @@ impl<'a> Worker<'a> {
     }
 }
 
+/// Re-arm a deferred publish through the scheduler's bounded backoff.
+///
+/// The alternative this replaces is `park`, which keeps the retained command
+/// but only ever runs it again on an external wake. A deferred publish has not
+/// applied its work, so its sources stay unacked (see
+/// [`Worker::retry_publish`]), and no wake may ever arrive for that document —
+/// in which case the unacked sources hold the walker's contiguous prefix and
+/// stall every document behind it. Deliberately not `async`: it is a scheduler
+/// transition, not coordination through the worker.
+fn rearm_deferred_publish(
+    tasks: &mut big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<
+        FrontierKey,
+        FrontierTask,
+        ConcurrentTaskOutput,
+    >,
+    key: FrontierKey,
+    task: FrontierTask,
+    retry: Retry,
+    future: impl std::future::Future<Output = Res<ConcurrentTaskOutput>> + Send + 'static,
+) -> Res<()> {
+    tasks.retry(key, task, retry, DEFERRED_PUBLISH_RETRY_DELAY, future)?;
+    Ok(())
+}
+
 async fn run_concurrent_frontier_task(
     task: FrontierTask,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
@@ -945,10 +1056,20 @@ async fn run_concurrent_frontier_task(
                 // Eligibility is checked against live Keyhive membership so part
                 // events for documents that joined or left the scope are handled
                 // by the same path as admission events.
-                tracing::debug!(%doc_id, "AFW checking live document scope membership");
-                let doc_groups = keyhive
-                    .group_ids_containing_document(doc_id.clone())
-                    .await?;
+                // The walk is a shared-lock traversal. It is deliberately not bounded
+                // by a timeout: a timeout defers the publish, and a defer with no
+                // re-drive stalls this document's cursor while looking like progress,
+                // which hides a hang instead of surfacing it. A `Groups(∅)` scope
+                // admits no document at all, so its answer cannot depend on the walk
+                // and the walk is skipped there.
+                let doc_groups = if scope.admits_nothing() {
+                    Default::default()
+                } else {
+                    tracing::debug!(%doc_id, "AFW checking live document scope membership");
+                    keyhive
+                        .group_ids_containing_document(doc_id.clone())
+                        .await?
+                };
                 tracing::debug!(%doc_id, doc_groups = ?doc_groups, "AFW resolved live document scope membership");
                 if !scope.admits_doc_groups(&doc_groups) {
                     // The document left the worker's scope: tear down its
@@ -1013,5 +1134,199 @@ mod tests {
         assert!(!scope_includes_part(&scope, crate::global_part_id()));
         assert!(scope_includes_part(&scope, group));
         assert!(!scope_includes_part(&scope, PartKey::new([9; 32])));
+    }
+
+    // The deferred-publish tests drive the real scheduler with the real key,
+    // command and output types, following the exact sequence
+    // `on_task_completion`'s deferred arm performs. What they cannot cover from
+    // here is the worker's own state: that the deferred path leaves
+    // `pending_admission`/`pending_part_sources` unacked, and that `machine_loop`
+    // ticks the deadline this re-arm installs.
+    type KeyedTasks = big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<
+        FrontierKey,
+        FrontierTask,
+        ConcurrentTaskOutput,
+    >;
+
+    fn publish_cmd(value: u64) -> FrontierTask {
+        FrontierTask::Publish {
+            doc_id: doc(value),
+            admission: None,
+            part_source: None,
+            part_cursor: None,
+        }
+    }
+
+    async fn deferred() -> Res<ConcurrentTaskOutput> {
+        Ok(ConcurrentTaskOutput::Deferred)
+    }
+
+    async fn published(through: Option<u64>) -> Res<ConcurrentTaskOutput> {
+        Ok(ConcurrentTaskOutput::Published { through })
+    }
+
+    /// A deferred publish is re-armed on a delay. Re-arming immediately would
+    /// spend the whole task budget spinning on the document that deferred, and
+    /// the delay is what makes the retry bounded work instead of a hot loop.
+    #[tokio::test]
+    async fn a_deferred_publish_is_rearmed_after_a_delay_not_immediately() {
+        let mut tasks = KeyedTasks::new(4);
+        let key = FrontierKey::Document(doc(7));
+        tasks
+            .replace(key.clone(), publish_cmd(7), deferred())
+            .unwrap();
+
+        let completion = tasks.next_completion().await.unwrap();
+        assert!(matches!(
+            completion.result,
+            Ok(ConcurrentTaskOutput::Deferred)
+        ));
+
+        let before = std::time::Instant::now();
+        rearm_deferred_publish(
+            &mut tasks,
+            key.clone(),
+            completion.command.clone(),
+            completion.retry,
+            published(Some(1)),
+        )
+        .unwrap();
+
+        let deadline = tasks
+            .next_deadline()
+            .expect("a re-armed publish must carry a deadline");
+        assert!(
+            deadline >= before + DEFERRED_PUBLISH_RETRY_DELAY,
+            "a deferred publish must not be re-armed immediately"
+        );
+        assert!(
+            deadline <= std::time::Instant::now() + DEFERRED_PUBLISH_RETRY_DELAY,
+            "the first re-arm waits one delay, not longer"
+        );
+
+        // The deadline is the only thing that runs it: ticking past it must
+        // execute the retry, so a deferred document makes progress with no new
+        // event of its own.
+        tasks
+            .tick(std::time::Instant::now() + DEFERRED_PUBLISH_RETRY_DELAY)
+            .unwrap();
+        let retried = tasks.next_completion().await.unwrap();
+        assert!(matches!(
+            retried.result,
+            Ok(ConcurrentTaskOutput::Published { through: Some(1) })
+        ));
+    }
+
+    /// A newer event for the document stays the fast path: the wake path calls
+    /// `start_publish` -> `replace` for the same key, which must cancel the
+    /// pending retry instead of racing it into a second task for that key.
+    #[tokio::test]
+    async fn a_publish_woken_while_a_retry_is_pending_replaces_it_without_double_spawning() {
+        let mut tasks = KeyedTasks::new(4);
+        let key = FrontierKey::Document(doc(9));
+        tasks
+            .replace(key.clone(), publish_cmd(9), deferred())
+            .unwrap();
+        let completion = tasks.next_completion().await.unwrap();
+        rearm_deferred_publish(
+            &mut tasks,
+            key.clone(),
+            completion.command.clone(),
+            completion.retry,
+            deferred(),
+        )
+        .unwrap();
+
+        // The newer event lands before the retry is due.
+        tasks
+            .replace(key.clone(), publish_cmd(9), published(Some(4)))
+            .unwrap();
+        let woken = tasks.next_completion().await.unwrap();
+        assert!(matches!(
+            woken.result,
+            Ok(ConcurrentTaskOutput::Published { through: Some(4) })
+        ));
+
+        assert!(
+            tasks.next_deadline().is_none(),
+            "the replaced retry must not stay due"
+        );
+        tasks
+            .tick(std::time::Instant::now() + DEFERRED_PUBLISH_RETRY_DELAY * 4)
+            .unwrap();
+        assert!(
+            tasks.next_deadline().is_none(),
+            "the replaced retry must not resurface"
+        );
+    }
+
+    /// The backoff belongs to the attempt, not to the key: repeated deferrals
+    /// widen the delay, and an attempt that publishes resets it so the next
+    /// deferral does not inherit an exhausted backoff.
+    #[tokio::test]
+    async fn deferred_retries_widen_their_delay_and_a_publish_resets_it() {
+        let mut tasks = KeyedTasks::new(4);
+        let key = FrontierKey::Document(doc(11));
+
+        tasks
+            .replace(key.clone(), publish_cmd(11), deferred())
+            .unwrap();
+        let first = tasks.next_completion().await.unwrap();
+        rearm_deferred_publish(
+            &mut tasks,
+            key.clone(),
+            first.command.clone(),
+            first.retry,
+            deferred(),
+        )
+        .unwrap();
+        let first_deadline = tasks.next_deadline().expect("first retry is due");
+
+        tasks.tick(first_deadline).unwrap();
+        let second = tasks.next_completion().await.unwrap();
+        assert_eq!(
+            second.retry.attempt_no, 2,
+            "the re-arm is the second attempt"
+        );
+        let before = std::time::Instant::now();
+        rearm_deferred_publish(
+            &mut tasks,
+            key.clone(),
+            second.command.clone(),
+            second.retry,
+            deferred(),
+        )
+        .unwrap();
+        let second_deadline = tasks.next_deadline().expect("second retry is due");
+        assert!(
+            second_deadline > before + DEFERRED_PUBLISH_RETRY_DELAY,
+            "a repeated deferral must widen the delay"
+        );
+
+        // A publish that succeeds, then defers again, starts from the minimum
+        // delay rather than the widened one.
+        tasks
+            .replace(key.clone(), publish_cmd(11), published(None))
+            .unwrap();
+        tasks.next_completion().await.unwrap();
+        tasks
+            .replace(key.clone(), publish_cmd(11), deferred())
+            .unwrap();
+        let third = tasks.next_completion().await.unwrap();
+        let before = std::time::Instant::now();
+        rearm_deferred_publish(
+            &mut tasks,
+            key.clone(),
+            third.command.clone(),
+            third.retry,
+            deferred(),
+        )
+        .unwrap();
+        let third_deadline = tasks.next_deadline().expect("third retry is due");
+        assert!(third_deadline >= before + DEFERRED_PUBLISH_RETRY_DELAY);
+        assert!(
+            third_deadline <= std::time::Instant::now() + DEFERRED_PUBLISH_RETRY_DELAY,
+            "a published attempt must reset the backoff"
+        );
     }
 }

@@ -377,6 +377,13 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot_without_keyhive_notifs(240, 241, "Owner", "StaleReader").await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    // The worker's replay task can settle this doc's object sync without any explicit
+    // sync from this test, and stats is a broadcast: a subscriber that arrives late
+    // misses the event and then waits for one that never recurs. The replay path only
+    // needs the keyhive membership to land, which the grant and syncs below arrange, so
+    // the subscription has to predate every path that can settle the doc — not just the
+    // sync this test triggers.
+    let mut settle_stats = pair.right().worker.subscribe_stats();
 
     let mut initial = automerge::Automerge::new();
     initial
@@ -391,10 +398,6 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    // Subscribe before the direct sync so the worker's replay task for this
-    // doc cannot complete unnoticed (stats is a broadcast: late subscribers
-    // miss earlier events).
-    let mut settle_stats = pair.right().worker.subscribe_stats();
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
             .await?;

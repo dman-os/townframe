@@ -263,7 +263,7 @@ impl ReplayRoute {
     fn of(target: &SubscriptionTarget) -> Self {
         match target {
             SubscriptionTarget::Part { part_id, .. } => Self::Part(part_id.clone()),
-            SubscriptionTarget::Object { obj_id } => Self::Object(obj_id.clone()),
+            SubscriptionTarget::Object { obj_id, .. } => Self::Object(obj_id.clone()),
         }
     }
 }
@@ -1037,6 +1037,10 @@ impl BigSyncMachine {
             let _state = self.tasks.cancel(worker.task_id).expect(ERROR_UNRECONIZED);
             worker.part_hints.retain(|part_id| parts.contains(part_id));
             if worker.part_hints.is_empty() && !objects.contains(&obj_id) {
+                // The task is dropped here and nothing will complete it, so the
+                // replay it owed is abandoned: forget the claim instead of keeping
+                // a cursor slot no completion can settle.
+                peer_state.cursor_machine.abandon_obj_sync(&obj_id);
                 continue;
             }
             worker.task_id = self.tasks.spawn(
@@ -1089,6 +1093,11 @@ impl BigSyncMachine {
                 .remove(&obj_id)
                 .expect(ERROR_IMPOSSIBLE);
             let _state = self.tasks.cancel(worker.task_id).expect(ERROR_UNRECONIZED);
+            // Nothing can complete the replay this worker owed, and the object
+            // route that ordered it is gone too (that is what made the worker
+            // stale), so release the claim: a re-added object must reach the
+            // backend again instead of reading as already in flight.
+            peer_state.cursor_machine.abandon_obj_sync(&obj_id);
         }
         peer_state.objects = objects;
         self.stat_machine
@@ -1426,9 +1435,10 @@ impl BigSyncMachine {
             })
             .collect::<Map<_, _>>();
         targets.extend(peer_state.objects.iter().cloned().map(|obj_id| {
+            let cursor = peer_state.cursor_machine.obj_resume_cursor(&obj_id);
             (
                 ReplayRoute::Object(obj_id.clone()),
-                SubscriptionTarget::Object { obj_id },
+                SubscriptionTarget::Object { obj_id, cursor },
             )
         }));
         targets
@@ -1449,8 +1459,13 @@ impl BigSyncMachine {
                 .into_iter()
                 .next()
                 .map(|(part_id, cursor)| SubscriptionTarget::Part { part_id, cursor }),
-            SubscriptionTarget::Object { obj_id } => Some(SubscriptionTarget::Object {
+            SubscriptionTarget::Object { obj_id, .. } => Some(SubscriptionTarget::Object {
                 obj_id: obj_id.clone(),
+                cursor: self
+                    .peers
+                    .get(&peer_id)?
+                    .cursor_machine
+                    .obj_resume_cursor(obj_id),
             }),
         }
     }
@@ -1856,6 +1871,11 @@ impl BigSyncMachine {
                             .expect(ERROR_UNRECONIZED);
                         assert_eq!(worker.task_id, task_id);
                         self.tasks.cancel(task_id).expect(ERROR_UNRECONIZED);
+                        // The stopped task owed the object a replay and the
+                        // removal below only settles membership, so release the
+                        // claim: nothing else can settle it, and keeping it would
+                        // suppress every later delivery of that cursor.
+                        peer_state.cursor_machine.abandon_obj_sync(&obj_id);
                     }
                     Self::schedule_obj_removal(
                         &mut self.tasks,
@@ -1971,8 +1991,13 @@ impl BigSyncMachine {
 
     /// Issue the deferred re-removal (remaining hints) and re-sync (re-added
     /// parts) for an object whose in-flight removal was cancelled by a re-add.
-    /// Called when the cancelled removal task's completion event lands, so the
+    /// Called when the cancelled removal task's terminal event lands, so the
     /// zombie task is guaranteed done and cannot race the new work.
+    ///
+    /// A cancelled removal whose terminal event landed (either outcome: the
+    /// backend applied it, or the task failed). Either way the re-add that
+    /// cancelled it supersedes the removal's intent, which is why an
+    /// unapplied zombie is not a reason to keep its membership lanes owed.
     fn resume_pending_removal(&mut self, peer_id: PeerKey, obj_id: ObjKey) {
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return;
@@ -1986,6 +2011,51 @@ impl BigSyncMachine {
         pending
             .re_added_parts
             .retain(|part_id| peer_state.parts.contains_key(part_id));
+        // Each worker settles every cursor it holds with its own fixed lane, so
+        // each one is handed only the cursors that still owe that lane. A cursor
+        // owing both lanes is handed to both, and whichever task applies its half
+        // settles that half. Handing the whole pool to both workers is what let a
+        // membership cursor settle the sync lane it never owed (panic) and left
+        // that same cursor's membership lane with no worker to settle it (part
+        // watermark stuck).
+        let mut membership_cursors: Set<CursorIndex> = default();
+        let mut sync_cursors: Set<CursorIndex> = default();
+        for &cursor in &pending.cursors {
+            if peer_state.cursor_machine.owes_obj_job_lane(
+                &obj_id,
+                cursor,
+                CursorJobCompletionKind::Membership,
+            ) {
+                membership_cursors.insert(cursor);
+            }
+            if peer_state.cursor_machine.owes_obj_job_lane(
+                &obj_id,
+                cursor,
+                CursorJobCompletionKind::Sync,
+            ) {
+                sync_cursors.insert(cursor);
+            }
+        }
+        // With no re-removal left to run, nothing will ever settle these
+        // membership lanes: their task was cancelled and every hint it held was
+        // cancelled by a re-add, which is the only thing that cancels a hint
+        // (`cancel_obj_removal_hint` is called from the re-add path). The removal
+        // is therefore moot — the object belongs in those parts again — so the
+        // lanes finish here. This is not an acknowledgement of a mutation that
+        // never ran: a Membership completion carries no acknowledgement, the
+        // object's replay position advances only on a Sync completion.
+        let settle_membership = pending.remaining_hints.is_empty();
+        if settle_membership {
+            for &cursor in &membership_cursors {
+                peer_state.cursor_machine.on_obj_sync_job_evt(
+                    obj_id.clone(),
+                    cursor,
+                    CursorJobCompletionKind::Membership,
+                    &mut peer_state.cursors_cmd_buf,
+                );
+            }
+        }
+        let settled_membership = settle_membership && !membership_cursors.is_empty();
         if !pending.remaining_hints.is_empty() {
             let deets = SyncTaskDeets {
                 peer_id: peer_id.clone(),
@@ -2004,7 +2074,7 @@ impl BigSyncMachine {
                 obj_id.clone(),
                 SyncWorkerState {
                     task_id,
-                    cursors: pending.cursors.clone(),
+                    cursors: membership_cursors,
                     part_hints: pending.remaining_hints,
                     remote_payload: None,
                 },
@@ -2012,7 +2082,7 @@ impl BigSyncMachine {
         }
         if !pending.re_added_parts.is_empty() {
             let deets = SyncTaskDeets {
-                peer_id,
+                peer_id: peer_id.clone(),
                 obj_id: obj_id.clone(),
                 remote_payload: pending.remote_payload.clone(),
             };
@@ -2025,14 +2095,17 @@ impl BigSyncMachine {
                 }),
             );
             peer_state.sync_workers.insert(
-                obj_id,
+                obj_id.clone(),
                 SyncWorkerState {
                     task_id,
-                    cursors: pending.cursors,
+                    cursors: sync_cursors,
                     part_hints: pending.re_added_parts,
                     remote_payload: pending.remote_payload,
                 },
             );
+        }
+        if settled_membership {
+            self.drain_cursor_machine_cmds(peer_id);
         }
     }
 }
@@ -2138,6 +2211,10 @@ impl BigSyncMachine {
                             .expect(ERROR_UNRECONIZED);
                         assert_eq!(worker.task_id, task_id);
                         self.tasks.cancel(task_id).expect(ERROR_UNRECONIZED);
+                        // Same as the cursor-strategy removal above: the stopped
+                        // task owed the object a replay, and the removal that
+                        // follows settles membership only.
+                        peer_state.cursor_machine.abandon_obj_sync(&obj_id);
                     }
                     Self::schedule_obj_removal(
                         &mut self.tasks,
@@ -2444,6 +2521,22 @@ impl BigSyncMachine {
         };
         peer_state.remove_workers.remove(&evt.obj_id);
         for &cursor in &cursors {
+            // The lane can be gone: a re-add's supersede drops a cursor's
+            // membership lane, and this task was already in flight then.
+            // Settling a lane the waiter no longer owes panics the job board.
+            if !peer_state.cursor_machine.owes_obj_job_lane(
+                &evt.obj_id,
+                cursor,
+                CursorJobCompletionKind::Membership,
+            ) {
+                tracing::debug!(
+                    peer_id = %evt.peer_id,
+                    obj_id = %evt.obj_id,
+                    cursor,
+                    "removal completion holds a cursor that no longer owes the membership lane",
+                );
+                continue;
+            }
             peer_state.cursor_machine.on_obj_sync_job_evt(
                 evt.obj_id.clone(),
                 cursor,
@@ -2575,6 +2668,22 @@ impl BigSyncMachine {
                 part_hints.remove(&part_id);
             }
             for &cursor in &completion.cursors {
+                // A removal can supersede this cursor while the sync it started
+                // is still in flight, dropping the sync lane. Settling a lane
+                // the waiter no longer owes panics the job board.
+                if !peer_state.cursor_machine.owes_obj_job_lane(
+                    &completion.obj_id,
+                    cursor,
+                    CursorJobCompletionKind::Sync,
+                ) {
+                    tracing::debug!(
+                        peer_id = %evt.peer_id,
+                        obj_id = %completion.obj_id,
+                        cursor,
+                        "sync completion holds a cursor that no longer owes the sync lane",
+                    );
+                    continue;
+                }
                 peer_state.cursor_machine.on_obj_sync_job_evt(
                     completion.obj_id.clone(),
                     cursor,
@@ -2729,6 +2838,62 @@ mod tests {
             "waiter {} still stranded after peer removal: need_set={:?}",
             1,
             stranded.get(&1),
+        );
+    }
+
+    /// An object route carries the position its replay has reached, so a store is asked
+    /// for the object's next events instead of its first ones. Without it a route with
+    /// more than one page re-reads its first page forever.
+    #[test]
+    fn an_object_route_is_refreshed_with_the_cursor_its_replay_acknowledged() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: [obj.clone()].into(),
+        }));
+
+        let route = SubscriptionTarget::Object {
+            obj_id: obj.clone(),
+            cursor: 0,
+        };
+        assert_eq!(
+            machine.refreshed_replay_target(peer.clone(), &route),
+            Some(SubscriptionTarget::Object {
+                obj_id: obj.clone(),
+                cursor: 0,
+            }),
+            "nothing is acknowledged yet, so the route starts at the beginning"
+        );
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 7,
+                    part_ids: Vec::new(),
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 7}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+            peer_state.cursor_machine.on_obj_sync_job_evt(
+                obj.clone(),
+                7,
+                CursorJobCompletionKind::Sync,
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+
+        assert_eq!(
+            machine.refreshed_replay_target(peer.clone(), &route),
+            Some(SubscriptionTarget::Object {
+                obj_id: obj.clone(),
+                cursor: 7,
+            }),
+            "the re-issued page resumes from the acknowledged replay position"
         );
     }
 
@@ -3027,6 +3192,236 @@ mod tests {
             !machine.peers[&peer].pending_removals.contains_key(&obj),
             "pending removal must be consumed by the resume"
         );
+    }
+
+    /// The real event path: a `Removed` then a `Changed` for the same part and
+    /// object cancels the removal task and leaves two cursors pending — one
+    /// owing the membership lane, one owing the sync lane.
+    ///
+    /// Handing that whole pool to both workers settled the membership cursor's
+    /// sync lane (which it never owed: panic) and left its membership lane with
+    /// no worker at all (part watermark stuck). Each lane must be settled by the
+    /// task that applies that half of the work, and by nothing else.
+    #[test]
+    fn readd_settles_each_lane_from_the_worker_that_owes_it() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+        {
+            // The part is past replay, so a cursor advance shows up as its
+            // replay cursor instead of being dropped as pending.
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state
+                .parts
+                .get_mut(&part)
+                .expect(ERROR_UNRECONIZED)
+                .strat = PeerPartStrategy::Cursor(CursorState { replay_cursor: 0 });
+        }
+
+        // Removed from the part: cursor 1 owes the membership lane.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 1,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        assert_eq!(
+            machine.peers[&peer].remove_workers[&obj].cursors,
+            [1].into()
+        );
+        machine.drain_sync_spawn_queue();
+
+        // Re-added to the same part: cursor 2 owes the sync lane, the removal
+        // hint is cancelled, and the re-sync is deferred until the zombie's
+        // terminal event lands.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 2,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 2}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        {
+            let pending = &machine.peers[&peer].pending_removals[&obj];
+            assert_eq!(pending.cursors, [1, 2].into());
+            assert_eq!(pending.re_added_parts, [part.clone()].into());
+            assert!(pending.remaining_hints.is_empty());
+        }
+        assert!(machine.drain_sync_spawn_queue().next().is_none());
+        assert_eq!(
+            part_replay_cursor(&machine, &peer, &part),
+            0,
+            "neither lane has settled yet, so the part must not have advanced"
+        );
+
+        // The zombie's completion: the removal it queued did run, so cursor 1's
+        // membership lane settles here, and the re-sync is issued for the
+        // re-added part alone.
+        machine.handle_evt(BigSyncEvent::RemoveCompleted(RemoveCompletedEvent {
+            task_id: removal_task,
+            peer_id: peer.clone(),
+            obj_id: obj.clone(),
+        }));
+        assert_eq!(
+            part_replay_cursor(&machine, &peer, &part),
+            1,
+            "the membership lane settling must advance the part to its own cursor"
+        );
+        let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].kind, SyncTaskKind::Sync);
+        let sync_task = machine.peers[&peer].sync_workers[&obj].task_id;
+        assert_eq!(
+            machine.peers[&peer].sync_workers[&obj].cursors,
+            [2].into(),
+            "the sync worker must not be handed the membership-only cursor"
+        );
+
+        // Completing the re-sync settles cursor 2's sync lane and advances the
+        // part past it.
+        machine.handle_evt(BigSyncEvent::SyncCompleted(SyncCompletedEvent {
+            task_id: sync_task,
+            peer_id: peer.clone(),
+            completion: SyncTaskCompletion {
+                obj_id: obj.clone(),
+                deets: SyncCompletionDeets::ChangedObject,
+            },
+        }));
+        assert_eq!(part_replay_cursor(&machine, &peer, &part), 2);
+        let cursor_machine = &machine.peers[&peer].cursor_machine;
+        assert!(
+            !cursor_machine.owes_obj_job_lane(&obj, 1, CursorJobCompletionKind::Membership),
+            "the membership lane must be settled once its task completed"
+        );
+        assert!(
+            !cursor_machine.owes_obj_job_lane(&obj, 2, CursorJobCompletionKind::Sync),
+            "the sync lane must be settled once its task completed"
+        );
+        assert!(
+            !cursor_machine.owes_obj_job_lane(&obj, 1, CursorJobCompletionKind::Sync),
+            "the membership cursor was never owed a sync lane"
+        );
+    }
+
+    #[test]
+    fn a_failed_cancelled_removal_still_finishes_its_membership_lanes() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state
+                .parts
+                .get_mut(&part)
+                .expect(ERROR_UNRECONIZED)
+                .strat = PeerPartStrategy::Cursor(CursorState { replay_cursor: 0 });
+        }
+
+        // Removed from the part: cursor 1 owes the membership lane.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 1,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        let removal_task = machine.peers[&peer].remove_workers[&obj].task_id;
+        machine.drain_sync_spawn_queue();
+
+        // Re-added before the removal landed: the removal's only hint is
+        // cancelled, so no re-removal is left to run and the re-sync defers
+        // until the cancelled task's terminal event lands.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 2,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 2}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        {
+            let pending = &machine.peers[&peer].pending_removals[&obj];
+            assert!(pending.remaining_hints.is_empty());
+            assert_eq!(pending.re_added_parts, [part.clone()].into());
+        }
+        assert_eq!(part_replay_cursor(&machine, &peer, &part), 0);
+
+        // The cancelled task never applied the removal. The re-add supersedes
+        // it, and with no re-removal left nothing else could ever settle cursor
+        // 1's membership lane, so it must finish here instead of freezing the
+        // part's cursor for the life of the route.
+        machine.handle_evt(BigSyncEvent::RemoveFailed(RemoveFailedEvent {
+            task_id: removal_task,
+            peer_id: peer.clone(),
+            obj_id: obj.clone(),
+            err: eyre::eyre!("removal task failed"),
+        }));
+        assert_eq!(
+            part_replay_cursor(&machine, &peer, &part),
+            1,
+            "the mooted membership lane must settle even though the task failed"
+        );
+        assert!(
+            !machine.peers[&peer].cursor_machine.owes_obj_job_lane(
+                &obj,
+                1,
+                CursorJobCompletionKind::Membership
+            ),
+            "no lane may be left owed that no worker will settle"
+        );
+        let spawned: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(spawned.len(), 1, "the re-add still needs its sync");
+        assert_eq!(spawned[0].kind, SyncTaskKind::Sync);
+        assert_eq!(machine.peers[&peer].sync_workers[&obj].cursors, [2].into());
+    }
+
+    fn part_replay_cursor(machine: &BigSyncMachine, peer: &PeerKey, part: &PartKey) -> CursorIndex {
+        let part = machine
+            .peers
+            .get(peer)
+            .expect(ERROR_UNRECONIZED)
+            .parts
+            .get(part)
+            .expect(ERROR_UNRECONIZED);
+        match &part.strat {
+            PeerPartStrategy::Cursor(state) => state.replay_cursor,
+            _ => panic!("the part must be in its cursor phase for an advance to be visible"),
+        }
     }
 
     #[test]

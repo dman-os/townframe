@@ -3398,7 +3398,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
     > {
         Ok(Ok(self
             .target_part_store
-            .get_changed_buckets(req.inner)
+            .get_changed_buckets(req.inner, self.subscriber.clone())
             .await?))
     }
 
@@ -3410,7 +3410,10 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             Result<big_sync_core::rpc::LeafBucketResult, big_sync_core::rpc::LeafBucketsError>,
         >,
     > {
-        Ok(Ok(self.target_part_store.leaf_buckets(req.inner).await?))
+        Ok(Ok(self
+            .target_part_store
+            .leaf_buckets(req.inner, self.subscriber.clone())
+            .await?))
     }
 }
 

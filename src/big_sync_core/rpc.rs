@@ -231,6 +231,13 @@ structstruck::strike! {
         pub since: CursorIndex,
         pub buckets: Vec<LeafBucketRequest>,
         pub seed: FingerprintSeed,
+        /// RPC impls should return at most this many entries per requested bucket.
+        ///
+        /// A hint rather than a bound: zero means no preference, and the impl returns
+        /// the smallest useful page of one entry, because a page with no entries reads
+        /// as `done` while entries remain. The responder caps it (as it caps
+        /// [`ReplayPageRequest::limit`]), so asking above the cap gets the cap rather
+        /// than an error.
         pub limit_hint: u32,
     }
 }
@@ -321,6 +328,12 @@ pub enum SubscriptionTarget {
     },
     Object {
         obj_id: ObjKey,
+        /// Where to resume this object's replay. An object route has no part of
+        /// its own whose cursor could carry the position, and the store is the
+        /// side that materializes the object's derived part, so the position
+        /// travels with the route. Without it every page asks for the object's
+        /// events from the start again.
+        cursor: CursorIndex,
     },
 }
 

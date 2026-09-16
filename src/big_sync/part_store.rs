@@ -8,7 +8,11 @@ use big_sync_core::rpc::{
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
     PartSummary, ReplayPageOutcome, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{BuckId, ByteKey, ObjKey, PartKey, PeerKey, mpsc};
+use big_sync_core::{BuckId, ObjKey, PartKey, PeerKey, mpsc};
+// Only the test-support contract module uses this, so gate it the same way that
+// module is gated; otherwise a plain lib build reports it as unused.
+#[cfg(any(test, feature = "test-support"))]
+use big_sync_core::ByteKey;
 
 /// The logical object and part routes represented by the part-store frontier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -252,13 +256,25 @@ pub trait HostPartStore: Send + Sync {
         &self,
         parts: HashSet<PartKey>,
     ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>>;
+    /// One page of a part's changed bucket summaries, for `subscriber`.
+    ///
+    /// A part `subscriber` may not read answers as [`ListPartsError::UnkownParts`],
+    /// exactly as a part this scope does not have: a refusal has to be
+    /// indistinguishable from an unknown part, because an empty or partial page
+    /// still confirms that the part exists.
     async fn get_changed_buckets(
         &self,
         req: GetChangedBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<Vec<BucketSummary>, ListPartsError>>;
+    /// One page of the entries of each requested bucket, for `subscriber`.
+    ///
+    /// A part `subscriber` may not read answers as [`LeafBucketsError::UnkownPart`],
+    /// exactly as a part this scope does not have does.
     async fn leaf_buckets(
         &self,
         req: LeafBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>>;
     async fn member_count(&self, part_id: PartKey) -> Res<u64>;
     /// The relevance `principal` is behind on `part_id` at `since`.
@@ -324,14 +340,24 @@ pub trait HostPartStore: Send + Sync {
         subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>>;
 
-    /// Whether a page request for `target` is denied for `subscriber`.
+    /// Whether a peer-facing read of `target` must be refused to `subscriber`.
     ///
-    /// A page uses this to answer "not for you" rather than an empty page, which
-    /// a caller could otherwise only read as "nothing to send". Every store answers this
-    /// for itself: a store that filters its subscriptions per recipient has something to
-    /// deny, and a store that genuinely hands every subscriber the same stream must say so
-    /// explicitly rather than inherit an assumed `false`.
-    async fn page_denied(&self, target: &SubscriptionTarget, subscriber: PeerKey) -> Res<bool>;
+    /// The one authorization answer for the whole peer-facing read surface: a page,
+    /// a bucket walk and a part summary all ask this, and all of them answer a
+    /// refusal as if the part were unknown, because a refusal that looks different
+    /// from one confirms that the part exists.
+    ///
+    /// `permitted_parts` decides it per part, so a store that filters its
+    /// subscriptions per recipient is refused here too, and a store that hands every
+    /// subscriber the same stream says so there rather than inheriting an answer
+    /// here.
+    async fn read_denied(&self, target: ReadTarget, subscriber: PeerKey) -> Res<bool> {
+        let (scope, obj_id) = target.into_scope();
+        Ok(self
+            .permitted_parts(scope, obj_id, Some(subscriber))
+            .await?
+            .is_some_and(|readable| readable.is_empty()))
+    }
 
     /// One bounded, filtered page of a single target's events, held while there
     /// is nothing to send.
@@ -362,11 +388,16 @@ pub trait HostPartStore: Send + Sync {
                 }
                 *cursor
             }
-            // An object target replays its derived part from the start; the store
-            // materializes that part while subscribing.
-            SubscriptionTarget::Object { .. } => 0,
+            // An object target carries no part cursor of its own: the client sends
+            // the position its replay has reached, and the store materializes the
+            // object's derived part while subscribing. Replaying from the start on
+            // every page would re-read the object's first page forever.
+            SubscriptionTarget::Object { cursor, .. } => *cursor,
         };
-        if self.page_denied(&target, subscriber.clone()).await? {
+        if self
+            .read_denied(ReadTarget::from(&target), subscriber.clone())
+            .await?
+        {
             return Ok(ReplayPageOutcome::Unauthorized);
         }
 
@@ -386,6 +417,18 @@ pub trait HostPartStore: Send + Sync {
             }
         };
 
+        // `limit` is documented as an upper bound on the events this page may
+        // carry, so a zero limit carries none. Answering here, before anything is
+        // drained, is what makes the bound deterministic: comparing after a push
+        // would hand back one event whenever one happened to be waiting. The
+        // resume point stays the caller's own position rather than `None`, because
+        // nothing was drained and an empty page may not claim caught-up.
+        if limit == 0 {
+            return Ok(ReplayPageOutcome::Events(PartPage {
+                events: Vec::new(),
+                next_cursor: Some(cursor),
+            }));
+        }
         let limit = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
         let mut events = Vec::new();
         let mut resume = None;
@@ -404,13 +447,13 @@ pub trait HostPartStore: Send + Sync {
                 () = &mut hold => break,
             };
             let (evt_cursor, event) = match evt {
-                // The replay half is drained. Answer as soon as the page holds
-                // something; an empty replay means the caller is caught up, so
-                // keep holding for a live event instead of answering nothing at
-                // once.
+                // The replay half is drained: this caller is caught up. Remember
+                // it — an empty page may only ever claim "caught up" because the
+                // replay said so, never because nothing arrived in time — and keep
+                // holding for a live event instead of answering nothing at once.
                 SubEvent::ReplayComplete => {
+                    drained = true;
                     if !events.is_empty() {
-                        drained = true;
                         break;
                     }
                     continue;
@@ -428,6 +471,14 @@ pub trait HostPartStore: Send + Sync {
             events,
             // `Some` means more is waiting, so the caller resumes from it.
             // `None` means the log is caught up as of the last event.
+            //
+            // NOTE: an empty page that expires on the hold *without* the replay half
+            // having said `ReplayComplete` also lands here as `None`, which reads as
+            // caught up but is only "nothing arrived in time". That is deliberately
+            // left as-is here: a caller re-issuing from a cursor derived from a
+            // page that returned nothing would re-drive the responder's replay, and
+            // the verdict wants to come from the replay's own completion rather than
+            // from the page's resume point.
             next_cursor: if drained { None } else { resume },
         }))
     }
@@ -547,6 +598,38 @@ pub enum PartScope {
     FromObject,
 }
 
+/// What a peer-facing read is about.
+///
+/// A page names a part or an object; a bucket walk and a part summary name a part.
+/// All of them reduce to the same question — may `subscriber` read it — which
+/// [`HostPartStore::read_denied`] answers through `permitted_parts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadTarget {
+    Part(PartKey),
+    Object(ObjKey),
+}
+
+impl ReadTarget {
+    /// The `(scope, obj_id)` pair `permitted_parts` resolves this target through.
+    fn into_scope(self) -> (PartScope, ObjKey) {
+        match self {
+            // `permitted_parts` reads the object only for a `FromObject` scope, so a
+            // part is asked about directly.
+            Self::Part(part_id) => (PartScope::Part(part_id), ObjKey::new([0u8; 32])),
+            Self::Object(obj_id) => (PartScope::FromObject, obj_id),
+        }
+    }
+}
+
+impl From<&SubscriptionTarget> for ReadTarget {
+    fn from(target: &SubscriptionTarget) -> Self {
+        match target {
+            SubscriptionTarget::Part { part_id, .. } => Self::Part(part_id.clone()),
+            SubscriptionTarget::Object { obj_id, .. } => Self::Object(obj_id.clone()),
+        }
+    }
+}
+
 /// The range of stored bucket indices belonging to `bucket_id`.
 ///
 /// ADR 012 decision 1: the index is a hash of the object key, so a bucket's members are a
@@ -578,6 +661,31 @@ pub mod contract {
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use std::collections::BTreeSet;
+
+    /// The peer every bucket read in the contract modules is asked as.
+    ///
+    /// A bucket walk is a peer-facing read, so it refuses a part its subscriber may
+    /// not read exactly as it refuses one the scope does not have. The helpers below
+    /// grant this principal Read on the parts they walk, which is what a permitted
+    /// peer holds; the refusal side is pinned by the responder's own test.
+    pub(crate) const CONTRACT_BUCKET_SUBSCRIBER: u8 = 0xf0;
+
+    pub(crate) async fn grant_bucket_read<S>(
+        store: &S,
+        parts: impl IntoIterator<Item = PartKey>,
+    ) -> Res<PeerKey>
+    where
+        S: HostPartStore + Sync + ?Sized,
+    {
+        use keyhive_core::access::Access;
+
+        let subscriber = PeerKey::new([CONTRACT_BUCKET_SUBSCRIBER; 32]);
+        let agents = HashMap::from([(subscriber.clone(), Access::Read)]);
+        for part in parts {
+            store.set_part_members(part, agents.clone()).await?;
+        }
+        Ok(subscriber)
+    }
 
     // pub async fn assert_scoped_obj_id_distribution<R>(
     //     resolver: &R,
@@ -696,6 +804,7 @@ pub mod contract {
         let live_ids: BTreeSet<_> = live_ids.iter().cloned().collect();
         let dead_ids: BTreeSet<_> = dead_ids.iter().cloned().collect();
         let expected = expected_bucket_summary(store, &live_ids, &dead_ids).await?;
+        let subscriber = grant_bucket_read(store, [part_id.clone()]).await?;
 
         assert_eq!(
             store.member_count(part_id.clone()).await?,
@@ -711,13 +820,16 @@ pub mod contract {
         assert_eq!(direct.fp, expected.fp);
 
         let changed = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id,
-                offset: BuckId::ROOT,
-                to_level: BuckId::ROOT.level(),
-                since: 0,
-                limit_hint: 1,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id,
+                    offset: BuckId::ROOT,
+                    to_level: BuckId::ROOT.level(),
+                    since: 0,
+                    limit_hint: 1,
+                },
+                subscriber,
+            )
             .await?;
         let changed = changed.expect(ERROR_IMPOSSIBLE);
         if expected.len == 0 {
@@ -765,21 +877,25 @@ pub mod contract {
 
         let expected: Vec<_> = live_ids.union(&dead_ids).cloned().collect();
         let limit_hint = limit_hint.max(1);
+        let subscriber = grant_bucket_read(store, [part_id.clone()]).await?;
         let mut seen = BTreeSet::new();
         let mut after = None;
 
         loop {
             let result = store
-                .leaf_buckets(LeafBucketsRequest {
-                    part_id: part_id.clone(),
-                    since: 0,
-                    buckets: vec![LeafBucketRequest {
-                        buck_id: BuckId::ROOT,
-                        after,
-                    }],
-                    seed,
-                    limit_hint,
-                })
+                .leaf_buckets(
+                    LeafBucketsRequest {
+                        part_id: part_id.clone(),
+                        since: 0,
+                        buckets: vec![LeafBucketRequest {
+                            buck_id: BuckId::ROOT,
+                            after,
+                        }],
+                        seed,
+                        limit_hint,
+                    },
+                    subscriber.clone(),
+                )
                 .await?;
             let result = result.expect(ERROR_IMPOSSIBLE);
             assert_eq!(result.seed, seed);
@@ -875,6 +991,8 @@ pub mod host_contract {
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use keyhive_core::access::Access;
     use tokio::time::{Duration, timeout};
+
+    use super::contract::grant_bucket_read;
 
     #[async_trait]
     pub trait HostPartStoreContractHarness {
@@ -1005,6 +1123,9 @@ pub mod host_contract {
         assert_local_revision_reader_all_contract(harness).await?;
         assert_latest_revision_is_a_read_contract(harness).await?;
         assert_page_outcome_contract(harness).await?;
+        assert_object_route_resumes_from_its_cursor(harness).await?;
+        assert_zero_page_limit_carries_no_events(harness).await?;
+        assert_bucket_limit_hints_agree_across_endpoints(harness).await?;
         assert_subscribing_allocates_no_revision_contract(harness).await?;
         Ok(())
     }
@@ -1063,6 +1184,7 @@ pub mod host_contract {
                     lower_bound: 0,
                     targets: HashSet::from([SubscriptionTarget::Object {
                         obj_id: obj_id.clone(),
+                        cursor: 0,
                     }]),
                 },
                 subscriber,
@@ -1079,6 +1201,273 @@ pub mod host_contract {
             store.latest_revision().await?,
             before,
             "subscribing to an object must not allocate a revision"
+        );
+        Ok(())
+    }
+
+    /// An object route must resume from the cursor the client sends.
+    ///
+    /// The route has no part cursor of its own, so a store that ignores the position
+    /// it is handed replays the object's events from the start on every page: the
+    /// caller re-issues, reads the same first page again, and never reaches the
+    /// second. One object with two changes and a page limit of one is therefore two
+    /// pages — but only if the position travels with the route.
+    pub async fn assert_object_route_resumes_from_its_cursor<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(240);
+        let obj = test_obj(241);
+        let member = big_sync_core::PeerKey::new([242u8; 32]);
+
+        store.ensure_part(part.clone()).await?;
+        store
+            .set_part_members(
+                part.clone(),
+                std::collections::HashMap::from([(member.clone(), Access::Read)]),
+            )
+            .await?;
+        // Two changes to the same member object, so its events span two cursors with
+        // distinguishable payloads.
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("object-route", 0),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("object-route", 1))
+            .await?;
+
+        /// One page of an object route. The subscription a page drains is produced by
+        /// a spawned task, so a page can come back empty before that task delivered
+        /// anything; re-issuing from the returned cursor is how a caller resumes.
+        async fn object_page(
+            store: &dyn HostPartStore,
+            obj: &ObjKey,
+            cursor: CursorIndex,
+            member: &big_sync_core::PeerKey,
+        ) -> Res<big_sync_core::rpc::PartPage> {
+            const PAGE_HOLD: Duration = Duration::from_millis(50);
+            const ATTEMPTS: u8 = 8;
+            for _ in 0..ATTEMPTS {
+                let outcome = store
+                    .replay_page(
+                        SubscriptionTarget::Object {
+                            obj_id: obj.clone(),
+                            cursor,
+                        },
+                        1,
+                        member.clone(),
+                        PAGE_HOLD,
+                    )
+                    .await?;
+                match outcome {
+                    ReplayPageOutcome::Events(page) if !page.events.is_empty() => return Ok(page),
+                    ReplayPageOutcome::Events(_) => continue,
+                    other => panic!("a granted member reads an object page, got {other:?}"),
+                }
+            }
+            panic!("an object route with buffered events produced no page");
+        }
+
+        fn changed(event: &PartEvent) -> &big_sync_core::rpc::ObjChanged {
+            let PartEvent::Changed(changed) = event else {
+                panic!("an object's own events arrive as changes, got {event:?}");
+            };
+            changed
+        }
+
+        let first = object_page(store, &obj, 0, &member).await?;
+        let first_cursor = changed(&first.events[0]).cursor;
+
+        let second = object_page(store, &obj, first_cursor, &member).await?;
+        let second_cursor = changed(&second.events[0]).cursor;
+
+        // A store that ignores the cursor it is handed answers the same first page
+        // again, so this is the assertion that separates resuming from repeating.
+        // (The payload cannot carry it: a store may report the object's current
+        // payload on every event.)
+        assert!(
+            second_cursor > first_cursor,
+            "resuming at cursor {first_cursor} must read the object's next event, not the same page again, got {second_cursor}",
+        );
+        Ok(())
+    }
+
+    /// `limit` is an upper bound on the events a page may carry, so a zero limit
+    /// carries none — whatever happens to be waiting behind it. The bound is applied
+    /// before anything is emitted: comparing it after a push made a zero-limit page
+    /// hand back one event whenever one was buffered, which is a bound only by
+    /// accident.
+    ///
+    /// A page that carried nothing must not claim caught-up either, since nothing was
+    /// drained: the caller's own resume point comes back, so a caller that asked for
+    /// no events learns that instead of learning that it is done.
+    pub async fn assert_zero_page_limit_carries_no_events<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(243);
+        let obj = test_obj(244);
+        let member = big_sync_core::PeerKey::new([245u8; 32]);
+
+        store.ensure_part(part.clone()).await?;
+        store
+            .set_part_members(
+                part.clone(),
+                std::collections::HashMap::from([(member.clone(), Access::Read)]),
+            )
+            .await?;
+        // Something for a store that ignores the bound to hand back.
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("zero-limit", 0),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("zero-limit", 1))
+            .await?;
+
+        for attempt in 0..4 {
+            let outcome = store
+                .replay_page(
+                    SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: 0,
+                    },
+                    0,
+                    member.clone(),
+                    Duration::from_millis(200),
+                )
+                .await?;
+            let ReplayPageOutcome::Events(page) = outcome else {
+                panic!("a granted part answers a page, got {outcome:?}");
+            };
+            assert!(
+                page.events.is_empty(),
+                "a zero limit must carry no events, attempt {attempt} got {}",
+                page.events.len()
+            );
+            assert!(
+                page.next_cursor.is_some(),
+                "a page that carried nothing must not claim caught-up"
+            );
+        }
+
+        // The bound is what suppressed them, not an empty part: a page of one does
+        // hand an event back. A store's replay runs on a spawned subscription, so
+        // re-issuing is how a caller waits for it to deliver.
+        let mut delivered = 0;
+        for _ in 0..8 {
+            let outcome = store
+                .replay_page(
+                    SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: 0,
+                    },
+                    1,
+                    member.clone(),
+                    Duration::from_millis(200),
+                )
+                .await?;
+            let ReplayPageOutcome::Events(page) = outcome else {
+                panic!("a granted part answers a page, got {outcome:?}");
+            };
+            if !page.events.is_empty() {
+                delivered = page.events.len();
+                break;
+            }
+        }
+        assert_eq!(delivered, 1, "a page of one carries exactly one event");
+        Ok(())
+    }
+
+    /// The two bucket endpoints read their `limit_hint` differently, and every store
+    /// must agree on which is which.
+    ///
+    /// `GetChangedBucketsRequest::limit_hint` is documented as the response's page
+    /// bound, with `BuckId::ARITY` extra siblings allowed, so a zero hint is a
+    /// zero-bucket page. `LeafBucketsRequest::limit_hint` is documented as a hint
+    /// rather than a bound, so zero means no preference and the smallest useful leaf
+    /// page is one entry — an empty page there would tell a pager it is done while
+    /// entries remain, because `done` is computed from where the page ended.
+    pub async fn assert_bucket_limit_hints_agree_across_endpoints<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(246);
+        let bucket = BuckId::new(1, 5);
+        let obj_a = obj_in_bucket(bucket, 1);
+        let obj_b = obj_in_bucket(bucket, 2);
+        let seed = FingerprintSeed::new(0x1111_2222, 0x3333_4444);
+
+        store.ensure_part(part.clone()).await?;
+        let subscriber = grant_bucket_read(store, [part.clone()]).await?;
+        seed_live_obj(
+            store,
+            obj_a,
+            payload("hint-a", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            obj_b,
+            payload("hint-b", 2),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+
+        let none = store
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: BuckId::ROOT,
+                    to_level: bucket.level(),
+                    since: 0,
+                    limit_hint: 0,
+                },
+                subscriber.clone(),
+            )
+            .await?
+            .expect("a granted part answers a bucket walk");
+        assert!(
+            none.is_empty(),
+            "a zero page bound carries no buckets, got {}",
+            none.len()
+        );
+
+        let page = store
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: bucket,
+                        after: None,
+                    }],
+                    seed,
+                    limit_hint: 0,
+                },
+                subscriber,
+            )
+            .await?
+            .expect("a granted part answers a leaf walk");
+        let page = page
+            .bucks
+            .get(&bucket)
+            .expect("the requested bucket has a page");
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "a zero leaf hint means no preference, so the smallest useful page is one entry"
         );
         Ok(())
     }
@@ -1359,6 +1748,7 @@ pub mod host_contract {
                 targets: HashSet::from([
                     big_sync_core::rpc::SubscriptionTarget::Object {
                         obj_id: obj.clone(),
+                        cursor: 0,
                     },
                     big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part_a.clone(),
@@ -1429,6 +1819,7 @@ pub mod host_contract {
                 lower_bound: replay_through,
                 targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
                     obj_id: missing_obj,
+                    cursor: 0,
                 }]),
             })
             .await??;
@@ -1618,6 +2009,7 @@ pub mod host_contract {
         let obj_c = obj_in_bucket(bucket_c, 3);
 
         store.ensure_part(part.clone()).await?;
+        let subscriber = grant_bucket_read(store, [part.clone()]).await?;
         seed_live_obj(
             store,
             obj_a.clone(),
@@ -1640,14 +2032,19 @@ pub mod host_contract {
         )
         .await?;
 
+        // An unknown part and an unreadable one answer alike: `unknown` is never
+        // granted, so this is both the unknown case and the refusal shape.
         match store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: unknown.clone(),
-                offset: bucket_a,
-                to_level: bucket_a.level(),
-                since: 0,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: unknown.clone(),
+                    offset: bucket_a,
+                    to_level: bucket_a.level(),
+                    since: 0,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
             .await?
         {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
@@ -1657,13 +2054,16 @@ pub mod host_contract {
         }
 
         let changed = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: bucket_a,
-                to_level: bucket_a.level(),
-                since: 0,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: bucket_a,
+                    to_level: bucket_a.level(),
+                    since: 0,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
             .await??
             .into_iter()
             .collect::<Vec<_>>();
@@ -1682,13 +2082,16 @@ pub mod host_contract {
         }
 
         let changed_from_b = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: bucket_b,
-                to_level: bucket_b.level(),
-                since: 0,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: bucket_b,
+                    to_level: bucket_b.level(),
+                    since: 0,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
             .await??
             .into_iter()
             .collect::<Vec<_>>();
@@ -1705,13 +2108,16 @@ pub mod host_contract {
         // scan instead of one exchange per level. The page is still in bucket order, and it
         // now contains levels the cursor's own level never covered.
         let mixed = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: BuckId::ROOT,
-                to_level: BuckId::MAX_LEVEL,
-                since: 0,
-                limit_hint: 64,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: BuckId::ROOT,
+                    to_level: BuckId::MAX_LEVEL,
+                    since: 0,
+                    limit_hint: 64,
+                },
+                subscriber.clone(),
+            )
             .await??
             .into_iter()
             .collect::<Vec<_>>();
@@ -1738,13 +2144,16 @@ pub mod host_contract {
             .max()
             .expect(ERROR_IMPOSSIBLE);
         let nothing = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: bucket_a,
-                to_level: bucket_a.level(),
-                since: cutoff,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: bucket_a,
+                    to_level: bucket_a.level(),
+                    since: cutoff,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
             .await??;
         assert!(nothing.is_empty());
 
@@ -1756,13 +2165,16 @@ pub mod host_contract {
         )
         .await?;
         let changed_after = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: bucket_a,
-                to_level: bucket_a.level(),
-                since: cutoff,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: bucket_a,
+                    to_level: bucket_a.level(),
+                    since: cutoff,
+                    limit_hint: 16,
+                },
+                subscriber,
+            )
             .await??
             .into_iter()
             .collect::<Vec<_>>();
@@ -1787,6 +2199,7 @@ pub mod host_contract {
         let seed = FingerprintSeed::new(0x4444_5555, 0x6666_7777);
 
         store.ensure_part(part.clone()).await?;
+        let subscriber = grant_bucket_read(store, [part.clone()]).await?;
         store
             .add_obj_to_parts(obj.clone(), vec![part.clone()])
             .await?;
@@ -1808,16 +2221,19 @@ pub mod host_contract {
         );
 
         let leaf_before = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part.clone(),
-                since: 0,
-                buckets: vec![LeafBucketRequest {
-                    buck_id: bucket,
-                    after: None,
-                }],
-                seed,
-                limit_hint: 8,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: bucket,
+                        after: None,
+                    }],
+                    seed,
+                    limit_hint: 8,
+                },
+                subscriber.clone(),
+            )
             .await??
             .bucks
             .remove(&bucket)
@@ -1863,29 +2279,35 @@ pub mod host_contract {
         assert!(bucket_after.changed_at > bucket_before.changed_at);
 
         let changed = store
-            .get_changed_buckets(GetChangedBucketsRequest {
-                part_id: part.clone(),
-                offset: bucket,
-                to_level: bucket.level(),
-                since: bucket_before.changed_at,
-                limit_hint: 16,
-            })
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: part.clone(),
+                    offset: bucket,
+                    to_level: bucket.level(),
+                    since: bucket_before.changed_at,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
             .await??
             .into_iter()
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![bucket_after]);
 
         let leaf_after = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part.clone(),
-                since: bucket_before.changed_at,
-                buckets: vec![LeafBucketRequest {
-                    buck_id: bucket,
-                    after: None,
-                }],
-                seed,
-                limit_hint: 8,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: bucket_before.changed_at,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: bucket,
+                        after: None,
+                    }],
+                    seed,
+                    limit_hint: 8,
+                },
+                subscriber,
+            )
             .await??
             .bucks
             .remove(&bucket)
@@ -1948,6 +2370,7 @@ pub mod host_contract {
         let seed = FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd);
 
         store.ensure_part(part.clone()).await?;
+        let subscriber = grant_bucket_read(store, [part.clone()]).await?;
         seed_live_obj(
             store,
             a2.clone(),
@@ -1978,17 +2401,22 @@ pub mod host_contract {
         )
         .await?;
 
+        // `unknown` is never granted, so it pins the unknown shape and the refusal
+        // shape at once.
         match store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: unknown,
-                since: 0,
-                buckets: vec![LeafBucketRequest {
-                    buck_id: bucket_a,
-                    after: None,
-                }],
-                seed,
-                limit_hint: 2,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: unknown,
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: bucket_a,
+                        after: None,
+                    }],
+                    seed,
+                    limit_hint: 2,
+                },
+                subscriber.clone(),
+            )
             .await?
         {
             Err(LeafBucketsError::UnkownPart) => {}
@@ -1996,22 +2424,25 @@ pub mod host_contract {
         }
 
         let page = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part.clone(),
-                since: 0,
-                buckets: vec![
-                    LeafBucketRequest {
-                        buck_id: bucket_a,
-                        after: None,
-                    },
-                    LeafBucketRequest {
-                        buck_id: bucket_b,
-                        after: None,
-                    },
-                ],
-                seed,
-                limit_hint: 2,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: 0,
+                    buckets: vec![
+                        LeafBucketRequest {
+                            buck_id: bucket_a,
+                            after: None,
+                        },
+                        LeafBucketRequest {
+                            buck_id: bucket_b,
+                            after: None,
+                        },
+                    ],
+                    seed,
+                    limit_hint: 2,
+                },
+                subscriber.clone(),
+            )
             .await??;
         assert_eq!(page.seed, seed);
         let page_a = page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE);
@@ -2066,22 +2497,25 @@ pub mod host_contract {
             .await?;
 
         let since_page = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part.clone(),
-                since,
-                buckets: vec![
-                    LeafBucketRequest {
-                        buck_id: bucket_a,
-                        after: None,
-                    },
-                    LeafBucketRequest {
-                        buck_id: bucket_b,
-                        after: None,
-                    },
-                ],
-                seed,
-                limit_hint: 2,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since,
+                    buckets: vec![
+                        LeafBucketRequest {
+                            buck_id: bucket_a,
+                            after: None,
+                        },
+                        LeafBucketRequest {
+                            buck_id: bucket_b,
+                            after: None,
+                        },
+                    ],
+                    seed,
+                    limit_hint: 2,
+                },
+                subscriber.clone(),
+            )
             .await??;
         assert_eq!(
             since_page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE),
@@ -2108,16 +2542,19 @@ pub mod host_contract {
         );
 
         let page_a_tail = store
-            .leaf_buckets(LeafBucketsRequest {
-                part_id: part,
-                since: 0,
-                buckets: vec![LeafBucketRequest {
-                    buck_id: bucket_a,
-                    after: Some(a2),
-                }],
-                seed,
-                limit_hint: 2,
-            })
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part,
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: bucket_a,
+                        after: Some(a2),
+                    }],
+                    seed,
+                    limit_hint: 2,
+                },
+                subscriber,
+            )
             .await??
             .bucks
             .remove(&bucket_a)
@@ -2630,6 +3067,7 @@ pub mod host_contract {
             if mode != 0 {
                 targets.insert(big_sync_core::rpc::SubscriptionTarget::Object {
                     obj_id: obj.clone(),
+                    cursor: 0,
                 });
             }
             let request = SubPartsRequest {
@@ -2926,6 +3364,7 @@ pub mod host_contract {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
                         obj_id: obj.clone(),
+                        cursor: 0,
                     }]),
                 })
                 .await??;
@@ -2960,6 +3399,7 @@ pub mod host_contract {
                         lower_bound: 0,
                         targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
                             obj_id: obj.clone(),
+                            cursor: 0,
                         }]),
                     },
                     peer,
@@ -3070,6 +3510,7 @@ pub mod host_contract {
                             },
                             big_sync_core::rpc::SubscriptionTarget::Object {
                                 obj_id: obj.clone(),
+                                cursor: 0,
                             },
                         ]),
                     },
@@ -3131,6 +3572,7 @@ pub mod host_contract {
                         lower_bound: baseline,
                         targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
                             obj_id: obj.clone(),
+                            cursor: 0,
                         }]),
                     },
                     peer,
@@ -3565,6 +4007,40 @@ pub mod host_contract {
         assert_eq!(
             page_tail.next_cursor, None,
             "next_cursor must be None on tail page"
+        );
+        // A zero limit is a legal request for "no events right now": it answers
+        // nothing, and while anything is waiting it must not claim the log is caught
+        // up — a caller reads `None` as "nothing further is waiting" and would strand
+        // the events it never received.
+        let page_zero = store
+            .list_events(HashSet::from([part.clone()]), 0, 0)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert!(
+            page_zero.events.is_empty(),
+            "a zero limit returns no events: {:?}",
+            page_zero.events
+        );
+        assert!(
+            page_zero.next_cursor.is_some(),
+            "a zero limit must not report caught-up while events are waiting"
+        );
+
+        // The same request against a part with nothing waiting is caught up.
+        let drained_part = test_part(125);
+        store.ensure_part(drained_part.clone()).await?;
+        let page_zero_empty = store
+            .list_events(HashSet::from([drained_part.clone()]), 0, 0)
+            .await??
+            .remove(&drained_part)
+            .expect(ERROR_IMPOSSIBLE);
+
+        assert!(page_zero_empty.events.is_empty());
+        assert_eq!(
+            page_zero_empty.next_cursor, None,
+            "a zero limit on a part with nothing waiting is caught up"
         );
         Ok(())
     }

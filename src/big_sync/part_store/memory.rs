@@ -9,12 +9,12 @@ use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
     GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, SubEvent, SubPartsRequest, SubscriptionTarget,
+    PartSummary, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 
 use super::PartFrontierKey;
-use super::{HostPartStore, PartScope, bucket_index_bounds};
+use super::{HostPartStore, PartScope, ReadTarget, bucket_index_bounds};
 use crate::keyed_frontier::{
     MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
     MemoryKeyedFrontierView, open_memory_keyed_frontier,
@@ -282,6 +282,9 @@ impl MemoryPartStoreScopeState {
         if buckets.is_empty() {
             return Ok(buckets);
         }
+        // `limit_hint` is the response's page bound with `BuckId::ARITY` extra
+        // siblings allowed (see `GetChangedBucketsRequest`), so a zero hint is a
+        // zero-bucket page rather than an unspecified page size.
         if limit_hint == 0 {
             return Ok(Vec::new());
         }
@@ -540,7 +543,25 @@ impl HostPartStore for MemoryPartStore {
     async fn get_changed_buckets(
         &self,
         req: GetChangedBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
+        // A part the subscriber may not read has to read as unknown, and this comes
+        // before the walk itself so no part of the answer depends on the refusal.
+        if self
+            .read_denied(ReadTarget::Part(req.part_id.clone()), subscriber)
+            .await?
+        {
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: vec![req.part_id],
+            }));
+        }
+        // Hidden parts are invisible to remote part access, exactly as
+        // `summarize_parts` and this store's own subscription filter treat them.
+        if self.hidden_parts.contains(&req.part_id) {
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: vec![req.part_id],
+            }));
+        }
         let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             guard.changed_bucket_summaries(
@@ -564,7 +585,18 @@ impl HostPartStore for MemoryPartStore {
     async fn leaf_buckets(
         &self,
         req: LeafBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+        // As above: an unreadable part reads as unknown, never as an empty page.
+        if self
+            .read_denied(ReadTarget::Part(req.part_id.clone()), subscriber)
+            .await?
+        {
+            return Ok(Err(LeafBucketsError::UnkownPart));
+        }
+        if self.hidden_parts.contains(&req.part_id) {
+            return Ok(Err(LeafBucketsError::UnkownPart));
+        }
         let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             let Some(part) = guard.parts.get(&req.part_id) else {
@@ -596,6 +628,8 @@ impl HostPartStore for MemoryPartStore {
                         .unwrap_or(items.len()),
                     None => 0,
                 };
+                // `LeafBucketsRequest::limit_hint` is a hint, not a bound: zero
+                // means no preference, so the smallest useful page is one entry.
                 let take = req.limit_hint.max(1) as usize;
                 let end = (start + take).min(items.len());
                 let done = end == items.len();
@@ -1043,9 +1077,15 @@ impl HostPartStore for MemoryPartStore {
                 candidates.sort_by_key(|(event_cursor, _)| *event_cursor);
                 let has_more = candidates.len() > limit as usize;
                 candidates.truncate(limit as usize);
-                let next_cursor = has_more
-                    .then(|| candidates.last().map(|(event_cursor, _)| *event_cursor))
-                    .flatten();
+                // The resume point is the last event this page returned. A page that
+                // returned none (a zero limit) resumes from where the caller already is
+                // rather than reporting caught-up: `None` means nothing further is
+                // waiting, and events are.
+                let next_cursor = has_more.then(|| {
+                    candidates
+                        .last()
+                        .map_or(cursor, |(event_cursor, _)| *event_cursor)
+                });
                 out.insert(
                     part_id.clone(),
                     PartPage {
@@ -1087,7 +1127,7 @@ impl HostPartStore for MemoryPartStore {
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id } => Some(obj_id.clone()),
+                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect();
@@ -1118,7 +1158,7 @@ impl HostPartStore for MemoryPartStore {
                 .targets
                 .iter()
                 .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id } => {
+                    SubscriptionTarget::Object { obj_id, .. } => {
                         Some((obj_id.clone(), reqs.lower_bound))
                     }
                     SubscriptionTarget::Part { .. } => None,
@@ -1218,7 +1258,7 @@ impl HostPartStore for MemoryPartStore {
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id } => Some(obj_id.clone()),
+                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect::<HashSet<_>>();
@@ -1243,7 +1283,7 @@ impl HostPartStore for MemoryPartStore {
                 .targets
                 .iter()
                 .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id } => {
+                    SubscriptionTarget::Object { obj_id, .. } => {
                         Some((obj_id.clone(), reqs.lower_bound))
                     }
                     SubscriptionTarget::Part { .. } => None,
@@ -1356,23 +1396,6 @@ impl HostPartStore for MemoryPartStore {
             guard.permitted_parts(scope, obj_id, principal)
         });
         Ok(permitted)
-    }
-
-    /// This store's subscriptions are filtered per recipient, so a page can be denied rather
-    /// than silently empty.
-    async fn page_denied(&self, target: &SubscriptionTarget, subscriber: PeerKey) -> Res<bool> {
-        let (scope, obj_id) = match target {
-            SubscriptionTarget::Part { part_id, .. } => {
-                // `permitted_parts` reads the object only for a `FromObject` scope,
-                // so a part is asked about directly.
-                (PartScope::Part(part_id.clone()), ObjKey::new([0u8; 32]))
-            }
-            SubscriptionTarget::Object { obj_id } => (PartScope::FromObject, obj_id.clone()),
-        };
-        Ok(self
-            .permitted_parts(scope, obj_id, Some(subscriber))
-            .await?
-            .is_some_and(|readable| readable.is_empty()))
     }
 }
 
@@ -1676,6 +1699,179 @@ mod tests {
         host_contract::assert_host_part_store_contract(&harness).await
     }
 
+    /// A hidden part stays physically present but is invisible to remote part access,
+    /// and that holds at the bucket endpoints too, not only in `summarize_parts` and
+    /// this store's own subscription filter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_parts_are_invisible_to_bucket_walks() -> Res<()> {
+        use big_sync_core::FingerprintSeed;
+        use big_sync_core::rpc::{GetChangedBucketsRequest, LeafBucketRequest, LeafBucketsRequest};
+
+        let hidden = PartKey(ByteKey::new([60u8; 32]));
+        let visible = PartKey(ByteKey::new([61u8; 32]));
+        let member = ObjKey(ByteKey::new([62u8; 32]));
+        let store = MemoryPartStore::with_config(crate::part_store::HostPartStoreConfig {
+            hidden_parts: HashSet::from([hidden.clone()]),
+            ..Default::default()
+        });
+        // Both parts are granted to the subscriber, including the hidden one: the
+        // refusal below has to be the hidden gate, not the access gate.
+        let subscriber = crate::part_store::contract::grant_bucket_read(
+            &store,
+            [hidden.clone(), visible.clone()],
+        )
+        .await?;
+
+        for part in [hidden.clone(), visible.clone()] {
+            store.ensure_part(part.clone()).await?;
+            store
+                .set_obj_payload(member.clone(), serde_json::json!({ "tag": "member" }))
+                .await?;
+            store.add_obj_to_parts(member.clone(), vec![part]).await?;
+        }
+
+        // The control: the same walk answers for a part that is not hidden, so a
+        // failure below is the gate and not an empty store.
+        let buckets = store
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: visible.clone(),
+                    offset: BuckId::ROOT,
+                    to_level: BuckId::MAX_LEVEL,
+                    since: 0,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
+            .await?
+            .expect("a visible part answers a bucket walk");
+        assert!(!buckets.is_empty(), "the control walk must see the part");
+
+        match store
+            .get_changed_buckets(
+                GetChangedBucketsRequest {
+                    part_id: hidden.clone(),
+                    offset: BuckId::ROOT,
+                    to_level: BuckId::MAX_LEVEL,
+                    since: 0,
+                    limit_hint: 16,
+                },
+                subscriber.clone(),
+            )
+            .await?
+        {
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                assert_eq!(unkown_parts, vec![hidden.clone()]);
+            }
+            other => panic!("a hidden part must read as unknown, got {other:?}"),
+        }
+
+        match store
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: hidden.clone(),
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: BuckId::ROOT,
+                        after: None,
+                    }],
+                    seed: FingerprintSeed::new(0x5555_6666, 0x7777_8888),
+                    limit_hint: 16,
+                },
+                subscriber,
+            )
+            .await?
+        {
+            Err(LeafBucketsError::UnkownPart) => {}
+            other => panic!("a hidden part must read as unknown, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// `hidden_parts` is applied to the page path as well as the bucket walk: a page for
+    /// a hidden part reads as unknown, which is not an empty page and not a denial.
+    ///
+    /// The gate belongs to the peer-facing read — `replay_page` resolves the part
+    /// through `summarize_parts` — so the trusted local reader below, which is the
+    /// in-process path, still sees the part.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_parts_are_invisible_to_the_page_path() -> Res<()> {
+        use big_sync_core::rpc::{ReplayPageOutcome, SubscriptionTarget};
+
+        let hidden = PartKey(ByteKey::new([70u8; 32]));
+        let visible = PartKey(ByteKey::new([71u8; 32]));
+        let member = ObjKey(ByteKey::new([72u8; 32]));
+        let store = MemoryPartStore::with_config(crate::part_store::HostPartStoreConfig {
+            hidden_parts: HashSet::from([hidden.clone()]),
+            ..Default::default()
+        });
+        // Granted, the hidden part included: the refusal below has to be the hidden
+        // gate and not the access gate.
+        let subscriber = crate::part_store::contract::grant_bucket_read(
+            &store,
+            [hidden.clone(), visible.clone()],
+        )
+        .await?;
+        for part in [hidden.clone(), visible.clone()] {
+            store.ensure_part(part.clone()).await?;
+            store
+                .set_obj_payload(member.clone(), serde_json::json!({ "tag": "member" }))
+                .await?;
+            store.add_obj_to_parts(member.clone(), vec![part]).await?;
+        }
+
+        let target = |part_id: PartKey| SubscriptionTarget::Part { part_id, cursor: 0 };
+        // The control: the same page reaches a part that is not hidden.
+        let control = store
+            .replay_page(
+                target(visible),
+                8,
+                subscriber.clone(),
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert!(
+            !matches!(control, ReplayPageOutcome::UnknownPart),
+            "the control page must reach a visible part, got {control:?}"
+        );
+        assert_eq!(
+            store
+                .replay_page(
+                    target(hidden.clone()),
+                    8,
+                    subscriber,
+                    Duration::from_millis(0),
+                )
+                .await?,
+            ReplayPageOutcome::UnknownPart,
+            "a hidden part must read as unknown on the page path"
+        );
+
+        // The in-process path is not gated: this is a peer-facing rule.
+        let local = store
+            .subscribe_local(SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([target(hidden)]),
+            })
+            .await??;
+        let mut saw_member = false;
+        while !saw_member {
+            let evt = tokio::time::timeout(Duration::from_secs(5), local.recv())
+                .await
+                .expect("the local reader answers within the timeout")?;
+            match evt {
+                SubEvent::Changed(changed) if changed.obj_id == member => saw_member = true,
+                SubEvent::ReplayComplete => break,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_member,
+            "a trusted local reader still sees the hidden part"
+        );
+        Ok(())
+    }
+
     /// The memory store's counterpart to the sqlite direct-share test: an explicit row on the
     /// derived object part is a direct share, and it resolves because subscribing materializes
     /// the object's single membership row.
@@ -1703,6 +1899,7 @@ mod tests {
                     lower_bound: 0,
                     targets: HashSet::from([SubscriptionTarget::Object {
                         obj_id: obj_id.clone(),
+                        cursor: 0,
                     }]),
                 },
                 peer,

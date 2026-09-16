@@ -5,6 +5,7 @@ pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
 pub mod doc_revision_store;
 mod group_part_worker;
+pub mod keyhive_access_stream;
 pub(crate) mod keyhive_admission;
 
 pub use automerge_frontier_worker::{

@@ -19,29 +19,6 @@ impl HostPartStore for SqliteBigRepoStore {
     ) -> Res<Option<Vec<PartKey>>> {
         Self::permitted_parts(self, scope, obj_id, principal).await
     }
-
-    /// This store's subscriptions are filtered per recipient, so a page can be
-    /// denied rather than silently empty.
-    async fn page_denied(
-        &self,
-        target: &big_sync_core::rpc::SubscriptionTarget,
-        subscriber: PeerKey,
-    ) -> Res<bool> {
-        let (scope, obj_id) = match target {
-            big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
-                // `permitted_parts` reads the object only for a `FromObject` scope,
-                // so a part is asked about directly.
-                (PartScope::Part(part_id.clone()), ObjKey::new([0u8; 32]))
-            }
-            big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
-                (PartScope::FromObject, obj_id.clone())
-            }
-        };
-        Ok(self
-            .permitted_parts(scope, obj_id, Some(subscriber))
-            .await?
-            .is_some_and(|readable| readable.is_empty()))
-    }
     async fn summarize_parts(
         &self,
         parts: HashSet<PartKey>,
@@ -257,7 +234,19 @@ impl HostPartStore for SqliteBigRepoStore {
     async fn get_changed_buckets(
         &self,
         req: GetChangedBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
+        // A part the subscriber may not read has to read as unknown, exactly as a
+        // part this scope does not have does, so the refusal cannot be told apart
+        // from one. Answered before any other work on the request.
+        if self
+            .read_denied(ReadTarget::Part(req.part_id.clone()), subscriber)
+            .await?
+        {
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: vec![req.part_id],
+            }));
+        }
         if self.hidden_parts.contains(&req.part_id) {
             return Ok(Err(ListPartsError::UnkownParts {
                 unkown_parts: vec![req.part_id],
@@ -345,7 +334,15 @@ impl HostPartStore for SqliteBigRepoStore {
     async fn leaf_buckets(
         &self,
         req: LeafBucketsRequest,
+        subscriber: PeerKey,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+        // As above: an unreadable part reads as unknown, never as an empty page.
+        if self
+            .read_denied(ReadTarget::Part(req.part_id.clone()), subscriber)
+            .await?
+        {
+            return Ok(Err(LeafBucketsError::UnkownPart));
+        }
         if self.hidden_parts.contains(&req.part_id) {
             return Ok(Err(LeafBucketsError::UnkownPart));
         }
@@ -716,7 +713,10 @@ impl HostPartStore for SqliteBigRepoStore {
             .bind(self.scope().id())
             .bind(Self::part_blob(part_id.clone()))
             .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-            .bind(i64::from(limit))
+            // At least one row, so a zero-length page still learns whether anything is
+            // waiting: the boundary txid it then resumes from is what keeps "nothing
+            // further is waiting" (`next_cursor: None`) from stranding events.
+            .bind(i64::from(limit.max(1)))
             .fetch_all(&self.sql.read_pool)
             .await?;
             let cutoff_txid: Option<i64> =
@@ -784,10 +784,20 @@ impl HostPartStore for SqliteBigRepoStore {
             out.insert(
                 part_id,
                 PartPage {
-                    events,
-                    next_cursor: has_more.then(|| {
-                        u64::try_from(cutoff_txid.expect(ERROR_IMPOSSIBLE)).expect(ERROR_IMPOSSIBLE)
-                    }),
+                    events: if limit == 0 { Vec::new() } else { events },
+                    next_cursor: if limit == 0 {
+                        // A zero-length page returns nothing, so the boundary row it
+                        // read cannot be its resume point — resuming there would skip
+                        // that event. It resumes from the caller's own position while
+                        // anything is waiting, and claims "nothing further" only when
+                        // nothing is.
+                        cutoff_txid.is_some().then_some(cursor)
+                    } else {
+                        has_more.then(|| {
+                            u64::try_from(cutoff_txid.expect(ERROR_IMPOSSIBLE))
+                                .expect(ERROR_IMPOSSIBLE)
+                        })
+                    },
                 },
             );
         }

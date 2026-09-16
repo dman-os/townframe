@@ -637,7 +637,7 @@ async fn reconcile_doc(
             .agents_for_membered(identifier)
             .await
             .into_iter()
-            .map(|(principal, access)| (PeerKey::new(principal), access))
+            .map(|(principal, access)| (PeerKey::new(principal.to_bytes()), access))
             .collect::<HashMap<_, _>>();
         // Access is granted per part, and a part is a one-way digest of a group id, so
         // the group id has to be retained here to ask Keyhive which principals may read
@@ -717,7 +717,7 @@ impl GroupAgentsMemo {
                 .agents_for_membered(group_identifier(group_id)?)
                 .await
                 .into_iter()
-                .map(|(principal, access)| (PeerKey::new(principal), access))
+                .map(|(principal, access)| (PeerKey::new(principal.to_bytes()), access))
                 .collect::<HashMap<_, _>>(),
         );
         cached.insert(group_id, Arc::clone(&agents));
@@ -760,7 +760,6 @@ async fn affected_event(
             ));
         }
         StaticEvent::Delegated(delegation) => {
-            group_parts.insert(group_part_id(delegation.issuer.to_bytes()));
             documents.extend(
                 delegation
                     .payload()
@@ -768,18 +767,25 @@ async fn affected_event(
                     .keys()
                     .map(|id| ObjKey::new(id.to_bytes())),
             );
+            // A part and a containing-group query both name a *group*, and the group
+            // this operation was dispatched to is the proof chain's root, not the
+            // immediate signer — the two differ whenever a non-root member
+            // re-delegates. The wire form carries proof *digests*, so the subject is
+            // resolved through this hive's graph rather than off the payload.
+            let subject = keyhive
+                .event_subject_id(StaticEvent::Delegated(delegation))
+                .await?
+                .expect("a delegated event names a membered subject");
+            group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(
-                        keyhive_core::principal::identifier::Identifier::from(delegation.issuer),
-                    )
+                    .document_ids_containing_group(subject)
                     .await
                     .into_iter()
                     .map(|id| ObjKey::new(id.as_bytes())),
             );
         }
         StaticEvent::Revoked(revocation) => {
-            group_parts.insert(group_part_id(revocation.issuer.to_bytes()));
             documents.extend(
                 revocation
                     .payload()
@@ -787,11 +793,16 @@ async fn affected_event(
                     .keys()
                     .map(|id| ObjKey::new(id.to_bytes())),
             );
+            // Same as the delegation arm: the group is the proof chain's root, not
+            // the immediate signer.
+            let subject = keyhive
+                .event_subject_id(StaticEvent::Revoked(revocation))
+                .await?
+                .expect("a revoked event names a membered subject");
+            group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(
-                        keyhive_core::principal::identifier::Identifier::from(revocation.issuer),
-                    )
+                    .document_ids_containing_group(subject)
                     .await
                     .into_iter()
                     .map(|id| ObjKey::new(id.as_bytes())),
@@ -828,6 +839,15 @@ async fn affected_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyhive::BigKeyhiveAgent;
+    use crate::keyhive_listener::BigRepoKeyhiveListener;
+    use crate::keyhive_storage::BigRepoKeyhiveStorage;
+    use keyhive_core::access::Access;
+    use keyhive_core::event::Event;
+    use keyhive_core::principal::group::id::GroupId as KhGroupId;
+    use keyhive_core::principal::identifier::Identifier;
+    use keyhive_core::principal::membered::Membered;
+    use std::collections::BTreeMap;
 
     #[test]
     fn group_part_id_uses_sedimentree_namespace() {
@@ -836,6 +856,65 @@ mod tests {
         assert_eq!(
             group_part_id([0; 32]).to_string(),
             "zB1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
+        );
+    }
+
+    /// A re-delegation whose signer is a member of the subject group rather than
+    /// the subject itself: the immediate signer and the graph the operation was
+    /// dispatched to are two different identifiers, so only naming the subject
+    /// derives the group's part. Same fixture shape as the delta-stream reading of
+    /// [`crate::keyhive::BigKeyhiveHandle::event_subject_id`].
+    #[tokio::test]
+    async fn delegation_group_part_names_the_proof_chain_root_not_the_signer() {
+        let (evt_tx, _evt_rx) = async_channel::unbounded();
+        let keyhive = BigKeyhiveHandle::new(
+            [23; 32],
+            BigRepoKeyhiveListener {
+                evt_tx,
+                storage: BigRepoKeyhiveStorage::memory(),
+            },
+        )
+        .await
+        .expect("boot keyhive handle");
+
+        let hive = keyhive.clone_keyhive();
+        let group = hive.generate_group(vec![]).await.expect("generate group");
+        let subject: Identifier = group.lock().await.group_id().into();
+        let member: BigKeyhiveAgent = hive
+            .get_agent(subject)
+            .await
+            .expect("a group is its own agent");
+        let update = hive
+            .add_member_with_manual_content(
+                member,
+                &Membered::Group(KhGroupId::from(subject), Arc::clone(&group)),
+                Access::Read,
+                BTreeMap::new(),
+            )
+            .await
+            .expect("add member");
+        let event: StaticEvent<Vec<u8>> = Event::Delegated(update.delegation).into();
+        let StaticEvent::Delegated(delegation) = &event else {
+            unreachable!("the fixture builds a delegation")
+        };
+        let signer: Identifier = delegation.issuer.into();
+        assert_ne!(
+            signer, subject,
+            "the fixture has to re-delegate from a non-root member"
+        );
+        let bytes = bincode::serialize(&event).expect("serialize delegation event");
+
+        let affected = affected_event(&keyhive, &bytes, &WorkerGroupScope::All)
+            .await
+            .expect("decode the admission");
+        assert_eq!(
+            affected.group_parts,
+            HashSet::from([group_part_id(subject.to_bytes())]),
+            "the part belongs to the proof chain's root, not to the signer"
+        );
+        assert!(
+            affected.docs.is_empty(),
+            "the group holds no documents, so no document is affected"
         );
     }
 }

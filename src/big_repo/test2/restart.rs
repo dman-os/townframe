@@ -741,6 +741,15 @@ async fn tier5_remote_restart_notification_propagates_existing_doc_update() -> c
     let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     drop(reader_doc);
     restart_right(&mut pair, right_path).await?;
+    // Both peers read `/seds`, the store-wide enumeration part. Part access is
+    // explicit, and a page denied when its route is registered backs off for the whole
+    // unauthorized window, so grant before `connect` re-registers the routes.
+    pair.left()
+        .allow_part_pull(pair.right(), &[crate::global_part_id()])
+        .await?;
+    pair.right()
+        .allow_part_pull(pair.left(), &[crate::global_part_id()])
+        .await?;
     pair.connect().await?;
     pair.left()
         .set_peer_parts(pair.right(), vec![crate::global_part_id()])

@@ -1097,6 +1097,43 @@ async fn wait_for_doc_presence_with_activity(
     Ok(())
 }
 
+/// Dump every (peer, part) a node's sync workers still consider unsettled, with the
+/// term that holds each one back, so a wait that refuses to settle names its own cause.
+async fn dump_sync_state(node: &SyncTestNode, label: &str) {
+    for (worker_name, worker) in [
+        ("docs", &node.sync_repo.big_sync_worker),
+        ("blobs", &node.sync_repo.blob_sync_worker),
+    ] {
+        let Ok(snapshot) = worker.snapshot().await else {
+            warn!(%label, worker = worker_name, "sync state dump: snapshot failed");
+            continue;
+        };
+        let unsettled = snapshot
+            .peer_part_sync_flags
+            .iter()
+            .filter(|(_, _, pending, multi_strat, replay_done, cursor_active)| {
+                *pending || *multi_strat || !*replay_done || *cursor_active
+            })
+            .map(
+                |(peer, part, pending, multi_strat, replay_done, cursor_active)| {
+                    format!(
+                        "peer={peer} part={part} pending={pending} multi_strat={multi_strat} \
+                         replay_done={replay_done} cursor_active={cursor_active}"
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+        warn!(
+            %label,
+            worker = worker_name,
+            local_peer_id = %node.sync_repo.router.endpoint().id(),
+            waiters = ?snapshot.full_sync_waiters,
+            unsettled = ?unsettled,
+            "sync state dump"
+        );
+    }
+}
+
 async fn wait_for_sync_convergence(
     source: &SyncTestNode,
     target: &SyncTestNode,
@@ -1119,14 +1156,41 @@ async fn wait_for_sync_convergence(
         partition_count = required_partitions.len(),
         "waiting for notification-driven sync convergence"
     );
-    tokio::try_join!(
-        target.sync_repo.wait_for_full_sync(
-            std::slice::from_ref(&peer_id),
-            &required_partitions,
-            None,
-        ),
-        wait_for_doc_set_parity(&source.drawer, &target.drawer, None),
-    )?;
+    // A stall here used to burn the whole nextest timeout with no evidence. Bound the
+    // wait and dump what refused to settle: the (peer, part) pairs still outstanding
+    // and which of the four `peer_part_is_fully_synced` terms held them back.
+    let wait = async {
+        tokio::try_join!(
+            target.sync_repo.wait_for_full_sync(
+                std::slice::from_ref(&peer_id),
+                &required_partitions,
+                None,
+            ),
+            wait_for_doc_set_parity(&source.drawer, &target.drawer, None),
+        )
+    };
+    tokio::pin!(wait);
+    let mut next_dump = tokio::time::Instant::now() + Duration::from_secs(45);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        tokio::select! {
+            result = &mut wait => {
+                result?;
+                break;
+            }
+            _ = tokio::time::sleep_until(next_dump) => {
+                dump_sync_state(source, "source").await;
+                dump_sync_state(target, "target").await;
+                if tokio::time::Instant::now() >= deadline {
+                    eyre::bail!(
+                        "notification-driven sync convergence did not settle within 180s; \
+                         the dumps above name the peers, parts and terms still outstanding"
+                    );
+                }
+                next_dump += Duration::from_secs(45);
+            }
+        }
+    }
     info!(
         source = %source.sync_repo.router.endpoint().id(),
         target = %target.sync_repo.router.endpoint().id(),

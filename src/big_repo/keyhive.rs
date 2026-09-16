@@ -4,6 +4,8 @@ use crate::{
     DocumentId, handler::BigRepoKeyhiveProtocol, keyhive_listener::BigRepoKeyhiveListener,
 };
 use keyhive_core::access::Access;
+use keyhive_core::crypto::signed_ext::SignedSubjectId;
+use keyhive_core::event::Event;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
@@ -387,7 +389,11 @@ impl BigKeyhiveHandle {
 
     /// All agents (individuals + groups) who can reach this doc/group, with [`Access`].
     /// O(|transitive_members(target)|) — used for incremental per-target update.
-    pub async fn agents_for_membered(&self, id: Identifier) -> HashMap<[u8; 32], Access> {
+    ///
+    /// Keyed by keyhive [`Identifier`], not by its bytes: the identifier is the
+    /// identity every caller either already holds or must keep, and a byte key
+    /// throws that away for the callers that need it back.
+    pub async fn agents_for_membered(&self, id: Identifier) -> BTreeMap<Identifier, Access> {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
@@ -397,17 +403,77 @@ impl BigKeyhiveHandle {
             ))
             .await
             .into_iter()
-            .map(|(id, (_, access))| (id.to_bytes(), access))
+            .map(|(id, (_, access))| (id, access))
             .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
             return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
                 .await
                 .into_iter()
-                .map(|(id, (_, access))| (id.to_bytes(), access))
+                .map(|(id, (_, access))| (id, access))
                 .collect();
         }
-        HashMap::new()
+        BTreeMap::new()
+    }
+
+    /// Whether this hive holds a document node for `id`.
+    ///
+    /// The `Identifier`-addressed twin of [`Self::get_group`]: an id is a
+    /// membered subject when it names either, and a caller that resolves the
+    /// kind itself must ask in the same order `agents_for_membered` does.
+    pub(crate) async fn has_document(&self, id: Identifier) -> bool {
+        self.keyhive
+            .get_document(KhDocumentId::from(id))
+            .await
+            .is_some()
+    }
+
+    /// The graph an admitted event names, or `None` when it names none.
+    ///
+    /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the
+    /// graph Keyhive dispatched the operation to, which is the proof chain's
+    /// root issuer ([`SignedSubjectId`], consumed at `keyhive.rs:1980,2066`) and
+    /// *not* the immediate signer — the two differ whenever a non-root member
+    /// re-delegates, which is the hazard the group-part worker's
+    /// `delegation.issuer` proxy carries (B19).
+    ///
+    /// The wire form carries proof *digests* (`StaticDelegation::proof`), so
+    /// the chain is resolved through this hive's own graph: there is no
+    /// payload-only derivation, and the resolution here is the same one Keyhive
+    /// performs when it applies the event.
+    ///
+    /// Prekey events change which peers can be *reached*, not who is a member
+    /// of what, so they name no graph and cannot change a closure.
+    pub(crate) async fn event_subject_id(
+        &self,
+        event: StaticEvent<Vec<u8>>,
+    ) -> Res<Option<Identifier>> {
+        if matches!(
+            event,
+            StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_)
+        ) {
+            return Ok(None);
+        }
+        let resolved = self
+            .keyhive
+            .static_event_to_event(event)
+            .await
+            .map_err(|err| ferr!("resolving an admitted Keyhive event's subject failed: {err}"))?;
+        Ok(Some(match resolved {
+            Event::CgkaOperation(operation) => Identifier::from(ed25519_dalek::VerifyingKey::from(
+                *operation.payload().doc_id(),
+            )),
+            // The proof chain's *root* issuer, not the immediate signer: `subject_id`
+            // walks `proof` to its head and answers that head's issuer, which is the graph
+            // Keyhive dispatched the operation to. Using `delegation.issuer` here is the
+            // B19 hazard and would name a non-membered id whenever a non-root member
+            // re-delegates.
+            Event::Delegated(delegation) => delegation.subject_id(),
+            Event::Revoked(revocation) => revocation.subject_id(),
+            Event::PrekeysExpanded(_) | Event::PrekeyRotated(_) => {
+                unreachable!("prekey events name no subject and returned above")
+            }
+        }))
     }
 
     /// What [`Access`] does `agent` have on this doc/group? None if unreachable.

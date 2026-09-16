@@ -948,7 +948,13 @@ impl BigSyncWorker {
         );
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
-        tracing::trace!(
+        // Debug, not trace: this is the *positive* half of the scheduling question,
+        // and the two skip paths above report their negative verdicts at debug. A
+        // run filtered to debug that shows neither a skip nor a spawn for an object
+        // is therefore a real absence, instead of the absence of a level nobody
+        // enabled — which is exactly how a "no sync task was spawned" conclusion can
+        // be reached from a run that spawned tasks.
+        tracing::debug!(
             task_id,
             peer_id = %task.deets.peer_id,
             obj_id = %task.deets.obj_id,

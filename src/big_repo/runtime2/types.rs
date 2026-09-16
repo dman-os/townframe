@@ -361,6 +361,16 @@ impl WorkerGroupScope {
         Self::Groups(std::collections::HashSet::new())
     }
 
+    /// Whether this scope is `Groups(∅)`, which admits no document at all.
+    ///
+    /// Callers that decide eligibility against a *live* Keyhive membership set can
+    /// use this to skip that traversal: with no groups in the scope the answer is
+    /// `false` for every document, whatever Keyhive says. The traversal is a
+    /// shared-lock walk, so skipping it matters for the disabled configuration.
+    pub fn admits_nothing(&self) -> bool {
+        matches!(self, Self::Groups(groups) if groups.is_empty())
+    }
+
     /// Is a document whose containing-group ids are `doc_groups` eligible for
     /// this worker?
     pub fn admits_doc_groups(&self, doc_groups: &std::collections::BTreeSet<[u8; 32]>) -> bool {
@@ -487,6 +497,21 @@ mod worker_scope_tests {
         assert!(
             !WorkerGroupScope::Groups(HashSet::from([super::group_part_id(other)]))
                 .admits_group(&eligible)
+        );
+    }
+
+    #[test]
+    fn disabled_scope_admits_no_document_and_says_so() {
+        let disabled = WorkerGroupScope::disabled();
+        assert!(disabled.admits_nothing());
+        assert!(!disabled.admits_doc_groups(&BTreeSet::from([[7; 32]])));
+        // The predicate is about the scope, not an accident of one document: a
+        // selective scope holding any group must not report itself as admitting
+        // nothing, and `All` never does.
+        assert!(!WorkerGroupScope::All.admits_nothing());
+        assert!(
+            !WorkerGroupScope::Groups(HashSet::from([super::group_part_id([7; 32])]))
+                .admits_nothing()
         );
     }
 

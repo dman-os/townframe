@@ -133,7 +133,7 @@ impl SqliteBigRepoStore {
             .targets
             .iter()
             .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id } => Some(obj_id.clone()),
+                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect();
@@ -168,6 +168,7 @@ impl SqliteBigRepoStore {
         }
 
         let store = self.clone();
+        // FIXME: this hsould go on a abortable join set
         tokio::spawn(async move {
             let mut cursor = reqs.lower_bound;
             let mut marker_sent = false;
@@ -613,15 +614,27 @@ impl SqliteBigRepoStore {
                 }
             }
 
-            // Replace this doc's access rows — one set per part. A part with no agent set
-            // gets its rows cleared, and so do the parts the doc is leaving. Rows come
-            // from `part_agents` (per group), never from the doc-level union, so a
-            // principal of one group never gains another group's part.
+            // Replace this doc's access rows — one set per part. Rows come from
+            // `part_agents` (per group), never from the doc-level union, so a principal of
+            // one group never gains another group's part. The rules for parts that carry
+            // no agent set are at the loop below.
             let changed_at =
                 i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
             let mut access_parts = current_parts.clone();
             access_parts.extend(desired_parts.iter().cloned());
             for part_id in access_parts {
+                // A part the document is leaving loses its rows along with the
+                // membership, whether or not this reconciliation derived an agent set
+                // for it. A part with no agent set that the document is *staying* in is
+                // a different case: those rows are not Keyhive-derived, so they belong
+                // to whoever manages that part's access outside Keyhive — an explicit
+                // mirror grant on `/seds`, say — and rewriting them here would delete a
+                // grant the embedder made.
+                let leaving = current_parts.contains(&part_id) && !desired_parts.contains(&part_id);
+                let agents = mutation.part_agents.get(&part_id);
+                if agents.is_none() && !leaving {
+                    continue;
+                }
                 let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
                 sqlx::query!(
                     "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
@@ -630,7 +643,7 @@ impl SqliteBigRepoStore {
                 )
                 .execute(&mut *tx)
                 .await?;
-                let Some(agents) = mutation.part_agents.get(&part_id) else {
+                let Some(agents) = agents else {
                     continue;
                 };
                 for (principal, access) in agents.iter() {

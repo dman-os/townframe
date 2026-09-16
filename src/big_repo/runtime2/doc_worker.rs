@@ -322,6 +322,15 @@ impl LoadedDocSnapshot {
             }
             pending = deferred;
         }
+        tracing::debug!(
+            doc_id = %doc_id,
+            doc_heads = doc.get_heads().len(),
+            checkpoint_count = causal_checkpoints.len(),
+            blocker_count = blockers.len(),
+            blocked_ref_count = blocked_refs.len(),
+            ?partially_decrypted,
+            "load_doc_snapshot: fixed-point outcome"
+        );
         let mut snapshot = Self::from_materialized_doc(
             doc,
             partially_decrypted,
@@ -1830,7 +1839,16 @@ impl<F: FutureForm> DocWorker2<F> {
                     .try_decrypt_content_keyed(self.sed_id, locator)
                     .await?;
                 let Some(entrypoint_raw) = entrypoint else {
-                    // Key not found — skip; may resolve via causal chain.
+                    // A keyless entry is not automatically unresolved. A
+                    // key-only causal checkpoint escrows the application keys
+                    // of the frontier it covers, so content whose own key is
+                    // escrowed by a covering checkpoint is reachable only by
+                    // walking that checkpoint: the entry carries no key of its
+                    // own to walk from, and the checkpoint is its descendant,
+                    // not its ancestor.
+                    made_progress |= self
+                        .walk_covering_checkpoints(*head, &mut plaintext_by_ref)
+                        .await?;
                     continue;
                 };
 
@@ -1882,6 +1900,59 @@ impl<F: FutureForm> DocWorker2<F> {
             );
         }
         Ok((resolved, unresolved))
+    }
+
+    /// Walk the local causal checkpoints that cover `covered` and fold every
+    /// plaintext they unlock into `plaintext_by_ref`.
+    ///
+    /// A key-only checkpoint escrows the application keys of the frontier it
+    /// covers, so it is the only entrypoint that reaches content whose own key
+    /// was escrowed: the covered commit has no key of its own to walk from and
+    /// the checkpoint sits below it in the causal order. Recovered keys are
+    /// cached exactly as the full materialization walk caches them, so a later
+    /// keyed attempt on the same content succeeds without another walk.
+    ///
+    /// Returns true when new plaintext was recovered.
+    async fn walk_covering_checkpoints(
+        &self,
+        covered: CommitId,
+        plaintext_by_ref: &mut HashMap<Vec<u8>, Vec<u8>>,
+    ) -> eyre::Result<bool> {
+        let covering: Vec<CommitId> = self
+            .causal_checkpoints
+            .iter()
+            .filter(|(_, checkpoint)| checkpoint.covered_frontier.contains(&covered))
+            .map(|(head, _)| *head)
+            .collect();
+        let mut made_progress = false;
+        for checkpoint_head in covering {
+            let locator = BigRepoCiphertextLocator::new(
+                BigRepoCiphertextKind::LooseCommit,
+                self.sed_id,
+                checkpoint_head,
+            );
+            let state = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            {
+                let mut cache = self
+                    .recovered_keys
+                    .lock()
+                    .expect("recovered-key cache lock poisoned");
+                for (content_ref, key) in &state.keys {
+                    if let Ok(array) = <[u8; 32]>::try_from(content_ref.as_slice()) {
+                        cache.insert(CommitId::new(array), *key);
+                    }
+                }
+            }
+            for (content_ref, plaintext) in &state.complete {
+                if plaintext_by_ref
+                    .insert(content_ref.clone(), plaintext.clone())
+                    .is_none()
+                {
+                    made_progress = true;
+                }
+            }
+        }
+        Ok(made_progress)
     }
 
     async fn notif_pending_heads(
