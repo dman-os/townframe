@@ -347,8 +347,7 @@ fn frontier_delta(
 
 fn event_branch_id(event: &AutomergeFrontierEvent) -> BranchId {
     let doc_id = match event {
-        AutomergeFrontierEvent::Added { doc_id, .. }
-        | AutomergeFrontierEvent::Changed { doc_id, .. }
+        AutomergeFrontierEvent::Changed { doc_id, .. }
         | AutomergeFrontierEvent::Removed { doc_id, .. } => doc_id,
     };
     BranchId(doc_id.to_string())
@@ -356,16 +355,14 @@ fn event_branch_id(event: &AutomergeFrontierEvent) -> BranchId {
 
 fn event_heads(event: &AutomergeFrontierEvent) -> Option<ChangeHashSet> {
     match event {
-        AutomergeFrontierEvent::Added { heads, .. }
-        | AutomergeFrontierEvent::Changed { heads, .. } => Some(ChangeHashSet(Arc::clone(heads))),
+        AutomergeFrontierEvent::Changed { heads, .. } => Some(ChangeHashSet(Arc::clone(heads))),
         AutomergeFrontierEvent::Removed { .. } => None,
     }
 }
 
 fn event_causal_epoch(event: &AutomergeFrontierEvent) -> Option<[u8; 32]> {
     match event {
-        AutomergeFrontierEvent::Added { causal_epoch, .. }
-        | AutomergeFrontierEvent::Changed { causal_epoch, .. } => *causal_epoch,
+        AutomergeFrontierEvent::Changed { causal_epoch, .. } => *causal_epoch,
         AutomergeFrontierEvent::Removed { .. } => None,
     }
 }

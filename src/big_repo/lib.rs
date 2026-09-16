@@ -483,7 +483,8 @@ impl BigRepo {
     }
     /// Resolve this repository's local Keyhive agent.
     pub async fn local_keyhive_agent(&self) -> Res<BigKeyhiveAgent> {
-let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.to_bytes32());
+        let peer_id =
+            subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.to_bytes32());
         self.keyhive
             .get_agent_by_peer_id(&peer_id)
             .await?
@@ -505,7 +506,7 @@ let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.t
     }
     /// Resolve a connected peer's Keyhive agent.
     pub async fn keyhive_agent_for_peer(&self, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
-let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32());
+        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32());
         self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
     }
     /// Grant administrative membership without exposing the Keyhive access type.
@@ -599,7 +600,10 @@ impl BigRepo {
         &self,
         document_id: DocumentId,
     ) -> Res<DocumentSyncSnapshot> {
-        let head_state = self.runtime.inspect_doc_head_state(document_id.clone()).await?;
+        let head_state = self
+            .runtime
+            .inspect_doc_head_state(document_id.clone())
+            .await?;
         let store = &self.big_sync_store;
         let indexed_parts = store.obj_parts(document_id.clone()).await?.len();
         let payload_present = store.obj_payload(document_id.clone()).await?.is_some();
@@ -724,7 +728,7 @@ impl BigRepo {
     ) -> Result<bool, CreateDocError> {
         let Some((bytes, initial_keys)) = self
             .keyhive_storage
-.staged_doc_content(doc_id.to_bytes32())
+            .staged_doc_content(doc_id.to_bytes32())
             .await
             .map_err(|err| {
                 CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
@@ -1054,7 +1058,10 @@ impl BigRepoConnection {
         if self.is_closed() {
             return Err(ferr!("connection is closed"));
         }
-        self.repo.runtime.sync_keyhive_with_peer(self.peer_id.clone()).await
+        self.repo
+            .runtime
+            .sync_keyhive_with_peer(self.peer_id.clone())
+            .await
     }
 
     /// NOTE: a succesful outcome doesn't correspond to doc

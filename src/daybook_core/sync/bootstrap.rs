@@ -409,7 +409,10 @@ async fn pull_required_partitions_via_big_sync_worker(
 
     let initial_partitions: HashMap<PartKey, big_sync::BackendId> = [
         (core_docs_partition_id.clone(), Arc::clone(&repo_backend_id)),
-        (content_docs_partition_id.clone(), Arc::clone(&repo_backend_id)),
+        (
+            content_docs_partition_id.clone(),
+            Arc::clone(&repo_backend_id),
+        ),
         (drawer_partition_id.clone(), Arc::clone(&repo_backend_id)),
         // booted and loaded the blob stores; they are not part of the initial clone
         // barrier.
@@ -431,7 +434,12 @@ async fn pull_required_partitions_via_big_sync_worker(
     // no parts to register here; the seed's blob worker probes our blob scope
     // via the RPC registry and sees an empty store until then.
     blob_sync_worker
-        .set_peer(peer_id.clone(), big_sync_rpc_client, HashMap::new(), HashMap::new())
+        .set_peer(
+            peer_id.clone(),
+            big_sync_rpc_client,
+            HashMap::new(),
+            HashMap::new(),
+        )
         .await?;
 
     let timeout_result = tokio::time::timeout(timeout, async {

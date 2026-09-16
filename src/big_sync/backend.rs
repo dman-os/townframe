@@ -133,7 +133,9 @@ pub mod contract {
 
         match &case.initial_payload {
             Some(payload) => {
-                store.set_obj_payload(case.obj_id.clone(), payload.clone()).await?;
+                store
+                    .set_obj_payload(case.obj_id.clone(), payload.clone())
+                    .await?;
                 if !case.initial_parts.is_empty() {
                     store
                         .add_obj_to_parts(case.obj_id.clone(), case.initial_parts.clone())

@@ -17,7 +17,6 @@ use utils_rs::prelude::{async_trait, serde_json};
 
 use super::PartFrontierKey;
 
-const EVENT_ADDED: i64 = 0;
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
 
@@ -85,13 +84,15 @@ impl<'a> SqliteFrontierWrite<'a> {
 
     async fn obj_ref(&mut self, obj_id: ObjKey) -> KeyedFrontierResult<i64> {
         let buck_index = i64::from(big_sync_core::BuckId::deepest_from_obj_key(&obj_id).index());
-        sqlx::query("INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id, buck_index) VALUES (?, ?, ?)")
-            .bind(self.scope_id)
-            .bind(obj_id.as_bytes().to_vec())
-            .bind(buck_index)
-            .execute(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id, buck_index) VALUES (?, ?, ?)",
+        )
+        .bind(self.scope_id)
+        .bind(obj_id.as_bytes().to_vec())
+        .bind(buck_index)
+        .execute(&mut **self.transaction_mut())
+        .await
+        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         sqlx::query_scalar("SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?")
             .bind(self.scope_id)
             .bind(obj_id.as_bytes().to_vec())
@@ -190,14 +191,6 @@ impl<'a> SqliteFrontierWrite<'a> {
                     payload,
                 })
             }
-            PartFrontierKey::Part { part_id, .. } if event_type == EVENT_ADDED => {
-                PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor,
-                    part_id: part_id.clone(),
-                    obj_id,
-                    payload,
-                })
-            }
             PartFrontierKey::Part { part_id, .. } if event_type == EVENT_CHANGED => {
                 PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                     cursor,
@@ -228,11 +221,6 @@ impl<'a> SqliteFrontierWrite<'a> {
                 if changed.obj_id == obj_id && changed.part_ids.is_empty() =>
             {
                 (EVENT_CHANGED, Some(changed.payload))
-            }
-            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Added(added)))
-                if added.obj_id == obj_id && added.part_id == part_id =>
-            {
-                (EVENT_ADDED, Some(added.payload))
             }
             (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Changed(changed)))
                 if changed.obj_id == obj_id

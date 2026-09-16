@@ -459,7 +459,9 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
                 continue 'b;
             }
         }
-        let local_summary = part_store.get_bucket_summary(part_id.clone(), buck.id).await;
+        let local_summary = part_store
+            .get_bucket_summary(part_id.clone(), buck.id)
+            .await;
         if summaries_agree(&local_summary, &buck) {
             clean_bucks.insert(buck.id);
             clean_ctr += 1;
@@ -521,7 +523,9 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
 ) -> Map<BuckId, BucketObjLeafPage> {
     let mut out = Map::new();
     for (buck_id, page) in bucks {
-        let summary = part_store.get_bucket_summary(part_id.clone(), buck_id).await;
+        let summary = part_store
+            .get_bucket_summary(part_id.clone(), buck_id)
+            .await;
         let mut out_objs = vec![];
         if summary.len == 0 {
             out_objs.extend(page.entries.into_iter().filter_map(|ee| {
@@ -548,8 +552,10 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
             match part_store.obj_payload(obj.obj_id.clone()).await {
                 Some(payload) => {
                     if !obj.dead {
-                        let local_fp =
-                            Fingerprint::new(&seed, &("big-sync-obj-fp-v1", obj.obj_id.clone(), payload));
+                        let local_fp = Fingerprint::new(
+                            &seed,
+                            &("big-sync-obj-fp-v1", obj.obj_id.clone(), payload),
+                        );
                         if local_fp != obj.fp {
                             out_objs.push(BucketObjEntry {
                                 obj_id: obj.obj_id,

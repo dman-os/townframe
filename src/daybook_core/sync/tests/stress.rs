@@ -519,16 +519,26 @@ async fn collect_diagnostic_report(
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let state = node.sync_repo.rcx.big_repo.doc_head_state(doc_id.clone()).await?;
+            let state = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .doc_head_state(doc_id.clone())
+                .await?;
             let signature = format!(
                 "registered={registered} access={access:?} state={:?} sedimentree={:?} materialized={:?}",
                 state.state, state.sedimentree_heads, state.materialized_heads
             );
             warn!(phase, node = node_index, %doc_id, %signature, "diagnostic document state");
             if state.materialized_heads.is_some() {
-                known_good_sources.entry(doc_id.clone()).or_insert(node_index);
+                known_good_sources
+                    .entry(doc_id.clone())
+                    .or_insert(node_index);
             }
-            signatures.entry(doc_id.clone()).or_default().push(signature);
+            signatures
+                .entry(doc_id.clone())
+                .or_default()
+                .push(signature);
         }
 
         // TEMP-FORENSICS: compare per-node stored commit/fragment blobs for
@@ -599,7 +609,12 @@ async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id.clone()));
+                    all_doc_ids.extend(
+                        entry
+                            .branches
+                            .values()
+                            .map(|branch| branch.branch_doc_id.clone()),
+                    );
                 }
             }
         }
@@ -902,7 +917,12 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let head_state = node.sync_repo.rcx.big_repo.doc_head_state(doc_id.clone()).await?;
+            let head_state = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .doc_head_state(doc_id.clone())
+                .await?;
             let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
                 big_repo::DocLookup::Ready(handle) => {
                     let mut heads = handle
@@ -935,7 +955,12 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id.clone()));
+                    all_doc_ids.extend(
+                        entry
+                            .branches
+                            .values()
+                            .map(|branch| branch.branch_doc_id.clone()),
+                    );
                 }
             }
         }

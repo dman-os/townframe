@@ -341,18 +341,26 @@ pub async fn test_cx_with_options(
         .branches
         .get("main")
         .ok_or_eyre("missing main branch for core inventory doc")?
-        .branch_doc_id.clone();
+        .branch_doc_id
+        .clone();
     let docs_inventory_doc_id = docs_entry
         .branches
         .get("main")
         .ok_or_eyre("missing main branch for docs inventory doc")?
-        .branch_doc_id.clone();
+        .branch_doc_id
+        .clone();
 
     big_repo
-        .add_admin_member_to_doc(core_inventory_doc_id.clone(), authority.blob_inventories.clone())
+        .add_admin_member_to_doc(
+            core_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
         .await?;
     big_repo
-        .add_admin_member_to_doc(docs_inventory_doc_id.clone(), authority.blob_inventories.clone())
+        .add_admin_member_to_doc(
+            docs_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
         .await?;
 
     config_repo

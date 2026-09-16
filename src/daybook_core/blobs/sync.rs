@@ -122,7 +122,9 @@ impl SyncBackend for BlobSyncBackend {
             .clone()
             .or_else(|| local_payload.clone())
             .unwrap_or_else(|| serde_json::json!({}));
-        self.part_store.set_obj_payload(obj_id.clone(), payload).await?;
+        self.part_store
+            .set_obj_payload(obj_id.clone(), payload)
+            .await?;
         let deets = if remote_payload.is_none() {
             SyncCompletionDeets::Noop
         } else if local_payload.is_none() {
@@ -605,7 +607,8 @@ mod tests {
                 }
                 other => panic!("expected AddedMember for node 1 sync_obj, got {other:?}"),
             }
-            let read_bytes = tokio::fs::read(nodes[1].blobs_repo.get_path(hash.clone()).await?).await?;
+            let read_bytes =
+                tokio::fs::read(nodes[1].blobs_repo.get_path(hash.clone()).await?).await?;
             assert_eq!(&read_bytes, payload);
         }
 
@@ -633,7 +636,8 @@ mod tests {
                 big_sync::SyncTaskRunOutcome::Completion(_) => {}
                 other => panic!("expected Completion for node 2 sync_obj, got {other:?}"),
             }
-            let read_bytes = tokio::fs::read(nodes[2].blobs_repo.get_path(hash.clone()).await?).await?;
+            let read_bytes =
+                tokio::fs::read(nodes[2].blobs_repo.get_path(hash.clone()).await?).await?;
             assert_eq!(&read_bytes, payload);
         }
 

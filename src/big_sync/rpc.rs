@@ -21,6 +21,15 @@ pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
 /// not a measured threshold.
 const MAX_PAGE_HOLD: Duration = Duration::from_secs(15);
 
+/// How many rpc requests may be handled at once.
+///
+/// A page request can hold for up to `MAX_PAGE_HOLD`, so a held request must not block
+/// the loop that dispatches the next one: handling requests inline serializes every peer
+/// behind one parked page request, and hides the stop token behind it too. The cap keeps
+/// that concurrency bounded rather than letting a peer grow the handler set without
+/// limit. A protocol knob, not a measured threshold.
+const MAX_INFLIGHT_RPC_HANDLERS: usize = 64;
+
 /// A request stamped with the storage scope it targets.
 ///
 /// The `scope_key` string is the stable cross-peer scope identifier (the
@@ -126,10 +135,8 @@ pub trait HostBigRpcClient: Send + Sync {
         req: PeerSummaryRequest,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
-    async fn replay_page(
-        &self,
-        req: ReplayPageRequest,
-    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
+    async fn replay_page(&self, req: ReplayPageRequest)
+    -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
 
     async fn get_changed_buckets(
         &self,
@@ -245,7 +252,8 @@ pub async fn spawn_big_sync_rpc(
     let cancel_token = CancellationToken::new();
     let fut = {
         let cancel_token = cancel_token.clone();
-        let mut worker = BigSyncRpcWorker { stores };
+        let worker = Arc::new(BigSyncRpcWorker { stores });
+        let permits = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_RPC_HANDLERS));
         async move {
             loop {
                 tokio::select! {
@@ -255,13 +263,13 @@ pub async fn spawn_big_sync_rpc(
                         let Some(msg) = msg else {
                             break;
                         };
-                        worker.handle_rpc_message(msg, None).await;
+                        spawn_rpc_handler(&worker, &permits, msg, None);
                     }
                     authenticated = authenticated_rx.recv() => {
                         let Some((peer_id, msg)) = authenticated else {
                             break;
                         };
-                        worker.handle_rpc_message(msg, Some(peer_id)).await;
+                        spawn_rpc_handler(&worker, &permits, msg, Some(peer_id));
                     }
                 }
             }
@@ -282,6 +290,27 @@ pub async fn spawn_big_sync_rpc(
             join_handle,
         },
     ))
+}
+
+/// Handle one request off the dispatch loop, under the inflight cap.
+///
+/// A panic inside a handler is not swallowed: the process-wide panic handler takes the
+/// whole process down, which is the intended behaviour for an invariant break here.
+fn spawn_rpc_handler(
+    worker: &Arc<BigSyncRpcWorker>,
+    permits: &Arc<tokio::sync::Semaphore>,
+    msg: BigSyncRpcMessage,
+    authenticated_peer: Option<PeerKey>,
+) {
+    let worker = Arc::clone(worker);
+    let permits = Arc::clone(permits);
+    tokio::spawn(async move {
+        let _permit = permits
+            .acquire_owned()
+            .await
+            .expect("rpc handler permits are never closed");
+        worker.handle_rpc_message(msg, authenticated_peer).await;
+    });
 }
 
 #[derive(Clone)]
@@ -355,7 +384,7 @@ struct BigSyncRpcWorker {
 impl BigSyncRpcWorker {
     #[tracing::instrument(skip(self, msg))]
     async fn handle_rpc_message(
-        &mut self,
+        &self,
         msg: BigSyncRpcMessage,
         authenticated_peer: Option<PeerKey>,
     ) {
@@ -385,10 +414,13 @@ impl BigSyncRpcWorker {
                         Ok(parts) => {
                             let mut summaries = HashMap::new();
                             for (part_id, summary) in parts {
-                                let since =
-                                    asker_part_cursors.get(&part_id).copied().unwrap_or(0);
+                                let since = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
                                 let dirty = store
-                                    .part_dirty_count(part_id.clone(), authenticated_peer.clone(), since)
+                                    .part_dirty_count(
+                                        part_id.clone(),
+                                        authenticated_peer.clone(),
+                                        since,
+                                    )
                                     .await
                                     .unwrap();
                                 summaries.insert(part_id, summary.into_strat_summaries(dirty));
@@ -498,7 +530,6 @@ mod tests {
         ObjKey(ByteKey::new(bytes))
     }
 
-
     async fn seed_test_store(store: &MemoryPartStore, part_id: PartKey) -> Res<()> {
         store.ensure_part(part_id.clone()).await?;
 
@@ -510,11 +541,15 @@ mod tests {
         store
             .set_obj_payload(live_obj.clone(), payload_live.clone())
             .await?;
-        store.add_obj_to_parts(live_obj, vec![part_id.clone()]).await?;
+        store
+            .add_obj_to_parts(live_obj, vec![part_id.clone()])
+            .await?;
         store
             .set_obj_payload(dead_obj.clone(), payload_dead.clone())
             .await?;
-        store.add_obj_to_parts(dead_obj.clone(), vec![part_id.clone()]).await?;
+        store
+            .add_obj_to_parts(dead_obj.clone(), vec![part_id.clone()])
+            .await?;
         store.remove_obj_from_part(dead_obj, part_id).await?;
         Ok(())
     }
@@ -536,7 +571,9 @@ mod tests {
                 .await?
                 .unwrap()
             {
-                let dirty = HostPartStore::part_dirty_count(store.as_ref(), part_id.clone(), None, 0).await?;
+                let dirty =
+                    HostPartStore::part_dirty_count(store.as_ref(), part_id.clone(), None, 0)
+                        .await?;
                 summaries.insert(part_id, summary.into_strat_summaries(dirty));
             }
             PeerSummaryResult { parts: summaries }
@@ -567,8 +604,10 @@ mod tests {
         // The in-process call and the network call must answer the same page.
         // They agree because this store holds no access rows, so the member half
         // is the same for both and neither is denied.
-        let page_target =
-            big_sync_core::rpc::SubscriptionTarget::Part { part_id: part_id.clone(), cursor: 0 };
+        let page_target = big_sync_core::rpc::SubscriptionTarget::Part {
+            part_id: part_id.clone(),
+            cursor: 0,
+        };
         let expected_page = store
             .replay_page(
                 page_target.clone(),

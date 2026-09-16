@@ -149,12 +149,7 @@ impl DrawerRepo {
         .fetch_all(&self.meta_store_sql.write_pool)
         .await?
         .into_iter()
-        .map(|(path, id)| {
-            (
-                path,
-                DocumentId::new(id),
-            )
-        })
+        .map(|(path, id)| (path, DocumentId::new(id)))
         .collect())
     }
 
@@ -297,7 +292,10 @@ impl DrawerRepo {
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
-            let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id.clone()).await? else {
+            let Some(latest_heads) = self
+                .get_branch_heads_by_doc_id(branch_doc_id.clone())
+                .await?
+            else {
                 debug!(
                     %doc_id,
                     %branch_path,

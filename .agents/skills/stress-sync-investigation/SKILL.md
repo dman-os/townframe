@@ -180,7 +180,7 @@ If documents agree but quiescence does not, find the peer/part with `cursor_acti
 
 For a persistent `Policy(DocumentNotFound)` tuple, do not infer that Keyhive sync never ran. Correlate the repository peer IDs with the Keyhive IDs in `KeyhiveSyncDone`, then inspect only exchanges containing both Keyhive IDs. Summarize `sending`, `requesting`, `our_pending`, `received`, `pending_after`, and `advanced`. A later explicit sync reporting all-zero differences while local policy still lacks the document is evidence that the serving syncpoint/visible-event projection diverged from actual admissions.
 
-Also extract the object's BigSync `Added`/`Changed`/`Removed` notifications as a compact table of timestamp, subscriber, part, and cursor. Multiple part additions can create concurrent tasks for one object; a later part removal does not settle a cursor owned by another part. Keep this distinct from authorization revocation.
+Also extract the object's BigSync notifications as a compact table of timestamp, subscriber, part, and cursor. The vocabulary is two kinds: `Changed` (a touch) and `Removed`. There is no `Added`: a keyed frontier row is the latest transition for a key, so it cannot say whether an object is new to a recipient. Multiple part additions can create concurrent tasks for one object; a later part removal does not settle a cursor owned by another part. Keep this distinct from authorization revocation.
 
 Do not search only for the word `unauthorized`: count exact classifications separately (`remote doc sync was unauthorized`, `Policy(DocumentNotFound)`, and protocol-level rejection variants).
 

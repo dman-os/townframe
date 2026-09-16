@@ -50,7 +50,8 @@ impl DrawerRepo {
             .wrap_err("error allocating doc in big repo")?;
         let doc_id = DocId::from(branch_doc_id.to_string());
         let branch_id = BranchId::from(branch_doc_id.to_string());
-        let mutation_actor_id = self.content_actor_id(args.user_path.as_deref(), branch_doc_id.clone());
+        let mutation_actor_id =
+            self.content_actor_id(args.user_path.as_deref(), branch_doc_id.clone());
         let now = Timestamp::now();
 
         let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
@@ -120,7 +121,11 @@ impl DrawerRepo {
         })()?;
         let handle = self
             .big_repo
-            .finalize_allocated_doc(branch_doc_id.clone(), doc_am, self.pending_documents_group.clone())
+            .finalize_allocated_doc(
+                branch_doc_id.clone(),
+                doc_am,
+                self.pending_documents_group.clone(),
+            )
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error finalizing allocated doc in big repo")?;
@@ -128,7 +133,9 @@ impl DrawerRepo {
         let entry = DocEntry {
             branches: [(
                 args.branch_path.to_string(),
-                StoredBranchRef { branch_doc_id: branch_doc_id.clone() },
+                StoredBranchRef {
+                    branch_doc_id: branch_doc_id.clone(),
+                },
             )]
             .into(),
             branches_deleted: HashMap::new(),
@@ -295,7 +302,13 @@ impl DrawerRepo {
             .add_admin_member_to_doc(branch_doc_id.clone(), self.drawer_group.clone())
             .await?;
         let entry = DocEntry {
-            branches: [(branch_path.to_string(), StoredBranchRef { branch_doc_id: branch_doc_id.clone() })].into(),
+            branches: [(
+                branch_path.to_string(),
+                StoredBranchRef {
+                    branch_doc_id: branch_doc_id.clone(),
+                },
+            )]
+            .into(),
             branches_deleted: HashMap::new(),
             vtag: VersionTag::mint(self.local_actor_id.clone()),
             previous_version_heads: None,
@@ -461,7 +474,8 @@ impl DrawerRepo {
                 name: branch_path.to_string(),
             });
         };
-        let mutation_actor_id = self.content_actor_id(patch.user_path.as_deref(), branch_doc_id.clone());
+        let mutation_actor_id =
+            self.content_actor_id(patch.user_path.as_deref(), branch_doc_id.clone());
         let existing_facet_keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj =
@@ -827,9 +841,12 @@ impl DrawerRepo {
                 .await?
                 .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
             let mut new_entry = entry.clone();
-            new_entry
-                .branches
-                .insert(to_branch.to_string(), StoredBranchRef { branch_doc_id: branch_doc_id.clone() });
+            new_entry.branches.insert(
+                to_branch.to_string(),
+                StoredBranchRef {
+                    branch_doc_id: branch_doc_id.clone(),
+                },
+            );
             new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
             let drawer_heads = self
@@ -916,7 +933,8 @@ impl DrawerRepo {
             .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-        let mutation_actor_id = self.content_actor_id(user_path, to_branch_ref.branch_doc_id.clone());
+        let mutation_actor_id =
+            self.content_actor_id(user_path, to_branch_ref.branch_doc_id.clone());
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),

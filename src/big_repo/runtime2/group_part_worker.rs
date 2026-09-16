@@ -626,7 +626,7 @@ async fn reconcile_doc(
     local_principal: PeerKey,
     group_agents: &GroupAgentsMemo,
 ) -> Res<GroupPartReconciliation> {
-let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32())
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32())
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
         .document_has_content(crate::DocumentId::new(doc.as_bytes()))
@@ -755,7 +755,9 @@ async fn affected_event(
     let mut group_parts = HashSet::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {
-            documents.push(crate::DocumentId::new(operation.payload().doc_id().as_bytes()));
+            documents.push(crate::DocumentId::new(
+                operation.payload().doc_id().as_bytes(),
+            ));
         }
         StaticEvent::Delegated(delegation) => {
             group_parts.insert(group_part_id(delegation.issuer.to_bytes()));
@@ -829,9 +831,11 @@ mod tests {
 
     #[test]
     fn group_part_id_uses_sedimentree_namespace() {
+        // Multibase base58btc of the derived key's bytes: the key space is a byte prefix, not
+        // text, so decision 1's readable-form display falls back to multibase here.
         assert_eq!(
             group_part_id([0; 32]).to_string(),
-            "B1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
+            "zB1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
         );
     }
 }

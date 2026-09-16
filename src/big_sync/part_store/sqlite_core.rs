@@ -334,7 +334,6 @@ pub enum MemberState {
     Dead,
 }
 
-pub const EVENT_ADDED: i64 = 0;
 pub const EVENT_CHANGED: i64 = 1;
 pub const EVENT_REMOVED: i64 = 2;
 

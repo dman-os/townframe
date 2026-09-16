@@ -38,7 +38,7 @@ where
     F: FutureForm + DocWorkerLoop<F> + 'static,
 {
     let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
 
     let worker = DocWorker2 {
         doc_id: doc_id.clone(),
@@ -1024,7 +1024,11 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let heads = Arc::from(heads);
         self.change_manager
-            .notify_sedimentree_heads_changed(self.doc_id.clone(), Arc::clone(&heads), origin.clone())
+            .notify_sedimentree_heads_changed(
+                self.doc_id.clone(),
+                Arc::clone(&heads),
+                origin.clone(),
+            )
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
         if matches!(&origin, BigRepoChangeOrigin::Local) {
@@ -1291,7 +1295,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.notif_pending_heads(&mut tree, peer_id.clone()).await?;
                 }
 
-                let origin = BigRepoChangeOrigin::Remote { peer_id: peer_id.clone() };
+                let origin = BigRepoChangeOrigin::Remote {
+                    peer_id: peer_id.clone(),
+                };
                 // Apply the session's decrypted content incrementally; refs
                 // whose Automerge dependencies are still missing stay blocked.
                 let applied = resolved.len();
@@ -2531,7 +2537,7 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5a; 32]);
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         let content_ref = CommitId::new([0x11; 32]);
         let checkpoint = CausalCheckpoint::new([0x77; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2651,7 +2657,7 @@ let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5b; 32]);
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         let content_ref = CommitId::new([0x21; 32]);
         let checkpoint = CausalCheckpoint::new([0x87; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);

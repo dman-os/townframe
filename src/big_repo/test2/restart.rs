@@ -336,7 +336,7 @@ async fn tier5_reopen_no_sync_membership_first() -> crate::Res<()> {
     let right_reader_peer = pair.right().peer_id();
     let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(&right_reader_peer.to_bytes32())
         .expect("peer id must be a verifying key");
-let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
@@ -419,7 +419,7 @@ async fn tier5_reopen_no_sync_payload_first() -> crate::Res<()> {
     let right_reader_peer = pair.right().peer_id();
     let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(&right_reader_peer.to_bytes32())
         .expect("peer id must be a verifying key");
-let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
@@ -573,7 +573,8 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "both-restart");
     drop(reader_doc);
     drop(owner_doc);
@@ -707,7 +708,7 @@ async fn wait_for_reader_access(
             .expect("peer id must be a verifying key"),
     );
     let document = keyhive_core::principal::identifier::Identifier::from(
-ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
             .expect("document id must be a verifying key"),
     );
     tokio::time::timeout(std::time::Duration::from_secs(30), async {

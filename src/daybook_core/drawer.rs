@@ -340,10 +340,16 @@ impl DrawerRepo {
             };
             for branch in entry.branches.values() {
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id.clone(), self.content_docs_group.clone())
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.content_docs_group.clone(),
+                    )
                     .await?;
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id.clone(), self.drawer_group.clone())
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.drawer_group.clone(),
+                    )
                     .await?;
             }
         }

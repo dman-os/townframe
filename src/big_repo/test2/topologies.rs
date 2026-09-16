@@ -35,7 +35,7 @@ async fn assert_relay_only(
 ) -> crate::Res<()> {
     let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(&relay.peer_id().to_bytes32())
         .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     let access = repo
         .keyhive()
@@ -190,9 +190,12 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     // R pulls the doc from A (stores parts, doesn't materialise).
     sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id.clone()).await?;
     // Then B pulls from R and materialises.
-    let b_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id.clone())
-            .await?;
+    let b_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 1),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&b_doc).await, "relay-doc");
 
     // Tier 0: sedimentree parity across all three nodes.
@@ -223,7 +226,9 @@ async fn tier3_pull_only_relay_does_not_materialize() -> crate::Res<()> {
         .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id.clone()).await?;
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id.clone())
+        .await?;
     assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
     let relay_state = topo.topo_node(1).repo.doc_head_state(doc_id).await?;
     assert!(!relay_state.sedimentree_heads.is_empty());
@@ -249,13 +254,17 @@ async fn tier3_read_only_relay_materializes_without_edit_access() -> crate::Res<
         .grant_doc_access(doc_id.clone(), relay_agent, Access::Read)
         .await?;
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
-    let relay_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id.clone())
-            .await?;
+    let relay_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&relay_doc).await, "read-only-relay");
-    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(&topo.topo_node(1).peer_id().to_bytes32())
-        .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let relay_vk =
+        ed25519_dalek::VerifyingKey::from_bytes(&topo.topo_node(1).peer_id().to_bytes32())
+            .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
+    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     assert_eq!(
         topo.topo_node(1)
@@ -323,9 +332,12 @@ async fn tier3_line_replication() -> crate::Res<()> {
     // B pulls the doc from A (stores parts, doesn't materialise).
     sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id.clone()).await?;
     // Then C pulls from B and materialises.
-    let c_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id.clone())
-            .await?;
+    let c_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 1),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&c_doc).await, "line-doc");
 
     // Tier 0: sedimentree parity across all three nodes.
@@ -412,17 +424,24 @@ async fn tier3_star_replication() -> crate::Res<()> {
     topo.topo_conn(0, 2).sync_keyhive_with_peer().await?;
 
     // Leaves pull the doc from the hub.
-    let leaf1_doc_l =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id.clone())
-            .await?;
-    let leaf2_doc_l =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 0), &topo.topo_node(2).repo, doc_id.clone())
-            .await?;
+    let leaf1_doc_l = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
+    let leaf2_doc_l = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 0),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&leaf1_doc_l).await, "star-doc");
     assert_eq!(read_title(&leaf2_doc_l).await, "star-doc");
 
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
-    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone()).await?;
+    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone())
+        .await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(hub_doc);
@@ -469,17 +488,24 @@ async fn tier3_triangle_replication() -> crate::Res<()> {
     topo.topo_conn(2, 0).sync_keyhive_with_peer().await?;
 
     // B pulls from A, C pulls from A.
-    let b_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id.clone())
-            .await?;
-    let c_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 0), &topo.topo_node(2).repo, doc_id.clone())
-            .await?;
+    let b_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
+    let c_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 0),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&b_doc).await, "triangle-doc");
     assert_eq!(read_title(&c_doc).await, "triangle-doc");
 
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
-    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone()).await?;
+    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone())
+        .await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(a_doc);
@@ -965,7 +991,8 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     b_r.sync_keyhive_with_peer().await?;
 
     // Reader pulls the doc from the relay — must get both initial and update1.
-    let reader_doc = fixtures::sync_doc_expect_ready(&b_r, &guard.node(2).repo, doc_id.clone()).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(&b_r, &guard.node(2).repo, doc_id.clone()).await?;
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
         Some("update1"),

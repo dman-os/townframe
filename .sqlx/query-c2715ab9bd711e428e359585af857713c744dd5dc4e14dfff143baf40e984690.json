@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT access_level\n                 FROM big_sync_syncable\n                 WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+  "query": "SELECT access_level\n                         FROM big_sync_syncable\n                         WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "0be74d4e4b72548f041771549c54d5c86566873474939732cd7dd9bd0bd0dfff"
+  "hash": "c2715ab9bd711e428e359585af857713c744dd5dc4e14dfff143baf40e984690"
 }

@@ -727,7 +727,9 @@ impl BigSyncWorker {
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
-                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id: peer_id.clone() });
+                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
+                    peer_id: peer_id.clone(),
+                });
                 self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
@@ -740,9 +742,11 @@ impl BigSyncWorker {
             } => {
                 for peer_id in &peer_ids {
                     let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: peer_id.clone() }))
-                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                            .ok();
+                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
+                            peer_id: peer_id.clone(),
+                        }))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                         return Ok(());
                     };
                     for part_id in &part_ids {
@@ -1065,7 +1069,11 @@ impl SyncTaskWorker {
                     let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
                     parts.sort_unstable();
                     parts.dedup();
-                    match self.backend.remove_obj_from_parts(obj_id.clone(), parts).await {
+                    match self
+                        .backend
+                        .remove_obj_from_parts(obj_id.clone(), parts)
+                        .await
+                    {
                         Ok(()) => {
                             BigSyncEvent::RemoveCompleted(big_sync_core::RemoveCompletedEvent {
                                 task_id: _task_id,

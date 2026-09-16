@@ -651,7 +651,8 @@ impl IrohSyncRepo {
             self.address_lookup.add_endpoint_info(addr.clone());
             self.blobs_sync_backend
                 .register_peer_addr(peer_id.clone(), addr.clone());
-            self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id.clone());
+            self.big_repo_rpc
+                .register_peer(remote_endpoint_id, peer_id.clone());
             let doc_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
             let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
@@ -736,7 +737,8 @@ impl IrohSyncRepo {
             error = ?signal.err,
             "current connection ended; tearing down peer registration"
         );
-        self.teardown_peer_registration(signal.peer_id.clone()).await;
+        self.teardown_peer_registration(signal.peer_id.clone())
+            .await;
         let removed = self.active_peers.write().await.remove(&signal.peer_id);
         let peer_key = match removed {
             Some(ActivePeerState::Connected { peer_key, .. }) => Some(peer_key),
@@ -769,7 +771,8 @@ impl IrohSyncRepo {
     /// caller manages that). Idempotent per peer.
     async fn teardown_peer_registration(&self, peer_id: PeerKey) {
         self.big_repo_rpc.unregister_peer(peer_id.clone());
-        self.blobs_sync_backend.unregister_peer_addr(peer_id.clone());
+        self.blobs_sync_backend
+            .unregister_peer_addr(peer_id.clone());
         self.big_sync_worker.remove_peer(peer_id.clone()).await.ok();
         self.blob_sync_worker.remove_peer(peer_id).await.ok();
     }
@@ -913,7 +916,8 @@ impl IrohSyncRepo {
             self.address_lookup.add_endpoint_info(endpoint_addr.clone());
             self.blobs_sync_backend
                 .register_peer_addr(conn.peer_id.clone(), endpoint_addr.clone());
-            self.big_repo_rpc.register_peer(endpoint_id, conn.peer_id.clone());
+            self.big_repo_rpc
+                .register_peer(endpoint_id, conn.peer_id.clone());
             self.big_sync_worker
                 .set_peer(
                     conn.peer_id.clone(),

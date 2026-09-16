@@ -111,7 +111,8 @@ pub async fn tier0_invariants(
     // scaled window to converge before failing the scenario.
     let parity_deadline =
         tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(30));
-    if let Err(error) = assert_sedimentree_parity_with_deadline(pair, doc_id.clone(), parity_deadline).await
+    if let Err(error) =
+        assert_sedimentree_parity_with_deadline(pair, doc_id.clone(), parity_deadline).await
     {
         let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
         return Err(crate::ferr!("{error}\n{diagnostics}"));

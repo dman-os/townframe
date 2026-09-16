@@ -108,7 +108,7 @@ Note that the ids are *meant* to be bytes already — `runtime2/group_part_worke
 constructs `DocumentId::new(*operation.payload().doc_id().as_bytes())` from bytes.
 
 **6. Delivered events disclose part keys.** `ObjChanged` carries
-`part_ids: Vec<PartId>` and `Added`/`Removed` name a part outright, so a peer
+`part_ids: Vec<PartId>` and the old `Added`/`Removed` named a part outright, so a peer
 learns the membership of parts it has no access to. There is no denial here today
 because there is no part-scoped authorization to be denied: the per-object row
 authorizes an event that names every part the object belongs to. Once
@@ -296,7 +296,7 @@ same operation: permitted iff the filtered set is non-empty.
 
 This is what closes problem 6. A `Changed` event for an object in parts `P` and `Q`
 delivered to a peer that may read only `Q` names `Q` alone, never `P`; an
-`Added`/`Removed` naming a part the recipient cannot read is not delivered at all.
+an `Added`/`Removed` naming a part the recipient cannot read was not delivered at all.
 A peer's own requests — the part keys it names in a subscription, the keys echoed
 back in `ListPartsError::UnkownParts` — are its own and are unaffected.
 
@@ -323,6 +323,15 @@ for a part the requester may not read answers *unknown part* or *unauthorized
 part* and the page is empty. A revocation therefore needs no new message type: the
 next page request discloses it. Nothing needs to distinguish "revoked" from "never
 had it".
+
+**As built.** The object-granular notice channel this replaces is gone: the subscription bus
+holds no `revoked_fetch` set, `arm_revocation_notices` and `take_revocation_notice` are
+deleted, and a filtered event is dropped whether or not the recipient just lost access. The
+removal filter's exemption went with it: an event whose parts all fail is omitted even when it
+is a `Removed`, because a membership removal is expressed as membership, not as a notice. The
+tests pin the whole rule from both sides: a revoked peer and a never-authorized peer receive
+neither the advance nor a payload-free hint nor a replayed removal, while a peer that keeps
+access still receives the removal.
 
 ### 3. Object subscriptions are object parts under a reserved `key` space
 
@@ -373,8 +382,8 @@ is always recreatable, no correctness depends on the row surviving.
 handling: its range structure is trivial (a single leaf), its dirty count is the
 same indexed query, and its cursor path is identical. The bucket machine and its
 peers should be able to reconcile an object part without knowing that is what it
-is. The only real difference is *data*, not machinery: an object part never emits
-`Added`/`Removed` as sync events, because subscribing is not a sync event.
+is. The only real difference is *data*, not machinery: materializing an object part
+allocates no revision, because subscribing is not a sync event.
 
 **API unification is a conclusion we have not earned yet.** The subscription and
 part-store surfaces should be unified only where a *difference inventory* justifies
@@ -396,14 +405,22 @@ membership row; the local lane is untouched. Inheritance needed no new authoriza
 the materialized row makes the object part one of the object's containing parts, so the
 existing `FromObject` resolution grants it, and an explicit row becomes additive through the
 same path. Materialization allocates no revision — it reuses the current one — so it cannot
-advance the scope cursor. Three things stay open by choice: nothing collects an unreferenced
-object part; an event that *names* `o:{O}` is not yet resolvable through `Part`/`AnyOf`
-candidate inheritance, only through an explicit row; and the inventory above was answered in
-the implementation rather than as a separate artifact, with the conclusion that the explicit
-APIs remain separate for now. One store divergence to carry: in sqlite `big_sync_members`
-*is* the keyed frontier, so materialization is observable as a single `Changed` at the
-current revision and never as `Added`, while the memory store materializes silently —
-delivery stays idempotent, but the asymmetry is real.
+advance the scope cursor. Two things stay open by choice: nothing collects an unreferenced
+object part, and the inventory above was answered in the implementation rather than as a
+separate artifact, with the conclusion that the explicit APIs remain separate for now. The
+third is closed: an event that *names* `o:{O}` resolves through `Part`/`AnyOf` candidate
+inheritance like any other object part. `PartKey::object_key` reverse-derives the object from
+the reserved key, and the lookup falls back to that object's containing parts, which is the
+same rule `FromObject` applies. It had to be closed rather than deferred because filtering
+gates delivery on the event naming a readable part, and no access row is ever written for a
+derived part, so an object-lane event filtered to empty and was never deliverable remotely. One store divergence to carry, and it is now bounded rather
+than open: in sqlite `big_sync_members` *is* the keyed frontier, so a materialization is
+observable as a single touch at the current revision, while the memory store keeps its
+frontier separately and records nothing. That is a storage-layout difference, not a semantic
+one — reads only hand back events past the asking cursor, so a recorded row never reaches a
+subscriber that had already passed that revision — and the invariant the stores do share,
+that subscribing allocates no revision, is pinned for both by the shared host contract
+(`assert_subscribing_allocates_no_revision_contract`).
 
 ### 4. Keep the bucket tree; the fix is the boundary, not the tree
 
@@ -703,6 +720,20 @@ per-subscription forwarding loop, and the RPC worker's subscription tasks and ca
 What was kept is kept for reuse, not compatibility: `SubPartsRequest`, `SubscriptionTarget`,
 `SubEvent` and the store-level `subscribe`/`subscribe_local`, because the page drains
 `subscribe` and so inherits step 1's recipient filter instead of reimplementing it.
+
+The event vocabulary is two kinds, not three, and that was settled here rather than
+inherited: a membership write is a *touch* (`Changed`, carrying the parts it names) and a
+deletion is `Removed`. There is no `Added`. A keyed frontier stores the latest transition
+per key rather than a history, so it cannot honour one: an object added at one revision and
+changed at a later one is simply `Changed` to a subscriber behind both, and two subscribers
+at the same cursor can be shown different kinds for the same object — an untrustworthy
+label, not merely a redundant one. Whether something is new is also a fact only the reader's
+own replica can answer exactly, and it answers it correctly under lag, which is the same
+argument that removed the stored `added_at`/`changed_at` stamps. Nothing branched on the
+distinction: `Added` and `Changed` projected to the same object sync. `Removed` stays
+because silence is ambiguous between "nothing happened" and "it is gone", and it keeps its
+tombstone. A backend wanting richer kinds carries them in the frontier's generic value,
+which widens what an embedder may assert rather than narrowing it.
 
 Two costs and one divergence, all open. Each page is drawn from a fresh subscription, so a
 deep backlog pays setup per page; the page bound was set to 1024 events because 256 made the
@@ -1047,6 +1078,13 @@ useful internally — automerge-frontier mirroring uses it — but nothing may r
 it being special: under decision 2 it is an ordinary part, and any part-scope
 resolution that lands on it behaves like any other.
 
+As built, that holds for the write path too: the batch reconciliation carries plain
+membership rather than a `desired_global` flag, `add_obj_to_parts` no longer filters `/seds`
+out of its inputs, and `scope_includes_part` resolves it generically. A local principal
+records its `/seds` membership when it can read the part, by the same rule as any other
+part, and the gossip path records `/seds` memberships from remote events like any other
+part as well — which is exactly what the earlier special case was hiding.
+
 Two tiers are worth distinguishing, and one is deferred: a grant on `/seds`
 permits *enumeration* of the list, while *pulling* a given document is still
 governed by the embedder's policy for that document. A future `sync_unknown` call
@@ -1174,15 +1212,15 @@ The store and the protocol need to expose, for a view:
 
 ## Migration
 
-1. **Part-scoped access and filtered delivery.** Move access rows to
-   `(scope, part, principal)` with a change stamp; make delivery compute the
-   recipient-filtered part set and drop events that filter to empty; update
-   `event_permitted` / `is_event_permitted` and the write paths that today delete
-   all rows for an object and re-insert one row per principal. This is the change
+1. **Part-scoped access and filtered delivery.** Landed: access rows are
+   `(scope, part, principal)` with a change stamp, delivery computes the
+   recipient-filtered part set and drops events that filter to empty, and
+   `event_permitted` / `is_event_permitted` and the write paths that used to delete
+   all rows for an object and re-insert one row per principal were rewritten. This is the change
    that makes the tree prune and stops the disclosure.
-   - The zero-part contract test changes meaning here, deliberately: an object in
+   - The zero-part contract test changed meaning, deliberately: an object in
      no part is not remotely deliverable. Its replay-versus-live convergence
-     assertion is kept on the local, unfiltered lane; a remote assertion is added
+     assertion is kept on the local, unfiltered lane, and a remote assertion was added
      for the fail-closed behavior. This is a semantic change, not a weakened test.
 2. **Per-part dirt.** Landed: the access-change stamp index, the counting primitive, the
    descriptor exchange, and the wiring. The asker advertises its per-part cursors in
@@ -1199,14 +1237,16 @@ The store and the protocol need to expose, for a view:
    else, so there is no second level input to plumb (decision 4). The opt-in-only gate is
    inverted (landed): bucket is the default and the embedders that had opted out run it
    too, with the offline-reopen coverage their recorded reason asked for (decision 6).
-4. **Object parts.** Start with the difference inventory, then give object
-   subscriptions a derived `o:{object_key}` part, one membership row, lazy
-   lifecycle, and inherited access with optional additive rows. This restores
-   remote single-object delivery through real authorization, and retires the
-   partless lane's special cases.
-5. **Long-poll delivery.** Replace `PeerReplayTask` with paged reads driven by the
-   cursor machine, with explicit unknown/unauthorized page outcomes and filtered
-   events. Delete the push-stream path.
+4. **Object parts.** Landed: object
+   subscriptions have a derived `o:{object_key}` part, one membership row, lazy
+   lifecycle, and inherited access with optional additive rows. This restored
+   remote single-object delivery through real authorization, and retired the
+   partless lane's special cases. The difference inventory was answered in the
+   implementation rather than as a separate artifact (decision 3).
+5. **Long-poll delivery.** Landed: `PeerReplayTask` is gone, replaced by paged reads
+   driven by the cursor machine, with explicit unknown/unauthorized page outcomes and
+   filtered events, and the push-stream path is deleted. The event vocabulary is two
+   kinds rather than three (decision 9).
 6. **Machine layering.** Re-express the cursor and bucket machines' bookkeeping in
    terms of `watermark.rs` and `tasks.rs` primitives. Landed where the primitives'
    semantics match: the cursor machine's stream book is `WatermarkMachine`; the machine's
@@ -1214,7 +1254,10 @@ The store and the protocol need to expose, for a view:
    in its place; and the job-lane half got the `drop_stream` / `StreamDrop` operation it was
    missing. Read and declined, with the reasons in decision 10: the bucket machine, the
    `PeerState` object-work maps, the bucket-strategy task maps, the full-sync waiter
-   barrier, the domain command queue, and the worker's task maps.
+   barrier, the domain command queue, and the worker's task maps. The thin machine layer
+   that remains — which commands a subscription event emits, in what order, and the
+   object-cursor dedup — is pinned by unit tests in `cursor.rs`, because `watermark.rs`
+   covers the primitives underneath it rather than the translation onto them.
 7. **Byte-string keys.** Landed: keys are `Arc<[u8]>` byte strings, the persisted
    columns and wire formats carry them (key columns were already unconstrained `BLOB`s),
    the `Key` types are renamed, the reserved key spaces are literal, and the distribution
@@ -1225,11 +1268,13 @@ The store and the protocol need to expose, for a view:
    of scope for the current change by decision rather than by omission: it is an addition, not a
    fix, it depends on the unmeasured item-width `ℓ` (decision 5, and the deferred list below),
    and nothing already built needs it to work.
-9. **`/seds`.** The rename landed — `global_part_id()` returns the reserved `/seds` — and
-   it stays a real part. The special-casing removal is the remainder, and it is three
-   sites: `add_obj_to_parts` still filters `/seds` out of its inputs, the batch write path
-   still carries a `desired_global` flag instead of plain membership, and
-   `scope_includes_part` still treats the reserved part specially.
+9. **`/seds`.** Landed. The rename is in place — `global_part_id()` returns the reserved
+   `/seds` — and it stays a real part: the three remaining special cases are gone.
+   `add_obj_to_parts` no longer filters `/seds` out of its inputs, the batch write path
+   carries plain membership instead of a `desired_global` flag (a local principal records
+   the membership when it can read the part, by the same rule as every other part), and
+   `scope_includes_part` resolves it generically. The gossip path records `/seds`
+   memberships from remote events like any other part, which decision 12 now states.
 
 Steps 1–3 are the near-term focus: a bucket that works for the authorized case,
 with a measured dirty count replacing the global-watermark heuristic and no part

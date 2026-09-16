@@ -93,7 +93,6 @@ impl PartRevisionReader {
                 if self.selects_object(&obj_id) && !self.selects_part(&part_id) =>
             {
                 let payload = match value {
-                    Some(PartEvent::Added(event)) => event.payload,
                     Some(PartEvent::Changed(event)) => event.payload,
                     Some(PartEvent::Removed(_)) | None => serde_json::Value::Null,
                 };
@@ -103,14 +102,6 @@ impl PartRevisionReader {
                     obj_id,
                     payload,
                 }))
-            }
-            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Added(mut event)))
-                if self.selects_part(&part_id) =>
-            {
-                event.cursor = revision;
-                event.obj_id = obj_id;
-                event.part_id = part_id;
-                Some(SubEvent::Added(event))
             }
             (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Changed(mut event)))
                 if self.selects_part(&part_id) =>
@@ -363,8 +354,9 @@ pub trait HostPartStore: Send + Sync {
     ) -> Res<ReplayPageOutcome> {
         let cursor = match &target {
             SubscriptionTarget::Part { part_id, cursor } => {
-                if let Err(ListPartsError::UnkownParts { .. }) =
-                    self.summarize_parts(HashSet::from([part_id.clone()])).await?
+                if let Err(ListPartsError::UnkownParts { .. }) = self
+                    .summarize_parts(HashSet::from([part_id.clone()]))
+                    .await?
                 {
                     return Ok(ReplayPageOutcome::UnknownPart);
                 }
@@ -424,7 +416,6 @@ pub trait HostPartStore: Send + Sync {
                     continue;
                 }
                 SubEvent::Changed(inner) => (inner.cursor, PartEvent::Changed(inner)),
-                SubEvent::Added(inner) => (inner.cursor, PartEvent::Added(inner)),
                 SubEvent::Removed(inner) => (inner.cursor, PartEvent::Removed(inner)),
             };
             resume = Some(evt_cursor);
@@ -577,7 +568,6 @@ pub fn bucket_index_bounds(bucket_id: BuckId) -> (u16, Option<u16>) {
     )
 }
 
-
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod contract {
@@ -712,7 +702,9 @@ pub mod contract {
             u64::from(expected.live_count)
         );
 
-        let direct = store.get_bucket_summary(part_id.clone(), BuckId::ROOT).await?;
+        let direct = store
+            .get_bucket_summary(part_id.clone(), BuckId::ROOT)
+            .await?;
         assert_eq!(direct.id, BuckId::ROOT);
         assert_eq!(direct.len, expected.len);
         assert_eq!(direct.live_count, expected.live_count);
@@ -825,14 +817,21 @@ pub mod contract {
                 let expected_fp = if entry.dead {
                     Fingerprint::new(
                         &seed,
-                        &("big-sync-obj-fp-v1", entry.obj_id.clone(), serde_json::Value::Null),
+                        &(
+                            "big-sync-obj-fp-v1",
+                            entry.obj_id.clone(),
+                            serde_json::Value::Null,
+                        ),
                     )
                 } else {
                     let payload = store
                         .obj_payload(entry.obj_id.clone())
                         .await?
                         .expect("live object must have payload");
-                    Fingerprint::new(&seed, &("big-sync-obj-fp-v1", entry.obj_id.clone(), payload))
+                    Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", entry.obj_id.clone(), payload),
+                    )
                 };
                 assert_eq!(entry.fp, expected_fp);
             }
@@ -892,8 +891,7 @@ pub mod host_contract {
         ObjKey(ByteKey::new(bytes))
     }
 
-
-fn payload(tag: &'static str, idx: u64) -> ObjPayload {
+    fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         serde_json::json!({
             "tag": tag,
             "idx": idx,
@@ -935,26 +933,31 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
     where
         S: HostPartStore + Sync + ?Sized,
     {
-        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
-        assert_eq!(store.obj_payload(obj_id.clone()).await?, Some(payload.clone()));
+        store
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
+        assert_eq!(
+            store.obj_payload(obj_id.clone()).await?,
+            Some(payload.clone())
+        );
         if !parts.is_empty() {
             store.add_obj_to_parts(obj_id, parts.to_vec()).await?;
         }
         Ok(())
     }
 
-    fn assert_added(
+    fn assert_member_touched(
         event: &PartEvent,
         cursor: CursorIndex,
         part_id: PartKey,
         obj_id: ObjKey,
         payload: ObjPayload,
     ) {
-        let PartEvent::Added(transition) = event else {
-            panic!("expected added event");
+        let PartEvent::Changed(transition) = event else {
+            panic!("expected a member write, which arrives as the part's touch");
         };
         assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_id, part_id);
+        assert_eq!(transition.part_ids, vec![part_id]);
         assert_eq!(transition.obj_id, obj_id);
         assert_eq!(transition.payload, payload);
     }
@@ -1002,6 +1005,7 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         assert_local_revision_reader_all_contract(harness).await?;
         assert_latest_revision_is_a_read_contract(harness).await?;
         assert_page_outcome_contract(harness).await?;
+        assert_subscribing_allocates_no_revision_contract(harness).await?;
         Ok(())
     }
 
@@ -1018,6 +1022,63 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         assert_eq!(
             first, second,
             "reading the latest revision must not allocate a revision"
+        );
+        Ok(())
+    }
+
+    /// Materializing an object part allocates no revision: subscribing is not a sync event, so
+    /// the membership row an object subscription derives can only be stamped with a revision the
+    /// store already had.
+    ///
+    /// The stores differ in whether that row is *also* their keyed-frontier entry — sqlite's
+    /// membership row is, memory keeps its frontier separately — and so they differ in whether a
+    /// subscriber who is behind that revision is told the derived part exists. That is a storage
+    /// layout difference rather than a semantic one, and it is bounded by the read filters: a
+    /// cursor is only advanced by a write, so a store that records the row never delivers it to a
+    /// subscriber that had already passed the revision. What both stores must agree on, and what
+    /// this pins, is that a subscriber asking for an object cannot move the cursor space forward.
+    pub async fn assert_subscribing_allocates_no_revision_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let obj_id = test_obj(240);
+        let subscriber = PeerKey::new([241u8; 32]);
+        store
+            .set_obj_payload(obj_id.clone(), serde_json::json!({"value": "materialize"}))
+            .await?;
+        // The derived part has to be readable, or the subscription is denied before it can
+        // materialize anything.
+        store
+            .set_part_members(
+                obj_id.object_part_key(),
+                HashMap::from([(subscriber.clone(), Access::Read)]),
+            )
+            .await?;
+        let before = store.latest_revision().await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([SubscriptionTarget::Object {
+                        obj_id: obj_id.clone(),
+                    }]),
+                },
+                subscriber,
+            )
+            .await??;
+        loop {
+            let event = recv_sub_event(&rx).await?;
+            if matches!(event, SubEvent::ReplayComplete) {
+                break;
+            }
+        }
+
+        assert_eq!(
+            store.latest_revision().await?,
+            before,
+            "subscribing to an object must not allocate a revision"
         );
         Ok(())
     }
@@ -1097,7 +1158,13 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 std::collections::HashMap::from([(member.clone(), Access::Read)]),
             )
             .await?;
-        seed_live_obj(store, obj.clone(), payload("page-outcome", 1), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("page-outcome", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
 
         let unknown_outcome = store
             .replay_page(
@@ -1137,7 +1204,7 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PartEvent::Added(added) if added.obj_id == obj && added.part_id == part
+                PartEvent::Changed(changed) if changed.obj_id == obj && changed.part_ids.contains(&part)
             )),
             "a granted member sees the part's events, got {events:?}"
         );
@@ -1146,7 +1213,13 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         // Both stores filter on current access rows, so this ordering is visible too; pinned so
         // that a later change to grant-time filtering has to be deliberate.
         store.ensure_part(late_grant.clone()).await?;
-        seed_live_obj(store, late_obj.clone(), payload("page-outcome-late", 2), std::slice::from_ref(&late_grant)).await?;
+        seed_live_obj(
+            store,
+            late_obj.clone(),
+            payload("page-outcome-late", 2),
+            std::slice::from_ref(&late_grant),
+        )
+        .await?;
         store
             .set_part_members(
                 late_grant.clone(),
@@ -1157,8 +1230,8 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         assert!(
             late_events.iter().any(|event| matches!(
                 event,
-                PartEvent::Added(added)
-                    if added.obj_id == late_obj && added.part_id == late_grant
+                PartEvent::Changed(changed)
+                    if changed.obj_id == late_obj && changed.part_ids.contains(&late_grant)
             )),
             "a member granted after the event was written still reads it, because the filter is \
              current access and not grant time; got {late_events:?}"
@@ -1209,7 +1282,13 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let part = test_part(220);
         let obj = test_obj(221);
         store.ensure_part(part.clone()).await?;
-        seed_live_obj(store, obj.clone(), payload("revision-all", 1), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("revision-all", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
         store
             .set_obj_payload(obj.clone(), payload("revision-all", 2))
             .await?;
@@ -1220,7 +1299,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         {
             assert!(revision > latest);
             saw_membership_event |= entries.iter().any(|entry| match entry {
-                SubEvent::Added(added) => added.obj_id == obj && added.part_id == part,
                 SubEvent::Changed(changed) => {
                     changed.obj_id == obj && changed.part_ids.contains(&part)
                 }
@@ -1268,14 +1346,20 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store.ensure_part(part_a.clone()).await?;
         store.ensure_part(part_b.clone()).await?;
         seed_live_obj(store, obj.clone(), payload("revision-1", 1), &[]).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()]).await?;
-        store.set_obj_payload(obj.clone(), payload("revision-2", 2)).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()])
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("revision-2", 2))
+            .await?;
 
         let mut reader = store
             .open_local_revision_reader(SubPartsRequest {
                 lower_bound: 0,
                 targets: HashSet::from([
-                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() },
+                    big_sync_core::rpc::SubscriptionTarget::Object {
+                        obj_id: obj.clone(),
+                    },
                     big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part_a.clone(),
                         cursor: 0,
@@ -1325,7 +1409,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         };
         let grouped_revision = grouped_revision.expect("replay must contain grouped change");
 
-        store.remove_obj_from_part(obj.clone(), part_a.clone()).await?;
+        store
+            .remove_obj_from_part(obj.clone(), part_a.clone())
+            .await?;
         let removed_revision = match reader.next(RevisionReadLimits::default()).await? {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision > replay_through);
@@ -1443,7 +1529,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store.set_obj_payload(obj_id.clone(), payload).await?;
         assert!(store.obj_exists(obj_id.clone()).await?);
 
-        store.add_obj_to_parts(obj_id.clone(), vec![part_id.clone()]).await?;
+        store
+            .add_obj_to_parts(obj_id.clone(), vec![part_id.clone()])
+            .await?;
         assert!(store.obj_exists(obj_id.clone()).await?);
 
         store.remove_obj_from_part(obj_id.clone(), part_id).await?;
@@ -1469,15 +1557,30 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             store.summarize_parts(HashSet::new()).await??,
             HashMap::new()
         );
-        match store.summarize_parts(HashSet::from([unknown.clone()])).await? {
+        match store
+            .summarize_parts(HashSet::from([unknown.clone()]))
+            .await?
+        {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
                 assert_eq!(unkown_parts, vec![unknown.clone()]);
             }
             other => panic!("unexpected summarize_parts result: {other:?}"),
         }
 
-        seed_live_obj(store, obj_a, payload("summarize-a", 1), std::slice::from_ref(&part_a)).await?;
-        seed_live_obj(store, obj_b, payload("summarize-b", 2), std::slice::from_ref(&part_b)).await?;
+        seed_live_obj(
+            store,
+            obj_a,
+            payload("summarize-a", 1),
+            std::slice::from_ref(&part_a),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            obj_b,
+            payload("summarize-b", 2),
+            std::slice::from_ref(&part_b),
+        )
+        .await?;
 
         let summary = store
             .summarize_parts(HashSet::from([part_a.clone(), part_b.clone()]))
@@ -1515,9 +1618,27 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let obj_c = obj_in_bucket(bucket_c, 3);
 
         store.ensure_part(part.clone()).await?;
-        seed_live_obj(store, obj_a.clone(), payload("changed-a", 1), std::slice::from_ref(&part)).await?;
-        seed_live_obj(store, obj_b, payload("changed-b", 2), std::slice::from_ref(&part)).await?;
-        seed_live_obj(store, obj_c, payload("changed-c", 3), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            obj_a.clone(),
+            payload("changed-a", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            obj_b,
+            payload("changed-b", 2),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            obj_c,
+            payload("changed-c", 3),
+            std::slice::from_ref(&part),
+        )
+        .await?;
 
         match store
             .get_changed_buckets(GetChangedBucketsRequest {
@@ -1554,7 +1675,10 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .all(|buck| buck.id.level() == bucket_a.level())
         );
         for buck in &changed {
-            assert_eq!(store.get_bucket_summary(part.clone(), buck.id).await?, *buck);
+            assert_eq!(
+                store.get_bucket_summary(part.clone(), buck.id).await?,
+                *buck
+            );
         }
 
         let changed_from_b = store
@@ -1624,7 +1748,13 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             .await??;
         assert!(nothing.is_empty());
 
-        seed_live_obj(store, obj_a, payload("changed-a-2", 4), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            obj_a,
+            payload("changed-a-2", 4),
+            std::slice::from_ref(&part),
+        )
+        .await?;
         let changed_after = store
             .get_changed_buckets(GetChangedBucketsRequest {
                 part_id: part.clone(),
@@ -1657,7 +1787,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let seed = FingerprintSeed::new(0x4444_5555, 0x6666_7777);
 
         store.ensure_part(part.clone()).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
 
         assert_eq!(store.obj_payload(obj.clone()).await?, None);
         assert_eq!(store.obj_parts(obj.clone()).await?, vec![part.clone()]);
@@ -1699,7 +1831,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             }
         );
 
-        let events_before = store.list_events(HashSet::from([part.clone()]), 0, 8).await??;
+        let events_before = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??;
         assert_eq!(
             events_before.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
@@ -1764,7 +1898,11 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                     dead: false,
                     fp: Fingerprint::new(
                         &seed,
-                        &("big-sync-obj-fp-v1", obj.clone(), payload("late-payload", 99)),
+                        &(
+                            "big-sync-obj-fp-v1",
+                            obj.clone(),
+                            payload("late-payload", 99)
+                        ),
                     ),
                 }],
                 next_after: None,
@@ -1772,16 +1910,20 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             }
         );
 
-        let events_after = store.list_events(HashSet::from([part.clone()]), 0, 8).await??;
+        let events_after = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??;
         let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
         assert_eq!(page_after.events.len(), 1);
-        let added_cursor = match &page_after.events[0] {
-            PartEvent::Added(event) => event.cursor,
-            other => panic!("expected added event, got {other:?}"),
+        let touched_cursor = match &page_after.events[0] {
+            PartEvent::Changed(changed) => changed.cursor,
+            other => {
+                panic!("expected the member write to arrive as the part's touch, got {other:?}")
+            }
         };
-        assert_added(
+        assert_member_touched(
             &page_after.events[0],
-            added_cursor,
+            touched_cursor,
             part,
             obj,
             payload("late-payload", 99),
@@ -1806,11 +1948,35 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let seed = FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd);
 
         store.ensure_part(part.clone()).await?;
-        seed_live_obj(store, a2.clone(), payload("leaf-a2", 2), std::slice::from_ref(&part)).await?;
-        seed_live_obj(store, a1.clone(), payload("leaf-a1", 1), std::slice::from_ref(&part)).await?;
-        seed_live_obj(store, a3.clone(), payload("leaf-a3", 3), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            a2.clone(),
+            payload("leaf-a2", 2),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            a1.clone(),
+            payload("leaf-a1", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            a3.clone(),
+            payload("leaf-a3", 3),
+            std::slice::from_ref(&part),
+        )
+        .await?;
         store.remove_obj_from_part(a3.clone(), part.clone()).await?;
-        seed_live_obj(store, b1.clone(), payload("leaf-b1", 4), std::slice::from_ref(&part)).await?;
+        seed_live_obj(
+            store,
+            b1.clone(),
+            payload("leaf-b1", 4),
+            std::slice::from_ref(&part),
+        )
+        .await?;
 
         match store
             .leaf_buckets(LeafBucketsRequest {
@@ -1881,15 +2047,23 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 entries: vec![BucketObjPageEntry {
                     obj_id: b1.clone(),
                     dead: false,
-                    fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", b1.clone(), payload("leaf-b1", 4))),
+                    fp: Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", b1.clone(), payload("leaf-b1", 4))
+                    ),
                 }],
                 next_after: None,
                 done: true,
             }
         );
 
-        let since = store.get_bucket_summary(part.clone(), bucket_b).await?.changed_at;
-        store.set_obj_payload(b1.clone(), payload("leaf-b1-2", 5)).await?;
+        let since = store
+            .get_bucket_summary(part.clone(), bucket_b)
+            .await?
+            .changed_at;
+        store
+            .set_obj_payload(b1.clone(), payload("leaf-b1-2", 5))
+            .await?;
 
         let since_page = store
             .leaf_buckets(LeafBucketsRequest {
@@ -1979,13 +2153,30 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store.ensure_part(part_a.clone()).await?;
         store.ensure_part(part_b.clone()).await?;
 
-        seed_live_obj(store, obj.clone(), payload("events-1", 1), std::slice::from_ref(&part_a)).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
-        store.set_obj_payload(obj.clone(), payload("events-2", 2)).await?;
-        store.remove_obj_from_part(obj.clone(), part_a.clone()).await?;
-        store.set_obj_payload(obj.clone(), payload("events-3", 3)).await?;
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("events-1", 1),
+            std::slice::from_ref(&part_a),
+        )
+        .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part_b.clone()])
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("events-2", 2))
+            .await?;
+        store
+            .remove_obj_from_part(obj.clone(), part_a.clone())
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("events-3", 3))
+            .await?;
 
-        match store.list_events(HashSet::from([unknown.clone()]), 0, 10).await? {
+        match store
+            .list_events(HashSet::from([unknown.clone()]), 0, 10)
+            .await?
+        {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
                 assert_eq!(unkown_parts, vec![unknown]);
             }
@@ -2058,16 +2249,18 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store
             .set_obj_payload(obj.clone(), payload("readable-subscribe", 1))
             .await?;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
 
         loop {
             match recv_sub_event(&rx).await? {
-                SubEvent::Added(event) => {
+                SubEvent::Changed(event) => {
                     assert_eq!(event.obj_id, obj);
-                    assert_eq!(event.part_id, part);
+                    assert!(event.part_ids.contains(&part), "the touched part is named");
                     break;
                 }
-                SubEvent::ReplayComplete | SubEvent::Changed(_) | SubEvent::Removed(_) => {}
+                SubEvent::ReplayComplete | SubEvent::Removed(_) => {}
             }
         }
         Ok(())
@@ -2097,11 +2290,23 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .await?;
         }
 
-        seed_live_obj(store, obj.clone(), payload("sub-1", 1), std::slice::from_ref(&part_a)).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
-        store.set_obj_payload(obj.clone(), payload("sub-2", 2)).await?;
+        seed_live_obj(
+            store,
+            obj.clone(),
+            payload("sub-1", 1),
+            std::slice::from_ref(&part_a),
+        )
+        .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part_b.clone()])
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), payload("sub-2", 2))
+            .await?;
         store.remove_obj_from_part(obj.clone(), part_a).await?;
-        store.set_obj_payload(obj.clone(), payload("sub-3", 3)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("sub-3", 3))
+            .await?;
 
         let rx = store
             .subscribe(
@@ -2126,7 +2331,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             other => panic!("unexpected replay events: {other:?}"),
         };
 
-        store.set_obj_payload(obj.clone(), payload("sub-4", 4)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("sub-4", 4))
+            .await?;
         let live_evt = recv_sub_event(&rx).await?;
         match live_evt {
             SubEvent::Changed(transition) => {
@@ -2156,7 +2363,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store
             .set_obj_payload(obj.clone(), payload("replay-filter", 1))
             .await?;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
 
         // Set explicit membership: auth_peer has Read; denied_peer gets
         // an empty membership map (explicitly denied).
@@ -2183,7 +2392,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let auth_events = collect_sub_events(&auth_rx).await?;
         assert!(
             auth_events.iter().any(|evt| match evt {
-                SubEvent::Added(added) => added.obj_id == obj && added.part_id == part,
                 SubEvent::Changed(changed) => {
                     changed.obj_id == obj && changed.part_ids == vec![part.clone()]
                 }
@@ -2221,11 +2429,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         // The denied subscriber must NOT receive any document events during replay.
         for evt in &denied_events {
             match evt {
-                SubEvent::Added(transition) => {
-                    panic!(
-                        "denied subscriber must not receive Added event during replay; got {transition:?}"
-                    );
-                }
                 SubEvent::Changed(transition) => {
                     panic!(
                         "denied subscriber must not receive Changed event during replay; got {transition:?}"
@@ -2396,8 +2599,12 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                     .set_part_members(part, HashMap::from([(peer.clone(), Access::Read)]))
                     .await?;
             }
-            store.set_obj_payload(obj.clone(), payload("matrix", 0)).await?;
-            store.add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()]).await?;
+            store
+                .set_obj_payload(obj.clone(), payload("matrix", 0))
+                .await?;
+            store
+                .add_obj_to_parts(obj.clone(), vec![part_a.clone(), part_b.clone()])
+                .await?;
             let baseline_cursor = store
                 .list_events(HashSet::from([part_a.clone(), part_b.clone()]), 0, u32::MAX)
                 .await??
@@ -2405,7 +2612,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .flat_map(|page| page.events.iter())
                 .map(|event| match event {
                     PartEvent::Changed(inner) => inner.cursor,
-                    PartEvent::Added(inner) => inner.cursor,
                     PartEvent::Removed(inner) => inner.cursor,
                 })
                 .max()
@@ -2422,7 +2628,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 });
             }
             if mode != 0 {
-                targets.insert(big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() });
+                targets.insert(big_sync_core::rpc::SubscriptionTarget::Object {
+                    obj_id: obj.clone(),
+                });
             }
             let request = SubPartsRequest {
                 lower_bound: baseline_cursor,
@@ -2437,9 +2645,21 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             if !live {
                 for operation in operations {
                     match operation {
-                        0 => store.set_obj_payload(obj.clone(), payload("matrix", 1)).await?,
-                        1 => store.remove_obj_from_part(obj.clone(), part_a.clone()).await?,
-                        2 => store.set_obj_payload(obj.clone(), payload("matrix", 2)).await?,
+                        0 => {
+                            store
+                                .set_obj_payload(obj.clone(), payload("matrix", 1))
+                                .await?
+                        }
+                        1 => {
+                            store
+                                .remove_obj_from_part(obj.clone(), part_a.clone())
+                                .await?
+                        }
+                        2 => {
+                            store
+                                .set_obj_payload(obj.clone(), payload("matrix", 2))
+                                .await?
+                        }
                         _ => unreachable!("unknown subscription mutation"),
                     }
                 }
@@ -2451,9 +2671,21 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             let mut events = collect_sub_events(&rx).await?;
             for operation in operations {
                 match operation {
-                    0 => store.set_obj_payload(obj.clone(), payload("matrix", 1)).await?,
-                    1 => store.remove_obj_from_part(obj.clone(), part_a.clone()).await?,
-                    2 => store.set_obj_payload(obj.clone(), payload("matrix", 2)).await?,
+                    0 => {
+                        store
+                            .set_obj_payload(obj.clone(), payload("matrix", 1))
+                            .await?
+                    }
+                    1 => {
+                        store
+                            .remove_obj_from_part(obj.clone(), part_a.clone())
+                            .await?
+                    }
+                    2 => {
+                        store
+                            .set_obj_payload(obj.clone(), payload("matrix", 2))
+                            .await?
+                    }
                     _ => unreachable!("unknown subscription mutation"),
                 }
                 events.push(recv_sub_event(&rx).await?);
@@ -2554,18 +2786,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                             .entry((inner.cursor, inner.obj_id))
                             .or_default()
                             .extend(inner.part_ids);
-                    }
-                    SubEvent::Added(inner) => {
-                        self.cursor(inner.cursor);
-                        if inner.obj_id != self.obj {
-                            self.violations.push(format!(
-                                "Added targeted {:?}, expected {:?}",
-                                inner.obj_id, self.obj
-                            ));
-                        }
-                        self.check_part(inner.part_id.clone(), "Added");
-                        self.state.payload = Some(inner.payload);
-                        self.state.live_parts.insert(inner.part_id);
                     }
                     SubEvent::Removed(inner) => {
                         self.cursor(inner.cursor);
@@ -2697,7 +2917,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             if !live {
-                store.set_obj_payload(obj.clone(), payload("zero-part", 1)).await?;
+                store
+                    .set_obj_payload(obj.clone(), payload("zero-part", 1))
+                    .await?;
             }
             let rx = store
                 .subscribe_local(SubPartsRequest {
@@ -2728,7 +2950,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             live: bool,
         ) -> Res<Vec<SubEvent>> {
             if !live {
-                store.set_obj_payload(obj.clone(), payload("zero-part", 1)).await?;
+                store
+                    .set_obj_payload(obj.clone(), payload("zero-part", 1))
+                    .await?;
             }
             let rx = store
                 .subscribe(
@@ -2747,7 +2971,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 match timeout(Duration::from_millis(250), rx.recv()).await {
                     Err(_) => {}
                     Ok(Ok(event)) => {
-                        panic!("partless object change must not reach a remote subscriber: {event:?}")
+                        panic!(
+                            "partless object change must not reach a remote subscriber: {event:?}"
+                        )
                     }
                     Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
                 }
@@ -2811,8 +3037,12 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             store
                 .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
                 .await?;
-            store.set_obj_payload(obj.clone(), payload("mixed", 0)).await?;
-            store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+            store
+                .set_obj_payload(obj.clone(), payload("mixed", 0))
+                .await?;
+            store
+                .add_obj_to_parts(obj.clone(), vec![part.clone()])
+                .await?;
             let baseline = store
                 .list_events(HashSet::from([part.clone()]), 0, u32::MAX)
                 .await??
@@ -2820,13 +3050,14 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .flat_map(|page| page.events.iter())
                 .map(|event| match event {
                     PartEvent::Changed(inner) => inner.cursor,
-                    PartEvent::Added(inner) => inner.cursor,
                     PartEvent::Removed(inner) => inner.cursor,
                 })
                 .max()
                 .unwrap_or_default();
             if !live {
-                store.set_obj_payload(obj.clone(), payload("mixed", 1)).await?;
+                store
+                    .set_obj_payload(obj.clone(), payload("mixed", 1))
+                    .await?;
             }
             let rx = store
                 .subscribe(
@@ -2837,7 +3068,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                                 part_id: part,
                                 cursor: baseline,
                             },
-                            big_sync_core::rpc::SubscriptionTarget::Object { obj_id: obj.clone() },
+                            big_sync_core::rpc::SubscriptionTarget::Object {
+                                obj_id: obj.clone(),
+                            },
                         ]),
                     },
                     peer,
@@ -2872,7 +3105,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
             store
                 .set_obj_payload(obj.clone(), payload("object-only", 0))
                 .await?;
-            store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+            store
+                .add_obj_to_parts(obj.clone(), vec![part.clone()])
+                .await?;
             let baseline = store
                 .list_events(HashSet::from([part]), 0, u32::MAX)
                 .await??
@@ -2880,7 +3115,6 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .flat_map(|page| page.events.iter())
                 .map(|event| match event {
                     PartEvent::Changed(inner) => inner.cursor,
-                    PartEvent::Added(inner) => inner.cursor,
                     PartEvent::Removed(inner) => inner.cursor,
                 })
                 .max()
@@ -3036,19 +3270,33 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         }
         // Build events: cursor 1-4 only for part_a, 5-6 involve part_b.
         // First set payload while obj has no parts (no event recorded).
-        store.set_obj_payload(obj.clone(), payload("per-cursor", 1)).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part_a.clone()]).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("per-cursor", 1))
+            .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part_a.clone()])
+            .await?;
         // cursor=1: Added obj, part_a
-        store.set_obj_payload(obj.clone(), payload("per-cursor", 2)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("per-cursor", 2))
+            .await?;
         // cursor=2: Changed [part_a]
-        store.set_obj_payload(obj.clone(), payload("per-cursor", 3)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("per-cursor", 3))
+            .await?;
         // cursor=3: Changed [part_a]
-        store.set_obj_payload(obj.clone(), payload("per-cursor", 4)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("per-cursor", 4))
+            .await?;
         // cursor=4: Changed [part_a]
 
-        store.add_obj_to_parts(obj.clone(), vec![part_b.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part_b.clone()])
+            .await?;
         // cursor=5: Added obj, part_b
-        store.set_obj_payload(obj.clone(), payload("per-cursor", 5)).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("per-cursor", 5))
+            .await?;
         // cursor=6: Changed [part_a, part_b]
 
         // The request lower bound is shared by all targets. The latest-state
@@ -3124,10 +3372,10 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
                 .expect(ERROR_IMPOSSIBLE);
             for evt in &page.events {
                 match evt {
-                    PartEvent::Added(added) => {
-                        collected.push((added.cursor, added.obj_id.clone()));
+                    PartEvent::Changed(changed) => {
+                        collected.push((changed.cursor, changed.obj_id.clone()));
                     }
-                    PartEvent::Changed(_) | PartEvent::Removed(_) => {
+                    PartEvent::Removed(_) => {
                         panic!("unexpected event type for single-object part");
                     }
                 }
@@ -3175,15 +3423,21 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store.ensure_part(part.clone()).await?;
 
         // Set to a higher cursor, then attempt regression.
-        store.set_peer_part_cursor(peer.clone(), part.clone(), 42).await?;
+        store
+            .set_peer_part_cursor(peer.clone(), part.clone(), 42)
+            .await?;
         assert_eq!(
-            store.get_peer_part_cursor(peer.clone(), part.clone()).await?,
+            store
+                .get_peer_part_cursor(peer.clone(), part.clone())
+                .await?,
             42,
             "initial cursor should be 42"
         );
 
         // Attempt to regress: setting to 5 must be a no-op.
-        store.set_peer_part_cursor(peer.clone(), part.clone(), 5).await?;
+        store
+            .set_peer_part_cursor(peer.clone(), part.clone(), 5)
+            .await?;
         let cursor = store.get_peer_part_cursor(peer, part).await?;
         assert!(
             cursor >= 42,
@@ -3201,18 +3455,28 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         let obj = test_obj(112);
 
         store.ensure_part(part.clone()).await?;
-        store.set_obj_payload(obj.clone(), payload("cursor-adv", 1)).await?;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .set_obj_payload(obj.clone(), payload("cursor-adv", 1))
+            .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
 
-        let summaries_after_add = store.summarize_parts(HashSet::from([part.clone()])).await??;
+        let summaries_after_add = store
+            .summarize_parts(HashSet::from([part.clone()]))
+            .await??;
         let cursor_after_add = summaries_after_add
             .get(&part)
             .expect("summary must contain part")
             .latest_cursor;
 
-        store.remove_obj_from_part(obj.clone(), part.clone()).await?;
+        store
+            .remove_obj_from_part(obj.clone(), part.clone())
+            .await?;
 
-        let summaries_after_remove = store.summarize_parts(HashSet::from([part.clone()])).await??;
+        let summaries_after_remove = store
+            .summarize_parts(HashSet::from([part.clone()]))
+            .await??;
         let cursor_after_remove = summaries_after_remove
             .get(&part)
             .expect("summary must contain part")
@@ -3250,9 +3514,13 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         store.ensure_part(part.clone()).await?;
 
         // Seed 2 objects
-        store.set_obj_payload(obj1.clone(), payload("exactness", 1)).await?;
+        store
+            .set_obj_payload(obj1.clone(), payload("exactness", 1))
+            .await?;
         store.add_obj_to_parts(obj1, vec![part.clone()]).await?;
-        store.set_obj_payload(obj2.clone(), payload("exactness", 2)).await?;
+        store
+            .set_obj_payload(obj2.clone(), payload("exactness", 2))
+            .await?;
         store.add_obj_to_parts(obj2, vec![part.clone()]).await?;
 
         // Query exactly limit=2 matching 2 events: next_cursor MUST be None
@@ -3269,7 +3537,9 @@ fn payload(tag: &'static str, idx: u64) -> ObjPayload {
         );
 
         // Seed 3rd object
-        store.set_obj_payload(obj3.clone(), payload("exactness", 3)).await?;
+        store
+            .set_obj_payload(obj3.clone(), payload("exactness", 3))
+            .await?;
         store.add_obj_to_parts(obj3, vec![part.clone()]).await?;
 
         // Query limit=2 when 3 events exist: next_cursor MUST be Some

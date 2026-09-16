@@ -225,14 +225,17 @@ async fn handle_rpc_message(
             // debounces the fan-out per peer. This task only keeps the
             // subscription alive for the connection's lifetime and removes it
             // on disconnect.
-            let sub_id = big_repo.subscribe_keyhive_changes(peer_id.clone(), tx).await;
+            let sub_id = big_repo
+                .subscribe_keyhive_changes(peer_id.clone(), tx)
+                .await;
             let cancel = cancel_token.child_token();
             let repo = Arc::clone(&big_repo);
             let cleanup_repo = Arc::clone(&big_repo);
             let peer_id_for_task = peer_id.clone();
             match subscription_tasks.spawn(async move {
                 cancel.cancelled().await;
-                repo.unsubscribe_keyhive_changes(&peer_id_for_task, sub_id).await;
+                repo.unsubscribe_keyhive_changes(&peer_id_for_task, sub_id)
+                    .await;
             }) {
                 Ok(_) => {
                     tracing::debug!(%peer_id, "registered direct Keyhive change stream");

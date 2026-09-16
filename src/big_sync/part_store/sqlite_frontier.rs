@@ -8,7 +8,7 @@ use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
     KeyedFrontierResult,
 };
-use big_sync_core::rpc::{ObjAddedToPart, ObjChanged, PartEvent};
+use big_sync_core::rpc::{ObjChanged, PartEvent};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::{async_trait, serde_json};
 
-const EVENT_ADDED: i64 = 0;
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
 
@@ -126,7 +125,8 @@ impl SqliteReadSource for SqlitePartFrontier {
                 ));
             }
             _ => Some(
-                row.part_id.clone()
+                row.part_id
+                    .clone()
                     .ok_or_else(|| invariant("part frontier row has no part id"))?,
             ),
         };
@@ -139,15 +139,6 @@ impl SqliteReadSource for SqlitePartFrontier {
         };
         let value = match row.event_type {
             EVENT_REMOVED => None,
-            EVENT_ADDED => {
-                let part_id = part_id.clone().ok_or_else(|| invariant("object key cannot be added"))?;
-                Some(PartEvent::Added(ObjAddedToPart {
-                    cursor: row.revision,
-                    part_id,
-                    obj_id: row.obj_id.clone(),
-                    payload: payload(&row)?,
-                }))
-            }
             EVENT_CHANGED => {
                 let part_ids = part_id.into_iter().collect();
                 Some(PartEvent::Changed(ObjChanged {

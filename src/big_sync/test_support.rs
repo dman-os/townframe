@@ -20,7 +20,9 @@ pub struct NetworkRestTarget {
     pub part_ids: Vec<PartKey>,
 }
 
-async fn cursor_snapshot(targets: &[NetworkRestTarget]) -> Res<Vec<BTreeMap<PartKey, CursorIndex>>> {
+async fn cursor_snapshot(
+    targets: &[NetworkRestTarget],
+) -> Res<Vec<BTreeMap<PartKey, CursorIndex>>> {
     let mut snapshots = Vec::with_capacity(targets.len());
     for target in targets {
         let requested: HashSet<_> = target.part_ids.iter().cloned().collect();

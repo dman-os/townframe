@@ -97,6 +97,19 @@ impl ObjKey {
     }
 }
 
+impl PartKey {
+    /// The object key this part is derived from, for an object part.
+    ///
+    /// ADR 012 decision 3: the derivation is the reserved `o:` scheme followed by the
+    /// object key's own bytes, so it round-trips exactly. `None` for a key outside the
+    /// reserved object-part space — the reserved scheme is what makes the distinction
+    /// decidable without consulting storage.
+    #[must_use]
+    pub fn object_key(&self) -> Option<ObjKey> {
+        self.as_bytes().strip_prefix(b"o:").map(ObjKey::new)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteKey(std::sync::Arc<[u8]>);
 
@@ -172,7 +185,9 @@ impl std::str::FromStr for ByteKey {
         // with `z` is ambiguous under this rule; the reserved key spaces start with `/`
         // or `o:`, so no key this crate constructs is.
         match value.strip_prefix('z') {
-            Some(encoded) => Ok(Self::new(bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?)),
+            Some(encoded) => Ok(Self::new(
+                bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?,
+            )),
             None => Ok(Self::new(value.as_bytes())),
         }
     }
@@ -198,8 +213,8 @@ impl<'de> serde::Deserialize<'de> for ByteKey {
     {
         if deserializer.is_human_readable() {
             let str = String::deserialize(deserializer)?;
-            let bytes = utils_rs::hash::decode_base58_multibase(&str)
-                .map_err(serde::de::Error::custom)?;
+            let bytes =
+                utils_rs::hash::decode_base58_multibase(&str).map_err(serde::de::Error::custom)?;
             Ok(Self::new(bytes))
         } else {
             struct MyVisitor;
@@ -356,5 +371,3 @@ impl BuckId {
         }
     }
 }
-
-

@@ -24,7 +24,7 @@ async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::Docum
     else {
         return "local peer id is not a verifying key".to_owned();
     };
-let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
+    let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
         return "document id is not a verifying key".to_owned();
     };
     let local = keyhive_core::principal::identifier::Identifier::from(local_key);
@@ -131,7 +131,8 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         let timeout = repo.sync_policy().backend_doc_sync_timeout;
         let receipt = match tokio::time::timeout(
             timeout,
-            repo.runtime.sync_doc_with_peer_receipt(doc_id.clone(), peer_id.clone()),
+            repo.runtime
+                .sync_doc_with_peer_receipt(doc_id.clone(), peer_id.clone()),
         )
         .await
         {
@@ -162,7 +163,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 let local_key =
                     ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
                         .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
-let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .map_err(|_| eyre::eyre!("document id is not a verifying key"))?;
                 let local = keyhive_core::principal::identifier::Identifier::from(local_key);
                 let document = keyhive_core::principal::identifier::Identifier::from(doc_key);

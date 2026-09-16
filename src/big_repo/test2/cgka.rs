@@ -388,7 +388,8 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let clone_handle =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id.clone())
+            .await?;
     clone_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "clone_phase", "opened"))
@@ -411,7 +412,7 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         }
     };
     pair.connect().await?;
-let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.to_bytes32())
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.to_bytes32())
         .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(verifying_key),
@@ -477,7 +478,8 @@ async fn tier6_group_doc_grant_then_add_user() -> crate::Res<()> {
 
     // History-inclusive: user reads content written before membership.
     let new_member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = new_member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -593,7 +595,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
 
     // Both documents must be readable by the new member.
     let reader_a =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_a_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_a_id.clone())
+            .await?;
     let tag_a = reader_a
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "tag")
@@ -611,7 +614,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     assert_eq!(tag_a.as_deref(), Some("doc-a"));
 
     let reader_b =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_b_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_b_id.clone())
+            .await?;
     let tag_b = reader_b
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "tag")
@@ -688,7 +692,8 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -831,7 +836,8 @@ async fn tier6_history_inclusive_access() -> crate::Res<()> {
     // The user must be able to read the full history including content
     // written before they were added.
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1085,7 +1091,8 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
 
     // Materialise: read the pre-grant content.
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -1117,7 +1124,8 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
     // Sync the edit back to the owner and verify convergence.
     pair.right_conn().sync_keyhive_with_peer().await?;
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     let note = owner_doc2
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "editor_note")
@@ -1250,7 +1258,8 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1377,7 +1386,8 @@ async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crat
     // have been openable at the time the janitor observed it (implicit: the
     // join materialized at all).
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1437,7 +1447,11 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Blobs written strictly before the join: the forward-secrecy set.
-    let prejoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let prejoin_blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
 
     pair.left()
         .repo
@@ -1458,7 +1472,8 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1485,7 +1500,11 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
     // reconstructable from the CGKA DAG because the joiner was not covered
     // by any wrap at those epochs.
     let joiner_keyhive = pair.right().repo.keyhive().clone_keyhive();
-    let postjoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let postjoin_blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let prejoin_ids: std::collections::HashSet<_> = prejoin_blobs.iter().collect();
     let kh_doc = joiner_keyhive
         .get_document(kh_document_id(doc_id)?)
@@ -1539,7 +1558,7 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
 fn kh_document_id(
     doc_id: crate::DocumentId,
 ) -> crate::Res<keyhive_core::principal::document::id::DocumentId> {
-let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .map_err(|err| crate::ferr!("doc_id is not a valid Ed25519 point: {err:?}"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

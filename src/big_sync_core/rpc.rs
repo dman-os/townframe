@@ -351,16 +351,6 @@ structstruck::strike! {
                 )]
                 pub payload: ObjPayload,
             }),
-            Added(pub struct ObjAddedToPart {
-                pub cursor: CursorIndex,
-                pub part_id: PartKey,
-                pub obj_id: ObjKey,
-                #[serde(
-                    serialize_with = "value_as_string",
-                    deserialize_with = "value_from_string"
-                )]
-                pub payload: ObjPayload,
-            }),
             Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
                 pub part_id: PartKey,
@@ -389,7 +379,6 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {
         Changed(ObjChanged),
-        Added(ObjAddedToPart),
         Removed(ObjRemovedFromPart),
         ReplayComplete,
     }
@@ -399,7 +388,6 @@ impl From<PartEvent> for SubEvent {
     fn from(evt: PartEvent) -> Self {
         match evt {
             PartEvent::Changed(inner) => Self::Changed(inner),
-            PartEvent::Added(inner) => Self::Added(inner),
             PartEvent::Removed(inner) => Self::Removed(inner),
         }
     }

@@ -90,7 +90,10 @@ mod tests {
             bytes
         );
         let part = PartKey::new(bytes);
-        assert_eq!(IdCodec::part_from_blob(IdCodec::part_blob(part.clone())), part);
+        assert_eq!(
+            IdCodec::part_from_blob(IdCodec::part_blob(part.clone())),
+            part
+        );
         let obj = ObjKey::new(bytes);
         assert_eq!(IdCodec::obj_from_blob(IdCodec::obj_blob(obj.clone())), obj);
         let peer = PeerKey::new(bytes);

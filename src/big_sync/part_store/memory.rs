@@ -8,8 +8,8 @@ use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
     GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, ObjAddedToPart, ObjChanged, ObjRemovedFromPart, PartEvent,
-    PartPage, PartSummary, SubEvent, SubPartsRequest, SubscriptionTarget,
+    LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
+    PartSummary, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
 use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 
@@ -171,11 +171,12 @@ impl MemoryPartStore {
     /// observe the cursor, or to stamp state that allocates no revision of its own — which is
     /// exactly a silent materialization — while `next` is reserved for write paths.
     ///
-    /// Whether this store should instead emit an event for the materialized row, as the sqlite
-    /// store does by recording it as a keyed-frontier `Changed`, is the undecided
-    /// materialization-parity question. It is left open deliberately: an earlier attempt to
-    /// consume a revision here was justified by an A/B against a test that was flaky for reasons
-    /// unrelated to this code, so that measurement supported nothing.
+    /// This store keeps its keyed frontier separately from its membership rows, so a materialized
+    /// row is not also a frontier entry and a subscriber that is behind the current revision is
+    /// not told the derived part exists; sqlite's membership row *is* its frontier entry, so it
+    /// is. The difference is bounded by the read filters, which only ever hand back events past
+    /// the asking cursor, and the invariant the stores do share — that subscribing allocates no
+    /// revision — is pinned for both by `assert_subscribing_allocates_no_revision_contract`.
     fn materialize_object_parts(&self, obj_ids: Vec<ObjKey>) {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
@@ -337,7 +338,6 @@ fn project_part_event(
 ) -> Option<SubEvent> {
     let obj_id = match &event {
         PartEvent::Changed(inner) => inner.obj_id.clone(),
-        PartEvent::Added(inner) => inner.obj_id.clone(),
         PartEvent::Removed(inner) => inner.obj_id.clone(),
     };
     // Candidate parts: what the event names, else the object's membership.
@@ -346,7 +346,6 @@ fn project_part_event(
             PartScope::AnyOf(inner.part_ids.clone())
         }
         PartEvent::Changed(_) => PartScope::FromObject,
-        PartEvent::Added(inner) => PartScope::Part(inner.part_id.clone()),
         PartEvent::Removed(inner) => PartScope::Part(inner.part_id.clone()),
     };
     // A concrete subscriber always filters.
@@ -367,15 +366,6 @@ fn project_part_event(
             Some(SubEvent::Changed(inner))
         }
         PartEvent::Changed(inner) if object_selected => {
-            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor: inner.cursor,
-                part_ids: Vec::new(),
-                obj_id: inner.obj_id,
-                payload: inner.payload,
-            }))
-        }
-        PartEvent::Added(inner) if !selected.is_empty() => Some(SubEvent::Added(inner)),
-        PartEvent::Added(inner) if object_selected => {
             Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor: inner.cursor,
                 part_ids: Vec::new(),
@@ -436,21 +426,18 @@ impl MemoryPartStoreScopeState {
             .iter()
             .map(|event| match event {
                 PartEvent::Changed(inner) => inner.cursor,
-                PartEvent::Added(inner) => inner.cursor,
                 PartEvent::Removed(inner) => inner.cursor,
             })
             .max()
             .expect(ERROR_IMPOSSIBLE);
         assert!(pending_events.iter().all(|event| match event {
             PartEvent::Changed(inner) => inner.cursor == revision,
-            PartEvent::Added(inner) => inner.cursor == revision,
             PartEvent::Removed(inner) => inner.cursor == revision,
         }));
         let mut frontier_mutations = Vec::new();
         for evt in pending_events {
             let (evt_parts, evt_obj_id) = match &evt {
                 PartEvent::Changed(inner) => (inner.part_ids.clone(), inner.obj_id.clone()),
-                PartEvent::Added(inner) => (vec![inner.part_id.clone()], inner.obj_id.clone()),
                 PartEvent::Removed(inner) => (vec![inner.part_id.clone()], inner.obj_id.clone()),
             };
             if evt_parts.is_empty() {
@@ -474,12 +461,6 @@ impl MemoryPartStoreScopeState {
                             frontier_mutations.push(FrontierMutation::Put {
                                 key,
                                 value: PartEvent::Changed(inner),
-                            });
-                        }
-                        PartEvent::Added(_) => {
-                            frontier_mutations.push(FrontierMutation::Put {
-                                key,
-                                value: evt.clone(),
                             });
                         }
                     }
@@ -562,7 +543,13 @@ impl HostPartStore for MemoryPartStore {
     ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
         let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            guard.changed_bucket_summaries(req.part_id.clone(), req.offset, req.to_level, req.since, req.limit_hint)
+            guard.changed_bucket_summaries(
+                req.part_id.clone(),
+                req.offset,
+                req.to_level,
+                req.since,
+                req.limit_hint,
+            )
         });
         tracing::debug!(
             part_id = %req.part_id,
@@ -586,7 +573,11 @@ impl HostPartStore for MemoryPartStore {
             let mut bucks = HashMap::new();
             for buck_req in req.buckets {
                 let buck_id = buck_req.buck_id;
-                if guard.bucket_summary(req.part_id.clone(), buck_id).changed_at <= req.since {
+                if guard
+                    .bucket_summary(req.part_id.clone(), buck_id)
+                    .changed_at
+                    <= req.since
+                {
                     bucks.insert(
                         buck_id,
                         LeafBucketPage {
@@ -621,7 +612,11 @@ impl HostPartStore for MemoryPartStore {
                         let fp = if dead {
                             Fingerprint::new(
                                 &req.seed,
-                                &("big-sync-obj-fp-v1", obj_id.clone(), serde_json::Value::Null),
+                                &(
+                                    "big-sync-obj-fp-v1",
+                                    obj_id.clone(),
+                                    serde_json::Value::Null,
+                                ),
                             )
                         } else {
                             let payload = part
@@ -631,7 +626,10 @@ impl HostPartStore for MemoryPartStore {
                                 .and_then(|_| guard.objs.get(&obj_id))
                                 .and_then(|obj| obj.payload.clone())
                                 .unwrap_or(serde_json::Value::Null);
-                            Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id.clone(), payload))
+                            Fingerprint::new(
+                                &req.seed,
+                                &("big-sync-obj-fp-v1", obj_id.clone(), payload),
+                            )
                         };
                         BucketObjPageEntry { obj_id, dead, fp }
                     })
@@ -809,9 +807,9 @@ impl HostPartStore for MemoryPartStore {
                     part.latest_cursor = cursor;
                     guard
                         .bus
-                        .queue_evt(PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        .queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                             cursor,
-                            part_id: part_id.clone(),
+                            part_ids: vec![part_id.clone()],
                             obj_id: obj_id.clone(),
                             payload: payload.clone(),
                         }));
@@ -875,9 +873,9 @@ impl HostPartStore for MemoryPartStore {
                 part.latest_cursor = cursor;
                 guard
                     .bus
-                    .queue_evt(PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    .queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor,
-                        part_id: part_id.clone(),
+                        part_ids: vec![part_id.clone()],
                         obj_id: obj_id.clone(),
                         payload: payload.clone(),
                     }));
@@ -1031,9 +1029,9 @@ impl HostPartStore for MemoryPartStore {
                                 .unwrap_or(serde_json::Value::Null);
                             (
                                 member.added_at,
-                                PartEvent::Added(ObjAddedToPart {
+                                PartEvent::Changed(ObjChanged {
                                     cursor: member.added_at,
-                                    part_id: part_id.clone(),
+                                    part_ids: vec![part_id.clone()],
                                     obj_id: obj_id.clone(),
                                     payload,
                                 }),
@@ -1120,7 +1118,9 @@ impl HostPartStore for MemoryPartStore {
                 .targets
                 .iter()
                 .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id } => Some((obj_id.clone(), reqs.lower_bound)),
+                    SubscriptionTarget::Object { obj_id } => {
+                        Some((obj_id.clone(), reqs.lower_bound))
+                    }
                     SubscriptionTarget::Part { .. } => None,
                 })
                 .collect(),
@@ -1152,9 +1152,12 @@ impl HostPartStore for MemoryPartStore {
                                     }
                                     (_, Some(event)) => event,
                                 };
-                                let Some(event) =
-                                    project_part_event(&guard, event, &selector, subscriber.clone())
-                                else {
+                                let Some(event) = project_part_event(
+                                    &guard,
+                                    event,
+                                    &selector,
+                                    subscriber.clone(),
+                                ) else {
                                     continue;
                                 };
                                 if let SubEvent::Changed(changed) = &event
@@ -1240,7 +1243,9 @@ impl HostPartStore for MemoryPartStore {
                 .targets
                 .iter()
                 .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id } => Some((obj_id.clone(), reqs.lower_bound)),
+                    SubscriptionTarget::Object { obj_id } => {
+                        Some((obj_id.clone(), reqs.lower_bound))
+                    }
                     SubscriptionTarget::Part { .. } => None,
                 })
                 .collect(),
@@ -1355,11 +1360,7 @@ impl HostPartStore for MemoryPartStore {
 
     /// This store's subscriptions are filtered per recipient, so a page can be denied rather
     /// than silently empty.
-    async fn page_denied(
-        &self,
-        target: &SubscriptionTarget,
-        subscriber: PeerKey,
-    ) -> Res<bool> {
+    async fn page_denied(&self, target: &SubscriptionTarget, subscriber: PeerKey) -> Res<bool> {
         let (scope, obj_id) = match target {
             SubscriptionTarget::Part { part_id, .. } => {
                 // `permitted_parts` reads the object only for a `FromObject` scope,
@@ -1686,7 +1687,9 @@ mod tests {
         let obj_id = ObjKey(ByteKey::new([65u8; 32]));
         let peer = PeerKey::new([66u8; 32]);
         let payload = serde_json::json!({"value": 1});
-        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
+        store
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
         store
             .set_part_members(
                 obj_id.object_part_key(),
@@ -1698,7 +1701,9 @@ mod tests {
             .subscribe(
                 SubPartsRequest {
                     lower_bound: 0,
-                    targets: HashSet::from([SubscriptionTarget::Object { obj_id: obj_id.clone() }]),
+                    targets: HashSet::from([SubscriptionTarget::Object {
+                        obj_id: obj_id.clone(),
+                    }]),
                 },
                 peer,
             )
@@ -1791,53 +1796,6 @@ mod tests {
         Ok(())
     }
 
-    /// Materializing an object part consumes no revision and emits no event: subscribing is not a
-    /// sync event, so the row can only be stamped with a revision the store already had. This
-    /// drives the object-target subscription that performs the materialization, so the coverage is
-    /// that such a subscription completes without advancing the cursor space.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn memory_materializing_object_part_is_quiet() -> Res<()> {
-        use big_sync_core::rpc::SubscriptionTarget;
-
-        let store = MemoryPartStore::new();
-        let obj_id = ObjKey(ByteKey::new([71u8; 32]));
-        let peer = PeerKey::new([72u8; 32]);
-        store
-            .set_obj_payload(obj_id.clone(), serde_json::json!({"value": 1}))
-            .await?;
-        store
-            .set_part_members(
-                obj_id.object_part_key(),
-                HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
-            )
-            .await?;
-        let before = store.latest_revision().await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([SubscriptionTarget::Object { obj_id }]),
-                },
-                peer,
-            )
-            .await??;
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await??;
-            if matches!(event, SubEvent::ReplayComplete) {
-                break;
-            }
-        }
-
-        let after = store.latest_revision().await?;
-        assert_eq!(
-            after, before,
-            "materialization is quiet: subscribing consumes no revision, so a subscriber asking\
-             for an object leaves the cursor space unchanged"
-        );
-        Ok(())
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn subscription_handoff_does_not_lose_immediate_mutation() -> Res<()> {
         let store = MemoryPartStore::new();
@@ -1856,7 +1814,9 @@ mod tests {
         for (obj, value) in [(first.clone(), "first"), (second.clone(), "second")] {
             store.set_obj_payload(obj, serde_json::json!(value)).await?;
         }
-        store.add_obj_to_parts(first.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(first.clone(), vec![part.clone()])
+            .await?;
 
         let rx = store
             .subscribe(
@@ -1880,17 +1840,17 @@ mod tests {
         loop {
             let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
             match event {
-                SubEvent::Added(event) => {
+                SubEvent::Changed(event) => {
                     seen.insert(event.obj_id);
                 }
                 SubEvent::ReplayComplete => break,
-                SubEvent::Changed(_) | SubEvent::Removed(_) => {}
+                SubEvent::Removed(_) => {}
             }
         }
         if !seen.contains(&second) {
             let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
             assert!(
-                matches!(&event, SubEvent::Added(event) if event.obj_id == second),
+                matches!(&event, SubEvent::Changed(event) if event.obj_id == second),
                 "immediate mutation was not delivered after replay: {event:?}"
             );
         }
@@ -1933,7 +1893,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match rx.recv().await {
-                    Ok(SubEvent::Added(_)) => return Ok::<_, eyre::Report>(()),
+                    Ok(SubEvent::Changed(_)) => return Ok::<_, eyre::Report>(()),
                     Ok(SubEvent::ReplayComplete) => continue,
                     Ok(_) => continue,
                     Err(_) => return Err(ferr!("stream closed")),
@@ -1958,9 +1918,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             match rx2.recv().await {
                 Ok(SubEvent::ReplayComplete) => Ok::<_, eyre::Report>(()),
-                Ok(SubEvent::Added(event)) => {
-                    Err(ferr!("denied replay leaked Added event: {event:?}"))
-                }
                 Ok(event) => Err(ferr!("denied replay leaked event: {event:?}")),
                 Err(_) => Err(ferr!("denied subscriber closed during replay")),
             }
@@ -2010,29 +1967,33 @@ mod tests {
                 peer,
             )
             .await??;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
         tokio::time::timeout(Duration::from_secs(2), async {
-            let mut saw_added = false;
+            let mut saw_touch = false;
             let mut saw_replay_complete = false;
             loop {
                 match rx.recv().await {
-                    Ok(SubEvent::Added(_)) => saw_added = true,
+                    Ok(SubEvent::Changed(_)) => saw_touch = true,
                     Ok(SubEvent::ReplayComplete) => saw_replay_complete = true,
                     Ok(event) => return Err(ferr!("unexpected authorized event: {event:?}")),
                     Err(_) => return Err(ferr!("authorized subscriber closed")),
                 }
-                if saw_added && saw_replay_complete {
+                if saw_touch && saw_replay_complete {
                     return Ok::<_, eyre::Report>(());
                 }
             }
         })
         .await??;
-        store.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
         // Should receive Added event.
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match rx.recv().await {
-                    Ok(SubEvent::Added(_)) => return,
+                    Ok(SubEvent::Changed(_)) => return,
                     Ok(SubEvent::ReplayComplete) => continue,
                     Ok(_) => continue,
                     Err(_) => return,
@@ -2074,7 +2035,9 @@ mod tests {
         store.ensure_part(part.clone()).await?;
         store.ensure_part(other_part.clone()).await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount::default(),
             "a part with neither members nor grants has no relevance to count"
         );
@@ -2085,7 +2048,9 @@ mod tests {
             .await?;
         store.add_obj_to_parts(obj_a, vec![part.clone()]).await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount {
                 member_changes: 1,
                 access_changes: 0,
@@ -2100,7 +2065,9 @@ mod tests {
             )
             .await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount {
                 member_changes: 1,
                 access_changes: 1,
@@ -2123,7 +2090,9 @@ mod tests {
             .await?;
         store.add_obj_to_parts(obj_b, vec![part.clone()]).await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount {
                 member_changes: 2,
                 access_changes: 1,
@@ -2135,7 +2104,9 @@ mod tests {
             .add_part_member(part.clone(), other_peer, keyhive_core::access::Access::Read)
             .await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount {
                 member_changes: 2,
                 access_changes: 1,
@@ -2147,7 +2118,9 @@ mod tests {
         store
             .set_obj_payload(obj_c.clone(), serde_json::json!({"c": 1}))
             .await?;
-        store.add_obj_to_parts(obj_c, vec![other_part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj_c, vec![other_part.clone()])
+            .await?;
         store
             .set_part_members(
                 other_part,
@@ -2155,7 +2128,9 @@ mod tests {
             )
             .await?;
         assert_eq!(
-            store.part_dirty_count(part.clone(), Some(peer.clone()), 0).await?,
+            store
+                .part_dirty_count(part.clone(), Some(peer.clone()), 0)
+                .await?,
             PartDirtyCount {
                 member_changes: 2,
                 access_changes: 1,

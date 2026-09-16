@@ -239,7 +239,7 @@ async fn classify_rows(
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         subs.keys()
-.map(|peer| KeyhivePeerId::from_bytes(peer.to_bytes32()))
+            .map(|peer| KeyhivePeerId::from_bytes(peer.to_bytes32()))
             .collect()
     });
     if connected.is_empty() {
@@ -434,12 +434,13 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerKey, ())>) {
         PeerKey,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
-    )> =
-        surelock::key::lock_scope(|key| {
-            let (subs, _key) = key.lock(subscriptions);
-            due.into_iter()
+    )> = surelock::key::lock_scope(|key| {
+        let (subs, _key) = key.lock(subscriptions);
+        due.into_iter()
             .filter_map(|(peer_id, ())| {
-                let found = subs.get(&peer_id).map(|entry| (peer_id.clone(), entry.id, entry.tx.clone()));
+                let found = subs
+                    .get(&peer_id)
+                    .map(|entry| (peer_id.clone(), entry.id, entry.tx.clone()));
                 if dispatch_diag() && found.is_none() {
                     tracing::debug!(
                         peer = %peer_id,
@@ -449,7 +450,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerKey, ())>) {
                 found
             })
             .collect()
-        });
+    });
     let delivery_futures = targets.into_iter().map(|(peer_id, sub_id, tx)| async move {
         if tx
             .send(KeyhiveChangedRpcEvent { initial: false })

@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS big_sync_buckets (
 CREATE INDEX IF NOT EXISTS big_sync_buckets_level_changed_idx
     ON big_sync_buckets(scope_id, part_ref, level, changed_at, buck_id);
 
--- event_type: 0 = Added, 1 = Changed, 2 = Removed
+-- event_type: 1 = a membership touch (present), 2 = absent. There is no
+-- "added" kind: whether an object is new is a fact only the reader's own
+-- replica knows, so the substrate reports only touched-or-deleted.
 CREATE TABLE IF NOT EXISTS big_sync_members (
       scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id)
     , obj_ref INTEGER NOT NULL REFERENCES big_sync_objs(obj_ref)
@@ -61,7 +63,7 @@ CREATE TABLE IF NOT EXISTS big_sync_members (
     , txid INTEGER NOT NULL
     , PRIMARY KEY(obj_ref, maybe_part_ref)
     , CHECK(maybe_part_ref >= 0)
-    , CHECK(event_type BETWEEN 0 AND 2)
+    , CHECK(event_type BETWEEN 1 AND 2)
     , CHECK(txid >= 0)
 ) STRICT;
 

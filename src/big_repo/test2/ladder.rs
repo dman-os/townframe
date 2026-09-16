@@ -28,7 +28,8 @@ async fn tier1_document_created_before_connection_replicates() -> crate::Res<()>
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "before connection");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
@@ -57,7 +58,8 @@ async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crat
 
     // One doc sync is the barrier: Bob must be able to read after this call.
     let bob_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = read_title(&bob_doc).await;
     assert_eq!(title, "ladder rung 1");
     heads::tier0_invariants(&pair, doc_id, &alice_doc, &bob_doc).await?;
@@ -86,7 +88,8 @@ async fn tier1_connected_document_update_propagates_to_reader_after_first_replic
 
     // First replication: reader pulls the initial doc in one sync.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "first rung");
     heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
 
@@ -101,7 +104,8 @@ async fn tier1_connected_document_update_propagates_to_reader_after_first_replic
     // Reader pulls the update in one sync.
     drop(reader_doc);
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc2).await, "second rung");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
 
@@ -127,7 +131,8 @@ async fn tier1_reader_edit_propagates_back_to_owner() -> crate::Res<()> {
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&editor_doc).await, "owner value");
 
     editor_doc
@@ -142,7 +147,8 @@ async fn tier1_reader_edit_propagates_back_to_owner() -> crate::Res<()> {
     // so the returned handle is the materialized post-edit view.
     drop(owner_doc);
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&owner_doc2).await, "editor value");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &editor_doc).await?;
 
@@ -167,7 +173,8 @@ async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     owner_doc
         .with_document(|doc| {
@@ -230,7 +237,8 @@ async fn tier1_noop_sync_emits_no_change_notification() -> crate::Res<()> {
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let (_registration, mut notifications) = pair
         .right()
         .repo
@@ -274,7 +282,8 @@ async fn tier1_closed_connection_then_reconnect_syncs_again() -> crate::Res<()> 
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "before reconnect");
 
     let old_left = pair.left_conn.take().expect("left connection should exist");
@@ -290,7 +299,8 @@ async fn tier1_closed_connection_then_reconnect_syncs_again() -> crate::Res<()> 
     pair.right_conn = Some(new_right);
 
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc2).await, "before reconnect");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
 
@@ -318,7 +328,8 @@ async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate:
     let doc_id = owner_doc.document_id();
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "before restart");
     drop(reader_doc);
 
@@ -334,7 +345,8 @@ async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate:
     pair.left_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc2).await, "before restart");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
 
@@ -361,7 +373,8 @@ async fn tier1_offline_updates_catch_up() -> crate::Res<()> {
 
     // Reader syncs the initial document.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "first value");
     heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
 
@@ -392,7 +405,8 @@ async fn tier1_offline_updates_catch_up() -> crate::Res<()> {
     // Reader syncs and catches up on the offline update.
     drop(reader_doc);
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc2).await, "offline update");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
 
@@ -438,7 +452,8 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
     let doc_id = owner_doc.document_id();
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &editor_doc).await?;
     drop(editor_doc);
 
@@ -457,7 +472,8 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
     pair.left_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     editor_doc
         .with_document(|doc| {
             doc.set_actor(automerge::ActorId::from([50_u8; 16]));
@@ -508,7 +524,8 @@ async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<
     pair.connect().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reopened =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_optional_text(&reopened, "owner_branch")
             .await

@@ -32,7 +32,8 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let revoke_frontier: BTreeSet<Vec<u8>> = pair
         .left()
         .repo
@@ -162,7 +163,8 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Pre-revoke: the editor can write.
     reader_doc
@@ -191,7 +193,7 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
                     .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("doc id must be a verifying key"),
             ),
         )
@@ -319,7 +321,8 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
     drop(owner_doc);
 
@@ -353,7 +356,7 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
                     .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("doc id must be a verifying key"),
             ),
         )
@@ -393,7 +396,8 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     // miss earlier events).
     let mut settle_stats = pair.right().worker.subscribe_stats();
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
     // The worker's peer replay may schedule the doc task before the keyhive
     // membership lands; that task fails with Policy(DocumentNotFound) and
@@ -502,7 +506,11 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id.clone(), reader_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            reader_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {

@@ -11,7 +11,7 @@
 //!   waits for its contiguous prefix.
 //! - **Source-part revisions** (a match-all local revision reader): every
 //!   part in the scope is read live, including parts created after boot — no
-//!   part enumeration is frozen into the walker. Added/Changed events carry a
+//!   part enumeration is frozen into the walker. Membership touches carry a
 //!   commit watermark; publishing waits for the doc bundle to reach that
 //!   watermark before reading heads.
 //!
@@ -57,11 +57,11 @@ const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// scope key), so the raw `doc_id` cannot collide with the document's own
 /// sedimentree object in the main scope.
 pub fn automerge_doc_obj_id(doc_id: crate::DocumentId) -> ObjKey {
-ObjKey(big_sync_core::ByteKey::new(doc_id.as_bytes()))
+    ObjKey(big_sync_core::ByteKey::new(doc_id.as_bytes()))
 }
 
 pub fn automerge_obj_to_doc_id(obj_id: ObjKey) -> crate::DocumentId {
-crate::DocumentId::new(obj_id.as_bytes())
+    crate::DocumentId::new(obj_id.as_bytes())
 }
 
 #[derive(Clone)]
@@ -164,7 +164,6 @@ pub fn spawn_automerge_frontier_worker(
             let part_reader = part_source.open((), part_durable).await?;
             let parts = ConcurrentDeltaWalker::open(part_reader, part_state, |event| {
                 let doc_id = match event {
-                    SubEvent::Added(event) => event.obj_id.clone(),
                     SubEvent::Changed(event) => event.obj_id.clone(),
                     SubEvent::Removed(event) => event.obj_id.clone(),
                     SubEvent::ReplayComplete => {
@@ -329,7 +328,9 @@ async fn publish_heads(
         "heads": heads_formatted,
         "causal_epoch": causal_epoch,
     });
-    frontier_store.set_obj_payload(am_obj_id.clone(), payload).await?;
+    frontier_store
+        .set_obj_payload(am_obj_id.clone(), payload)
+        .await?;
     tracing::debug!(
         %doc_id,
         head_count = heads.len(),
@@ -714,16 +715,6 @@ impl<'a> Worker<'a> {
             "AFW consumed part revision delta"
         );
         match delta.entry {
-            SubEvent::Added(event) => {
-                let doc_id = automerge_obj_to_doc_id(event.obj_id);
-                tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped added part revision to document");
-                self.remember_part_source(doc_id.clone(), source);
-                self.pending_parts
-                    .entry(doc_id.clone())
-                    .or_default()
-                    .insert(event.part_id, event.cursor);
-                self.start_publish(doc_id)?;
-            }
             SubEvent::Changed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
                 self.remember_part_source(doc_id.clone(), source.clone());
@@ -852,7 +843,8 @@ impl<'a> Worker<'a> {
                     task = ?task,
                     "AFW publish task deferred/parked"
                 );
-                self.tasks.park(FrontierKey::Document(doc_id.clone()), task.clone());
+                self.tasks
+                    .park(FrontierKey::Document(doc_id.clone()), task.clone());
             }
             (task, Err(error)) => {
                 tracing::error!(task = ?task, error = ?error, "AFW task failed");
@@ -903,7 +895,10 @@ impl<'a> Worker<'a> {
     fn start_ready_document_work(&mut self) -> Res<()> {
         for doc_id in std::mem::take(&mut self.wake_docs) {
             tracing::debug!(%doc_id, active_tasks = self.tasks.active_count(), "AFW considering woken document");
-            if !self.tasks.has_capacity_for(FrontierKey::Document(doc_id.clone())) {
+            if !self
+                .tasks
+                .has_capacity_for(FrontierKey::Document(doc_id.clone()))
+            {
                 tracing::debug!(%doc_id, "AFW retaining woken document: scheduler at capacity");
                 self.wake_docs.insert(doc_id);
                 continue;
@@ -951,7 +946,9 @@ async fn run_concurrent_frontier_task(
                 // events for documents that joined or left the scope are handled
                 // by the same path as admission events.
                 tracing::debug!(%doc_id, "AFW checking live document scope membership");
-                let doc_groups = keyhive.group_ids_containing_document(doc_id.clone()).await?;
+                let doc_groups = keyhive
+                    .group_ids_containing_document(doc_id.clone())
+                    .await?;
                 tracing::debug!(%doc_id, doc_groups = ?doc_groups, "AFW resolved live document scope membership");
                 if !scope.admits_doc_groups(&doc_groups) {
                     // The document left the worker's scope: tear down its

@@ -632,7 +632,7 @@ impl BigKeyhiveHandle {
         let doc_id = DocumentId::new(signing_key.verifying_key().to_bytes());
         let reservation = crate::keyhive_storage::DocReservation {
             magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
-doc_id: doc_id.to_bytes32(),
+            doc_id: doc_id.to_bytes32(),
             signing_key: signing_key.to_bytes(),
             parents: parents
                 .into_iter()
@@ -656,7 +656,7 @@ doc_id: doc_id.to_bytes32(),
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         if storage
-.load_doc_reservation(doc_id.to_bytes32())
+            .load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
             .is_none()
@@ -672,7 +672,7 @@ doc_id: doc_id.to_bytes32(),
             return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
         }
         storage
-.stage_doc_reservation(doc_id.to_bytes32(), initial_content, initial_keys)
+            .stage_doc_reservation(doc_id.to_bytes32(), initial_content, initial_keys)
             .await
             .map_err(|err| ferr!("failed staging initial document content: {err}"))
     }
@@ -694,7 +694,7 @@ doc_id: doc_id.to_bytes32(),
     ) -> Res<Vec<EventHash>> {
         let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let Some(reservation) = storage
-.load_doc_reservation(doc_id.to_bytes32())
+            .load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
         else {
@@ -714,7 +714,7 @@ doc_id: doc_id.to_bytes32(),
             return Ok(Vec::new());
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
-if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
+        if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
             return Err(ferr!(
                 "reserved signing key does not match document id {doc_id}"
             ));
@@ -752,7 +752,7 @@ if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
         let Some(_reservation) = storage
-.load_doc_reservation(doc_id.to_bytes32())
+            .load_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
         else {
@@ -774,7 +774,7 @@ if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
             Vec::new()
         };
         storage
-.delete_doc_reservation(doc_id.to_bytes32())
+            .delete_doc_reservation(doc_id.to_bytes32())
             .await
             .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
         Ok(hashes)
@@ -1000,7 +1000,7 @@ if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32() {
 }
 
 fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
-let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
         .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

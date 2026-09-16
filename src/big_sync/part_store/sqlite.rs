@@ -1,6 +1,6 @@
 use super::HostPartStore;
 use super::LocalPartRevisionReader;
-use super::sqlite_core::{EVENT_ADDED, EVENT_REMOVED};
+use super::sqlite_core::EVENT_REMOVED;
 use super::{PartFrontierKey, PartScope, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
 use crate::keyed_frontier::open_sqlite_reader;
@@ -17,9 +17,8 @@ use big_sync_core::part_store::PartStoreReadOnly;
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
-    LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjAddedToPart, ObjChanged,
-    ObjRemovedFromPart, PartEvent, PartPage, PartSummary, SubEvent, SubPartsRequest,
-    SubscriptionTarget,
+    LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart,
+    PartEvent, PartPage, PartSummary, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
 use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 #[cfg(test)]
@@ -235,7 +234,10 @@ impl SqlitePartStore {
                 tx.commit().await?;
                 continue;
             };
-            let old_state = self.core.load_member_state(&mut tx, part_id.clone(), obj_id.clone()).await?;
+            let old_state = self
+                .core
+                .load_member_state(&mut tx, part_id.clone(), obj_id.clone())
+                .await?;
             if matches!(old_state, MemberState::Live(_)) {
                 tx.commit().await?;
                 continue;
@@ -254,9 +256,11 @@ impl SqlitePartStore {
                 .await?;
             // `apply_bucket_transition` maintains the range summaries only. The membership row
             // is also this store's keyed-frontier entry (`decode_row` turns a member row into a
-            // frontier event), so materialization is recorded as a plain `Changed` at the
-            // current revision: an object part never emits `Added`/`Removed`, and no revision is
-            // allocated because subscribing is not a sync event.
+            // frontier event), so materialization is recorded as a plain touch at the current
+            // revision, and no revision is allocated because subscribing is not a sync event.
+            // The memory store keeps its frontier separately and so records nothing here; that is a
+            // storage-layout difference, and the invariant both stores share is pinned by
+            // `assert_subscribing_allocates_no_revision_contract`.
             sqlx::query!(
                 "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -463,12 +467,6 @@ impl HostPartStore for SqlitePartStore {
             let events = candidates
                 .iter()
                 .map(|candidate| match candidate.event_type {
-                    EVENT_ADDED => PartEvent::Added(ObjAddedToPart {
-                        cursor: candidate.txid,
-                        part_id: part_id.clone(),
-                        obj_id: candidate.obj_id.clone(),
-                        payload: candidate.payload.clone(),
-                    }),
                     EVENT_REMOVED => PartEvent::Removed(ObjRemovedFromPart {
                         cursor: candidate.txid,
                         part_id: part_id.clone(),
@@ -677,9 +675,9 @@ impl HostPartStore for SqlitePartStore {
             )
             .execute(&mut **tx)
             .await?;
-            events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
-                part_id,
+                part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
                 payload: payload.clone(),
             }));
@@ -717,10 +715,13 @@ impl HostPartStore for SqlitePartStore {
             let part_id = Self::part_from_blob(part.part_id.clone());
             frontier_tx
                 .put(
-                    PartFrontierKey::Part { obj_id: obj_id.clone(), part_id: part_id.clone() },
-                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    PartFrontierKey::Part {
+                        obj_id: obj_id.clone(),
+                        part_id: part_id.clone(),
+                    },
+                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor,
-                        part_id,
+                        part_ids: vec![part_id],
                         obj_id: obj_id.clone(),
                         payload: payload.clone(),
                     }),
@@ -973,7 +974,11 @@ impl HostPartStore for SqlitePartStore {
             let fp = if dead {
                 Fingerprint::new(
                     &req.seed,
-                    &("big-sync-obj-fp-v1", obj_id.clone(), serde_json::Value::Null),
+                    &(
+                        "big-sync-obj-fp-v1",
+                        obj_id.clone(),
+                        serde_json::Value::Null,
+                    ),
                 )
             } else {
                 let payload_json: Option<String> = row.try_get("payload_json")?;
@@ -1064,22 +1069,28 @@ impl HostPartStore for SqlitePartStore {
                 "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                 self.core.scope_id, obj_ref, part_ref
             ).execute(&mut **tx).await?;
-            events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
-                part_id,
+                part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
                 payload: payload.clone(),
             }));
         }
         for event in &events {
-            if let SubEvent::Added(added) = event {
+            let SubEvent::Changed(changed) = event else {
+                continue;
+            };
+            for event_part in &changed.part_ids {
+                // One frontier row per key, and the row's value is that part's touch.
+                let mut narrowed = changed.clone();
+                narrowed.part_ids = vec![event_part.clone()];
                 frontier_tx
                     .put(
                         PartFrontierKey::Part {
-                            obj_id: obj_id.clone(),
-                            part_id: added.part_id.clone(),
+                            obj_id: changed.obj_id.clone(),
+                            part_id: event_part.clone(),
                         },
-                        PartEvent::Added(added.clone()),
+                        PartEvent::Changed(narrowed),
                     )
                     .await?;
             }
@@ -1257,8 +1268,7 @@ impl HostPartStore for SqlitePartStore {
                         (PartFrontierKey::Object(_), Some(PartEvent::Changed(changed))) => {
                             (None, SubEvent::Changed(changed))
                         }
-                        (PartFrontierKey::Object(_), Some(PartEvent::Added(_)))
-                        | (PartFrontierKey::Object(_), Some(PartEvent::Removed(_))) => {
+                        (PartFrontierKey::Object(_), Some(PartEvent::Removed(_))) => {
                             unreachable!("object frontier rows are changed or tombstones")
                         }
                         (
@@ -1271,18 +1281,6 @@ impl HostPartStore for SqlitePartStore {
                                 part_ids: Vec::new(),
                                 obj_id,
                                 payload: serde_json::Value::Null,
-                            }),
-                        ),
-                        (
-                            PartFrontierKey::Part { obj_id, part_id },
-                            Some(PartEvent::Added(added)),
-                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => (
-                            None,
-                            SubEvent::Changed(ObjChanged {
-                                cursor: entry.revision,
-                                part_ids: Vec::new(),
-                                obj_id,
-                                payload: added.payload,
                             }),
                         ),
                         (
@@ -1308,15 +1306,6 @@ impl HostPartStore for SqlitePartStore {
                                 obj_id,
                             }),
                         ),
-                        (
-                            PartFrontierKey::Part { obj_id, part_id },
-                            Some(PartEvent::Added(mut added)),
-                        ) => {
-                            added.cursor = entry.revision;
-                            added.part_id = part_id.clone();
-                            added.obj_id = obj_id;
-                            (Some(part_id), SubEvent::Added(added))
-                        }
                         (
                             PartFrontierKey::Part { obj_id, part_id },
                             Some(PartEvent::Changed(mut changed)),
@@ -1555,11 +1544,7 @@ impl HostPartStore for SqlitePartStore {
 
     /// This store's subscriptions are filtered per recipient, so a page can be
     /// denied rather than silently empty.
-    async fn page_denied(
-        &self,
-        target: &SubscriptionTarget,
-        subscriber: PeerKey,
-    ) -> Res<bool> {
+    async fn page_denied(&self, target: &SubscriptionTarget, subscriber: PeerKey) -> Res<bool> {
         let (scope, obj_id) = match target {
             SubscriptionTarget::Part { part_id, .. } => {
                 // `permitted_parts` reads the object only for a `FromObject` scope,
@@ -1938,9 +1923,12 @@ mod tests {
         .await?;
 
         let removed_obj_id = obj_ids[1].clone();
-        HostPartStore::remove_obj_from_part(&store, removed_obj_id.clone(), part_id.clone()).await?;
+        HostPartStore::remove_obj_from_part(&store, removed_obj_id.clone(), part_id.clone())
+            .await?;
         let live_ids: Vec<_> = obj_ids
-            .iter().filter(|&obj_id| *obj_id != removed_obj_id).cloned()
+            .iter()
+            .filter(|&obj_id| *obj_id != removed_obj_id)
+            .cloned()
             .collect();
         crate::part_store::contract::assert_root_bucket_contract(
             &store,
@@ -1960,14 +1948,19 @@ mod tests {
         let part_id = test_part_id(7);
         let obj_id = test_obj_id(8);
 
-        HostPartStore::set_obj_payload(&store, obj_id.clone(), serde_json::json!({"phase": "created"}))
-            .await?;
+        HostPartStore::set_obj_payload(
+            &store,
+            obj_id.clone(),
+            serde_json::json!({"phase": "created"}),
+        )
+        .await?;
         HostPartStore::add_obj_to_parts(&store, obj_id.clone(), vec![part_id.clone()]).await?;
         HostPartStore::remove_obj_from_part(&store, obj_id.clone(), part_id.clone()).await?;
 
-        let deleted_page = HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
-            .await?
-            .expect(ERROR_IMPOSSIBLE);
+        let deleted_page =
+            HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
+                .await?
+                .expect(ERROR_IMPOSSIBLE);
         let deleted_events = &deleted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
         assert_eq!(deleted_events.len(), 1);
         let PartEvent::Removed(transition) = &deleted_events[0] else {
@@ -1977,20 +1970,25 @@ mod tests {
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
 
-        HostPartStore::set_obj_payload(&store, obj_id.clone(), serde_json::json!({"phase": "recreated"}))
-            .await?;
+        HostPartStore::set_obj_payload(
+            &store,
+            obj_id.clone(),
+            serde_json::json!({"phase": "recreated"}),
+        )
+        .await?;
         HostPartStore::add_obj_to_parts(&store, obj_id.clone(), vec![part_id.clone()]).await?;
 
-        let upserted_page = HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
-            .await?
-            .expect(ERROR_IMPOSSIBLE);
+        let upserted_page =
+            HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
+                .await?
+                .expect(ERROR_IMPOSSIBLE);
         let upserted_events = &upserted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
         assert_eq!(upserted_events.len(), 1);
-        let PartEvent::Added(second_added) = &upserted_events[0] else {
-            panic!("expected second added event");
+        let PartEvent::Changed(second_added) = &upserted_events[0] else {
+            panic!("expected the second member write to arrive as a touch");
         };
         assert_eq!(second_added.cursor, 5);
-        assert_eq!(second_added.part_id, part_id);
+        assert_eq!(second_added.part_ids, vec![part_id]);
         assert_eq!(second_added.obj_id, obj_id);
         assert_eq!(
             second_added.payload,
@@ -2011,9 +2009,11 @@ mod tests {
         let part_id = test_part_id(9);
         let obj_id = test_obj_id(10);
 
-        HostPartStore::set_obj_payload(&store_a, obj_id.clone(), serde_json::json!({"scope": "a"})).await?;
+        HostPartStore::set_obj_payload(&store_a, obj_id.clone(), serde_json::json!({"scope": "a"}))
+            .await?;
         HostPartStore::add_obj_to_parts(&store_a, obj_id.clone(), vec![part_id.clone()]).await?;
-        HostPartStore::set_obj_payload(&store_b, obj_id.clone(), serde_json::json!({"scope": "b"})).await?;
+        HostPartStore::set_obj_payload(&store_b, obj_id.clone(), serde_json::json!({"scope": "b"}))
+            .await?;
         HostPartStore::add_obj_to_parts(&store_b, obj_id.clone(), vec![part_id.clone()]).await?;
 
         assert_eq!(
@@ -2024,7 +2024,10 @@ mod tests {
             HostPartStore::obj_payload(&store_b, obj_id).await?,
             Some(serde_json::json!({"scope": "b"}))
         );
-        assert_eq!(HostPartStore::member_count(&store_a, part_id.clone()).await?, 1);
+        assert_eq!(
+            HostPartStore::member_count(&store_a, part_id.clone()).await?,
+            1
+        );
         assert_eq!(HostPartStore::member_count(&store_b, part_id).await?, 1);
         Ok(())
     }
@@ -2067,11 +2070,16 @@ mod tests {
         store1
             .set_obj_payload(obj.clone(), serde_json::json!("first"))
             .await?;
-        store1.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+        store1
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
 
         // Persist membership.
         store1
-            .set_part_members(part.clone(), std::collections::HashMap::from([(auth.clone(), Access::Read)]))
+            .set_part_members(
+                part.clone(),
+                std::collections::HashMap::from([(auth.clone(), Access::Read)]),
+            )
             .await?;
 
         // Helper to drain through ReplayComplete.
@@ -2312,9 +2320,14 @@ mod tests {
         let obj_id = test_obj_id(230);
         let peer = PeerKey::new([231; 32]);
         let payload = serde_json::json!({"value": 1});
-        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
         store
-            .set_part_members(obj_id.object_part_key(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
+        store
+            .set_part_members(
+                obj_id.object_part_key(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
 
         let rx = store
@@ -2365,9 +2378,14 @@ mod tests {
         store
             .set_obj_payload(obj_id.clone(), serde_json::json!({"value": 1}))
             .await?;
-        store.add_obj_to_parts(obj_id.clone(), vec![part_id]).await?;
         store
-            .set_part_members(obj_id.object_part_key(), HashMap::from([(peer.clone(), Access::Read)]))
+            .add_obj_to_parts(obj_id.clone(), vec![part_id])
+            .await?;
+        store
+            .set_part_members(
+                obj_id.object_part_key(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
 
         let rx = store
@@ -2400,7 +2418,9 @@ mod tests {
         }
 
         let payload = serde_json::json!({"value": 2});
-        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
+        store
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Ok(SubEvent::Changed(changed))) => {
                 assert_eq!(changed.obj_id, obj_id);
@@ -2431,11 +2451,18 @@ mod tests {
         let peer = PeerKey::new([237; 32]);
         store.ensure_part(part_id.clone()).await?;
         store
-            .set_part_members(part_id.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
         let payload = serde_json::json!({"value": 1});
-        store.set_obj_payload(obj_id.clone(), payload.clone()).await?;
-        store.add_obj_to_parts(obj_id.clone(), vec![part_id]).await?;
+        store
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
+        store
+            .add_obj_to_parts(obj_id.clone(), vec![part_id])
+            .await?;
 
         let rx = store
             .subscribe(
@@ -2485,9 +2512,9 @@ mod tests {
                 obj_id: obj_id.clone(),
                 part_id: first_part.clone(),
             },
-            PartEvent::Added(ObjAddedToPart {
+            PartEvent::Changed(ObjChanged {
                 cursor: 0,
-                part_id: first_part.clone(),
+                part_ids: vec![first_part.clone()],
                 obj_id: obj_id.clone(),
                 payload: serde_json::json!({"part": 1}),
             }),
@@ -2499,9 +2526,9 @@ mod tests {
                 obj_id: obj_id.clone(),
                 part_id: second_part.clone(),
             },
-            PartEvent::Added(ObjAddedToPart {
+            PartEvent::Changed(ObjChanged {
                 cursor: 0,
-                part_id: second_part.clone(),
+                part_ids: vec![second_part.clone()],
                 obj_id: obj_id.clone(),
                 payload: serde_json::json!({"part": 2}),
             }),
@@ -2528,9 +2555,9 @@ mod tests {
             .await?
             .map_err(eyre::Report::from)?;
         match rx.recv().await.expect("subscription channel stays open") {
-            SubEvent::Added(added) => {
+            SubEvent::Changed(added) => {
                 assert_eq!(added.cursor, second_cursor);
-                assert_eq!(added.part_id, second_part);
+                assert_eq!(added.part_ids[0], second_part);
                 assert_eq!(added.obj_id, obj_id);
             }
             event => panic!("expected only newer second-part Added, got {event:?}"),
@@ -2635,10 +2662,19 @@ mod tests {
         let peer = PeerKey::new([222; 32]);
         store.ensure_part(part_id.clone()).await?;
         store
-            .set_part_members(part_id.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
-        let tombstone_cursor =
-            delete_frontier_key(&store, PartFrontierKey::Part { obj_id: obj_id.clone(), part_id: part_id.clone() }).await?;
+        let tombstone_cursor = delete_frontier_key(
+            &store,
+            PartFrontierKey::Part {
+                obj_id: obj_id.clone(),
+                part_id: part_id.clone(),
+            },
+        )
+        .await?;
 
         let rx = store
             .subscribe(
@@ -2799,7 +2835,9 @@ mod tests {
         );
 
         // Another principal's grant on this part is not this principal's relevance.
-        store.add_part_member(part.clone(), other_peer, read).await?;
+        store
+            .add_part_member(part.clone(), other_peer, read)
+            .await?;
         assert_eq!(
             HostPartStore::part_dirty_count(&store, part.clone(), Some(peer.clone()), 0).await?,
             PartDirtyCount {
@@ -2813,7 +2851,9 @@ mod tests {
         store
             .set_obj_payload(obj_c.clone(), serde_json::json!({"c": 1}))
             .await?;
-        store.add_obj_to_parts(obj_c, vec![other_part.clone()]).await?;
+        store
+            .add_obj_to_parts(obj_c, vec![other_part.clone()])
+            .await?;
         store
             .set_part_members(other_part, HashMap::from([(peer.clone(), read)]))
             .await?;
@@ -2848,7 +2888,10 @@ mod tests {
         let peer = PeerKey::new([242; 32]);
         store.ensure_part(part_id.clone()).await?;
         store
-            .set_part_members(part_id.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
         let mut cursors = Vec::new();
         for seed in 0..5u8 {
@@ -2856,10 +2899,13 @@ mod tests {
             cursors.push(
                 put_frontier_event(
                     &store,
-                    PartFrontierKey::Part { obj_id: obj_id.clone(), part_id: part_id.clone() },
-                    PartEvent::Added(ObjAddedToPart {
-                        cursor: 0,
+                    PartFrontierKey::Part {
+                        obj_id: obj_id.clone(),
                         part_id: part_id.clone(),
+                    },
+                    PartEvent::Changed(ObjChanged {
+                        cursor: 0,
+                        part_ids: vec![part_id.clone()],
                         obj_id,
                         payload: serde_json::json!({"seed": seed}),
                     }),
@@ -2925,7 +2971,10 @@ mod tests {
         store.ensure_part(granted_part.clone()).await?;
         store.ensure_part(ungranted_part.clone()).await?;
         store
-            .set_part_members(granted_part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_part_members(
+                granted_part.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
 
         let unknown = store
@@ -2992,19 +3041,28 @@ mod tests {
         store.ensure_part(readable_part.clone()).await?;
         store.ensure_part(other_part.clone()).await?;
         store
-            .set_part_members(readable_part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .set_part_members(
+                readable_part.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
             .await?;
         store
-            .set_part_members(other_part.clone(), HashMap::from([(PeerKey::new([250; 32]), Access::Read)]))
+            .set_part_members(
+                other_part.clone(),
+                HashMap::from([(PeerKey::new([250; 32]), Access::Read)]),
+            )
             .await?;
         let obj_id = test_obj_id(251);
         for part_id in [readable_part.clone(), other_part] {
             put_frontier_event(
                 &store,
-                PartFrontierKey::Part { obj_id: obj_id.clone(), part_id: part_id.clone() },
-                PartEvent::Added(ObjAddedToPart {
+                PartFrontierKey::Part {
+                    obj_id: obj_id.clone(),
+                    part_id: part_id.clone(),
+                },
+                PartEvent::Changed(ObjChanged {
                     cursor: 0,
-                    part_id,
+                    part_ids: vec![part_id],
                     obj_id: obj_id.clone(),
                     payload: serde_json::json!({"value": 1}),
                 }),
@@ -3026,11 +3084,15 @@ mod tests {
         let ReplayPageOutcome::Events(page) = page else {
             panic!("expected a page, got {page:?}");
         };
-        assert_eq!(page.events.len(), 1, "the granted part's event is delivered");
+        assert_eq!(
+            page.events.len(),
+            1,
+            "the granted part's event is delivered"
+        );
         assert!(
             matches!(
                 page.events.first(),
-                Some(PartEvent::Added(added)) if added.part_id == readable_part
+                Some(PartEvent::Changed(changed)) if changed.part_ids == vec![readable_part]
             ),
             "and it carries only the granted part"
         );

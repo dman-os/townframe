@@ -147,7 +147,11 @@ async fn tier8_can_t_decrypt_before_joining() -> crate::Res<()> {
     assert_blobs_encrypted(&guard.node(0).repo, doc_id.clone()).await;
 
     // The intruder (no grant) must NOT be able to decrypt any blob.
-    let blobs = guard.node(0).repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let blobs = guard
+        .node(0)
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     for raw in &blobs {
         let result = try_decrypt(&guard.node(1).repo, doc_id.clone(), raw).await;
         assert!(
@@ -203,10 +207,17 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
     assert_blobs_encrypted(&pair.left().repo, doc_id.clone()).await;
 
     // Editor must be able to decrypt the post-grant blob.
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let mut found_decryptable = false;
     for raw in &blobs {
-        if try_decrypt(&pair.right().repo, doc_id.clone(), raw).await.is_ok() {
+        if try_decrypt(&pair.right().repo, doc_id.clone(), raw)
+            .await
+            .is_ok()
+        {
             found_decryptable = true;
             break;
         }
@@ -257,7 +268,11 @@ async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
         .add_member_to_group(reader_agent, &group, Access::Read)
         .await?;
 
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let mut found = None;
     for raw in blobs {
         let encrypted = decode_encrypted_blob(&raw)?;
@@ -364,7 +379,8 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     editor_doc
         .with_document(|d| {
             d.transact(|tx| tx.put(automerge::ROOT, "phase", "prerevoke"))
@@ -376,7 +392,8 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     let _owner_sync =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(_owner_sync);
     drop(editor_doc);
 
@@ -397,7 +414,11 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
         .await??;
 
     // Collect blobs after the post-revoke write.
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
 
     // Pre-revoke blobs should still be decryptable by the owner (and the
     // revoked peer's local cache, but we only verify owner).
@@ -480,7 +501,8 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // --- Disconnect and fork.
     fixtures::go_offline(&mut pair).await?;
@@ -601,7 +623,8 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
         Some("archive-roundtrip")
@@ -633,7 +656,8 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
 
     // Verify the right node can still sync and materialise new content.
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc2, "title").await.as_deref(),
         Some("archive-roundtrip")

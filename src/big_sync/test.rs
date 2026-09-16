@@ -258,8 +258,7 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
         // it observe new events soon after they land. The double caps the
         // caller's request rather than honouring the long production hold, so a
         // test does not sit on the long poll.
-        let hold = Duration::from_millis(u64::from(req.hold_ms))
-            .min(Duration::from_millis(50));
+        let hold = Duration::from_millis(u64::from(req.hold_ms)).min(Duration::from_millis(50));
         let outcome = self
             .target_part_store
             .replay_page(req.target, req.limit, self.source_peer_id.clone(), hold)
@@ -570,7 +569,10 @@ impl NodeHarness {
                 store.set_part_members(part, agents.clone()).await?;
             }
         }
-        self.host.store.set_obj_payload(obj.clone(), payload).await?;
+        self.host
+            .store
+            .set_obj_payload(obj.clone(), payload)
+            .await?;
         self.host.store.add_obj_to_parts(obj, test_parts()).await?;
         Ok(())
     }
@@ -661,7 +663,9 @@ async fn memory_part_store_root_bucket_contract() -> Res<()> {
                 ),
             )
             .await?;
-        store.add_obj_to_parts(obj_id.clone(), vec![part_id.clone()]).await?;
+        store
+            .add_obj_to_parts(obj_id.clone(), vec![part_id.clone()])
+            .await?;
         obj_ids.push(obj_id);
     }
 
@@ -676,9 +680,13 @@ async fn memory_part_store_root_bucket_contract() -> Res<()> {
     .await?;
 
     let removed_obj_id = obj_ids[1].clone();
-    store.remove_obj_from_part(removed_obj_id.clone(), part_id.clone()).await?;
+    store
+        .remove_obj_from_part(removed_obj_id.clone(), part_id.clone())
+        .await?;
     let live_ids: Vec<_> = obj_ids
-        .iter().filter(|&obj_id| *obj_id != removed_obj_id).cloned()
+        .iter()
+        .filter(|&obj_id| *obj_id != removed_obj_id)
+        .cloned()
         .collect();
     crate::part_store::contract::assert_root_bucket_contract(
         &store,
@@ -705,10 +713,7 @@ fn memory_part_store_terminal_bucket_bounds_do_not_wrap() {
     let (start, end) = crate::part_store::bucket_index_bounds(terminal);
     assert!(end.is_none(), "terminal bucket must not wrap");
     assert_eq!(start, 15 << 12);
-    assert_eq!(
-        start,
-        crate::part_store::bucket_index_bounds(terminal).0
-    );
+    assert_eq!(start, crate::part_store::bucket_index_bounds(terminal).0);
     let non_terminal = BuckId::new(2, 0);
     let (start, end) = crate::part_store::bucket_index_bounds(non_terminal);
     assert_eq!((start, end), (0, Some(1 << 8)));
@@ -744,12 +749,20 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
         obj_ids_b.push(obj.clone());
     }
     for ((_, payload), obj_id) in objs.iter().zip(obj_ids_a.iter()) {
-        store_a.set_obj_payload(obj_id.clone(), payload.clone()).await?;
-        store_a.add_obj_to_parts(obj_id.clone(), vec![test_part()]).await?;
+        store_a
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
+        store_a
+            .add_obj_to_parts(obj_id.clone(), vec![test_part()])
+            .await?;
     }
     for ((_, payload), obj_id) in objs.iter().rev().zip(obj_ids_b.iter().rev()) {
-        store_b.set_obj_payload(obj_id.clone(), payload.clone()).await?;
-        store_b.add_obj_to_parts(obj_id.clone(), vec![test_part()]).await?;
+        store_b
+            .set_obj_payload(obj_id.clone(), payload.clone())
+            .await?;
+        store_b
+            .add_obj_to_parts(obj_id.clone(), vec![test_part()])
+            .await?;
     }
 
     let a_initial = store_a
@@ -933,7 +946,9 @@ async fn assert_two_node_alignment(
     let worker_left = left.handle.snapshot().await?;
     let worker_right = right.handle.snapshot().await?;
     let part_id = test_part();
-    let expected_left_parts = [(part_id.clone(), TEST_BACKEND_ID.into())].into_iter().collect();
+    let expected_left_parts = [(part_id.clone(), TEST_BACKEND_ID.into())]
+        .into_iter()
+        .collect();
     let expected_right_parts = [(part_id, TEST_BACKEND_ID.into())].into_iter().collect();
     assert_eq!(worker_left.peer_parts.len(), 1);
     assert_eq!(worker_right.peer_parts.len(), 1);
@@ -1139,8 +1154,12 @@ async fn memory_sync_preconnected_seeds_converge() -> Res<()> {
     let left_payload = payload("left-a", 1, node_a.peer_id.clone());
     let right_payload = payload("right-b", 1, node_b.peer_id.clone());
 
-    node_a.seed_obj(left_obj.clone(), left_payload.clone()).await?;
-    node_b.seed_obj(right_obj.clone(), right_payload.clone()).await?;
+    node_a
+        .seed_obj(left_obj.clone(), left_payload.clone())
+        .await?;
+    node_b
+        .seed_obj(right_obj.clone(), right_payload.clone())
+        .await?;
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
@@ -1184,7 +1203,9 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
 
     let obj = gen_obj_id(20);
     let created_payload = payload("connected-create", 1, node_b.peer_id.clone());
-    node_b.seed_obj(obj.clone(), created_payload.clone()).await?;
+    node_b
+        .seed_obj(obj.clone(), created_payload.clone())
+        .await?;
 
     // Wait on the events this test asserts, not on the idle proxy: `is_idle` omits
     // machine tasks and `all`, so it can report idle before the sync task spawns.
@@ -1255,7 +1276,9 @@ async fn memory_sync_wait_for_full_sync_resolves_for_connected_peer_pair() -> Re
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     let obj = gen_obj_id(21);
-    node_b.seed_obj(obj.clone(), created_payload.clone()).await?;
+    node_b
+        .seed_obj(obj.clone(), created_payload.clone())
+        .await?;
 
     tokio::time::timeout(
         Duration::from_secs(30),
@@ -1337,8 +1360,12 @@ async fn memory_sync_connected_cursor_replay_handles_mutation_burst() -> Res<()>
     let obj_b = gen_obj_id(42);
     let obj_a_payload = payload("cursor-a-0", 1, node_a.peer_id.clone());
     let obj_b_payload = payload("cursor-b-0", 1, node_b.peer_id.clone());
-    node_a.seed_obj(obj_a.clone(), obj_a_payload.clone()).await?;
-    node_b.seed_obj(obj_b.clone(), obj_b_payload.clone()).await?;
+    node_a
+        .seed_obj(obj_a.clone(), obj_a_payload.clone())
+        .await?;
+    node_b
+        .seed_obj(obj_b.clone(), obj_b_payload.clone())
+        .await?;
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
@@ -1503,11 +1530,19 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let obj = gen_obj_id(51);
     let live_payload = payload("live", 1, peer_a.clone());
 
-    store_a.set_obj_payload(obj.clone(), live_payload.clone()).await?;
-    store_a.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
+    store_a
+        .set_obj_payload(obj.clone(), live_payload.clone())
+        .await?;
+    store_a
+        .add_obj_to_parts(obj.clone(), vec![part.clone()])
+        .await?;
     store_b.set_obj_payload(obj.clone(), live_payload).await?;
-    store_b.add_obj_to_parts(obj.clone(), vec![part.clone()]).await?;
-    store_a.remove_obj_from_part(obj.clone(), part.clone()).await?;
+    store_b
+        .add_obj_to_parts(obj.clone(), vec![part.clone()])
+        .await?;
+    store_a
+        .remove_obj_from_part(obj.clone(), part.clone())
+        .await?;
 
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
@@ -1544,21 +1579,37 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let left_payload = payload("left-a", 1, peer_a.clone());
     let right_payload = payload("right-b", 1, peer_b.clone());
 
-    store_a.set_obj_payload(obj_a.clone(), left_payload.clone()).await?;
-    store_a.add_obj_to_parts(obj_a.clone(), vec![part.clone()]).await?;
+    store_a
+        .set_obj_payload(obj_a.clone(), left_payload.clone())
+        .await?;
+    store_a
+        .add_obj_to_parts(obj_a.clone(), vec![part.clone()])
+        .await?;
     store_b
         .set_obj_payload(obj_b.clone(), right_payload.clone())
         .await?;
     store_b.add_obj_to_parts(obj_b.clone(), vec![part]).await?;
 
-    let backend_a = MemorySyncBackend::new(peer_a.clone(), Arc::clone(&store_a_dyn), Arc::clone(&world));
-    let backend_b = MemorySyncBackend::new(peer_b.clone(), Arc::clone(&store_b_dyn), Arc::clone(&world));
+    let backend_a =
+        MemorySyncBackend::new(peer_a.clone(), Arc::clone(&store_a_dyn), Arc::clone(&world));
+    let backend_b =
+        MemorySyncBackend::new(peer_b.clone(), Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     backend_a
-        .sync_obj(peer_b, obj_b.clone(), Vec::new(), Some(right_payload.clone()))
+        .sync_obj(
+            peer_b,
+            obj_b.clone(),
+            Vec::new(),
+            Some(right_payload.clone()),
+        )
         .await?;
     backend_b
-        .sync_obj(peer_a, obj_a.clone(), Vec::new(), Some(left_payload.clone()))
+        .sync_obj(
+            peer_a,
+            obj_a.clone(),
+            Vec::new(),
+            Some(left_payload.clone()),
+        )
         .await?;
 
     let snapshot_a = store_a.snapshot().await?;
@@ -1610,8 +1661,12 @@ async fn memory_sync_two_node_bidirectional_connect_converges() -> Res<()> {
     let left_payload = payload("left", 1, node_a.peer_id.clone());
     let right_payload = payload("right", 1, node_b.peer_id.clone());
 
-    node_a.seed_obj(left_obj.clone(), left_payload.clone()).await?;
-    node_b.seed_obj(right_obj.clone(), right_payload.clone()).await?;
+    node_a
+        .seed_obj(left_obj.clone(), left_payload.clone())
+        .await?;
+    node_b
+        .seed_obj(right_obj.clone(), right_payload.clone())
+        .await?;
 
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
@@ -1814,7 +1869,11 @@ async fn await_catchup_and_verify(
             .expect(ERROR_IMPOSSIBLE);
         assert_eq!(
             value,
-            payload(serde_json::json!({ "ii": ii }), ii as u64, peer.peer_id.clone())
+            payload(
+                serde_json::json!({ "ii": ii }),
+                ii as u64,
+                peer.peer_id.clone()
+            )
         );
     }
 
@@ -1883,7 +1942,11 @@ async fn run_band_scenario(
 
     for ii in 0..total {
         let obj_id = gen_obj_id(ii);
-        let value = payload(serde_json::json!({ "ii": ii }), ii as u64, node_b.peer_id.clone());
+        let value = payload(
+            serde_json::json!({ "ii": ii }),
+            ii as u64,
+            node_b.peer_id.clone(),
+        );
         if ii < shared {
             node_a.seed_obj(obj_id.clone(), value.clone()).await?;
         }
@@ -1926,8 +1989,14 @@ async fn long_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
     let timeout = Duration::from_secs(180);
     let bucket =
         run_band_scenario("sparse", SPARSE_TOTAL, SHARED, timeout, SyncMode::Bucket).await?;
-    let cursor =
-        run_band_scenario("sparse", SPARSE_TOTAL, SHARED, timeout, SyncMode::CursorOnly).await?;
+    let cursor = run_band_scenario(
+        "sparse",
+        SPARSE_TOTAL,
+        SHARED,
+        timeout,
+        SyncMode::CursorOnly,
+    )
+    .await?;
     // Counted work, never wall-clock. The tree prunes every range whose fingerprint agrees,
     // so the bucket band touches object work proportional to the difference, while cursor
     // replay pays for every event in the gap. One order of magnitude is the claim; the
@@ -2010,7 +2079,11 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
         node_b
             .seed_obj(
                 gen_obj_id(ii),
-                payload(serde_json::json!({ "ii": ii }), ii as u64, node_b.peer_id.clone()),
+                payload(
+                    serde_json::json!({ "ii": ii }),
+                    ii as u64,
+                    node_b.peer_id.clone(),
+                ),
             )
             .await?;
     }
@@ -2044,7 +2117,11 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
         node_b
             .seed_obj(
                 gen_obj_id(ii),
-                payload(serde_json::json!({ "ii": ii }), ii as u64, node_b.peer_id.clone()),
+                payload(
+                    serde_json::json!({ "ii": ii }),
+                    ii as u64,
+                    node_b.peer_id.clone(),
+                ),
             )
             .await?;
     }
@@ -2187,7 +2264,9 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
 
     let obj = gen_obj_id(80);
     let shared_from_third = payload("shared-from-third", 1, node_c.peer_id.clone());
-    node_c.seed_obj(obj.clone(), shared_from_third.clone()).await?;
+    node_c
+        .seed_obj(obj.clone(), shared_from_third.clone())
+        .await?;
 
     tokio::try_join!(node_a.connect_to(&node_c), node_c.connect_to(&node_a))?;
     tokio::try_join!(node_b.connect_to(&node_c), node_c.connect_to(&node_b))?;

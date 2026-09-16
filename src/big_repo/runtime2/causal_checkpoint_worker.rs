@@ -63,11 +63,13 @@ pub fn spawn_causal_checkpoint_worker(
                     if runtime.is_stopped() {
                         return Ok(());
                     }
-let doc_id = crate::DocumentId::new(doc_obj.as_bytes());
+                    let doc_id = crate::DocumentId::new(doc_obj.as_bytes());
                     let admitted = match scope.groups() {
                         None => true,
                         Some(_) => scope.admits_doc_groups(
-                            &keyhive.group_ids_containing_document(doc_id.clone()).await?,
+                            &keyhive
+                                .group_ids_containing_document(doc_id.clone())
+                                .await?,
                         ),
                     };
                     if admitted {
@@ -366,7 +368,11 @@ async fn run_task(
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
             if let Some(_) = scope.groups()
-                && !scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id.clone()).await?)
+                && !scope.admits_doc_groups(
+                    &keyhive
+                        .group_ids_containing_document(doc_id.clone())
+                        .await?,
+                )
             {
                 return Ok(TaskOutput::OutOfScope);
             }

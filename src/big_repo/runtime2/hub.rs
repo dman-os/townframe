@@ -327,7 +327,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .collect(),
                 )
                 .ok_or_else(|| ferr!("automerge document has no content heads"))?;
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 // Stage the plaintext before creating the Keyhive authority.
                 // This is the recovery record for a crash in any later step.
                 let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
@@ -480,7 +480,7 @@ let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
             } else {
                 runtime_io
                     .contains_sedimentree(sedimentree_core::id::SedimentreeId::new(
-doc_id.to_bytes32(),
+                        doc_id.to_bytes32(),
                     ))
                     .await
             };
@@ -763,7 +763,8 @@ where
                     .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
-                if let Ok(Some((worker, _lease))) = self.acquire_existing_doc_worker_handle(doc_id.clone())
+                if let Ok(Some((worker, _lease))) =
+                    self.acquire_existing_doc_worker_handle(doc_id.clone())
                 {
                     if let Err(err) = worker.send(DocWorkerMsg::InspectHeadState { resp, _lease }) {
                         debug!(%doc_id, ?err, "failed sending InspectHeadState to worker");
@@ -842,7 +843,7 @@ where
             } => {
                 let request_id = subduction_core::connection::message::RequestId {
                     requestor: subduction_core::peer::id::PeerId::new(
-self.local_peer_id.to_bytes32(),
+                        self.local_peer_id.to_bytes32(),
                     ),
                     nonce: waiter_id,
                 };
@@ -854,7 +855,7 @@ self.local_peer_id.to_bytes32(),
                         resp,
                     },
                 );
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::SyncDoc,
                     F::sync_doc_with_peer(
@@ -979,7 +980,7 @@ let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 self.handle_release_internal_lease(doc_id, generation);
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
-let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::ContainsSedimentree,
                     F::contains_sedimentree(Arc::clone(&self.runtime_io), sedimentree_id, resp),
@@ -2220,7 +2221,7 @@ where
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {
             requestor: subduction_keyhive::KeyhivePeerId::from_bytes(
-self.local_peer_id.to_bytes32(),
+                self.local_peer_id.to_bytes32(),
             ),
             nonce: round_id,
         };
@@ -2460,7 +2461,8 @@ self.local_peer_id.to_bytes32(),
         lease: DocWorkerInternalLease,
     ) -> eyre::Result<()> {
         if self.materialization_retries_in_flight.contains_key(&doc_id) {
-            self.materialization_retries_requested.insert(doc_id.clone());
+            self.materialization_retries_requested
+                .insert(doc_id.clone());
             debug!(
                 %doc_id,
                 "latching materialization retry behind the in-flight walk"

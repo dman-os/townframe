@@ -92,7 +92,8 @@ async fn tier4_new_data_breaks_convergence_then_restores_it() -> crate::Res<()> 
 
     drop(reader_doc);
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
         Some("new-data")
@@ -125,7 +126,8 @@ async fn tier4_delta_sync_advances_only_the_new_frontier() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     drop(reader_doc);
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let after = pair
         .right()
         .repo
@@ -198,10 +200,12 @@ async fn tier4_fork_then_merge_preserves_decryption() -> crate::Res<()> {
     pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     drop(owner_doc);
     let owner_doc =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(editor_doc);
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&owner_doc, "owner_branch").await.as_deref(),
         Some("kept")
@@ -241,7 +245,8 @@ async fn tier4_rapid_fire_then_idle_sync_converges_once() -> crate::Res<()> {
             .await??;
     }
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
     let before = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;

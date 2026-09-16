@@ -1657,7 +1657,11 @@ mod tests {
             }] if *g == group_id && *m == member_id
         ));
 
-        manager.notify_document_access_changed(doc_id.clone(), member_id.clone(), BigRepoAccess::Relay)?;
+        manager.notify_document_access_changed(
+            doc_id.clone(),
+            member_id.clone(),
+            BigRepoAccess::Relay,
+        )?;
         let batch4 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch4.as_slice(),

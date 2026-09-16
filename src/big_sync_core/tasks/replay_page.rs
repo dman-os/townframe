@@ -64,13 +64,11 @@ impl ReplayPageTask {
     {
         let peer_id = self.peer_id.clone();
         let target = self.target.clone();
-        self.run_run(cx)
-            .await
-            .map_err(|deets| ReplayPageTaskError {
-                peer_id,
-                target,
-                deets,
-            })
+        self.run_run(cx).await.map_err(|deets| ReplayPageTaskError {
+            peer_id,
+            target,
+            deets,
+        })
     }
 
     async fn run_run<K, PStore, Rpc, Rng>(

@@ -120,7 +120,9 @@ impl BigRepoStressFixture {
             for part_id in parts {
                 peer_cursors.insert(
                     part_id.clone(),
-                    node.store.get_peer_part_cursor(peer_id.clone(), part_id.clone()).await?,
+                    node.store
+                        .get_peer_part_cursor(peer_id.clone(), part_id.clone())
+                        .await?,
                 );
             }
             result.insert(peer_id, peer_cursors);
@@ -333,7 +335,10 @@ impl StressFixture for BigRepoStressFixture {
         // group-part membership index — per-doc grants would be an
         // anti-pattern.
 
-        self.obj_doc_map.lock().await.insert(obj.clone(), doc_id.clone());
+        self.obj_doc_map
+            .lock()
+            .await
+            .insert(obj.clone(), doc_id.clone());
         self.all_docs.lock().await.insert(doc_id);
         Ok(())
     }
@@ -791,7 +796,7 @@ impl StressFixture for BigRepoStressFixture {
                             .expect("stress peer id must be a verifying key"),
                     );
                     let doc_identifier = keyhive_core::principal::identifier::Identifier::from(
-ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                             .expect("stress document id must be a verifying key"),
                     );
                     let access = node

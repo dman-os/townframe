@@ -2487,7 +2487,9 @@ async fn upsert_processor_runlog_item(
         "done_token": done_token,
         "done_at": jiff::Timestamp::now().to_string(),
     });
-    partition_store.set_obj_payload(item_id.clone(), payload).await?;
+    partition_store
+        .set_obj_payload(item_id.clone(), payload)
+        .await?;
     partition_store
         .add_obj_to_parts(
             item_id,

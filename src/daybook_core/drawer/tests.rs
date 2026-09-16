@@ -319,7 +319,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         })
         .await?;
 
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     let main_heads = repo
         .get_doc_branches(&doc_id)
@@ -344,7 +350,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         .expect("local branch ref missing after creation");
     // Local branches are checkout-local work and must not enter the
     // replicated drawer partition.
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
     let local_branch_doc = repo
         .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("/tmp/job-1"), None)
         .await?
@@ -426,7 +438,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads.clone()),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     repo.create_branch_at_heads_from_branch(
         &doc_id,
@@ -509,13 +527,25 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 2);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        2
+    );
 
     assert!(
         repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
             .await?
     );
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     assert!(repo.del(&doc_id).await?);
     assert_eq!(big_sync_host.store.member_count(partition_id).await?, 0);

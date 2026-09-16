@@ -96,7 +96,7 @@ async fn load_fragment_metas(
     store: &crate::SqliteBigRepoStore,
     doc_id: crate::DocumentId,
 ) -> crate::Res<Vec<sedimentree_core::fragment::Fragment>> {
-let sed_id = SedimentreeId::new(doc_id.to_bytes32());
+    let sed_id = SedimentreeId::new(doc_id.to_bytes32());
     <crate::SqliteBigRepoStore as Storage<Sendable>>::load_fragment_metas(store, sed_id)
         .await
         .map_err(|e| crate::ferr!("failed loading fragment metas: {e}"))
@@ -148,7 +148,7 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
         "at least one fragment must exist after a boundary commit, \
          got {} fragments for sedimentree {:?}",
         fragments.len(),
-SedimentreeId::new(doc_id.to_bytes32()),
+        SedimentreeId::new(doc_id.to_bytes32()),
     );
     tracing::info!(
         "stored {} fragment(s); first fragment head={:?}",
@@ -160,7 +160,8 @@ SedimentreeId::new(doc_id.to_bytes32()),
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &agent, Access::Read).await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // ── 5. Tier-0 invariants (sedimentree parity + materialized-heads parity) ─
     heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;

@@ -101,14 +101,7 @@ impl DrawerMaterializationReader {
                     self.lower_bound = self.lower_bound.max(revision);
                     for event in entries {
                         let change = match event {
-                            AutomergeFrontierEvent::Added {
-                                doc_id,
-                                heads,
-                                causal_epoch,
-                                revision,
-                                ..
-                            }
-                            | AutomergeFrontierEvent::Changed {
+                            AutomergeFrontierEvent::Changed {
                                 doc_id,
                                 heads,
                                 causal_epoch,
@@ -980,8 +973,9 @@ impl DrawerRepo {
                 if local_segments.first() == user_segments.first()
                     && local_segments.get(1) == user_segments.get(1)
                 {
-                    local_actor_ids
-                        .insert(self.content_actor_id(Some(&user_meta.user_path), branch_doc_id.clone()));
+                    local_actor_ids.insert(
+                        self.content_actor_id(Some(&user_meta.user_path), branch_doc_id.clone()),
+                    );
                 }
             }
         }

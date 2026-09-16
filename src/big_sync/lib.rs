@@ -21,6 +21,7 @@ mod trap;
 mod worker;
 
 pub use backend::SyncBackend;
+pub use big_sync_core::SyncMode;
 pub use big_sync_core::delta_walker_sparse_state::{
     DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
 };
@@ -29,7 +30,6 @@ pub use big_sync_core::delta_walker_state::{
     DeltaWalkerStateTransaction,
 };
 pub use big_sync_core::part_store::ObjPayload;
-pub use big_sync_core::SyncMode;
 pub use delta_walker_state::{SqliteDeltaWalkerStateRepo, SqliteDeltaWalkerStateTransaction};
 #[cfg(feature = "test-support")]
 pub use part_store::host_contract as host_part_store_contract;

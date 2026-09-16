@@ -102,7 +102,10 @@ impl DecidePeerStrategyTask {
         // the same one.
         let mut asker_part_cursors = Map::new();
         for part_id in &self.parts {
-            let cursor = cx.part_store.get_peer_part_cursor(self.peer_id.clone(), part_id.clone()).await;
+            let cursor = cx
+                .part_store
+                .get_peer_part_cursor(self.peer_id.clone(), part_id.clone())
+                .await;
             asker_part_cursors.insert(part_id.clone(), cursor);
         }
         let summary = peer_rpc
@@ -273,9 +276,13 @@ impl DecidePeerStrategyTask {
                         since: last_peer_cursor,
                     })
                     .await??;
-                let filtered =
-                    crate::bucket::filter_buckets(part_id.clone(), working_level, buckets, &cx.part_store)
-                        .await;
+                let filtered = crate::bucket::filter_buckets(
+                    part_id.clone(),
+                    working_level,
+                    buckets,
+                    &cx.part_store,
+                )
+                .await;
                 let strat = match filtered {
                     crate::bucket::FilteredBuckets::Relist(buck_id) => {
                         offset = buck_id;
@@ -329,13 +336,12 @@ mod tests {
     use super::*;
 
     use crate::{
-        BuckId, ObjKey, PeerKey, PartKey, SyncMode,
-        mpsc,
+        BuckId, ObjKey, PartKey, PeerKey, SyncMode, mpsc,
         part_store::{ObjPayload, PartDirtyCount, PartStoreReadOnly},
         rpc::{
-            BigSyncRpcResult, BucketPartSummary, BucketSummary, CursorPartSummary, LeafBucketResult,
-            LeafBucketsError, ListPartsError, PartStratSummary, PeerSummaryRequest,
-            PeerSummaryResult,
+            BigSyncRpcResult, BucketPartSummary, BucketSummary, CursorPartSummary,
+            LeafBucketResult, LeafBucketsError, ListPartsError, PartStratSummary,
+            PeerSummaryRequest, PeerSummaryResult,
         },
         tasks::{MachineTaskMsg, TaskCtx, TaskResultDeets},
     };
@@ -366,7 +372,8 @@ mod tests {
         fn peer_summary<'a>(
             &'a self,
             req: PeerSummaryRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>
+        {
             assert_eq!(
                 req.asker_part_cursors
                     .get(&PartKey::new(PART_BYTES))
@@ -401,7 +408,8 @@ mod tests {
         fn get_changed_buckets<'a>(
             &'a self,
             _req: GetChangedBucketsRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>>
+        {
             self.bucket_walk_entered.set(true);
             let bucket = self.dirty_bucket.clone();
             Local::from_future(async move { Ok(Ok(vec![bucket])) })
@@ -410,7 +418,8 @@ mod tests {
         fn leaf_buckets<'a>(
             &'a self,
             _req: crate::rpc::LeafBucketsRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>>
+        {
             unreachable!("the decision task does not leaf")
         }
     }
@@ -590,4 +599,3 @@ mod tests {
         );
     }
 }
-

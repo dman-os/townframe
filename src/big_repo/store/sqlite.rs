@@ -1,11 +1,11 @@
 use crate::interlude::*;
 
-use big_sync::{HostPartStore, PartScope};
 use big_sync::open_sqlite_local_revision_reader;
 use big_sync::sqlite_core::{
-    EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
+    EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
     SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
 };
+use big_sync::{HostPartStore, PartScope};
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
@@ -87,13 +87,6 @@ struct BigRepoSubscriptions {
     pending: HashSet<Uuid>,
     live: HashSet<Uuid>,
     subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
-    /// Object/principal pairs whose fetch access was just revoked. The next
-    /// event for such a pair is delivered payload-free instead of dropped, so
-    /// the peer can discover the revocation: it attempts a sync, the serving
-    /// side rejects it at the wire with `Unauthorized`, and the peer settles
-    /// its cursor. Content delivery stays gated by fetch access — the notice
-    /// never carries an object payload.
-    revoked_fetch: HashSet<(ObjKey, PeerKey)>,
 }
 
 impl BigRepoSubscriptions {
@@ -308,8 +301,7 @@ pub(crate) struct GroupPartReconciliation {
     pub(crate) agents: HashMap<PeerKey, keyhive_core::access::Access>,
     /// The agent set of each part the doc resides in — these are the access rows that
     /// get written, so a principal of one group never receives another group's part.
-    pub(crate) part_agents:
-        HashMap<PartKey, Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
+    pub(crate) part_agents: HashMap<PartKey, Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
     /// The parts this reconciliation manages: a part the doc is currently in that is
     /// managed but not desired is removed. `/seds` is in here like any other part
     /// (decision 9).
@@ -484,11 +476,11 @@ impl SqliteBigRepoStore {
 
     fn event_scope(event: &SubEvent) -> PartScope {
         match event {
-            SubEvent::Changed(inner) if !inner.part_ids.is_empty() => {
-                PartScope::AnyOf(inner.part_ids.clone())
-            }
-            SubEvent::Changed(_) => PartScope::FromObject,
-            SubEvent::Added(inner) => PartScope::Part(inner.part_id.clone()),
+            SubEvent::Changed(inner) => match inner.part_ids.as_slice() {
+                [] => PartScope::FromObject,
+                [part] => PartScope::Part(part.clone()),
+                parts => PartScope::AnyOf(parts.to_vec()),
+            },
             SubEvent::Removed(inner) => PartScope::Part(inner.part_id.clone()),
             SubEvent::ReplayComplete => PartScope::FromObject,
         }
@@ -497,7 +489,6 @@ impl SqliteBigRepoStore {
     fn event_kind(event: &SubEvent) -> &'static str {
         match event {
             SubEvent::Changed(_) => "changed",
-            SubEvent::Added(_) => "added",
             SubEvent::Removed(_) => "removed",
             SubEvent::ReplayComplete => "replay_complete",
         }
@@ -508,49 +499,9 @@ impl SqliteBigRepoStore {
     fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartKey>) {
         match event {
             SubEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
-            SubEvent::Added(inner) => (inner.cursor, vec![inner.part_id.clone()]),
             SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id.clone()]),
             SubEvent::ReplayComplete => (CursorIndex::default(), Vec::new()),
         }
-    }
-
-    /// Strip object content from an event while keeping its identity and
-    /// cursor, so a peer that lost fetch access can act on the advance without
-    /// receiving payload bytes.
-    fn without_payload(event: SubEvent) -> SubEvent {
-        match event {
-            SubEvent::Changed(mut inner) => {
-                inner.payload = serde_json::Value::Null;
-                SubEvent::Changed(inner)
-            }
-            SubEvent::Added(mut inner) => {
-                inner.payload = serde_json::Value::Null;
-                SubEvent::Added(inner)
-            }
-            other => other,
-        }
-    }
-
-    /// Arm a single payload-free revocation notice for each principal that
-    /// just lost fetch access to `obj_id`.
-    pub(crate) fn arm_revocation_notices(
-        &self,
-        obj_id: ObjKey,
-        principals: impl IntoIterator<Item = PeerKey>,
-    ) {
-        let mut bus = self.bus.write().expect(ERROR_MUTEX);
-        for principal in principals {
-            bus.revoked_fetch.insert((obj_id.clone(), principal));
-        }
-    }
-
-    /// Consume a pending revocation notice for `(obj_id, principal)`.
-    fn take_revocation_notice(&self, obj_id: ObjKey, principal: Option<PeerKey>) -> bool {
-        let Some(principal) = principal else {
-            return false;
-        };
-        let mut bus = self.bus.write().expect(ERROR_MUTEX);
-        bus.revoked_fetch.remove(&(obj_id, principal))
     }
 
     async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
@@ -561,8 +512,11 @@ impl SqliteBigRepoStore {
         let mut push_recipient = |sub_id: Uuid, event: SubEvent| {
             let (obj_id, cursor, part_id) = match &event {
                 SubEvent::Changed(inner) => (inner.obj_id.clone(), inner.cursor, None),
-                SubEvent::Added(inner) => (inner.obj_id.clone(), inner.cursor, Some(inner.part_id.clone())),
-                SubEvent::Removed(inner) => (inner.obj_id.clone(), inner.cursor, Some(inner.part_id.clone())),
+                SubEvent::Removed(inner) => (
+                    inner.obj_id.clone(),
+                    inner.cursor,
+                    Some(inner.part_id.clone()),
+                ),
                 SubEvent::ReplayComplete => unreachable!(),
             };
             recipients
@@ -593,20 +547,11 @@ impl SqliteBigRepoStore {
                 }
                 let obj_id = match &event {
                     SubEvent::Changed(inner) => inner.obj_id.clone(),
-                    SubEvent::Added(inner) => inner.obj_id.clone(),
                     SubEvent::Removed(inner) => inner.obj_id.clone(),
                     SubEvent::ReplayComplete => continue,
                 };
                 let object_event = match &event {
                     SubEvent::Changed(inner) => {
-                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: inner.cursor,
-                            part_ids: Vec::new(),
-                            obj_id: inner.obj_id.clone(),
-                            payload: inner.payload.clone(),
-                        }))
-                    }
-                    SubEvent::Added(inner) => {
                         Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                             cursor: inner.cursor,
                             part_ids: Vec::new(),
@@ -630,13 +575,6 @@ impl SqliteBigRepoStore {
                             }
                         }
                     }
-                    SubEvent::Added(inner) => {
-                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
-                            for &sub_id in subs {
-                                push_recipient(sub_id, event.clone());
-                            }
-                        }
-                    }
                     SubEvent::Removed(inner) => {
                         if let Some(subs) = bus.by_part.get(&inner.part_id) {
                             for &sub_id in subs {
@@ -650,11 +588,12 @@ impl SqliteBigRepoStore {
                     && let Some(subs) = bus.by_obj.get(&obj_id)
                 {
                     for &sub_id in subs {
-                        if matches!(&event, SubEvent::Added(inner)
-                            if bus.parts_by_sub
-                                .get(&sub_id)
-                                .is_some_and(|parts| parts.contains(&inner.part_id)))
-                        {
+                        let already_delivered_via_part = matches!(&event, SubEvent::Changed(inner)
+                                if inner.part_ids.first().is_some_and(|part_id| bus
+                                    .parts_by_sub
+                                    .get(&sub_id)
+                                    .is_some_and(|parts| parts.contains(part_id))));
+                        if already_delivered_via_part {
                             continue;
                         }
                         push_recipient(sub_id, object_event.clone());
@@ -667,46 +606,47 @@ impl SqliteBigRepoStore {
                 };
                 if bus.pending.contains(&sub_id) {
                     if sub.pending.mark_dirty() {
-                        promote.push((sub_id, event, obj_id, sub.principal.clone(), sub.sender.clone()));
+                        promote.push((
+                            sub_id,
+                            event,
+                            obj_id,
+                            sub.principal.clone(),
+                            sub.sender.clone(),
+                        ));
                     }
                     continue;
                 }
                 if !bus.live.contains(&sub_id) {
                     continue;
                 }
-                dispatch.push((sub_id, event, obj_id, sub.principal.clone(), sub.sender.clone()));
+                dispatch.push((
+                    sub_id,
+                    event,
+                    obj_id,
+                    sub.principal.clone(),
+                    sub.sender.clone(),
+                ));
             }
         }
 
         let mut drop_subs = HashSet::new();
         for (sub_id, event, obj_id, principal, sender) in dispatch {
-            // A policy-check failure must not masquerade as a denial: that
-            // would silently drop a deliverable event from a live subscriber.
-            // Filtered parts are the authorization decision AND the non-exposure
-            // rule: a dropped event disclosed nothing about a part the recipient
-            // cannot read. A removal is exempt: it carries no content, and a
-            // recipient that just lost access must still learn the doc left the part
-            // it was reading.
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || !self
-                    .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
-                    .await?
-                    .is_some_and(|readable| readable.is_empty());
-            let event = if permitted {
-                event
-            } else if self.take_revocation_notice(obj_id.clone(), principal.clone()) {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store delivered payload-free revocation notice",
-                );
-                Self::without_payload(event)
-            } else {
+            // A policy-check failure must not masquerade as a denial: that would
+            // silently drop a deliverable event from a live subscriber. Filtered
+            // parts are the authorization decision AND the non-exposure rule: a
+            // dropped event disclosed nothing about a part the recipient cannot
+            // read.
+            //
+            // Denial is not an event (ADR 012 decision 2): there are no
+            // authorization events, so there is no revocation notice either. A peer
+            // that lost access discovers it from its next page request for that part,
+            // which answers denied, and settles its cursor from that; nothing here
+            // needs to distinguish "revoked" from "never had it".
+            let permitted = !self
+                .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
+                .await?
+                .is_some_and(|readable| readable.is_empty());
+            if !permitted {
                 let (cursor, part_ids) = Self::event_diagnostic(&event);
                 tracing::debug!(
                     ?sub_id,
@@ -718,32 +658,19 @@ impl SqliteBigRepoStore {
                     "part-store dropped live subscription event: subscriber lacks fetch access",
                 );
                 continue;
-            };
+            }
             if sender.try_send(event).is_err() {
                 drop_subs.insert(sub_id);
             }
         }
 
         for (sub_id, event, obj_id, principal, sender) in promote {
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || !self
-                    .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
-                    .await?
-                    .is_some_and(|readable| readable.is_empty());
+            let permitted = !self
+                .permitted_parts(Self::event_scope(&event), obj_id.clone(), principal.clone())
+                .await?
+                .is_some_and(|readable| readable.is_empty());
             let event = if permitted {
                 Some(event)
-            } else if self.take_revocation_notice(obj_id.clone(), principal.clone()) {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store delivered payload-free revocation notice",
-                );
-                Some(Self::without_payload(event))
             } else {
                 let (cursor, part_ids) = Self::event_diagnostic(&event);
                 tracing::debug!(
@@ -813,30 +740,7 @@ impl SqliteBigRepoStore {
             // principal access. An event that named nothing usable still delivers when
             // the principal can read some part of it.
             PartScope::FromObject => {
-                let rows = sqlx::query!(
-                    "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
-                     FROM big_sync_members m
-                     JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-                     JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
-                     WHERE m.scope_id = ?1
-                       AND m.obj_ref = (
-                           SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-                       )
-                       AND m.maybe_part_ref > 0
-                       AND m.event_type != 2
-                       AND s.principal_id = ?3
-                     ORDER BY p.part_id",
-                    self.scope_id,
-                    Self::obj_blob(obj_id.clone()),
-                    &peer_blob
-                )
-                .fetch_all(&self.sql.read_pool)
-                .await?;
-                let readable = rows
-                    .into_iter()
-                    .filter(|row| is_fetch_access(row.access_level))
-                    .map(|row| Self::part_from_blob(row.part_id))
-                    .collect::<Vec<_>>();
+                let readable = self.readable_parts_of_object(&obj_id, &peer_blob).await?;
                 tracing::trace!(
                     ?obj_id,
                     ?principal,
@@ -850,20 +754,37 @@ impl SqliteBigRepoStore {
         };
         let mut readable = Vec::with_capacity(candidates.len());
         for part_id in candidates {
-            let Some(part_ref) = self.core.find_part_ref(part_id.clone()).await? else {
+            let access_level: Option<i64> = match self.core.find_part_ref(part_id.clone()).await? {
+                Some(part_ref) => {
+                    sqlx::query_scalar!(
+                        "SELECT access_level
+                         FROM big_sync_syncable
+                         WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+                        self.scope_id,
+                        part_ref,
+                        &peer_blob
+                    )
+                    .fetch_optional(&self.sql.read_pool)
+                    .await?
+                }
+                None => None,
+            };
+            if access_level.is_some_and(is_fetch_access) {
+                readable.push(part_id);
+                continue;
+            }
+            // Access to a derived object part is inherited (decision 3): a principal that
+            // can read any part containing the object can read `o:{O}`. No syncable row is
+            // ever written for a derived part, so without this an object-lane event that
+            // names `o:{O}` filters to empty and is never deliverable remotely.
+            let Some(object_key) = part_id.object_key() else {
                 continue;
             };
-            let access_level: Option<i64> = sqlx::query_scalar!(
-                "SELECT access_level
-                 FROM big_sync_syncable
-                 WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
-                self.scope_id,
-                part_ref,
-                &peer_blob
-            )
-            .fetch_optional(&self.sql.read_pool)
-            .await?;
-            if access_level.is_some_and(is_fetch_access) {
+            if !self
+                .readable_parts_of_object(&object_key, &peer_blob)
+                .await?
+                .is_empty()
+            {
                 readable.push(part_id);
             }
         }
@@ -874,6 +795,41 @@ impl SqliteBigRepoStore {
             "policy event permission",
         );
         Ok(Some(readable))
+    }
+
+    /// The parts containing `obj_id` that `peer_blob` may fetch-read, in key order.
+    ///
+    /// This is the `FromObject` resolution at the heart of decision 2, and the inheritance
+    /// rule an object part is resolved through.
+    async fn readable_parts_of_object(
+        &self,
+        obj_id: &ObjKey,
+        peer_blob: &[u8],
+    ) -> Res<Vec<PartKey>> {
+        let rows = sqlx::query!(
+            "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
+             FROM big_sync_members m
+             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+             JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
+             WHERE m.scope_id = ?1
+               AND m.obj_ref = (
+                   SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+               )
+               AND m.maybe_part_ref > 0
+               AND m.event_type != 2
+               AND s.principal_id = ?3
+             ORDER BY p.part_id",
+            self.scope_id,
+            Self::obj_blob(obj_id.clone()),
+            peer_blob
+        )
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| is_fetch_access(row.access_level))
+            .map(|row| Self::part_from_blob(row.part_id))
+            .collect())
     }
 }
 

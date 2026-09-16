@@ -24,7 +24,6 @@ structstruck.workspace = true
 
 #
 # collections
-smallvec.workspace = true
 
 #
 # encoding

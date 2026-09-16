@@ -122,7 +122,12 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     // Finalization creates the document under the reserved identity with the
     // real content heads and the reserved parents.
     owner
-        .finalize_reserved_doc(doc_id.clone(), nonempty::nonempty!([7u8; 32]), &protocol, &storage)
+        .finalize_reserved_doc(
+            doc_id.clone(),
+            nonempty::nonempty!([7u8; 32]),
+            &protocol,
+            &storage,
+        )
         .await?;
     assert!(owner.document_has_content(doc_id.clone()).await?);
     assert!(

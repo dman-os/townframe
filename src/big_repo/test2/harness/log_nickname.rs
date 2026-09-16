@@ -26,7 +26,10 @@ fn registry() -> &'static std::sync::Mutex<HashMap<[u8; 32], String>> {
 /// without this every interleaved multi-node failure report is unreadable.
 pub fn register(peer_id: PeerKey, name: impl Into<String>) {
     let name = name.into();
-    let bytes: [u8; 32] = peer_id.as_bytes().try_into().expect("peer id must be 32 bytes");
+    let bytes: [u8; 32] = peer_id
+        .as_bytes()
+        .try_into()
+        .expect("peer id must be 32 bytes");
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let keyhive_peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(bytes);
     tracing::info!(

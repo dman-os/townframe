@@ -500,7 +500,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     pub async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> eyre::Result<Vec<Vec<u8>>> {
         let (resp, rx) = futures::channel::oneshot::channel();
-let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         self.cmd_tx
             .send(Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp })
             .await

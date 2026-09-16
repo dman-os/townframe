@@ -183,7 +183,8 @@ impl BlobsRepo {
                 false,
             );
             self.write_meta(&object_paths.meta, &meta).await?;
-            self.ingest_path_with_iroh(&object_paths.blob, hash.clone()).await?;
+            self.ingest_path_with_iroh(&object_paths.blob, hash.clone())
+                .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
 
@@ -236,7 +237,8 @@ impl BlobsRepo {
             }
 
             self.write_meta(&object_paths.meta, &meta).await?;
-            self.ingest_path_with_iroh(&source_snapshot, hash.clone()).await?;
+            self.ingest_path_with_iroh(&source_snapshot, hash.clone())
+                .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
             Ok(hash)
@@ -268,7 +270,8 @@ impl BlobsRepo {
             false,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
-        self.ingest_path_with_iroh(&object_paths.blob, hash.clone()).await?;
+        self.ingest_path_with_iroh(&object_paths.blob, hash.clone())
+            .await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
 
@@ -372,7 +375,8 @@ impl BlobsRepo {
         request: BlobMaterializeRequest,
     ) -> Res<PathBuf> {
         let hash = blob_hash_from_id(blob_id.clone());
-        self.ensure_local_object_no_meta_rewrite(blob_id.clone()).await?;
+        self.ensure_local_object_no_meta_rewrite(blob_id.clone())
+            .await?;
         let source_path = self.object_paths(blob_id)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,

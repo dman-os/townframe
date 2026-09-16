@@ -228,7 +228,8 @@ async fn tier7_origin_filter_remote() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     let (_reg, mut rx) = pair
         .left()
@@ -410,7 +411,8 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
 
     // Reader materialises once so a doc worker is spawned in the runtime.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Subscribe on the reader side before dropping the handle.
     let (_reg, mut rx) = pair
@@ -558,7 +560,8 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
 
     // Reader writes a change.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     reader_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "reader-write"))
@@ -997,7 +1000,8 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Subscribe on both sides (doc already created, no bootstrap to drain).
     let (_reg_owner, mut owner_rx) = pair

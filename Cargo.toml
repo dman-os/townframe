@@ -89,7 +89,6 @@ surelock = "0.1"
 
 #
 # collections
-smallvec = "1.15"
 
 #
 # encoding

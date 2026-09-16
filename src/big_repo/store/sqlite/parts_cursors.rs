@@ -469,7 +469,11 @@ impl HostPartStore for SqliteBigRepoStore {
             let fp = if dead {
                 Fingerprint::new(
                     &req.seed,
-                    &("big-sync-obj-fp-v1", obj_id.clone(), serde_json::Value::Null),
+                    &(
+                        "big-sync-obj-fp-v1",
+                        obj_id.clone(),
+                        serde_json::Value::Null,
+                    ),
                 )
             } else {
                 let payload_json: Option<String> = row.try_get("payload_json")?;
@@ -528,12 +532,14 @@ impl HostPartStore for SqliteBigRepoStore {
         let mut events = Vec::new();
         for part_id in parts {
             let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
-            let old = self.load_member_state(&mut tx, part_id.clone(), obj_id.clone()).await?;
+            let old = self
+                .load_member_state(&mut tx, part_id.clone(), obj_id.clone())
+                .await?;
             if matches!(old, MemberState::Live(_)) {
                 continue;
             }
             let cursor = Self::next_cursor(&mut tx).await?;
-            sqlx::query!("INSERT INTO big_sync_members(scope_id,obj_ref,maybe_part_ref,event_type,txid) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(obj_ref,maybe_part_ref) DO UPDATE SET event_type=excluded.event_type,txid=excluded.txid", self.scope().id(), obj_ref, part_ref, EVENT_ADDED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO big_sync_members(scope_id,obj_ref,maybe_part_ref,event_type,txid) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(obj_ref,maybe_part_ref) DO UPDATE SET event_type=excluded.event_type,txid=excluded.txid", self.scope().id(), obj_ref, part_ref, EVENT_CHANGED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)).execute(&mut *tx).await?;
             self.apply_bucket_transition(
                 &mut tx,
                 part_id.clone(),
@@ -554,9 +560,9 @@ impl HostPartStore for SqliteBigRepoStore {
             .execute(&mut *tx)
             .await?;
             sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id=?1 AND obj_ref=?2 AND part_ref=?3", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-            events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
-                part_id,
+                part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
                 payload: payload.clone(),
             }));
@@ -574,7 +580,9 @@ impl HostPartStore for SqliteBigRepoStore {
         };
         let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
         sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-        let old_state = self.load_member_state(&mut tx, part_id.clone(), obj_id.clone()).await?;
+        let old_state = self
+            .load_member_state(&mut tx, part_id.clone(), obj_id.clone())
+            .await?;
         let MemberState::Live(old_payload) = old_state else {
             tx.commit().await?;
             return Ok(());
@@ -647,8 +655,7 @@ impl HostPartStore for SqliteBigRepoStore {
             "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_ref, cursor)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(scope_id, peer_id, part_ref) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
-            self.scope().id(), Self::peer_blob(peer_id), part_ref,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            self.scope().id(), Self::peer_blob(peer_id), part_ref, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
         ).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
@@ -749,9 +756,14 @@ impl HostPartStore for SqliteBigRepoStore {
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
                 if enforce_policy
-                    && Self::permitted_parts(self, PartScope::Part(part_id.clone()), obj_id.clone(), None)
-                        .await?
-                        .is_some_and(|readable| readable.is_empty())
+                    && Self::permitted_parts(
+                        self,
+                        PartScope::Part(part_id.clone()),
+                        obj_id.clone(),
+                        None,
+                    )
+                    .await?
+                    .is_some_and(|readable| readable.is_empty())
                 {
                     continue;
                 }
@@ -760,12 +772,6 @@ impl HostPartStore for SqliteBigRepoStore {
                         cursor: txid,
                         part_id: part_id.clone(),
                         obj_id,
-                    }),
-                    EVENT_ADDED => PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                        cursor: txid,
-                        part_id: part_id.clone(),
-                        obj_id,
-                        payload,
                     }),
                     _ => PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor: txid,
@@ -842,8 +848,7 @@ impl HostPartStore for SqliteBigRepoStore {
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
-        let changed_at =
-            i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
+        let changed_at = i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
         sqlx::query!(
             "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
             self.scope().id(),
@@ -866,8 +871,7 @@ impl HostPartStore for SqliteBigRepoStore {
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
-        let changed_at =
-            i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
+        let changed_at = i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
         sqlx::query!("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3", self.scope().id(), part_ref, Self::peer_blob(member.clone())).execute(&mut *tx).await?;
         sqlx::query!("INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at) VALUES (?1, ?2, ?3, ?4, ?5)", self.scope().id(), part_ref, Self::peer_blob(member), encode_access(&access), changed_at).execute(&mut *tx).await?;
         tx.commit().await?;
