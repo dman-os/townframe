@@ -301,6 +301,7 @@ is `file:line` in the current tree.
 | B17 | `big_sync_core` | A cancelled removal whose zombie then *fails* with every hint already cancelled kept its membership lanes owed with no worker left that could settle them, because the settle was gated on the zombie having applied. | FIXED: with no re-removal left, the membership lanes now finish regardless of the zombie's outcome, and `ZombieRemovalOutcome` is gone (it was the only user). This is not an acknowledgement of a mutation that never ran: a Membership completion carries no acknowledgement — the object's replay position advances only on a Sync completion (B3) — and the only canceller of a hint is the re-add path (`cancel_obj_removal_hint` is called from `Changed`), so every cancelled hint means the object belongs in that part again. Test `a_failed_cancelled_removal_still_finishes_its_membership_lanes` (negative-checked: it fails with the old gate). | med | done — verified by me: clippy clean, `nextest -p big_sync_core -p big_sync` 171/171 pass |
 | B18 | `big_sync_core` | If every `re_added_parts` entry is filtered out at resume (the part is gone from the peer), no sync worker is spawned and the sync lanes stay owed; the fork traced `remove_part` retiring the part's book, which frees those waiters, but that is a reading and not a test. | `lib.rs` `resume_pending_removal` + `remove_part`. | low | open — needs a test |
 | B19 | `big_repo` | `group_part_worker` takes the event's *immediate signer* (`delegation.issuer`) as the group id when deriving a part (`group_part_worker.rs:734-741,773`), but the id keyhive dispatched the operation to is `Delegation::subject_id()`, the proof chain's root issuer (`../keyhive/keyhive_core/src/crypto/signed_ext.rs:28-46`, consumed at `keyhive.rs:1980,2066`). When a non-root group member re-delegates the two differ, so a part can be derived for an id that is not a membered graph. Latent, pre-existing, out of ADR 013's scope — recorded, not fixed. | evidence above; found by the ADR review while checking the subject derivation ADR 013 must use | med | fixed - see section F |
+| B20 | `big_sync_core` | A `Sync` completion was **dropped** whenever a removal's membership lane sat at the same cursor as the object's in-flight content replay: the caller's gate (`owes_obj_sync_completion`, `cursor.rs:143-176` in the working copy; the parent spelled it `owes_obj_job_lane(.., Sync)`) answered false for that cursor, `handle_sync_completed` `continue`d, and `on_obj_sync_job_evt(.., Sync)` never ran — so `acknowledged` did not move and `in_flight` stayed set (only `abandon_obj_sync` clears it), stranding the position the object route resumes from, while `cursor.rs` states a sync completion is exactly the acknowledgement that advances it. | FIXED: the acknowledgement is no longer entangled with the board's settlement. `CursorSyncMachine::on_obj_sync_job_evt` releases the object's claim for every `Sync` completion, then settles the board only where `JobBoard::owes_lane` says that lane is owed (an object-target replay registers no part job at all; a shared cursor's membership lane stays owed and keeps gating its part), and `handle_sync_completed` (`lib.rs:2738-2749`) no longer guards before calling. `owes_obj_sync_completion` deleted (no references left). Test `a_sync_completion_acknowledges_the_object_beside_a_membership_lane` (`cursor.rs`) drives an object-only `Changed` and a `Removed` at one cursor and asserts the route resumes from 7 while the membership lane is still owed. | med | done — verified by me: `cargo clippy -p big_sync_core --all-targets --all-features` exit 0, zero warnings; `cargo nextest run -p big_sync_core -E 'test(cursor) \| test(sync)' --retries 0` 32/32 pass; extra narrow run `-E 'test(removal) \| test(readd) \| test(object) \| test(completion)'` 28/28 pass, which is what covers the `handle_sync_completed`/`handle_remove_completed` call sites (the required filter alone skips them); negative check: reinstating the drop (early return in the `Sync` branch when a Membership lane is owed at that cursor) fails the new test on `left: 0, right: 7` — "the acknowledged replay is what the object route resumes from" — then the fixed file was restored byte-identical (sha256 match) and re-run green |
 
 Known-correct items from the same review (recorded so they are not
 re-litigated): the sqlite frontier reader enables its notification before
@@ -315,7 +316,52 @@ send error, so none is an unbounded leak _by itself_ (`part_store.rs:445`,
 
 Test:
 `big_repo::test2::stress::tests::long_test_big_repo_tier10_stress_4_editor_converges`,
-`TIMEOUT 240.033s`; neighbours pass. Status: **open**.
+`TIMEOUT 240.033s`; neighbours pass. Status: **open, and its shape changed on 2026-09-18** —
+the concurrency question now dominates; see the re-measurement block immediately below.
+
+### C re-measurement (2026-09-18, on the post-batch working copy)
+
+Two measurements that change what this section is about:
+
+1. **The test passes in isolation.** `cargo nextest run -p big_repo -E
+   'test(long_test_big_repo_tier10_stress_4_editor_converges)'` → `PASS [29.141s]` (log
+   `/tmp/tier10-alone.log`). The previous revision of this section recorded it timing out at 240s on
+   the first isolated attempt, so either that attempt predated the H-A/H-B/H-C/B2 work now in the
+   tree, or the hang is intermittent. Treat "reproduces on demand" as unproven until it is shown
+   again at this revision.
+2. **The hang signature is absent from the current full-suite log.** In `/tmp/flake.log` (a 764-test
+   parallel run, 589s) the whole file contains **zero** occurrences of `converged=false`, `mismatch=`,
+   any `phase3` marker, `stress final cluster settle complete`, and `stress cluster alignment
+   complete`. The `3_editor_1_relay` variant (stdout block 345459-449606) *did* progress: `phase1
+   mutations complete` 42.19s, `phase1 post-mutations settled` 56.26s, `phase2 connect complete`
+   88.30s, `phase2 post-connect settled` 126.67s, `phase2 mutations complete` 216.22s. So it was killed
+   at 240s inside phase3/alignment, before the barrier's convergence poll ever ran. (An earlier
+   revision of this block read the absent `phase3` marker as "killed before the mutations"; that was
+   wrong — the markers are phase1/phase2 and they are present.)
+   unbounded `wait_for_quiescence_freeze(None)` this section blames — that run never reached the
+   no-carrier stall either. But do not read the timeouts as "the tests are merely slow": the same
+   block re-syncs **30 objects 700 times** while `phase2` grinds (below), which is what keeps phase3
+   from settling.
+
+So the failure set of that run decomposes as: one real deterministic failure
+(`test2::topologies::tier3_line_private_reader_keyhive_propagates_through_relay`, reproducible alone in
+1.9s, `Unknown agent` — the race class AGENTS.md names) and four **non-settlement** failures that must
+not be filed as scheduling. Measured inside that log's two tier10 blocks (lines 345459-449606): 30
+distinct `obj_id`s, **700 `spawn sync task`, 395 `big sync object task completed`, 63 failures**, spread
+from 13s to 226s across all four peers — up to 51 spawns and 28 completions for a single object, i.e.
+roughly two spawns per completion, sustained for 200 seconds. A sync task that *completes and reports
+`ObjectSynced`* therefore does not settle the object it synced: the machine re-arms and re-syncs the
+same 30 objects until the kill. `sparse_dirt` shows the same shape (`saw 19997 objects` while sync
+tasks keep completing at 214s). One sub-signature is already visible: two tasks for the *same*
+`obj_id`+peer spawned 95ms apart (editor-2, task 478 then 487 at 70.52s/70.61s) with only 487
+completing — the skill's "multiple concurrent tasks for one object" note, where a completion that does
+not settle the claim leaves the machine re-arming. This is the live hunt; the `tier3` fix (retry
+versus panic) is a separate, already-assigned item.
+
+Attribution note: `/tmp/flake.log` is a symlink to `/run/media/asdf/p3N/tmp/hunt-logs/flake1.log`, so
+there is only one full-suite log and pre/post-batch log comparison is impossible; attribution was
+done from `jj diff -r d7284beffd73..@`, which touches in these paths only the two H-D width
+conversions (`keyhive_doc_id`, `group_part_worker.rs:626`) — neither is on the `Unknown agent` path.
 
 Pinned (`me`, from the log):
 
@@ -673,3 +719,506 @@ refuses to run `reconcile_causal_coverage` while blocked (`:1384`). But two read
    **(a)** tag `blocked_refs` at insertion with the reason so a live doc can report real blockers, or
    **(b)** keep the outcome but carry the blocked count/refs on `SyncDocReceipt` so the *log* tells the
    truth without claiming a precise blocker. Both are interface changes, so neither was made unilaterally.
+
+## H. External reviewer batch — triage (35 claims, ~25 files)
+
+An external LLM reviewer produced 35 findings. They were triaged **read-only** by four reviewers (workflow
+`4f63e4b8`), one brief per file group (`/tmp/triage-{a,b,c,d}.md`), each required to return per claim:
+verdict, `file:line` evidence with the call path that makes it reachable, one-sentence root cause, whether it is
+introduced by this working copy, and the smallest correct fix — with **no implementation**. The verdicts below
+are theirs; **each fix still gets verified at the site by the operator before it lands**, and the two claims the
+operator had already formed an opinion on (A6, C12) are noted with the disagreement.
+
+The reviewer's own framing was adversarial and it matters: 13 of the 35 claims were refuted by the code, and the
+refutations are recorded below so they are not re-litigated. Several refutations rest on the same fact —
+`ObjKey`/`PeerKey` are variable-length *by design* (ADR 012 decision 1) while their consumers assume 32-byte
+Keyhive identities, which `ids.rs:136-148` documents as an invariant ("Every key that reaches them is a 32-byte
+digest by construction") that is *asserted at the point of use* rather than carried by the type. Where a
+non-32-byte value is genuinely reachable (A5, C1-C3) that is a real defect; where it can only be reached by
+violating the documented contract from local code (B4-B11), calling it a defect would be reopening that
+invariant, and the reviewer said so.
+
+### H.1 Valid and ours — to fix
+
+| ID | Site | Defect | Fix | Batch |
+|----|------|--------|-----|-------|
+| A3 | `big_sync_core/cursor.rs:143` (+ guard at `lib.rs:2674-2686`) | An object-target replay is tracked only in `object_replays`, but the B1 `owes_obj_job_lane` guard consults only the part JobBoard, so the completion is dropped: `acknowledged`/`in_flight` never move, the route stays at cursor 0. **This is the stall-shaped one.** | Let an object replay's own claim (`in_flight == cursor`) satisfy the guard when no part job owes that cursor. | H-A |
+| A4 | `big_sync_core/cursor.rs:300-312` | `object_replays.get_mut(&obj_id)` never creates the entry, so a part-scoped `Sync` completion cannot record its cursor; the route later reads 0 and re-reads the object's first page (the reviewer notes the harm today is a redundant re-read, not the stall — A3 is the stall). | Seed the entry on a `Sync` completion (`entry().or_default()`). | H-A |
+| B2 | `store/sqlite/sedimentree.rs:633` | `leaving` is derived from the document's *occupied* parts, not the reconciler's managed set, and the delete is part-wide (`:640`), so a document materialized into a foreign part deletes that part's access rows while its membership stays. | Derive `leaving` from `stale` (`stale.contains(&part_id)`). | H-B |
+| B3 | `store/sqlite/sedimentree.rs:635-646` | When `agents.is_none()` and not leaving, the branch still runs a part-wide `DELETE ... WHERE part_ref = ?` with no re-insert, so a document leaving `/seds` deletes *every* principal's `/seds` row — the embedder's mirror grant. | Skip the delete when `agents.is_none()`; the part-level access reconciler owns those rows. | H-B |
+| C1 | `daybook_core/blobs.rs:479-494` | Path built from `blob_hash_from_id` (Display) unencoded; a peer-authored facet digest with a reserved `/…` spelling makes `Path::join` replace `BlobsRepo::root` — a path escape. | One fix covers C1-C3: keep `BlobId` a distinct 32-byte-digest type (or validate at the parse boundary). | H-C |
+| C2 | `daybook_core/blobs.rs:750-756` | `blob_id_to_iroh_hash`/`blob_id_to_digest_str` call the panicking `to_bytes32()`, reachable from `sync.rs:61` for any parsed non-32-byte key. | Same typed-`BlobId` fix; reject non-32-byte ids at the blob boundary. | H-C |
+| C3 | `daybook_core/blobs.rs:751` / `ids.rs:209-224` | Our own writers emit the canonical 34-byte multihash form, but `BlobId::from_str` decodes multibase only, so `pin_worker.rs:230` accepts it as a 34-byte key and blob sync panics. | Decode multihash digests to the 32-byte id; reject every other length before the key enters the inventory. | H-C |
+| A5 | `big_sync_core/ids.rs:144-147` | The fixed-width conversion panics, and the sync path's `obj_id` can come from a peer-delivered event or a parsed key, aborting the process instead of dropping the object. | Make the conversion fallible at these edges and answer the sync with an error for a non-32-byte key. | H-D |
+| A1 | `big_sync/part_store/memory.rs:184-189` | Materialization mutates membership rows only; this store's object route reads the keyed frontier, so a later explicit share is invisible where sqlite (which records at the current revision) re-tells the peer. | Record the derived-part touch as a frontier mutation at the stamping revision — note `MemoryKeyedFrontierTable::apply_at` rejects a non-advancing revision, so this needs the operator's call against the "subscribing allocates no revision" invariant. | H-E |
+| A2 | `big_sync/part_store.rs:397-401`, `memory.rs:405-412` | The object route's authorization runs *before* the `subscribe` that would materialize the derived part, and candidates resolve from `objs[obj].parts`, so a peer holding only a share on `o:{obj}` is `Unauthorized` forever (and is re-asked forever by that arm). | Add `obj_id.object_part_key()` to the `FromObject` candidates in both stores. | H-E |
+| A7 | `big_sync/rpc.rs:14` | ALPN is still `townframe/big-sync/0` while this change set altered the wire enum it gates (`SubscriptionTarget::Object` gained `cursor`), so a stale peer completes `/0` and then fails mid-protocol. | Bump the ALPN version. | H-F |
+| A8 | `big_sync/rpc.rs:346-350` | The permit is acquired *inside* the spawned task while dispatch spawns unconditionally, so `MAX_INFLIGHT_RPC_HANDLERS` bounds running handlers, not the waiters — a peer can pile up unbounded parked tasks. | Acquire the permit before spawning, or use a bounded pending-request queue. | H-F |
+| A9 | `big_sync/worker.rs:116-121` | `wait_for_idle`'s predicate omits `task_counts.live` and `active_machine_tasks`, so it can report idle while an in-flight machine task still owes the events it will feed the cursor machine. | Use the scheduler's idle predicate plus `active_machine_tasks == 0`. **Not the `tier10_4` cause**: that path settles via `wait_for_quiescence`/`assert_cluster_alignment`, so this does not explain the timeout. | H-F |
+| B12 | `test2/harness/topo.rs:255,728-739,624-647` | `Pair::boot`/`boot_persistent` register `/seds` routes without authorizing either peer, while only `boot_without_keyhive_notifs` grants both directions first; the denial backs off rather than retrying, so the tests still pass over document parts and silently lose `/seds` replication coverage. **This is the tracker's existing B16.** | Call `allow_part_pull(remote, &[global_part_id()])` both ways in `boot`/`boot_persistent` before connect. | H-G |
+| B13 | `test2/harness/topo.rs:373-390` | Same root cause at the connection seam: route registration (`set_peer_parts`) and per-part authorization (`allow_part_pull` → `add_part_member`) are separate steps with no ordering rule. | Grant each subscribed part inside `connect_with_keyhive_notifications` before `set_peer_parts`. | H-G |
+| C11 | `docs/adrs/012-...:400` | Object-partness is a bare byte-prefix test (`ids.rs:93-97`) over keys that may be arbitrary bytes (hashed part keys), so ≈2⁻¹⁶ of them begin `o:` and would resolve through the object-part authorization path — contrary to the ADR's own "it cannot collide" claim. | Make object-partness decidable without a prefix test (stored kind / membership), or record the collision probability as accepted. | H-H |
+| C4 | `docs/adrs/010-...:455` | The slot schema has no writer sequence or observed-lane frontier, so the causal merge the prose asserts has no representation (`011:306-309` has the fields ADR 010 lacks). | Add `writer_seq`/`observed`, or define sibling supersession via source causality the adapter holds. | H-H |
+| C6 | `docs/adrs/010-...:498-508` | ADR 010 redeclares ADR 011's `TaskDeclarationV1` with a narrower field set while demanding byte-equal canonicalization, so two adopters cannot canonicalize the same `TaskId`. | Reuse ADR 011's declaration verbatim, or define one producer-independent canonical declaration (the reviewer notes "required" is the wrong word for the two optional timestamps). | H-H |
+| C9 | `docs/adrs/011-...:463` | `retain_until` and `not_after` are both optional, so a producer can set a retention horizon with no deadline, permitting an old replica to reintroduce and execute a pending ticket after terminal evidence is discarded — the very invariant `011:470` states. | Pin `not_after` whenever a retention horizon is set, at the producer boundary. | H-H |
+| C12 | `docs/bigsync-reconciliation-open-items.md:167-169` | The bullet tells future permission-writer changes to filter to readers, contradicting the later correction (`:226-233`) and the shipped behaviour (mirror the closure verbatim). | Replace it with the final rule: copy the document closure, `Relay` included; point at ADR 013 §4. | H-H |
+| D4 | `x/task-coordination-demo.ts:389` | The demo publishes the router heartbeat exactly once, modelling the ADR's *periodic* lossy discovery channel as a fire-once broadcast — and "no periodic republication" is not among the simplifications its header declares. | Re-publish the heartbeat each step. | H-I |
+| D5 | `x/task-coordination-demo.ts:404` | The router's only memory of an allocation is the registration snapshot taken at discovery time, so a second `route()` for an in-flight task passes the `activeAttempts` guard and calls `dispatch.start` again. | Give the router live allocation memory (record the accepted id in `route`, or an `AttemptChanged` update back from `accept`). | H-I |
+
+### H.2 Refuted by the code — recorded so they are not re-litigated
+
+| ID | Claim | Why it is not a defect |
+|----|-------|------------------------|
+| B1 | `publish` leaks unreadable part ids | Every delivered id came from `bus.by_part`, which is populated only from the subscriber's own requested targets (`sedimentree.rs:157-163`), so the list is always ⊆ requested; object subscribers get an empty list. Delivery-then-denial is the revocation-settling path by design (`sqlite.rs:634-644`), and filtering would be exactly the omission shape tracker decision B6 rejects. **Conflicts with the decision; not a distinct gap.** |
+| B4 | `inspect_stored_doc_blobs` panics on a non-32-byte `DocumentId` | A test-support inspection API; every constructor feeds 32 bytes; local only; non-32-byte is an invariant break by contract, not an input shape. |
+| B5 | `keyhive_doc_id` panics instead of using its `Res` | The `Err` its callers consume is "32 bytes but not a curve point"; the length panic precedes it. Widening the non-document classifier to key shapes is an ids/ADR decision, not a panic to convert. |
+| B6, B7, B8, B9, B10, B11 | `to_bytes32()` panics in `NativeBigRepoIo`, `mod.rs::connect/close`, `open_connection_iroh`, `OpenConn`, `register_peer`, `backend.rs` error paths | In each case the reviewer established the identity is 32 bytes wherever it is minted (handshake-authenticated peer ids, local `Runtime2Cmd`s whose payload is a `Box<dyn Any>` and cannot cross the wire, local contact-card identities), i.e. not remote-reachable. |
+| A6 | Retention-reader id aliases two walkers when a component contains `/` | The `format!("{ns}/{consumer}")` mapping is indeed non-injective, but every call site passes literal constants and no namespace is another namespace plus `/` plus a suffix, so no two pairs can currently collide. Nothing to fix now; if a caller ever embeds a key in a component, length-prefix the namespace. *(The operator had called this real on inspection — the reviewer's call-site sweep is the better evidence and refutes reachability.)* |
+| D1, D2, D3, D6 | Demo overwrites per-writer terminal facts; `accept` passes the router's mutable ticket; split-brain claims allocate twice; all nodes share one `TriageDomain` | `x/task-coordination-demo.ts` is an unreferenced, unbuilt Deno "executable thought experiment" (its own header) outside every check/build pipeline; each of these is either a declared boundary stand-in or the ADR's accepted behaviour (011:331 explicitly allows duplicate allocation across partitions). D1's requested signed-sequence machinery is ADR 011 design territory. |
+
+### H.3 Decisions needed (spec questions, not fixes)
+
+- **C5** ADR 010's bounded settlement set has no retention/compaction rule, so "stale-task rejection after
+  pruning" cannot be judged — ADR 010 already carries this as its open question 1 (`:711`). Decide the settlement
+  representation first.
+- **C7** ADR 011's router slot is grow-only and the document *asserts* bounded lanes while its own open question 5
+  (`:603`) asks what those bounds are. Decide lane expiry/compaction, or restate "bounded" as bounded-by-current
+  candidate set.
+- **C8** `UNCLEAR` rather than valid: nothing in ADR 011 states that an empty slot blocks takeover, so "the
+  election cannot start" is an inference. Evidence needed is a statement that step 1 presupposes an existing
+  claim; if it does, the document needs an empty-slot bootstrap rule.
+- **C10** Where a task-authoritative terminal record lives when `archive_part` is absent is ADR 011's open
+  question 9 (`:607`) — the reviewer's loss/resurrection is the known consequence of that open decision.
+- **B14** (from §G) still needs the operator's choice between tagging `blocked_refs` at insertion and carrying the
+  blocked count on `SyncDocReceipt`.
+
+### H.4 Fix batches (one writer at a time, each verified by the operator)
+
+- **H-A** object-route cursor machine (A3, A4) — `big_sync_core/cursor.rs` (+ `lib.rs` guard): the stall-shaped
+  pair, and the tests from the earlier object-path lane are the place to pin them.
+- **H-B** access-row reconciliation (B2, B3) — `store/sqlite/sedimentree.rs`: revoking rows a part-level owner
+  owns is the denial class, so these come before any cosmetic work.
+- **H-C** blob identity (C1-C3) — one typed-`BlobId` fix covering path escape, panics and the multihash mismatch.
+- **H-D** fallible fixed-width conversion at the sync edge (A5) — smallest first step of the larger key-width
+  question; the type-level answer (carry the invariant in the type) is a broader refactor to decide separately.
+- **H-E** part-store materialization/authorization asymmetry (A1, A2) — memory vs sqlite, and the ordering of
+  authorization before materialization.
+- **H-F** RPC hygiene (A7 ALPN bump, A8 permit-before-spawn, A9 idle predicate).
+- **H-G** harness `/seds` authorization (B12, B13) — the existing tracker B16, now with the exact constructors.
+- **H-H** documentation truth (C11 as-built vs claim, C4, C6, C9, C12).
+- **H-I** demo fidelity (D4, D5) — demo-only, lowest priority.
+
+### H.5 Batch status
+
+**H-A — object-route cursor settlement (A3, A4): DONE, verified by the operator.** Two files:
+`big_sync_core/cursor.rs` (new `owes_obj_sync_completion`, and `on_obj_sync_job_evt` now *seeds* the
+`object_replays` entry with `entry().or_default()` instead of `get_mut`) and `big_sync_core/lib.rs`
+(`handle_sync_completed`'s per-cursor guard calls the new predicate; the refusal path, its message and its
+`continue` are untouched, so the B1 fix stands). New tests:
+`an_object_only_replay_completion_advances_the_route_it_acknowledged` (asserts the *observable* route target,
+`Object { cursor: 7 }`) and `a_part_scoped_sync_records_the_object_cursor_of_an_object_with_no_replay_yet`.
+
+Operator verification, on my own runs: clippy exit 0 with zero warnings on both crates; `big_sync_core` 88/88;
+`big_sync` 91 passed (the 1 skip is pre-existing, present before this change). **Both negative checks reproduced
+independently**: reverting the guard to `owes_obj_job_lane` fails A3's test with
+`left: Some(Object { …, cursor: 0 })` vs `right: … cursor: 7` (exactly the worker's reported text), and removing
+the A4 seed fails its test with `left: []` against the expected `SetPartCursor { cursor: 5 }`/`PartIdle` pair.
+Both probes were reverted through tracked edits and the suite re-run green.
+
+**A subtlety the worker found and reported instead of papering over:** the naive form of A3 ("an object replay's
+claim satisfies the guard") would panic the JobBoard, because a `Membership`-only waiter can sit at the same
+cursor as an object-only `Sync` claim and the board's `settle` panics on a lane its waiter does not hold. The
+predicate therefore lets the claim stand in only when the board tracks *nothing* for that cursor
+(`owes_obj_sync_completion`, `cursor.rs:163-171`), which is the tracker's own wording. Reachability of the panic
+is low — that combination also cancels the object-only sync worker and abandons the claim — so this is insurance
+against a process-fatal panic rather than a behaviour change. Worth keeping in mind when reading that predicate:
+it deliberately asks the board twice.
+
+### H.6 A deterministic contract failure in the `big_repo` store's object route
+
+Found because the H-B worker reported a red test instead of working around it. It is **not** H-B's and not H-A's:
+
+- `cargo nextest run -p big_repo -E 'test(sqlite_big_repo_host_part_store_contract)'` fails deterministically at
+  `big_sync/part_store.rs:1273` — `an object route with buffered events produced no page`.
+- **H-A exonerated by me**: reverting H-A's guard to `owes_obj_job_lane` reproduces the failure byte-identically
+  (the cursor machine is not on this path at all — the contract drives `HostPartStore::replay_page` directly).
+  **H-B exonerated by its own revert** (and the harness never calls `reconcile_group_part_batch`).
+- **It is `SqliteBigRepoStore`-specific**: the *same* contract suite passes for the plain `SqlitePartStore` and for
+  the memory store — `memory_host_part_store_contract` (`big_sync/part_store/memory.rs:1695`) and
+  `sqlite_host_part_store_contract` (`big_sync/part_store/sqlite.rs:2269`) are both inside the 91-test `big_sync`
+  run that is green. Only `SqliteBigRepoHarness` (`big_repo/store/sqlite/tests.rs:10-25`, a bare
+  `SqliteBigRepoStore::new(sql, "…", BuckId::MAX_LEVEL)`) fails.
+
+Instrumented evidence (mine, temporary and removed): the failing call is the **second** page, resuming from
+`cursor=184`; and a page from `cursor=0` with limit 8 returns exactly **one** event —
+
+```
+Changed(ObjChanged { cursor: 184, part_ids: [], payload: {"idx": 1, "tag": "object-route"} })
+```
+
+The harness's `seed_live_obj` writes a payload (`idx 0`) *and then* adds the object to the part, so that first
+change should be visible on the object route; it is not. A 3-second hold on the resume page returns empty, so this
+is not a hold-too-short race. The object route in `SqliteBigRepoStore` therefore omits (or coalesces away) the
+change that was written before the object's part membership existed, where the plain store keeps it.
+
+**Verification gap, owned:** when the object-path lane landed, I verified `big_sync` + `big_sync_core` (170/170) and
+only `cargo check`ed `big_repo` — so this assertion's `big_repo` instantiation was never *run*. A shared contract
+suite has to be run at **every** instantiation, not just the crate that owns it. That is why this slipped, and it is
+the reason the H-B worker's report was worth taking seriously rather than filing as "unrelated".
+
+### H.7 H.6 fixed — the object row was stamped by every payload write, and the object route read only that row
+
+**Root cause (two halves of one bug, both in `big_repo/store/sqlite/sedimentree.rs`):**
+
+1. `set_obj_payload_in_tx` upserted the object-level member row `(obj_ref, maybe_part_ref = 0)` on *every* payload
+   write, overwriting its `txid`. Instrumented: `set_obj_payload(idx 0)` → `(obj,0)@182`; `add_obj_to_parts` →
+   `(obj,part)@183`; then `set_obj_payload(idx 1)` re-stamped **both** rows to `184`, so the first change's position
+   ceased to exist anywhere. The plain store stamps that row only when the object has no live parts; the memory
+   store gates its object lane the same way.
+2. `replay_candidates`' object arm filtered `m.maybe_part_ref = 0 AND m.obj_ref IN (…)`, i.e. it read only that one
+   (now overwritten) row. The plain store, the memory store, *and this store's own* `open_local_revision_reader`
+   resolve an object route as every frontier row of that object.
+
+Outcome: **the store was wrong** (not the contract). The fix is the two hunks — the object row is stamped only when
+the object has no parts (with a comment saying why), and the object arm resolves `m.obj_ref IN (SELECT obj_ref FROM
+big_sync_objs …)`. No test file changed: the existing shared assertion *is* the regression test, since it failed
+before and passes now.
+
+**Verified by the operator, on my own runs:** `big_repo` contract 1 passed (was exit 100); both `big_sync`
+instantiations pass; `clippy -p big_repo --all-features --all-targets` and `clippy -p big_sync --all-targets
+--all-features` exit 0 with zero warnings; `big_repo store::sqlite` 67/67. **My own negative check**: with the guard
+disabled but the widened arm present (`if true || parts.is_empty()`), the contract fails with the original
+`an object route with buffered events produced no page`, so that half is independently necessary; the worker
+reported the mirror check for the other half (`assert_subscribe_live_filtering_contract`, `payload None` vs
+`{"idx":1}`), which my probe could not reach because the suite aborts at the first failing assertion. Probe
+reverted through a tracked edit and the suite re-run green.
+
+**Flagged, not fixed (deliberate, narrow diff):** `ReplayCandidate._maybe_part_id` and its `LEFT JOIN` are now dead;
+the pre-existing FIXME at `sedimentree.rs:283` (linear merge scan, now fed the object's part rows too) is not
+addressed; and consecutive *partless* payload writes still coalesce into a single object-route page in all three
+stores, unpinned by any assertion. Each is a follow-up, not a regression.
+
+### H.8 Two cross-store divergences around `add_obj_to_parts` (unpinned, found while answering a design question)
+
+An object joining a part **does** publish a change even when its payload is unchanged: the trigger is the membership
+transition to `Live`. All three stores agree on that, and on the two deliberate exemptions — an object with no payload
+is recorded as *pending* membership with no event (the event appears when the payload lands), and re-adding to a part
+the member is already live in is a no-op. The mechanisms:
+
+- `big_repo` store, `parts_cursors.rs:510-567`: per part, skip if already `Live`, else a cursor +
+  `big_sync_members(…, EVENT_CHANGED, cursor)` + bucket transition + `latest_cursor` bump + `SubEvent::Changed`.
+- `big_sync` sqlite store, `part_store/sqlite.rs:1069-1128`: same, plus an explicit frontier row per part.
+- memory store, `part_store/memory.rs:856-918`: same, via `queue_evt(PartEvent::Changed(…))`.
+
+Two divergences are *not* pinned by any assertion:
+
+1. **Cursor granularity.** The memory store allocates one cursor for the whole call (`global_cursor.next()` before the
+   loop) and the plain sqlite store likewise computes `cursor` before its `for part_id in parts`, while the `big_repo`
+   store allocates a cursor **per part inside the loop** (`parts_cursors.rs:549`). Adding one object to two parts in a
+   single call therefore yields two events sharing one cursor in two stores and two distinct cursors in the third.
+   Because resume-from-cursor paging uses the cursor as an exclusive lower bound, a client resuming from a shared
+   cursor can skip the sibling event — a plausible store-specific flake.
+2. **Frontier visibility of a membership add.** In the `big_repo` store the frontier *is* `big_sync_members`, so the
+   add writes the object route's row directly (and the H-J fix widened the object arm to read every row of the
+   object, so the route now sees it). The plain sqlite store writes an explicit frontier row per part. The **memory**
+   store writes **no** frontier entry (`add_obj_to_parts` has zero `frontier` references), so on that store a
+   membership add is invisible on the *object* route — which is A1's asymmetry seen from the explicit-add side rather
+   than the subscribe-materialization side.
+
+Both are candidates for the shared contract suite (`assert_host_part_store_contract`), which is exactly where a
+cross-store semantic like this belongs.
+
+### H.9 H-C done — the blob digest became a type, so the escape is unrepresentable
+
+**Shape chosen: (a), the 32-byte invariant carried by the type.** `pub type BlobId = ObjKey` became
+`pub struct BlobId([u8; 32])` (`daybook_core/blobs.rs:91`), with:
+
+- `TryFrom<&ObjKey> -> Result<BlobId, BlobIdDecodeError>` as the only way in from a foreign key, so a key that is not
+  a digest is *rejected* rather than panicking or reaching the path layout;
+- `From<BlobId> for ObjKey` for the part-store object key (the digest bytes, so the two spellings of one digest name
+  one object);
+- `Display`/`Debug` = base58btc of the 32 bytes, which is what `object_paths` (`:629`) is built from — the doc there
+  now states the property: *base58 of 32 bytes by construction, so no part of it can read as an absolute path or a
+  parent*;
+- `to_bytes32()` total (the width is the invariant), so `blob_id_to_iroh_hash`/`blob_id_to_digest_str` can no longer
+  panic on a length that cannot vary;
+- `FromStr` accepting exactly two spellings — the blake3 multihash text our writers emit, and the plain multibase
+  text of a `db+blob` URL — both decoding to the same 32 bytes.
+
+**A second defect the survey found, worse than the review's framing:** the canonical multihash text did not merely
+panic downstream, it named a **different blob**. `BlobId::from_str` (multibase-only) turned the 34-byte multihash text
+into a 34-byte key, i.e. a different identity *and* a different on-disk name than `put()` writes. Two decoders for one
+text form.
+
+**A trap avoided:** `utils_rs::hash::decode_base58_multibase` **panics on the empty string** (it indexes the first
+byte), so `FromStr` checks emptiness explicitly rather than relying on the decoder to reject it.
+
+**Verified by the operator** (the worker timed out mid-verification and wrote no results section; all of this was
+re-derived from the working copy): `clippy -p daybook_core --all-targets --all-features` exit 0;
+`cargo check -p daybook_ffi --all-features` exit 0 (the one other crate that names `BlobId`); 44/44 on
+`test(blob) | test(pin_worker) | test(inventory)`; the two new tests pass on their own; and mechanically, every
+`BlobId::new` site passes exactly 32 bytes with **no** `BlobId::new(<bytes from a peer>)` left anywhere. The two
+tests are substantive, not shallow: `blob_id_rejects_reserved_and_non_digest_spellings` rejects
+`/etc/daybook-escape`, `o:/object/path`, `../daybook-escape`, arbitrary text and the empty string, and
+`blob_digest_spelling_names_the_same_blob_on_disk` asserts both spellings resolve to the **same on-disk path** via
+`repo.get_path`.
+
+**No revert-probe applies here, and that is the point**: the fix is type-enforced, so there is no small edit that
+reintroduces a non-32-byte blob id — which is why the negative check is the mechanical absence of arbitrary
+construction above rather than a failing-test observation. The brief asked for a third test (a non-32-byte key
+reaching the previously-panicking paths); it is unnecessary because that value is now unrepresentable.
+
+Not done, deliberately: no wider `daybook_core` test sweep was run. The change is compile-enforced across the crate
+and `clippy --all-targets` compiled every test target, with the affected filters green, so the remaining risk is
+runtime behaviour of unrelated suites rather than of the type.
+
+## I. Derived object parts: case 10 dropped, `o:` is a name (decided)
+
+**Decision (operator, 2026-09-18): drop case 10 outright, and stop storing, enumerating or
+interpreting derived object parts at all.** `o:{object_key}` stays the reserved *name* from ADR 012
+decision 1; nothing branches on it, so a part whose arbitrary key begins `o:` is simply an ordinary
+part. The object lane therefore carries **content only** — a membership transition, removal
+included, is a part-lane fact delivered to peers that may read that part, and a peer that may no
+longer read any containing part is refused rather than told about the removal (long-poll, not an
+event bus). ADR 012 is updated: decision 3 rewritten, decision 9's vocabulary extended, the case
+table's rows 9-11 and two deferred bullets closed.
+
+### Why (all code-verified, 2026-09-18)
+
+1. **Materialization was a write on a read, and in sqlite it was observable.** `subscribe` on an
+   `Object` target called `materialize_object_parts` (`memory.rs:176-215`, sqlite ~`:195-215`), which
+   wrote a part row plus the object's single live membership row at the current revision. In sqlite
+   `big_sync_members` *is* the keyed frontier, so a subscriber behind that revision was handed a
+   fabricated content touch — a read emitting a sync event to a third party.
+2. **`obj_parts()` returned the derived row**, so the frontier reconciler removed it as "not
+   desired" (`automerge_frontier_worker.rs:388-400`; scope teardown `:1076-1082` — `desired_parts`
+   comes from keyhive scope and can never contain a derived part) and then *consumed its own
+   removal* (`:811-830` → `Cmd::RemoveFrontierMembership`). **Latent, not the `tier10_4` cause**:
+   `AFW mapped removed part revision` had **0** occurrences in `/tmp/tier10-rerun.log` against 277
+   `mapped changed` — so the loop exists in code and did not fire in that run.
+3. **The inheritance fallback made `o:{O}` pageable as an ordinary part** by any peer that could read
+   a containing part (`big_repo/store/sqlite.rs:766-780`, sqlite twin `part_store/sqlite.rs:1610-1640`
+   — `find_part_ref` miss, then `part_id.object_key()` → `readable_parts_of_object`). That is the
+   hack that made `o:` observable to non-`o:` paging peers, and it is what routed `Removed{part_id:
+   o:{doc}}` to them.
+4. **Materialization never bought case 11 anything.** Access to `o:{O}` is only ever *inherited*, and
+   no production code writes an access row for a derived part (`set_part_members(o:{obj})` has test
+   callers only: `memory.rs:1891`, `sqlite.rs:2552,2611`). So an object in no part stayed refused
+   with the row present — §3's "fail-closed until object parts exist" was still fail-closed after
+   they existed.
+5. **Case 10 did not need it either**: `set_part_members` creates the part row itself via
+   `ensure_part_ref` (`part_store/sqlite.rs:1496-1500`), and an access row FKs `part_ref →
+   big_sync_parts` (`migrations/001_init.sql:91-96`), so a stored row and the direct-share feature
+   stand or fall together — which is why dropping the case drops the mechanism.
+
+### What the cleanup touches
+
+- delete `materialize_object_parts` and its call in `subscribe` (both stores);
+- delete the inheritance fallback in `permitted_parts`, and with it `PartKey::object_key` (its only
+  caller is that fallback) and `ObjKey::object_part_key` (3 non-test callers: the two materializers
+  plus the contract harness);
+- `obj_parts` needs no exemption once nothing stores derived parts, but assert it (both stores + the
+  `parts_cursors` twin) so a future writer cannot reintroduce one;
+- object-lane projection: a part-level deletion must not synthesize `Changed{part_ids: [], payload:
+  Null}` (`big_sync/part_store.rs:96-110`, `part_store/sqlite.rs:1334-1355`, `memory.rs:375-388`), and
+  the machine must not let a membership fact occupy `object_replays` (`cursor.rs:238-275`);
+- replace `assert_subscribing_allocates_no_revision_contract` (`part_store.rs:1150-1200`) with "a
+  subscribe writes nothing and emits nothing to any subscriber" — the phantom touch was the
+  materialization, not the derivation.
+
+Tracker rows this closes or moots: **H.1 A1 and A2** (moot), **C11** (closed by construction: nothing
+interprets the prefix), **H-E**'s scope (shrinks to the tombstone/payload asymmetry in §J3), and the
+ADR 012 items named above.
+
+### Decisions taken on the earlier list (delegated: "as long as it falls out of the existing design")
+
+- **B6a**: keep the distinguishable `ReplayPageOutcome::Unauthorized`; revocation reconciliation
+  consumes it and the leak is the existence of a part id the caller already named.
+- **B2a**: do not wire the materialization wake; the durable re-arm stays the mechanism.
+- **B14**: option (a) — tag `blocked_refs` at insertion so the log carries real blockers. Rides with
+  §C; not a blocker for it.
+- **A6**: leave the non-injective retention reader id (unreachable); length-prefix the namespace if a
+  caller ever embeds a key in a component.
+- **B16**: an experiment before a decision — connect *without* the `/seds` pre-grant and see whether
+  the siblings' path still converges; the answer decides harness versus product fix.
+- **H-D**: direction fixed — a `big_repo`-local extension trait over the key types whose conversion
+  is fallible and returns `eyre`, used at the sync edge; identities that are minted local and
+  fixed-width keep the infallible path, where the panic *is* the invariant assertion.
+
+## J. ADR 012 revocation/removal gaps (found 2026-09-18, to address)
+
+- **J1 — the object lane's removal shape contradicted the ADR. DONE (ADR).** The code synthesized a
+  payload-less `Changed` for a part deletion while §2/§9 define an empty part list as *resolve the
+  membership* and the vocabulary as touch/`Removed`. Fixed in §3 + §9 + case rows; the code half is
+  §I.
+- **J2 — what a refusal does to a route is unstated. NEEDS A CALL.** §2 says the next page discloses
+  a revocation; §9 says denial backs off (`UNAUTHORIZED_BACKOFF`, 30s) rather than dropping the route.
+  Missing: the page's resume point is the last *delivered* event (`part_store.rs:436-483`:
+  `resume = Some(evt_cursor)` per received event, `next_cursor: if drained { None } else { resume }`),
+  so a revoked-then-regranted peer re-reads what it missed *if retention still holds it* — retention,
+  not the cursor, is the risk; plus what the route/worker state does while denied, and that the
+  distinguishable `Unauthorized` (B6a) is the one non-disclosure gap on this surface.
+- **J3 — "content cleared" has no event and the stores disagree about what remains. NEEDS A CALL.**
+  The payload is nulled in the same transaction as the last removal with no event
+  (`parts_cursors.rs:601-621`, `sqlite.rs:1192-1210`); memory instead tombstones the object and drops
+  the entry (`memory.rs:968-975`). §9 says `Removed` "keeps its tombstone" but never defines it.
+  Decide whether content-cleared needs a kind, and require the three stores to agree on the tombstone
+  shape (contract assertion).
+- **J4 — re-add is not symmetric with add. NEEDS A CALL.** `add_obj_to_parts` on an object with no
+  payload records *pending* membership and emits nothing (`parts_cursors.rs:511-526`;
+  `big_sync_pending_members`), so "removed then re-added" leaves a peer with silence where it expects
+  the object to come back; the event appears only once a payload lands. State the rule, or change it.
+- **J5 — ordering between an access change and a membership change is unstated. NEEDS A CALL.** Two
+  transactions, two cursors, either intermediate state observable. Both orders are safe for a reader
+  (it either sees the `Removed` or is refused), but a producer's ordering is part of the contract if a
+  revocation must never be observable as a removal for a part the peer cannot read.
+- **J6 — recovery after a long revocation is unspecified. RECORDED.** If the log pruned past a
+  revoked peer's cursor, no band is specified for re-deriving what it missed: tie it to the pruning
+  floor (registered readers, `events.rs:350-382`) and name the recovery (enumeration/RIBLT band or a
+  fresh cursor).
+- **J7 — ADR 010's removal dependence. DEFERRED with ADR 010.** Its lifecycle is expressed as
+  "removed from the active task part" plus a settlement in `S`, and reviewer C10 (no `archive_part`
+  → a stale active copy can resurrect execution) is a removal-semantics question. Deferred, but the
+  model decided here is what it will build on.
+
+### J resolutions (operator, 2026-09-18) — ADR 012 §2 and §9 amended
+
+- **J2 — refusal is trivial; the real question was tombstone exclusion. Verified, narrowed to one
+  open decision.** A page is a list operation over one part: no authorization to list it, refused.
+  Access is a property of the part and not of an interval, so a peer that keeps or regains access
+  reads the whole retained history behind its cursor — retention is the bound, not authorization.
+  The stamps that would let a page *exclude* `Removed` for a never-seen object went with `Added`
+  (`big_sync/migrations/001_init.sql:55-57`, ADR 012 §9), and the membership row's `txid` is
+  overwritten per transition (`ON CONFLICT … DO UPDATE SET txid`, `parts_cursors.rs:539,589-591`),
+  so exclusion **cannot be recomputed** for an arbitrary cursor today. It is exact for `cursor = 0`:
+  a reader that acked nothing in a part can hold no membership of it. Cost today: the page's row
+  budget is spent on `event_type = 2` rows (cutoff CTE and row query in `list_events_with_policy`),
+  which a fresh subscriber on a long-lived part pays in round trips before it reaches content.
+  **Not a correctness gap** — an uninformative removal is a no-op on both sides
+  (`remove_obj_from_part` early-returns on an unknown `obj_ref`, `parts_cursors.rs:574-577`; the
+  peer's replica knows its own membership). **Decided: restore the add stamp as a *server-side
+  predicate*, not as a wire kind.** One `added_at` per `(obj, part)` membership row, holding the
+  cursor at which that row most recently became *present* (set on absent→present, preserved by
+  present→present touches): a deleted row at `T` is delivered to a reader at `c` iff
+  `added_at <= c < T`, and `cursor = 0` falls out of the same predicate (no stamp is zero). It must
+  be applied in both the cutoff CTE and the row query so excluded tombstones do not consume the
+  limit. The event-kind set stays two, so §9's "two subscribers can be shown different kinds"
+  objection does not return: only which rows a page is drawn from depends on the reader's cursor.
+  Dead-row pruning is a separate question (§K3) and is not safe without epochs.
+- **J3 — no content-cleared API exists and none is needed. Closed.** Confirmed: the `PartStore`
+  trait exposes `set_obj_payload`/`obj_payload`/`add_obj_to_parts`/`remove_obj_from_part` and
+  nothing else, and the only nulling is the implicit `UPDATE big_sync_objs SET payload_json = NULL`
+  at `parts_cursors.rs:605-608`. With J4's rule, content-gone is the last `Removed` a reader can
+  read and the replica drops content when its containing set empties — an inference, not an event
+  kind. The store divergence this item recorded disappears with the rule (nothing nulls a payload
+  implicitly), and the contract becomes: the dead membership row stays in every store.
+- **J4 — decided: keep the asymmetry; payload retention removes the pathology.** A payload-less add
+  is not an event (pending membership), symmetrically on re-add, and with retention a re-added
+  object emits `Changed` because its payload is still there. The "sedimentree exists but the payload
+  was dropped" case is gone, and the new invariant is **live membership implies a payload**.
+- **J5 — dissolved; only the rule is written down.** The question was transactional ordering between
+  the access change and the membership change (two writes, two cursors). With J2's answer it does
+  not arise: the filter is *current* access, no epoch is carried, both orders are correct, and a
+  reader either sees the removal or is refused the part that names it.
+- **J6 — recorded, and now the same knob as J2's tail.** The pruning floor (registered readers)
+  bounds both the long-revocation gap and the tombstone page tail.
+- **J7 — deferred with ADR 010** (unchanged), now noted as building on the payload rule above.
+
+## K. GC, counters, cursor epochs (decided shape; implementation ordered)
+
+Decided with J2-J4 (operator, 2026-09-18); ADR 012 §9 carries the prose.
+
+- **K1 — explicit payload removal is the only way to clear content.** `remove_obj_payload` on the
+  store: in one transaction, remove the object from every containing part (emitting those
+  `Removed`s) and then drop the payload. Stop the implicit null in `remove_obj_from_part` (both
+  stores; memory additionally drops the object entry today at `memory.rs:968-975`). Invariant: live
+  membership implies a payload, and a payload-less object cannot be in a part (payload-less adds
+  stay in `big_sync_pending_members` and emit nothing).
+- **K2 — the janitorial loop is the embedder's.** Store side: a part-less object listing plus
+  counters (live/dead rows, payload bytes, tombstone bytes, dead-to-live ratio per part). Backend
+  side: a loop that reads them, decides what to keep, and calls K1. This replaces "membership
+  removal drops the payload" as the collection policy, and the ratio is also what says which parts
+  are paying bucket-sync cost for slots nobody asked about.
+- **K3 — cursor epochs: withdrawn; tombstone vacuuming blocked on an authority rule.** A per-part
+  epoch carrying rotation state in the cursor's identity is *wrong specialization*: it makes the
+  bucket strategy's meaning depend on a flag two partitioned peers cannot agree on. It also does not
+  answer the case that matters — A syncing from B, where B's stale presence resurrects what A
+  pruned — so it cannot be the thing pruning rests on. Pruning needs "whose membership set wins on
+  disagreement": an authority for the part. big_repo can compare authority for a partition;
+  keyhive's authority is over object *existence*, not membership, so it cannot settle a member row.
+  Detection already exists (`live_fp`/`dead_fp`, `live_count`/`dead_count` separate dead from live),
+  so the gap is the direction only. Until then, dead rows are kept and paid for locally (storage,
+  dead fingerprint, comparisons); `added_at` removes the wire cost, which is what it was for.
+- **K4 — an epoch is neither an event kind nor `added_at`.** `added_at` excludes tombstones
+  *within* an epoch; a rotation drops them *between* epochs. Both keep the wire vocabulary at two
+  kinds.
+- **K6 — leaf page byte budget.** `limit_hint` counts entries, not bytes: at the cap a page of
+  32-byte keys is ~42 KB and a longer key is worse, so the per-object cost is no longer bounded.
+  Decision: add a byte bound beside the entry cap (recorded in the ADR's deferred list too).
+- **K7 — key-hash addressing: not now, on purpose.** Replacing the leaf entry's `obj_id` with a hash
+  of it does not work as a local tweak: the leaf page is *paired by id* (the asker looks the object
+  up locally and computes its own fingerprint), and the action on a difference is keyed by id, so a
+  hash means a resolution step per difference — i.e. difference-proportional set reconciliation
+  (RIBLT), which is already the deferred band with its own item-width question. It would also make
+  the hash an *identity* if it ever addressed an object, which needs a scope-stable keyed hash and a
+  durable hash-to-key index to be ungrindable (ADR decision 9's case 12). Ignored for now.
+- **K8 — the replay loop's shared cursor (fixed with this work).** `subscribe_with_policy` advanced
+  one high-water cursor across parts, so when one part's page truncated at `REPLAY_RAW_BATCH_SIZE`
+  (256) while a sibling's page returned a higher cursor, the truncated part's remaining rows between
+  the two were skipped — silent event loss on catch-up. Fixed: each part advances from its own page
+  (its bound moves only from that part's returned cursors/`next_cursor`, advanced before the access
+  filter so a filtered row is not re-read forever), grouped by bound so shared positions still
+  collapse into one store call. The object route got its own cursor in a mixed subscription —
+  strictly fewer dropped events, and **not covered by any test** (`replay_page` cannot reach
+  multi-part: it takes one target by value, so it never had the shape).
+- **K5 — where `added_at` lives (storage, not wire).** It is per-key metadata on the frontier's own
+  row: a column beside `event_type`/`txid` in `big_sync_members` (both sqlite stores — the
+  big_sync store's frontier *is* that row, `part_store/sqlite_frontier.rs` decodes it into
+  `FrontierEntry<PartFrontierKey, PartEvent>` and already reads `event_type`/`revision` off it),
+  and a side map keyed `(obj, part)` in the memory store, whose frontier *value* is the `PartEvent`
+  itself (`MemoryKeyedFrontierTable<PartFrontierKey, PartEvent>`, with `tombstoned_objs` already
+  holding a removal cursor per object). It must **not** go on `PartEvent`: `PartPage.events:
+  Vec<PartEvent>` is the postcard wire type, so a field there would be sent to every peer. The
+  page SQL uses it purely as a predicate; the memory store needs the same stamp retained for
+  tombstoned keys, which is one more place the two stores must be pinned to agree.
+- **K6 — the authority vacuuming would rest on already exists in both deployments.** Big_repo
+  derives partitions from keyhive groups, and keyhive tracks the causal relation for object removal
+  with permanent revocations, so a removal is derivable from keyhive state rather than from a
+  peer's replay event — the honest reason removals were modelled loosely: the primary consumer of
+  the replay stream does not act on remote removal events for content. Triage's authority is the
+  router: a removal traced to a router is respected, and a healed partition re-derives from the
+  historical routers, so validity is a function of which router it came from. Both are "whose
+  membership set wins" rules; what is missing is plumbing one into a part store's pruning decision.
+
+## L. Post-batch review lane, diff-attributed (2026-09-18)
+
+Unlike section B, this lane had a shell: it ran `jj diff -r main..@ -- src/big_sync`, paged the
+whole diff, and re-checked every claim below against the working copy, so these items are
+attributed to the diff (in the one case that leaves `src/big_sync`, the file it leaves is the
+symlink documented in L1). No test suite was run for the comment/doc-only part of this lane;
+`cargo clippy -p big_sync --all-targets --all-features` was.
+
+| id | area | claim | evidence | sev (lane) | status |
+| -- | ---- | ----- | -------- | ---------- | ------ |
+| L1 | part store (schema) | `big_sync/migrations/001_init.sql` is edited in place — `buck_index` added to `CREATE TABLE IF NOT EXISTS big_sync_objs`, `added_at` to `big_sync_members`, and `big_sync_syncable` re-keyed from `obj_ref` to `part_ref` with a new `changed_at` — so any database that already applied version 1 can no longer open: sqlx records a checksum per applied migration and refuses a changed file, `CREATE TABLE IF NOT EXISTS` would not add the columns to it anyway, and no `ALTER` exists. Two migrators run this same physical file, so the break is not confined to big_sync's own schema: `SqliteCore::init_schema` runs it under `_sqlx_migrations`, and the big_repo store runs it as its version 1 through the symlink `big_repo/migrations/001_init.sql` under `_big_repo_migrations`. `set_ignore_missing(true)` on the big_sync migrator only covers versions recorded in the DB but absent from the directory; it is not a checksum escape. | `migrations/001_init.sql:1-8,35,81,110-116`; `big_sync/part_store/sqlite_core.rs:353-357` (migrator statics + `set_ignore_missing`), `:374-375` (`init_schema` -> `MIGRATOR.run`); `big_repo/store/sqlite.rs:48-52` (`dangerous_set_table_name("_big_repo_migrations")`), `:456-457` (`init_schema` then `MIGRATOR.run`); `ls -la src/big_repo/migrations/001_init.sql` -> symlink to `../../big_sync/migrations/001_init.sql`. | high | decided — accepted for now, no shim and no new migration file (operator call: break rather than shim). Revisit before release. The file is now internally honest instead: its header states that 001 creates fresh databases only and that no pre-existing scope DB is supported, and the `added_at` comment no longer claims rows can "predate the column" (verified: every insert either stamps a cursor from the bumped-before-use global cursor, so >= 1, or is a guarded upsert whose insert arm cannot fire — `sedimentree.rs:846`, `parts_cursors.rs:1074`). Note the comment edit changes the checksum too, which is the same accepted break. |
+| L2 | part store (bucket wire) | The leaf page's byte budget skips a row that does not fit and keeps scanning (`continue`), while the page is keyset-paginated (`o.obj_id > r.after_id`, `next_after` = the last entry returned): if a later, shorter key fits, that entry is returned and the resume point moves past the skipped one, which no later page can then reach. The memory store stops the page instead (`break`), and the budget's own doc bounds the page ("The encoded size one bucket's leaf page is bounded by, whatever `limit_hint` asks for"), with the shared contract test stating the intent as "A leaf page stops at the byte budget before it stops at the entry hint". Secondary: a page whose rows all fail the budget reports `done=false` with `next_after=None`, which the machine reads as "re-ask from the head" (`leaf_after = None`). Uniform key widths make `continue` and `break` identical, which is why that contract test passes (it seeds 4 KiB and 80 KiB keys, but all one width per bucket). | `part_store/sqlite.rs:956-958` vs `part_store/memory.rs:597-599`; `part_store.rs:707-717` (const doc), `:3028` (test doc); `big_sync_core/bucket.rs:174` (`state.leaf_after = page.next_after`), `:177` (`leaf_exhausted`). | high | in-progress — owned by the replay-page wire fork, which is doing `continue -> break` in `part_store/sqlite.rs`. Two things for them while they are in the file: (1) the pin that would have caught this is one wide-then-narrow key pair in the same bucket; (2) the const doc's parenthetical ("a page with no entries reads as `done` while entries remain") does not match either store — memory computes `done = end == items.len()` and sqlite `done = entries.len() == total_count`, so an empty page yields `done = false` with `next_after = None`, i.e. no position at all, which is strictly worse than the doc says. |
+| L3 | harness (RPC fidelity) | `MemoryRpcClient::peer_summary` calls `target_part_store.summarize_parts` directly, so the in-process harness answers a summary for every named part, while the production responder refuses a part the asker may not read before summarizing (`read_denied` -> `UnkownParts`, folded into the same answer an unknown part gets). The other three arms of the same client pass `source_peer_id` and let the store refuse, so the summary arm is the odd one out: a test that reasons about policy through the summary path exercises a more permissive responder than production. | `test.rs:215-241` vs `rpc.rs:431-483` (refusal at `:472`); the three arms that do pass the peer: `test.rs:243` (`replay_page`), `:269` (`get_changed_buckets`), `:299` (`leaf_buckets`). | med | open |
+| L4 | formatting | Two committed spots are not rustfmt-shaped: the tail of `collect_stats_until`'s doc comment and the whole function (through its closing brace) are indented four spaces past module level, and the `pub use part_store::{..}` list in `lib.rs` is neither sorted nor laid out the way rustfmt emits a vertical list. Cosmetic only — no behaviour depends on either. | `test.rs:1162-1165` (fn at `:1164`); `lib.rs:43-47`. | low | open |
+
+Recorded so they are not re-litigated (deliberate, from the same lane):
+
+- **The hold-expiry "caught up" page.** `replay_page` returns `next_cursor: None` when the hold
+expires with nothing drained and no `ReplayComplete`, which a caller reads as caught-up. This is
+deliberate and pinned (`assert_page_outcome_contract`), and the client asks for `HOLD_MS` equal to
+the responder's `MAX_PAGE_HOLD`, so reaching it needs the responder to fail to deliver within 15 s.
+- **`part_dirty_count` does not count an access revocation.** The revocation deletes the
+`(part, principal)` row, so there is no `changed_at` left to compare; documented in both stores,
+and the peer summary path refuses the part on the same state anyway.
+- **memory's `bucket_items_for_path` scans a part's members per bucket page.** The price of keeping
+the `obj_id` order the page cursor needs after the index became a hash; stated at the site, and the
+sqlite store keeps the range predicate in a column instead.
+- **"The first entry is always taken" is load-bearing at both bucket endpoints.** `done` is computed from
+where the page ended (`done = end == items.len()` in memory, `entries.len() == total_count` in sqlite), so
+a page that returns nothing while rows still match reports `done = false` with `next_after = None`: the
+walk loses its position and re-asks from the head rather than terminating. That is why the byte budget
+takes the first entry even when it alone exceeds the budget.

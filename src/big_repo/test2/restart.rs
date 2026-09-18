@@ -635,9 +635,11 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     // Grant and sync keyhive so the reader learns the CGKA material — but
     // do NOT sync the document content yet.
+    tracing::info!(%doc_id, stage = "grant-and-propagate", "restart test await begin");
     fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     // Write content that has NOT been synced to the reader.
+    tracing::info!(%doc_id, stage = "local-write", "restart test await begin");
     owner_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "note", "written-before-restart"))
@@ -645,13 +647,16 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
         })
         .await??;
     drop(owner_doc);
+    tracing::info!(%doc_id, stage = "pre-restart-quiescence", "restart test await begin");
     pair.left().repo.wait_for_quiescence(None).await?;
 
     // --- Restart the left node WITHOUT syncing the content first.
     let old_left = pair.left_conn.take().expect("left connection");
     let _old_right = pair.right_conn.take().expect("right connection");
+    tracing::info!(%doc_id, stage = "stop-connection", "restart test await begin");
     old_left.stop().await?;
 
+    tracing::info!(%doc_id, stage = "restart-left", "restart test await begin");
     pair.restart_left(StorageConfig::Disk { path: left_path })
         .await?;
 

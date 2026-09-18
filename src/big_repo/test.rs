@@ -3564,12 +3564,28 @@ impl SyncRepoNode {
         .expect("timed out waiting for iroh accept loop");
     }
 
+    /// Wait for an accepted connection on this node and take it.
+    ///
+    /// The peer's accept callback stores the connection asynchronously, so a
+    /// caller that dials and then reads the slot immediately races it: the
+    /// connection is not recorded yet and an `expect` here would panic. Wait
+    /// for the callback instead of assuming the slot is already filled.
     async fn take_latest_accepted_connection(&self) -> BigRepoConnection {
-        self.accepted_connection
-            .lock()
-            .await
-            .take()
-            .expect("expected accepted connection to be available")
+        timeout(SYNC_PROPAGATION_TIMEOUT, async {
+            loop {
+                let notified = self.accept_notify.notified();
+                tokio::pin!(notified);
+                // Register interest before checking the slot, so a store
+                // landing between the check and the wait cannot be lost.
+                notified.as_mut().enable();
+                if let Some(connection) = self.accepted_connection.lock().await.take() {
+                    return connection;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("timed out waiting for the iroh accept loop to record a connection")
     }
 
     async fn connect_to(&self, remote: &SyncRepoNode) -> Res<()> {

@@ -24,7 +24,12 @@ async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::Docum
     else {
         return "local peer id is not a verifying key".to_owned();
     };
-    let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
+    // The document id came off the sync edge, so its width is peer input rather than an
+    // invariant to assert.
+    let Ok(doc_bytes) = doc_id.try_to_bytes32() else {
+        return "document id is not 32 bytes wide".to_owned();
+    };
+    let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_bytes) else {
         return "document id is not a verifying key".to_owned();
     };
     let local = keyhive_core::principal::identifier::Identifier::from(local_key);
@@ -144,6 +149,13 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             Ok(Err(crate::SyncDocError::TransportError)) => {
                 eyre::bail!("transport error syncing doc");
             }
+            Ok(Err(crate::SyncDocError::WorkerUnavailable)) => {
+                // The receipt's content was persisted by Subduction but the
+                // local worker that hydrates the live document was stopping, so
+                // it was never applied. Failing here lets big_sync reschedule
+                // against a fresh worker rather than reporting a false success.
+                eyre::bail!("local document worker unavailable while syncing {doc_id}");
+            }
             Ok(Err(crate::SyncDocError::NotFound)) => {
                 eyre::bail!("remote doc was not found");
             }
@@ -163,7 +175,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 let local_key =
                     ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
                         .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
-                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
                     .map_err(|_| eyre::eyre!("document id is not a verifying key"))?;
                 let local = keyhive_core::principal::identifier::Identifier::from(local_key);
                 let document = keyhive_core::principal::identifier::Identifier::from(doc_key);

@@ -6,7 +6,7 @@
 //! derived work has completed successfully.
 
 use crate::interlude::*;
-use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::{BigKeyhiveHandle, EventSubject};
 use crate::runtime2::{WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::{GroupPartReconciliation, SqliteBigRepoStore};
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
@@ -145,6 +145,7 @@ pub fn spawn_group_part_worker(
                 pending_sources: HashMap::new(),
                 pending_documents: HashMap::new(),
                 pending_group_parts: HashMap::new(),
+                parked_decodes: HashMap::new(),
                 outbox: Outbox::default(),
             };
             worker.machine_loop().await
@@ -201,6 +202,9 @@ enum Task {
 #[derive(Debug)]
 enum TaskOutput {
     Decoded(AffectedEvent),
+    /// The event's proof chain is not resolvable here yet: the decode is early,
+    /// not wrong, and the completion handler parks it.
+    Unresolved,
     Reconciled,
     Ensured,
 }
@@ -236,6 +240,9 @@ struct Worker<'a> {
     pending_sources: HashMap<u64, PendingSource>,
     pending_documents: HashMap<ObjKey, PendingDocument>,
     pending_group_parts: HashMap<PartKey, PendingGroupPart>,
+    /// Decodes keyed by admission row, parked on a delegate this hive has not
+    /// ingested yet. Their source rows stay unsettled while parked.
+    parked_decodes: HashMap<u64, Task>,
     outbox: Outbox<Cmd, ()>,
 }
 
@@ -288,6 +295,9 @@ impl<'a> Worker<'a> {
                                     },
                                 )?;
                             }
+                            // A batch is the only thing that can clear a parked
+                            // decode, so wake them here rather than on a timer.
+                            self.retry_parked_decodes()?;
                         }
                     }
                 }
@@ -297,14 +307,77 @@ impl<'a> Worker<'a> {
     }
 
     fn start_task(&mut self, key: GroupPartKey, task: Task) -> Res<()> {
-        let future = run_task(
-            task.clone(),
+        let future = task_future(
             self.store.clone(),
             self.keyhive.clone(),
             self.local_peer_id.clone(),
             self.scope.clone(),
+            task.clone(),
         );
         self.tasks.replace(key, task, future)?;
+        Ok(())
+    }
+
+    /// Park a decode whose event named a delegate this hive has not ingested.
+    ///
+    /// The source stays unsettled, so the admission cursor never advances over
+    /// work that could not be applied, and the key is woken by the next
+    /// admission row ([`Self::retry_parked_decodes`]) rather than by a timer.
+    fn park_decode(&mut self, source: SourceCursor, task: Task) {
+        self.tasks
+            .park(GroupPartKey::Decode(source.key), task.clone());
+        let old = self.parked_decodes.insert(source.key, task);
+        assert!(old.is_none(), "a decode key was parked twice");
+        tracing::debug!(
+            source_key = source.key,
+            source_cursor = source.cursor,
+            local_peer_id = %self.local_peer_id,
+            parked_decodes = self.parked_decodes.len(),
+            "group-part decode parked: the event's proof chain is not resolvable yet"
+        );
+    }
+
+    /// Wake every decode parked on an unknown delegate.
+    ///
+    /// Only an event this worker has not read yet can clear one, and a batch is
+    /// exactly that: the admission log is appended *after* Keyhive incorporated
+    /// the event (`SqliteBigRepoStore::append`), so the delegate's own ingest
+    /// always brings a later row than the row it stranded.
+    fn retry_parked_decodes(&mut self) -> Res<()> {
+        if self.parked_decodes.is_empty() {
+            return Ok(());
+        }
+        let parked: Vec<u64> = self.parked_decodes.keys().copied().collect();
+        for source_key in parked {
+            let task = self
+                .parked_decodes
+                .remove(&source_key)
+                .expect("parked decode disappeared while retrying");
+            let future = task_future(
+                self.store.clone(),
+                self.keyhive.clone(),
+                self.local_peer_id.clone(),
+                self.scope.clone(),
+                task,
+            );
+            tracing::debug!(
+                source_key,
+                local_peer_id = %self.local_peer_id,
+                parked_decodes = self.parked_decodes.len(),
+                "waking a parked group-part decode"
+            );
+            if !self.tasks.wake(GroupPartKey::Decode(source_key), future)? {
+                // A duplicate delivery of the same row replaced the parked key
+                // with live work: that task's own completion owns the next
+                // attempt, so dropping the local entry is enough.
+                tracing::debug!(
+                    source_key,
+                    local_peer_id = %self.local_peer_id,
+                    parked_decodes = self.parked_decodes.len(),
+                    "parked group-part decode superseded by live work"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -316,6 +389,9 @@ impl<'a> Worker<'a> {
             (Task::Decode { source, .. }, Ok(TaskOutput::Decoded(affected))) => {
                 self.on_decoded(source, affected).await?;
             }
+            (task @ Task::Decode { source, .. }, Ok(TaskOutput::Unresolved)) => {
+                self.park_decode(source, task);
+            }
             (Task::ReconcileDocument { doc, sources, .. }, Ok(TaskOutput::Reconciled)) => {
                 self.finish_document_task(doc, sources).await?;
             }
@@ -325,6 +401,8 @@ impl<'a> Worker<'a> {
             (Task::Decode { .. }, Ok(TaskOutput::Reconciled | TaskOutput::Ensured))
             | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Decoded(_)))
             | (Task::EnsurePart { .. }, Ok(TaskOutput::Decoded(_)))
+            | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Unresolved))
+            | (Task::EnsurePart { .. }, Ok(TaskOutput::Unresolved))
             | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Ensured))
             | (Task::EnsurePart { .. }, Ok(TaskOutput::Reconciled)) => {
                 unreachable!("group-part task produced an incompatible output")
@@ -566,6 +644,20 @@ impl<'a> Worker<'a> {
     }
 }
 
+/// Build the future for one keyed task.
+///
+/// The parameters are owned so the returned future borrows nothing from the
+/// worker: a parked decode is woken while the worker is mutably borrowed.
+fn task_future(
+    store: SqliteBigRepoStore,
+    keyhive: BigKeyhiveHandle,
+    local_peer_id: PeerKey,
+    scope: WorkerGroupScope,
+    task: Task,
+) -> impl Future<Output = Res<TaskOutput>> + Send + 'static {
+    run_task(task, store, keyhive, local_peer_id, scope)
+}
+
 async fn run_task(
     task: Task,
     store: SqliteBigRepoStore,
@@ -574,9 +666,10 @@ async fn run_task(
     scope: WorkerGroupScope,
 ) -> Res<TaskOutput> {
     match task {
-        Task::Decode { bytes, .. } => Ok(TaskOutput::Decoded(
-            affected_event(&keyhive, &bytes, &scope).await?,
-        )),
+        Task::Decode { bytes, .. } => match affected_event(&keyhive, &bytes, &scope).await? {
+            EventDecode::Affected(affected) => Ok(TaskOutput::Decoded(affected)),
+            EventDecode::Unresolved => Ok(TaskOutput::Unresolved),
+        },
         Task::ReconcileDocument {
             doc,
             affected_group_parts,
@@ -626,7 +719,7 @@ async fn reconcile_doc(
     local_principal: PeerKey,
     group_agents: &GroupAgentsMemo,
 ) -> Res<GroupPartReconciliation> {
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32())
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.try_to_bytes32()?)
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
         .document_has_content(crate::DocumentId::new(doc.as_bytes()))
@@ -744,11 +837,21 @@ struct AffectedEvent {
     group_parts: HashSet<PartKey>,
 }
 
+/// One admitted event, decoded as far as this hive can currently take it.
+#[derive(Debug, Clone)]
+enum EventDecode {
+    Affected(AffectedEvent),
+    /// The event's proof chain is not resolvable here yet. The caller parks the
+    /// decode instead of failing it: Keyhive calls this a missing dependency, and
+    /// the missing link's own admission row is what clears it.
+    Unresolved,
+}
+
 async fn affected_event(
     keyhive: &BigKeyhiveHandle,
     bytes: &[u8],
     scope: &WorkerGroupScope,
-) -> Res<AffectedEvent> {
+) -> Res<EventDecode> {
     let event: StaticEvent<Vec<u8>> = bincode::deserialize(bytes)
         .map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
     let mut documents = Vec::new();
@@ -772,10 +875,16 @@ async fn affected_event(
             // immediate signer — the two differ whenever a non-root member
             // re-delegates. The wire form carries proof *digests*, so the subject is
             // resolved through this hive's graph rather than off the payload.
-            let subject = keyhive
+            let subject = match keyhive
                 .event_subject_id(StaticEvent::Delegated(delegation))
                 .await?
-                .expect("a delegated event names a membered subject");
+            {
+                EventSubject::Named(subject) => subject,
+                EventSubject::Unnamed => {
+                    unreachable!("a delegated event names a membered subject")
+                }
+                EventSubject::Unresolved => return Ok(EventDecode::Unresolved),
+            };
             group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
@@ -795,10 +904,14 @@ async fn affected_event(
             );
             // Same as the delegation arm: the group is the proof chain's root, not
             // the immediate signer.
-            let subject = keyhive
+            let subject = match keyhive
                 .event_subject_id(StaticEvent::Revoked(revocation))
                 .await?
-                .expect("a revoked event names a membered subject");
+            {
+                EventSubject::Named(subject) => subject,
+                EventSubject::Unnamed => unreachable!("a revoked event names a membered subject"),
+                EventSubject::Unresolved => return Ok(EventDecode::Unresolved),
+            };
             group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
@@ -824,7 +937,7 @@ async fn affected_event(
             docs.push(doc);
         }
     }
-    Ok(AffectedEvent {
+    Ok(EventDecode::Affected(AffectedEvent {
         docs,
         group_parts: group_parts
             .into_iter()
@@ -833,7 +946,7 @@ async fn affected_event(
                 WorkerGroupScope::Groups(groups) => groups.contains(part),
             })
             .collect(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -904,9 +1017,15 @@ mod tests {
         );
         let bytes = bincode::serialize(&event).expect("serialize delegation event");
 
-        let affected = affected_event(&keyhive, &bytes, &WorkerGroupScope::All)
+        let affected = match affected_event(&keyhive, &bytes, &WorkerGroupScope::All)
             .await
-            .expect("decode the admission");
+            .expect("decode the admission")
+        {
+            EventDecode::Affected(affected) => affected,
+            EventDecode::Unresolved => {
+                panic!("the fixture's delegation chain is unresolvable")
+            }
+        };
         assert_eq!(
             affected.group_parts,
             HashSet::from([group_part_id(subject.to_bytes())]),

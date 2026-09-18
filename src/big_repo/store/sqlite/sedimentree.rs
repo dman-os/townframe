@@ -75,7 +75,7 @@ impl SqliteBigRepoStore {
             query.push("0");
         } else {
             query.push(
-                "m.maybe_part_ref = 0 AND m.obj_ref IN (
+                "m.obj_ref IN (
                     SELECT obj_ref FROM big_sync_objs
                     WHERE scope_id = ",
             );
@@ -137,6 +137,22 @@ impl SqliteBigRepoStore {
                 SubscriptionTarget::Part { .. } => None,
             })
             .collect();
+        // A part target's cursor is the position its own replay has reached, and the request's
+        // lower bound is the floor under all of them. Replaying a part from below its cursor
+        // re-delivers what the caller already consumed, and it asks the `added_at` predicate
+        // about a cursor the caller never claimed — which drops a removal that has to arrive.
+        // The sibling sqlite store resolves a part target the same way.
+        let mut part_bounds: HashMap<PartKey, CursorIndex> = HashMap::new();
+        for target in &reqs.targets {
+            let SubscriptionTarget::Part { part_id, cursor } = target else {
+                continue;
+            };
+            let bound = reqs.lower_bound.max(*cursor);
+            part_bounds
+                .entry(part_id.clone())
+                .and_modify(|existing| *existing = (*existing).max(bound))
+                .or_insert(bound);
+        }
         if subscriber.is_some()
             && let Err(err) = self.summarize_parts(parts.clone()).await?
         {
@@ -168,28 +184,65 @@ impl SqliteBigRepoStore {
         }
 
         let store = self.clone();
-        // FIXME: this hsould go on a abortable join set
+        // FIXME: this should go on a abortable join set
         tokio::spawn(async move {
-            let mut cursor = reqs.lower_bound;
+            // Objects and parts each carry their own replay position: one part's page must never
+            // move another part's bound.
+            let mut object_cursor = reqs.lower_bound;
             let mut marker_sent = false;
             let mut object_replay_pending = true;
+            let event_cursor = |event: &PartEvent| match event {
+                PartEvent::Changed(inner) => inner.cursor,
+                PartEvent::Removed(inner) => inner.cursor,
+            };
             loop {
                 sub.pending
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let page = store
-                    .list_events_with_policy(
-                        parts.clone(),
-                        cursor,
-                        REPLAY_RAW_BATCH_SIZE,
-                        subscriber.is_some(),
-                    )
-                    .await
-                    .expect(ERROR_IMPOSSIBLE)
-                    .expect(ERROR_IMPOSSIBLE);
+                // One page per distinct bound: parts that share a replay position still collapse
+                // into one store call (and one policy guard), while every part is paged from its
+                // own bound.
+                let mut by_bound: HashMap<CursorIndex, HashSet<PartKey>> = HashMap::new();
+                for part_id in &parts {
+                    by_bound
+                        .entry(part_bounds.get(part_id).copied().expect(ERROR_IMPOSSIBLE))
+                        .or_default()
+                        .insert(part_id.clone());
+                }
+                let mut page: HashMap<PartKey, PartPage> = HashMap::new();
+                for (bound, group) in by_bound {
+                    let one = store
+                        .list_events_with_policy(
+                            group,
+                            bound,
+                            REPLAY_RAW_BATCH_SIZE,
+                            subscriber.is_some(),
+                        )
+                        .await
+                        .expect(ERROR_IMPOSSIBLE)
+                        .expect(ERROR_IMPOSSIBLE);
+                    page.extend(one);
+                }
+                // A part's position advances from its own page only — the boundary it stopped at
+                // and the rows it returned — so a sibling's higher cursor cannot step over rows
+                // this part has not delivered yet.
+                for (part_id, part_page) in &page {
+                    let through = part_page.events.iter().map(event_cursor).max();
+                    // The page's verdict reconstructs the position the old option carried:
+                    // a page that is not drained hands back a position to ask from again,
+                    // a drained one carries none.
+                    let next_cursor = (!part_page.drained).then_some(part_page.resume);
+                    let stopped_at = match (through, next_cursor) {
+                        (Some(through), Some(next)) => Some(through.max(next)),
+                        (through, next) => through.or(next),
+                    };
+                    if let Some(stopped_at) = stopped_at {
+                        let bound = part_bounds.get_mut(part_id).expect(ERROR_IMPOSSIBLE);
+                        *bound = (*bound).max(stopped_at);
+                    }
+                }
                 let mut output: Vec<SubEvent> = Vec::new();
                 let mut raw_event_count = 0;
-                let mut max_cursor = cursor;
                 let mut part_events = page
                     .into_iter()
                     .flat_map(|(part_id, page)| {
@@ -199,23 +252,14 @@ impl SqliteBigRepoStore {
                     })
                     .collect::<Vec<_>>();
                 part_events.sort_by_key(|(part_id, event)| {
-                    let event_cursor = match event {
-                        PartEvent::Changed(inner) => inner.cursor,
-                        PartEvent::Removed(inner) => inner.cursor,
-                    };
                     let obj_id = match event {
                         PartEvent::Changed(inner) => inner.obj_id.clone(),
                         PartEvent::Removed(inner) => inner.obj_id.clone(),
                     };
-                    (event_cursor, obj_id, part_id.clone())
+                    (event_cursor(event), obj_id, part_id.clone())
                 });
                 for (part_id, event) in part_events {
                     raw_event_count += 1;
-                    let event_cursor = match &event {
-                        PartEvent::Changed(inner) => inner.cursor,
-                        PartEvent::Removed(inner) => inner.cursor,
-                    };
-                    max_cursor = max_cursor.max(event_cursor);
                     let obj_id = match &event {
                         PartEvent::Changed(inner) => inner.obj_id.clone(),
                         PartEvent::Removed(inner) => inner.obj_id.clone(),
@@ -261,11 +305,11 @@ impl SqliteBigRepoStore {
                 if object_replay_pending {
                     let no_parts: HashSet<PartKey> = HashSet::new();
                     let object_candidates = store
-                        .replay_candidates(&no_parts, &objects, cursor, None, None)
+                        .replay_candidates(&no_parts, &objects, object_cursor, None, None)
                         .await
                         .expect(ERROR_IMPOSSIBLE);
                     for candidate in object_candidates {
-                        max_cursor = max_cursor.max(candidate.txid);
+                        object_cursor = object_cursor.max(candidate.txid);
                         raw_event_count += 1;
                         let readable = store
                             .permitted_parts(
@@ -304,7 +348,6 @@ impl SqliteBigRepoStore {
                         return;
                     }
                 }
-                cursor = max_cursor;
                 if raw_event_count != 0 {
                     continue;
                 }
@@ -370,7 +413,32 @@ impl SqliteBigRepoStore {
         .fetch_all(&mut **tx)
         .await?;
         let cursor = Self::next_cursor(tx).await?;
-        sqlx::query!("INSERT INTO big_sync_members(scope_id,obj_ref,maybe_part_ref,event_type,txid) VALUES (?1,?2,0,?3,?4) ON CONFLICT(obj_ref,maybe_part_ref) DO UPDATE SET event_type=excluded.event_type,txid=excluded.txid", self.scope().id(), obj_ref, EVENT_CHANGED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)).execute(&mut **tx).await?;
+        // The object's own row carries a change only when no part row carries it. A part is
+        // the finer key, and it is the object route's rows that a client pages through, so
+        // stamping the object row as well would overwrite the position of the change made
+        // while the object had no parts — the change the object route has yet to deliver.
+        if parts.is_empty() {
+            // Stamp `added_at` on a row that becomes present; preserve it when the row was
+            // already present, so a touch is not a new add.
+            sqlx::query!(
+                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?4)
+                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                     event_type = excluded.event_type
+                   , txid = excluded.txid
+                   , added_at = CASE
+                         WHEN big_sync_members.event_type = ?5 THEN excluded.added_at
+                         ELSE big_sync_members.added_at
+                     END",
+                self.scope().id(),
+                obj_ref,
+                EVENT_CHANGED,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                EVENT_REMOVED
+            )
+            .execute(&mut **tx)
+            .await?;
+        }
         let old_payload: ObjPayload = old_payload_json
             .as_deref()
             .filter(|str| !str.is_empty())
@@ -399,11 +467,18 @@ impl SqliteBigRepoStore {
             let part_id = Self::part_from_blob(row.part_id);
             let part_ref = row.part_ref;
             sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
+                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                     event_type = excluded.event_type
+                   , txid = excluded.txid
+                   , added_at = CASE
+                         WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
+                         ELSE big_sync_members.added_at
+                     END",
                 self.scope().id(), obj_ref, part_ref, EVENT_CHANGED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                EVENT_REMOVED
             )
             .execute(&mut **tx)
             .await?;
@@ -616,25 +691,21 @@ impl SqliteBigRepoStore {
 
             // Replace this doc's access rows — one set per part. Rows come from
             // `part_agents` (per group), never from the doc-level union, so a principal of
-            // one group never gains another group's part. The rules for parts that carry
-            // no agent set are at the loop below.
+            // one group never gains another group's part. Only a part with a derived
+            // agent set carries rows this reconciliation owns: the delete below is
+            // part-wide, so for any other part it would revoke rows belonging to that
+            // part's own access owner — an explicit mirror grant on `/seds`, or a
+            // part-level reconciler mirroring a derived part's closure. A part the doc
+            // merely happens to occupy (materialized by `add_obj_to_parts`) is exactly
+            // such a part, which is why occupancy cannot decide the delete.
             let changed_at =
                 i64::try_from(Self::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
             let mut access_parts = current_parts.clone();
             access_parts.extend(desired_parts.iter().cloned());
             for part_id in access_parts {
-                // A part the document is leaving loses its rows along with the
-                // membership, whether or not this reconciliation derived an agent set
-                // for it. A part with no agent set that the document is *staying* in is
-                // a different case: those rows are not Keyhive-derived, so they belong
-                // to whoever manages that part's access outside Keyhive — an explicit
-                // mirror grant on `/seds`, say — and rewriting them here would delete a
-                // grant the embedder made.
-                let leaving = current_parts.contains(&part_id) && !desired_parts.contains(&part_id);
-                let agents = mutation.part_agents.get(&part_id);
-                if agents.is_none() && !leaving {
+                let Some(agents) = mutation.part_agents.get(&part_id) else {
                     continue;
-                }
+                };
                 let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
                 sqlx::query!(
                     "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
@@ -643,9 +714,6 @@ impl SqliteBigRepoStore {
                 )
                 .execute(&mut *tx)
                 .await?;
-                let Some(agents) = agents else {
-                    continue;
-                };
                 for (principal, access) in agents.iter() {
                     sqlx::query!(
                         "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
@@ -726,16 +794,23 @@ impl SqliteBigRepoStore {
             .await?;
             match &new {
                 MemberState::Live(_) => {
+                    // The transition becomes present now (or was already present and is being
+                    // re-emitted): only a row that was absent takes the new add cursor.
                     sqlx::query!(
-                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                             VALUES (?1, ?2, ?3, ?4, ?5)
+                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                              ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                               event_type = excluded.event_type, txid = excluded.txid",
+                               event_type = excluded.event_type, txid = excluded.txid
+                             , added_at = CASE
+                                   WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
+                                   ELSE big_sync_members.added_at
+                               END",
                         self.scope().id(),
                         self.core.find_obj_ref(doc.clone()).await?.expect(ERROR_IMPOSSIBLE),
                         self.core.ensure_part_ref(&mut tx, part_id.clone()).await?,
                         EVENT_CHANGED,
                         i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                        EVENT_REMOVED,
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -1875,5 +1950,118 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             self.publish(events).await?;
             Ok(count)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A replay page covers at most [`REPLAY_RAW_BATCH_SIZE`] rows *per part*, and each part's
+    /// position advances from its own page. A replay that carried one high-water mark across
+    /// parts let a part whose page stopped at the highest cursor (a later member) move every
+    /// sibling's bound past rows those siblings had not delivered: a catch-up replay silently
+    /// lost events. 300 objects in one part (just over one page) plus one later member in a
+    /// second part is exactly that shape.
+    #[tokio::test]
+    async fn replay_advances_each_part_from_its_own_page() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-replay-per-part-page",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part = PartKey(ByteKey::new([0xe1; 32]));
+        let sibling = PartKey(ByteKey::new([0xe2; 32]));
+        let peer = PeerKey(ByteKey::new([0xe3; 32]));
+        store.ensure_part(part.clone()).await?;
+        store.ensure_part(sibling.clone()).await?;
+        for part_id in [part.clone(), sibling.clone()] {
+            store
+                .set_part_members(
+                    part_id,
+                    HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
+                )
+                .await?;
+        }
+
+        // One page plus a remainder, so the part's replay needs a second page.
+        let backlog: usize = usize::try_from(REPLAY_RAW_BATCH_SIZE).expect(ERROR_IMPOSSIBLE) + 44;
+        let backlogged: Vec<ObjKey> = (1u32..=u32::try_from(backlog).expect(ERROR_IMPOSSIBLE))
+            .map(|index| {
+                let mut bytes = [0u8; 32];
+                bytes[..4].copy_from_slice(&index.to_be_bytes());
+                ObjKey(ByteKey::new(bytes))
+            })
+            .collect();
+        for obj_id in &backlogged {
+            store
+                .set_obj_payload(obj_id.clone(), serde_json::json!({ "idx": "backlog" }))
+                .await?;
+            store
+                .add_obj_to_parts(obj_id.clone(), vec![part.clone()])
+                .await?;
+        }
+
+        // Added after every backlogged object, so this member's cursor is the scope's highest:
+        // it is the cursor the shared high-water mark used to carry into the other part.
+        let late = ObjKey(ByteKey::new([0x7f; 32]));
+        store
+            .set_obj_payload(late.clone(), serde_json::json!({ "idx": "late" }))
+            .await?;
+        store
+            .add_obj_to_parts(late.clone(), vec![sibling.clone()])
+            .await?;
+
+        let rx = HostPartStore::subscribe(
+            &store,
+            SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([
+                    SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: 0,
+                    },
+                    SubscriptionTarget::Part {
+                        part_id: sibling.clone(),
+                        cursor: 0,
+                    },
+                ]),
+            },
+            peer,
+        )
+        .await??;
+
+        let mut replayed: HashSet<ObjKey> = HashSet::new();
+        let mut saw_late = false;
+        loop {
+            match rx.recv().await? {
+                SubEvent::Changed(changed) if changed.part_ids.contains(&part) => {
+                    replayed.insert(changed.obj_id);
+                }
+                SubEvent::Changed(changed) if changed.part_ids.contains(&sibling) => {
+                    saw_late = true;
+                }
+                SubEvent::ReplayComplete => break,
+                _ => {}
+            }
+        }
+
+        let missing: Vec<&ObjKey> = backlogged
+            .iter()
+            .filter(|obj_id| !replayed.contains(*obj_id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} of {} objects in the page-truncated part were never replayed (first missing: {:?})",
+            missing.len(),
+            backlogged.len(),
+            missing.first()
+        );
+        assert!(
+            saw_late,
+            "the sibling part's member must be replayed as well"
+        );
+        Ok(())
     }
 }

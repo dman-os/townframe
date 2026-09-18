@@ -87,9 +87,9 @@ impl DocWorkerHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the channel is closed (worker gone) or full
-    /// (worker backlogged). Callers may explicitly handle closure when it races
-    /// an expected zero-handle eviction.
+    /// The mailbox is unbounded, so the only failure is a closed channel (the
+    /// worker is gone); a backlogged worker cannot fill it. Callers may handle
+    /// closure explicitly when it races an expected zero-handle eviction.
     pub fn send(&self, msg: DocWorkerMsg) -> eyre::Result<()> {
         self.msg_tx.try_send(msg).map_err(|err| match err {
             async_channel::TrySendError::Closed(_) => ferr!("doc worker closed"),

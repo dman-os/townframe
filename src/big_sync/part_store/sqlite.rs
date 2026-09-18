@@ -1,5 +1,6 @@
 use super::HostPartStore;
 use super::LocalPartRevisionReader;
+use super::PartStoreStats;
 use super::sqlite_core::EVENT_REMOVED;
 use super::{PartFrontierKey, PartScope, ReadTarget, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
@@ -189,95 +190,6 @@ impl SqlitePartStore {
 }
 
 impl SqlitePartStore {
-    /// Materialize the derived single-object part for each object a remote subscriber asked
-    /// for: the part row plus its one live membership row.
-    ///
-    /// ADR 012 decision 3. The membership row is load-bearing rather than decorative:
-    /// delivery filters an event's candidate parts by the recipient's access rows, so unless
-    /// the object appears in its own part, an explicit share on `o:{object_key}` resolves to
-    /// nothing and is never delivered. In this store a membership row is also the keyed-frontier
-    /// entry, so materialization is observable as one `Changed` for the object part at the
-    /// current revision; it allocates no revision and never records `Added`, because subscribing
-    /// is not a sync event.
-    async fn materialize_object_parts(&self, obj_ids: Vec<ObjKey>) -> Res<()> {
-        let cursor = self.latest_revision().await?;
-        for obj_id in obj_ids {
-            let part_id = obj_id.object_part_key();
-            let mut tx = self
-                .core
-                .sql
-                .write_pool
-                .begin_with("BEGIN IMMEDIATE")
-                .await?;
-            let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id.clone()).await?;
-            let payload_json: Option<String> = sqlx::query_scalar!(
-                "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-                obj_ref
-            )
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-            let Some(payload_json) = payload_json.filter(|payload_json| !payload_json.is_empty())
-            else {
-                // No payload yet: stage the membership the way `add_obj_to_parts` does, so it
-                // lands when a payload arrives. There is nothing to deliver without one.
-                let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
-                sqlx::query!(
-                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
-                     VALUES (?1, ?2, ?3)",
-                    self.core.scope_id,
-                    obj_ref,
-                    part_ref
-                )
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                continue;
-            };
-            let old_state = self
-                .core
-                .load_member_state(&mut tx, part_id.clone(), obj_id.clone())
-                .await?;
-            if matches!(old_state, MemberState::Live(_)) {
-                tx.commit().await?;
-                continue;
-            }
-            let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
-            let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
-            self.core
-                .apply_bucket_transition(
-                    &mut tx,
-                    part_id,
-                    obj_id,
-                    cursor,
-                    &old_state,
-                    &MemberState::Live(payload),
-                )
-                .await?;
-            // `apply_bucket_transition` maintains the range summaries only. The membership row
-            // is also this store's keyed-frontier entry (`decode_row` turns a member row into a
-            // frontier event), so materialization is recorded as a plain touch at the current
-            // revision, and no revision is allocated because subscribing is not a sync event.
-            // The memory store keeps its frontier separately and so records nothing here; that is a
-            // storage-layout difference, and the invariant both stores share is pinned by
-            // `assert_subscribing_allocates_no_revision_contract`.
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
-                self.core.scope_id,
-                obj_ref,
-                part_ref,
-                crate::sqlite_core::EVENT_CHANGED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-            )
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-        }
-        Ok(())
-    }
-
     async fn replay_candidates(
         &self,
         parts: &HashSet<PartKey>,
@@ -331,7 +243,18 @@ impl SqlitePartStore {
             }
             separated.push_unseparated("))");
         }
-        query.push(") ORDER BY m.txid, m.obj_ref, m.maybe_part_ref");
+        query.push(")");
+        // The `added_at` predicate (ADR 012 decision 9): a tombstone at cursor `T` belongs in a
+        // reader's page exactly when `added_at <= cursor < T`. A removal for a member the reader
+        // never saw carries no information for it, and excluding it here keeps it from consuming
+        // the page's row budget. A zero stamp is a row from before the column and stays
+        // selectable. `lower_bound` is the reader's cursor in all three shapes of this query.
+        query.push(" AND (m.event_type != ");
+        query.push_bind(EVENT_REMOVED);
+        query.push(" OR m.added_at <= ");
+        query.push_bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
+        query.push(")");
+        query.push(" ORDER BY m.txid, m.obj_ref, m.maybe_part_ref");
         if let Some(limit) = limit {
             query.push(" LIMIT ");
             query.push_bind(i64::from(limit));
@@ -442,39 +365,52 @@ impl HostPartStore for SqlitePartStore {
         let mut out = HashMap::new();
         for part_id in parts {
             let requested_part = HashSet::from([part_id.clone()]);
-            let candidates = self
-                .replay_candidates(&requested_part, &HashSet::new(), cursor, None, Some(limit))
-                .await?;
             let limit_usize = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
-            let (candidates, next_cursor) = if limit_usize == 0 {
-                // A zero-length page returns nothing, and may only report caught-up
+            let (drained, candidates) = if limit_usize == 0 {
+                // A zero-length page carries nothing, and may only claim caught-up
                 // when nothing is waiting: the page is not a statement about the log
                 // unless it filled, or was asked for at least one event. Probe for one
-                // waiting candidate so a caller that reads `None` as "nothing further is
-                // waiting" cannot strand the events it never received.
+                // waiting candidate so a caller that reads `drained` as "nothing further
+                // is waiting" cannot strand the events it never received.
                 let waiting = !self
                     .replay_candidates(&requested_part, &HashSet::new(), cursor, None, Some(1))
                     .await?
                     .is_empty();
-                (Vec::new(), waiting.then_some(cursor))
-            } else if candidates.len() < limit_usize {
-                (candidates, None)
+                (!waiting, Vec::new())
             } else {
-                let cutoff = candidates.last().expect(ERROR_IMPOSSIBLE).txid;
-                let mut page = candidates
-                    .into_iter()
-                    .filter(|candidate| candidate.txid < cutoff)
-                    .collect::<Vec<_>>();
-                let boundary = self
-                    .replay_candidates(&requested_part, &HashSet::new(), cursor, Some(cutoff), None)
+                let raw = self
+                    .replay_candidates(&requested_part, &HashSet::new(), cursor, None, Some(limit))
                     .await?;
-                page.extend(boundary);
-                let has_more = !self
-                    .replay_candidates(&requested_part, &HashSet::new(), cutoff, None, Some(1))
-                    .await?
-                    .is_empty();
-                (page, has_more.then_some(cutoff))
+                // A snapshot read knows whether its fetch came up short, so the verdict
+                // is "the page did not fill": a full page may still have a successor,
+                // and only a page that came up short is caught up.
+                if raw.len() < limit_usize {
+                    (true, raw)
+                } else {
+                    // The last fetched txid is the page's boundary, and every event
+                    // sharing it must travel together so a transaction is not split;
+                    // the page therefore ends at that whole txid.
+                    let cutoff = raw.last().expect(ERROR_IMPOSSIBLE).txid;
+                    let mut page = raw
+                        .into_iter()
+                        .filter(|candidate| candidate.txid < cutoff)
+                        .collect::<Vec<_>>();
+                    let boundary = self
+                        .replay_candidates(
+                            &requested_part,
+                            &HashSet::new(),
+                            cursor,
+                            Some(cutoff),
+                            None,
+                        )
+                        .await?;
+                    page.extend(boundary);
+                    (false, page)
+                }
             };
+            // Always a position to ask from again: past the last event this page
+            // carried, or the caller's own cursor when it carried none.
+            let resume = candidates.last().map_or(cursor, |candidate| candidate.txid);
             let events = candidates
                 .iter()
                 .map(|candidate| match candidate.event_type {
@@ -495,7 +431,8 @@ impl HostPartStore for SqlitePartStore {
                 part_id,
                 PartPage {
                     events,
-                    next_cursor,
+                    resume,
+                    drained,
                 },
             );
         }
@@ -934,6 +871,8 @@ impl HostPartStore for SqlitePartStore {
         struct LeafBucketPageBuilder {
             buck_id: BuckId,
             entries: Vec<BucketObjPageEntry>,
+            /// Encoded bytes the entries already cost, by `super::leaf_entry_wire_bytes`.
+            bytes: usize,
             total_count: u32,
         }
 
@@ -1011,17 +950,38 @@ impl HostPartStore for SqlitePartStore {
             .map(|buck_req| LeafBucketPageBuilder {
                 buck_id: buck_req.buck_id,
                 entries: Vec::new(),
+                bytes: 0,
                 total_count: 0,
             })
             .collect();
+        let mut budget_stopped: Option<usize> = None;
         for row in rows {
             let req_ord =
                 usize::try_from(row.try_get::<i64, _>("req_ord")?).expect(ERROR_IMPOSSIBLE);
+            // The budget ends the page for the bucket it binds on. Because the page is
+            // keyset-paginated (`obj_id > after_id`), resuming past a skipped row would
+            // strand it, so the page stops here and every later row of the *same* bucket is
+            // dropped. Rows of the other buckets follow (the query orders by `req_ord`)
+            // and must still be processed, so the stop is per-bucket rather than a flat
+            // `break` of this shared result set.
+            if budget_stopped == Some(req_ord) {
+                continue;
+            }
             let page = pages.get_mut(req_ord).expect(ERROR_IMPOSSIBLE);
             page.total_count =
                 u32::try_from(row.try_get::<i64, _>("total_count")?).expect(ERROR_IMPOSSIBLE);
             let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
             let dead = row.try_get::<i64, _>("event_type")? == EVENT_REMOVED;
+            // The page's cost is decided from the key alone — the fingerprint hashes the
+            // payload without carrying it — so a row the page cannot hold costs no JSON parse.
+            // The first entry is always taken, because a page with no entries reads as `done`
+            // while entries remain, which would strand the tail.
+            let entry_bytes = super::leaf_entry_wire_bytes(obj_id.as_bytes().len());
+            if !page.entries.is_empty() && page.bytes + entry_bytes > super::LEAF_PAGE_BYTE_BUDGET {
+                budget_stopped = Some(req_ord);
+                continue;
+            }
+            page.bytes += entry_bytes;
             let fp = if dead {
                 Fingerprint::new(
                     &req.seed,
@@ -1189,30 +1149,178 @@ impl HostPartStore for SqlitePartStore {
                 &MemberState::Dead,
             )
             .await?;
-        let live_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM big_sync_members
-             WHERE scope_id = ? AND obj_ref = ? AND maybe_part_ref > 0
-               AND maybe_part_ref != ? AND event_type != ?",
-        )
-        .bind(self.core.scope_id)
-        .bind(obj_ref)
-        .bind(part_ref)
-        .bind(EVENT_REMOVED)
-        .fetch_one(&mut **tx)
-        .await?;
-        if live_count == 0 {
-            sqlx::query!(
-                "UPDATE big_sync_objs SET payload_json = NULL WHERE obj_ref = ?1",
-                obj_ref
-            )
-            .execute(&mut **tx)
-            .await?;
-        }
+        // The object keeps its payload: a membership removal is not a content removal, and
+        // dropping the content is `remove_obj_payload`'s job.
         frontier_tx
             .delete(PartFrontierKey::Part { obj_id, part_id })
             .await?;
         frontier_tx.commit().await?;
         Ok(())
+    }
+
+    /// Remove the object from every part it is in and drop its payload, in one transaction.
+    ///
+    /// The per-part half is `remove_obj_from_part`'s: the same bucket transition, tombstone row
+    /// and frontier deletion, at one shared revision so the parts it leaves move together. That
+    /// shared revision is also why the public per-part method cannot be called in a loop.
+    async fn remove_obj_payload(&self, obj_id: ObjKey) -> Res<()> {
+        let mut frontier_tx = self.frontier.begin().await?;
+        let tx = frontier_tx.context_mut();
+        let obj_ref: Option<i64> = sqlx::query_scalar(
+            "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?",
+        )
+        .bind(self.core.scope_id)
+        .bind(Self::obj_blob(obj_id.clone()))
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(obj_ref) = obj_ref else {
+            frontier_tx.commit().await?;
+            return Ok(());
+        };
+        let payload_json: Option<String> =
+            sqlx::query_scalar("SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?")
+                .bind(obj_ref)
+                .fetch_one(&mut **tx)
+                .await?;
+        if payload_json.filter(|payload| !payload.is_empty()).is_none() {
+            // No payload, nothing to drop. A live membership implies a payload, so an object
+            // without one has no membership this could clear either.
+            frontier_tx.commit().await?;
+            return Ok(());
+        }
+        let live_parts = sqlx::query(
+            "SELECT p.part_id
+               FROM big_sync_members m
+               JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+              WHERE m.scope_id = ? AND m.obj_ref = ? AND m.maybe_part_ref > 0
+                AND m.event_type != ?",
+        )
+        .bind(self.core.scope_id)
+        .bind(obj_ref)
+        .bind(EVENT_REMOVED)
+        .fetch_all(&mut **tx)
+        .await?;
+        let mut live_part_ids = Vec::with_capacity(live_parts.len());
+        for row in live_parts {
+            live_part_ids.push(Self::part_from_blob(row.try_get("part_id")?));
+        }
+        // One revision covers every removal: the parts move together, and the payload drop is
+        // not a separate sync step.
+        let cursor = if live_part_ids.is_empty() {
+            None
+        } else {
+            Some(frontier_tx.revision().await?)
+        };
+        for part_id in live_part_ids {
+            let cursor = cursor.expect(ERROR_IMPOSSIBLE);
+            let tx = frontier_tx.context_mut();
+            let old_state = self
+                .core
+                .load_member_state(&mut *tx, part_id.clone(), obj_id.clone())
+                .await?;
+            let MemberState::Live(old_payload) = old_state else {
+                continue;
+            };
+            let tx = frontier_tx.context_mut();
+            self.core
+                .apply_bucket_transition(
+                    &mut *tx,
+                    part_id.clone(),
+                    obj_id.clone(),
+                    cursor,
+                    &MemberState::Live(old_payload),
+                    &MemberState::Dead,
+                )
+                .await?;
+            frontier_tx
+                .delete(PartFrontierKey::Part {
+                    obj_id: obj_id.clone(),
+                    part_id,
+                })
+                .await?;
+        }
+        // The object lane's row is content, and its payload is read out of `big_sync_objs`
+        // rather than stored on the row, so a live row with nothing behind it is unreadable.
+        // It goes with the payload; a reader that could hold the content drops it from the
+        // removals above rather than from a notice. Checked before the payload is cleared,
+        // because that read is what the row's value *is*.
+        let object_key = PartFrontierKey::Object(obj_id);
+        let has_object_lane_row = frontier_tx.get(&object_key).await?.is_some();
+        let tx = frontier_tx.context_mut();
+        sqlx::query("UPDATE big_sync_objs SET payload_json = NULL WHERE obj_ref = ?")
+            .bind(obj_ref)
+            .execute(&mut **tx)
+            .await?;
+        if has_object_lane_row {
+            frontier_tx.delete(object_key).await?;
+        }
+        frontier_tx.commit().await?;
+        Ok(())
+    }
+
+    async fn partless_objects(&self, limit: u32, after: Option<ObjKey>) -> Res<Vec<ObjKey>> {
+        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT o.obj_id
+               FROM big_sync_objs o
+              WHERE o.scope_id = ",
+        );
+        query.push_bind(self.core.scope_id);
+        query.push(" AND o.payload_json IS NOT NULL AND o.payload_json != ''");
+        if let Some(after) = after {
+            query.push(" AND o.obj_id > ");
+            query.push_bind(Self::obj_blob(after));
+        }
+        query.push(
+            " AND NOT EXISTS (
+                   SELECT 1 FROM big_sync_members m
+                    WHERE m.scope_id = o.scope_id
+                      AND m.obj_ref = o.obj_ref
+                      AND m.maybe_part_ref > 0
+                      AND m.event_type != ",
+        );
+        query.push_bind(EVENT_REMOVED);
+        query.push(") ORDER BY o.obj_id ASC LIMIT ");
+        query.push_bind(i64::from(limit));
+        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        rows.into_iter()
+            .map(|row| Ok(Self::obj_from_blob(row.try_get("obj_id")?)))
+            .collect()
+    }
+
+    async fn part_store_stats(&self) -> Res<PartStoreStats> {
+        let row = sqlx::query(
+            "SELECT
+                 (SELECT COUNT(*) FROM big_sync_objs
+                   WHERE scope_id = ?1 AND payload_json IS NOT NULL AND payload_json != '') AS payload_objects
+               , (SELECT COALESCE(SUM(LENGTH(CAST(payload_json AS BLOB))), 0) FROM big_sync_objs
+                   WHERE scope_id = ?1 AND payload_json IS NOT NULL AND payload_json != '') AS payload_bytes
+               , (SELECT COUNT(*) FROM big_sync_objs o
+                   WHERE o.scope_id = ?1 AND o.payload_json IS NOT NULL AND o.payload_json != ''
+                     AND NOT EXISTS (
+                         SELECT 1 FROM big_sync_members m
+                          WHERE m.scope_id = o.scope_id
+                            AND m.obj_ref = o.obj_ref
+                            AND m.maybe_part_ref > 0
+                            AND m.event_type != ?2)) AS partless_objects
+               , (SELECT COUNT(*) FROM big_sync_members
+                   WHERE scope_id = ?1 AND maybe_part_ref > 0 AND event_type != ?2) AS live_rows
+               , (SELECT COUNT(*) FROM big_sync_members
+                   WHERE scope_id = ?1 AND maybe_part_ref > 0 AND event_type = ?2) AS dead_rows",
+        )
+        .bind(self.core.scope_id)
+        .bind(EVENT_REMOVED)
+        .fetch_one(&self.core.sql.read_pool)
+        .await?;
+        Ok(PartStoreStats {
+            payload_objects: u64::try_from(row.try_get::<i64, _>("payload_objects")?)
+                .expect(ERROR_IMPOSSIBLE),
+            payload_bytes: u64::try_from(row.try_get::<i64, _>("payload_bytes")?)
+                .expect(ERROR_IMPOSSIBLE),
+            partless_objects: u64::try_from(row.try_get::<i64, _>("partless_objects")?)
+                .expect(ERROR_IMPOSSIBLE),
+            live_rows: u64::try_from(row.try_get::<i64, _>("live_rows")?).expect(ERROR_IMPOSSIBLE),
+            dead_rows: u64::try_from(row.try_get::<i64, _>("dead_rows")?).expect(ERROR_IMPOSSIBLE),
+        })
     }
 
     async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex> {
@@ -1262,7 +1370,12 @@ impl HostPartStore for SqlitePartStore {
         subscriber: PeerKey,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
         use big_sync_core::rpc::SubscriptionTarget;
-        let mut selector = SqlitePartSelector::default();
+        // The peer-facing page applies the `added_at` predicate: a tombstone for a member the
+        // reader never saw is a round trip it cannot use.
+        let mut selector = SqlitePartSelector {
+            added_at_predicate: true,
+            ..Default::default()
+        };
         let mut parts = HashSet::new();
         let mut objects = HashSet::new();
         for target in &reqs.targets {
@@ -1278,10 +1391,6 @@ impl HostPartStore for SqlitePartStore {
                     selector.objects.insert(obj_id.clone(), reqs.lower_bound);
                 }
             }
-        }
-        if !objects.is_empty() {
-            self.materialize_object_parts(objects.iter().cloned().collect())
-                .await?;
         }
         if let Err(err) = self.summarize_parts(parts.clone()).await? {
             return Ok(Err(err));
@@ -1322,18 +1431,14 @@ impl HostPartStore for SqlitePartStore {
                         (PartFrontierKey::Object(_), Some(PartEvent::Removed(_))) => {
                             unreachable!("object frontier rows are changed or tombstones")
                         }
+                        // The object lane carries content only: a part-level deletion is a
+                        // part-lane fact, so an object reader that did not select the part has
+                        // nothing to book for it. A payload-less `Changed` means *resolve the
+                        // membership*, which the cursor machine books as a content delivery.
                         (
                             PartFrontierKey::Part { obj_id, part_id },
                             None | Some(PartEvent::Removed(_)),
-                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => (
-                            None,
-                            SubEvent::Changed(ObjChanged {
-                                cursor: entry.revision,
-                                part_ids: Vec::new(),
-                                obj_id,
-                                payload: serde_json::Value::Null,
-                            }),
-                        ),
+                        ) if objects.contains(&obj_id) && !parts.contains(&part_id) => continue,
                         (
                             PartFrontierKey::Part { obj_id, part_id },
                             Some(PartEvent::Changed(changed)),
@@ -2088,12 +2193,19 @@ mod tests {
         Ok(tx.commit().await?)
     }
 
+    /// The payload outlives the membership: this store used to null the payload when the live
+    /// count reached zero, and `remove_obj_payload` is the only path that clears it now.
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_part_store_contract_membership_semantics() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://repo").await?;
         let part_id = test_part_id(1);
         let obj_id = test_obj_id(2);
-        contract::assert_membership_semantics(&store, part_id, obj_id).await;
+        contract::assert_add_obj_to_parts_is_idempotent(&store, part_id.clone(), obj_id.clone())
+            .await;
+        host_contract::assert_payload_survives_membership_removal_contract(&SqliteHostHarness {
+            store: store.clone(),
+        })
+        .await?;
         Ok(())
     }
 
@@ -2179,8 +2291,24 @@ mod tests {
         HostPartStore::add_obj_to_parts(&store, obj_id.clone(), vec![part_id.clone()]).await?;
         HostPartStore::remove_obj_from_part(&store, obj_id.clone(), part_id.clone()).await?;
 
-        let deleted_page =
+        // The object joined the part at cursor 2 and the tombstone is at cursor 3, so a reader
+        // at cursor 0 never saw the object in the part and is not handed the removal; a reader
+        // that did see the add is.
+        let nothing_at_zero =
             HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
+                .await?
+                .expect(ERROR_IMPOSSIBLE);
+        assert!(
+            nothing_at_zero
+                .get(&part_id)
+                .expect(ERROR_IMPOSSIBLE)
+                .events
+                .is_empty(),
+            "a tombstone for a member this reader never saw is not delivered"
+        );
+
+        let deleted_page =
+            HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 2, 10)
                 .await?
                 .expect(ERROR_IMPOSSIBLE);
         let deleted_events = &deleted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
@@ -2201,7 +2329,7 @@ mod tests {
         HostPartStore::add_obj_to_parts(&store, obj_id.clone(), vec![part_id.clone()]).await?;
 
         let upserted_page =
-            HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 0, 10)
+            HostPartStore::list_events(&store, HashSet::from([part_id.clone()]), 2, 10)
                 .await?
                 .expect(ERROR_IMPOSSIBLE);
         let upserted_events = &upserted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
@@ -2271,6 +2399,20 @@ mod tests {
             store: test_store("big-sync-sqlite-test://host-contract").await?,
         };
         host_contract::assert_host_part_store_contract(&harness).await
+    }
+
+    /// The leaf page's byte budget, which the store applies beside the entry hint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_leaf_page_byte_budget_contract() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://leaf-byte-budget").await?;
+        host_contract::assert_leaf_page_byte_budget_contract(&store).await
+    }
+
+    /// What the store shows a peer, which a part-less payload is not part of.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_observed_snapshot_excludes_partless_payload_contract() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://observed-partless").await?;
+        host_contract::assert_observed_snapshot_excludes_partless_payload(&store).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2533,188 +2675,6 @@ mod tests {
         Ok(())
     }
 
-    /// Decision 3: the object part is derived from the object key, and an explicit row on it is
-    /// a direct share. It delivers only because subscribing materializes the object's single
-    /// membership row — that row is what the recipient's access is resolved through.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_object_part_direct_share_is_delivered_remotely() -> Res<()> {
-        use keyhive_core::access::Access;
-
-        let store = test_store("big-sync-sqlite-test://object-part-direct-share").await?;
-        let obj_id = test_obj_id(230);
-        let peer = PeerKey::new([231; 32]);
-        let payload = serde_json::json!({"value": 1});
-        store
-            .set_obj_payload(obj_id.clone(), payload.clone())
-            .await?;
-        store
-            .set_part_members(
-                obj_id.object_part_key(),
-                HashMap::from([(peer.clone(), Access::Read)]),
-            )
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                        obj_id: obj_id.clone(),
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        // The object part is materialized by the subscription, and in this store that
-        // materialization itself is a `Changed` for the object part, so the payload may arrive
-        // more than once. What must hold is that it arrives.
-        let mut delivered = Vec::new();
-        loop {
-            match rx.recv().await.expect("subscription channel stays open") {
-                SubEvent::Changed(changed) => {
-                    assert_eq!(changed.obj_id, obj_id);
-                    delivered.push(changed.payload);
-                }
-                SubEvent::ReplayComplete => break,
-                event => panic!("unexpected event {event:?}"),
-            }
-        }
-        assert!(
-            delivered.contains(&payload),
-            "the directly shared object was not delivered: {delivered:?}"
-        );
-        Ok(())
-    }
-
-    /// An explicit row on the object part is *additive*: the object also lives in a part the
-    /// peer cannot read, and the share still delivers it. The live change lands in both parts,
-    /// and only the object part is readable, so what arrives must have come through it.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_object_part_share_is_additive_to_an_unreadable_part() -> Res<()> {
-        use keyhive_core::access::Access;
-
-        let store = test_store("big-sync-sqlite-test://object-part-additive").await?;
-        let obj_id = test_obj_id(232);
-        let part_id = test_part_id(233);
-        let peer = PeerKey::new([234; 32]);
-        store.ensure_part(part_id.clone()).await?;
-        store
-            .set_obj_payload(obj_id.clone(), serde_json::json!({"value": 1}))
-            .await?;
-        store
-            .add_obj_to_parts(obj_id.clone(), vec![part_id])
-            .await?;
-        store
-            .set_part_members(
-                obj_id.object_part_key(),
-                HashMap::from([(peer.clone(), Access::Read)]),
-            )
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                        obj_id: obj_id.clone(),
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        // The share delivers the object, and never names the part the peer cannot read: a part
-        // id the recipient may not read is not disclosed by delivery or by omission.
-        loop {
-            match rx.recv().await.expect("subscription channel stays open") {
-                SubEvent::Changed(changed) => {
-                    assert_eq!(changed.obj_id, obj_id);
-                    assert!(
-                        changed.part_ids.is_empty(),
-                        "the unreadable part must not be named: {:?}",
-                        changed.part_ids
-                    );
-                }
-                SubEvent::ReplayComplete => break,
-                event => panic!("unexpected event {event:?}"),
-            }
-        }
-
-        let payload = serde_json::json!({"value": 2});
-        store
-            .set_obj_payload(obj_id.clone(), payload.clone())
-            .await?;
-        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
-            Ok(Ok(SubEvent::Changed(changed))) => {
-                assert_eq!(changed.obj_id, obj_id);
-                assert!(
-                    changed.part_ids.is_empty(),
-                    "the unreadable part must not be named: {:?}",
-                    changed.part_ids
-                );
-                assert_eq!(changed.payload, payload);
-            }
-            Ok(Ok(event)) => panic!("expected the shared object's live change, got {event:?}"),
-            Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
-            Err(_) => panic!("timed out waiting for the shared object's live change"),
-        }
-        Ok(())
-    }
-
-    /// Access to the object part is *inherited*: a peer that may read a part holding the object
-    /// may read the object with no row on the derived part — and materializing that part must
-    /// not take that access away.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_object_part_inherits_access_from_a_containing_part() -> Res<()> {
-        use keyhive_core::access::Access;
-
-        let store = test_store("big-sync-sqlite-test://object-part-inherited").await?;
-        let obj_id = test_obj_id(235);
-        let part_id = test_part_id(236);
-        let peer = PeerKey::new([237; 32]);
-        store.ensure_part(part_id.clone()).await?;
-        store
-            .set_part_members(
-                part_id.clone(),
-                HashMap::from([(peer.clone(), Access::Read)]),
-            )
-            .await?;
-        let payload = serde_json::json!({"value": 1});
-        store
-            .set_obj_payload(obj_id.clone(), payload.clone())
-            .await?;
-        store
-            .add_obj_to_parts(obj_id.clone(), vec![part_id])
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Object {
-                        obj_id: obj_id.clone(),
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
-            Ok(Ok(SubEvent::Changed(changed))) => {
-                assert_eq!(changed.obj_id, obj_id);
-                assert_eq!(changed.payload, payload);
-            }
-            Ok(Ok(event)) => panic!("expected the inherited object, got {event:?}"),
-            Ok(Err(err)) => panic!("remote subscription closed unexpectedly: {err}"),
-            Err(_) => panic!("timed out waiting for the inherited object"),
-        }
-        Ok(())
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_subscribe_part_targets_have_independent_lower_bounds() -> Res<()> {
         use keyhive_core::access::Access;
@@ -2879,6 +2839,8 @@ mod tests {
         Ok(())
     }
 
+    /// A part's tombstone reaches a reader that had seen the object in the part, and not one
+    /// whose cursor predates the add (`added_at <= cursor < tombstone`).
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_subscribe_part_tombstone_is_removed() -> Res<()> {
         use keyhive_core::access::Access;
@@ -2894,6 +2856,20 @@ mod tests {
                 HashMap::from([(peer.clone(), Access::Read)]),
             )
             .await?;
+        let added_cursor = put_frontier_event(
+            &store,
+            PartFrontierKey::Part {
+                obj_id: obj_id.clone(),
+                part_id: part_id.clone(),
+            },
+            PartEvent::Changed(ObjChanged {
+                cursor: 0,
+                part_ids: vec![part_id.clone()],
+                obj_id: obj_id.clone(),
+                payload: serde_json::json!({"value": 1}),
+            }),
+        )
+        .await?;
         let tombstone_cursor = delete_frontier_key(
             &store,
             PartFrontierKey::Part {
@@ -2903,21 +2879,42 @@ mod tests {
         )
         .await?;
 
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_id.clone(),
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
+        let sub = |cursor| {
+            let store = &store;
+            let part_id = part_id.clone();
+            let peer = peer.clone();
+            async move {
+                store
+                    .subscribe(
+                        SubPartsRequest {
+                            lower_bound: cursor,
+                            targets: HashSet::from([
+                                big_sync_core::rpc::SubscriptionTarget::Part {
+                                    part_id: part_id.clone(),
+                                    cursor,
+                                },
+                            ]),
+                        },
+                        peer,
+                    )
+                    .await
+            }
+        };
+
+        // A reader whose cursor predates the add never saw the object in the part, so the
+        // tombstone is excluded rather than booked as a delivery.
+        let before = sub(0).await??;
         assert_eq!(
-            rx.recv().await.expect("subscription channel stays open"),
+            before
+                .recv()
+                .await
+                .expect("subscription channel stays open"),
+            SubEvent::ReplayComplete
+        );
+
+        let after = sub(added_cursor).await??;
+        assert_eq!(
+            after.recv().await.expect("subscription channel stays open"),
             SubEvent::Removed(ObjRemovedFromPart {
                 cursor: tombstone_cursor,
                 part_id,
@@ -2925,7 +2922,7 @@ mod tests {
             })
         );
         assert_eq!(
-            rx.recv().await.expect("subscription channel stays open"),
+            after.recv().await.expect("subscription channel stays open"),
             SubEvent::ReplayComplete
         );
         Ok(())
@@ -3106,6 +3103,33 @@ mod tests {
         Ok(())
     }
 
+    /// Replay until the page has something to report.
+    ///
+    /// A page that carried nothing is not a verdict about the log: the replay's
+    /// hold can expire before the subscription has produced an event, and the
+    /// wire contract says the caller re-asks from the same position. Polling
+    /// here keeps a test independent of how long a hold happened to last
+    /// instead of pinning it to a wall-clock window that load can close.
+    async fn replay_page_with_events(
+        store: &SqlitePartStore,
+        target: SubscriptionTarget,
+        limit: u32,
+        peer: &PeerKey,
+    ) -> Res<PartPage> {
+        const PAGE_HOLD: Duration = Duration::from_millis(50);
+        loop {
+            let outcome = store
+                .replay_page(target.clone(), limit, peer.clone(), PAGE_HOLD)
+                .await?;
+            let ReplayPageOutcome::Events(page) = outcome else {
+                panic!("expected a page, got {outcome:?}");
+            };
+            if !page.events.is_empty() || page.drained {
+                return Ok(page);
+            }
+        }
+    }
+
     /// A page is bounded, and its cursor resumes without replaying or skipping.
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_replay_page_is_bounded_and_resumes() -> Res<()> {
@@ -3142,47 +3166,60 @@ mod tests {
             );
         }
 
-        let page = store
-            .replay_page(
-                SubscriptionTarget::Part {
-                    part_id: part_id.clone(),
-                    cursor: 0,
-                },
-                2,
-                peer.clone(),
-                Duration::from_millis(50),
-            )
-            .await?;
-        let ReplayPageOutcome::Events(page) = page else {
-            panic!("expected a page, got {page:?}");
-        };
+        let page = replay_page_with_events(
+            &store,
+            SubscriptionTarget::Part {
+                part_id: part_id.clone(),
+                cursor: 0,
+            },
+            2,
+            &peer,
+        )
+        .await?;
         assert_eq!(page.events.len(), 2, "a page obeys its limit");
         assert_eq!(
-            page.next_cursor,
-            Some(cursors[1]),
+            page.resume, cursors[1],
             "the resume point is the last delivered event"
         );
-
-        // Resuming from the page's cursor picks up exactly where it stopped.
-        let page = store
-            .replay_page(
-                SubscriptionTarget::Part {
-                    part_id,
-                    cursor: page.next_cursor.expect(ERROR_IMPOSSIBLE),
-                },
-                10,
-                peer,
-                Duration::from_millis(50),
-            )
-            .await?;
-        let ReplayPageOutcome::Events(page) = page else {
-            panic!("expected a page, got {page:?}");
-        };
-        assert_eq!(page.events.len(), 3, "the remaining events, no replay");
-        assert_eq!(
-            page.next_cursor, None,
-            "a drained log has nothing further to resume from"
+        assert!(
+            !page.drained,
+            "a page that stopped at its limit is not a caught-up verdict"
         );
+
+        // Resuming from the page's resume picks up exactly where it stopped.
+        // Poll until the replay reports caught-up: a page that stopped short is
+        // not a verdict either, and the caller re-asks from its `resume`.
+        let mut remaining = Vec::new();
+        let mut cursor = page.resume;
+        loop {
+            let outcome = store
+                .replay_page(
+                    SubscriptionTarget::Part {
+                        part_id: part_id.clone(),
+                        cursor,
+                    },
+                    10,
+                    peer.clone(),
+                    Duration::from_millis(50),
+                )
+                .await?;
+            let ReplayPageOutcome::Events(page) = outcome else {
+                panic!("expected a page, got {outcome:?}");
+            };
+            if page.events.is_empty() && !page.drained {
+                continue;
+            }
+            remaining.extend(page.events);
+            cursor = page.resume;
+            if page.drained {
+                assert_eq!(
+                    cursor, cursors[4],
+                    "and it resumes past its last delivered event"
+                );
+                break;
+            }
+        }
+        assert_eq!(remaining.len(), 3, "the remaining events, no replay");
         Ok(())
     }
 
@@ -3252,7 +3289,11 @@ mod tests {
             panic!("expected a page, got {empty:?}");
         };
         assert!(page.events.is_empty(), "no events to send");
-        assert_eq!(page.next_cursor, None, "and nothing to resume from");
+        assert!(page.drained, "an exhausted replay is the caught-up answer");
+        assert_eq!(
+            page.resume, 0,
+            "and it resumes from the caller's own cursor"
+        );
         Ok(())
     }
 
@@ -3298,20 +3339,16 @@ mod tests {
             .await?;
         }
 
-        let page = store
-            .replay_page(
-                SubscriptionTarget::Part {
-                    part_id: readable_part.clone(),
-                    cursor: 0,
-                },
-                8,
-                peer,
-                Duration::from_millis(50),
-            )
-            .await?;
-        let ReplayPageOutcome::Events(page) = page else {
-            panic!("expected a page, got {page:?}");
-        };
+        let page = replay_page_with_events(
+            &store,
+            SubscriptionTarget::Part {
+                part_id: readable_part.clone(),
+                cursor: 0,
+            },
+            8,
+            &peer,
+        )
+        .await?;
         assert_eq!(
             page.events.len(),
             1,

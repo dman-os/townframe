@@ -5,7 +5,7 @@ use big_sync::sqlite_core::{
     EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
     SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
 };
-use big_sync::{HostPartStore, PartScope, ReadTarget};
+use big_sync::{HostPartStore, PartScope, PartStoreStats, ReadTarget};
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
@@ -133,6 +133,17 @@ pub struct SqliteBigRepoStore {
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
     local_revision_wakeups: Arc<Notify>,
+    /// Last admission-log seq committed to this scope's store, bumped inside
+    /// [`append_admitted_events`](Self::append_admitted_events) — the single
+    /// durable admission choke point. A keyhive sync completion stamps this
+    /// into its event so the hub can enforce, without a DB round-trip, that the
+    /// round's admissions are reflected in its own `admitted_head` before it
+    /// resolves waiters.
+    ///
+    /// Zero until the first append in this process, matching the hub's
+    /// `admitted_head` initialization, so a completion that admitted nothing
+    /// new still resolves immediately.
+    admission_watermark: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(feature = "test-support")]
@@ -465,6 +476,7 @@ impl SqliteBigRepoStore {
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
             local_revision_wakeups: Arc::new(Notify::new()),
+            admission_watermark: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -771,21 +783,6 @@ impl SqliteBigRepoStore {
             };
             if access_level.is_some_and(is_fetch_access) {
                 readable.push(part_id);
-                continue;
-            }
-            // Access to a derived object part is inherited (decision 3): a principal that
-            // can read any part containing the object can read `o:{O}`. No syncable row is
-            // ever written for a derived part, so without this an object-lane event that
-            // names `o:{O}` filters to empty and is never deliverable remotely.
-            let Some(object_key) = part_id.object_key() else {
-                continue;
-            };
-            if !self
-                .readable_parts_of_object(&object_key, &peer_blob)
-                .await?
-                .is_empty()
-            {
-                readable.push(part_id);
             }
         }
         tracing::trace!(
@@ -799,8 +796,9 @@ impl SqliteBigRepoStore {
 
     /// The parts containing `obj_id` that `peer_blob` may fetch-read, in key order.
     ///
-    /// This is the `FromObject` resolution at the heart of decision 2, and the inheritance
-    /// rule an object part is resolved through.
+    /// This is the `FromObject` resolution at the heart of decision 2: an event or a
+    /// subscription that names the object rather than a part resolves through the object's
+    /// real parts, which are the only ones an access row can name.
     async fn readable_parts_of_object(
         &self,
         obj_id: &ObjKey,

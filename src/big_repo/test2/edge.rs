@@ -10,6 +10,8 @@
 //! | `duplicate_concurrent_sync_converges` | Two concurrent `sync_doc_with_peer` calls converge without duplicate state or errors. |
 //! | `reconnect_preserves_live_handles` | After connection loss + reconnect, previously acquired live handles remain valid and can read new content. |
 //! | `interrupted_sync_retry_succeeds` | A sync that fails due to closed connection can be retried after reconnect. |
+//! | `dropped_content_apply_fails_sync_receipt` | A round whose received content cannot be routed to a stopping doc worker fails the caller instead of reporting a success receipt. |
+//! | `keyhive_completion_defers_until_admission_watermark` | A keyhive completion whose admission watermark is ahead of the hub's admitted head is held until the admission event lands, so the follow-up reconciliation wait cannot observe a stale head. |
 //!
 //! # Skipped-by-design
 //!
@@ -412,6 +414,63 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
         phase.as_deref(),
         Some("post-reconnect"),
         "live handle must see content written after reconnect"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Dropped content apply fails the sync receipt ─────────────────────────
+//
+// A sync round whose received content cannot reach the document worker (the
+// worker is stopping, so its unbounded mailbox is closed) must fail the caller.
+// Swallowing the send and letting the round completion resolve the waiter with
+// an empty reconsider would hand the caller a success receipt for content that
+// was never applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_dropped_content_apply_fails_sync_receipt() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(106, 107, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "dropped-apply"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
+    // Reader materialises the document, so the round's reconsider would report
+    // a live `Ready` success rather than a cold `Stored`.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    // Owner produces content the Reader has not seen: the next sync carries it.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "carried"))
+                .map_err(|err| crate::ferr!("failed owner edit: {err:?}"))
+        })
+        .await??;
+
+    // Make the next content-carrying apply on Reader's hub hit a closed
+    // doc-worker mailbox: the "worker stopped between resolving the handle and
+    // sending" race, forced deterministically.
+    pair.right()
+        .repo
+        .fail_next_content_apply_route(doc_id.clone())
+        .await?;
+
+    let receipt = pair
+        .right_conn()
+        .sync_doc_with_peer_receipt(doc_id.clone())
+        .await;
+    assert!(
+        matches!(&receipt, Err(SyncDocError::WorkerUnavailable)),
+        "a round whose content apply was dropped must fail the caller, got: {receipt:?}"
     );
 
     drop(reader_doc);
@@ -1167,5 +1226,172 @@ async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Re
         );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+    Ok(())
+}
+
+// ─── Keyhive completion cannot outrun its admission watermark ─────────────
+//
+// `sync_keyhive_with_peer` waits for the round, then for the group-part
+// projection to reach the admission watermark captured at that moment. If the
+// round resolved straight from its completion, a completion that arrived ahead
+// of the hub's `admitted_head` would let the caller return and immediately
+// capture a *stale* head, resolving reconciliation while this round's
+// admissions were never projected. The hub must hold the round until the
+// admission watermark catches up.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_keyhive_completion_defers_until_admission_watermark() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(199, 201, "Owner", "Reader").await?;
+    let peer = pair.right().peer_id();
+    let probe = crate::DocumentId::new([0u8; 32]);
+
+    // Settle first so the hold starts with no round in flight.
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    // Hold left's events so the round's real completion cannot land while the
+    // test drives the completion-before-admission inversion by hand.
+    let hold = pair.left().repo.hold_hub_events().await?;
+
+    let sync = pair.left().repo.sync_keyhive_with_peer(peer.clone());
+    futures::pin_mut!(sync);
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "sync must park on its round"
+    );
+    // FIFO barrier: the hub has started the round and registered the waiter.
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+
+    // A completion stamped one seq AHEAD of the hub's admitted head.
+    let admitted_seq = pair
+        .left()
+        .repo
+        .inject_keyhive_completion_for_test(peer.clone())
+        .await?;
+
+    // Let the projection catch up to that advanced watermark. A round that
+    // resolved from its completion alone would now finish reconciliation
+    // against the STALE head it captured, masking the missing admission — so
+    // this is exactly where the defect surfaces.
+    pair.left()
+        .repo
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
+            seq: admitted_seq,
+        })
+        .await?;
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "the round must not resolve before its admission watermark is reached"
+    );
+    // Give the caller a full command round-trip to run through reconciliation.
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "the round must not resolve before its admission watermark is reached"
+    );
+
+    // The admission event lands: the round may now finish, and the caller's
+    // reconciliation then captures the ADVANCED head.
+    pair.left()
+        .repo
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
+            seq: admitted_seq,
+        })
+        .await?;
+    // Poll once so the caller advances into reconciliation, then let that
+    // command round-trip complete.
+    assert!(futures::poll!(sync.as_mut()).is_pending());
+    pair.left().repo.contains_sedimentree_id(probe).await?;
+    match futures::poll!(sync.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result?;
+        }
+        std::task::Poll::Pending => {
+            panic!("sync must complete once the projection reaches the round's admission watermark")
+        }
+    }
+    drop(hold);
+    Ok(())
+}
+
+// ─── Quiescence must not resolve over work routed behind its fence ────────
+//
+// A worker's fence ack only covers work enqueued *before* the fence. A command
+// that routes work into a worker while a probe is pending (here
+// `EnsureCausalCoverage` → `ReconcileCausalCoverage`, enqueued by the
+// causal-checkpoint worker from a different sender and free to land behind the
+// probe) must count as activity so the probe restarts: the restarted fence is
+// enqueued after that work, and the worker necessarily runs the work before
+// acking. Otherwise the probe resolves, the caller returns, and the coverage
+// reconcile/publish runs afterwards — the caller snapshots state that is
+// self-consistent but behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let node = Node::boot(203, "Owner").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "quiescence-coverage"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let doc = node.repo.create_doc(initial).await?;
+    let doc_id = doc.document_id();
+
+    // Hold events so the probe's fence acks cannot land while the coverage is
+    // routed behind the probe.
+    let hold = node.repo.hold_hub_events().await?;
+
+    let wait = node.repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
+        std::time::Duration::from_secs(30),
+    )));
+    futures::pin_mut!(wait);
+    assert!(
+        futures::poll!(wait.as_mut()).is_pending(),
+        "quiescence wait must park on its probe"
+    );
+    let barrier_before = node.repo.quiescence_probe_barrier_for_test().await?;
+    assert!(
+        barrier_before.is_some(),
+        "a probe must be active with a live doc worker and held fence acks"
+    );
+
+    // Route coverage work into the doc worker while the probe is pending. The
+    // probe barrier query below is FIFO after this command, so it observes the
+    // hub's reaction to the routing.
+    let coverage = node.repo.runtime.ensure_causal_coverage(doc_id.clone());
+    futures::pin_mut!(coverage);
+    assert!(
+        futures::poll!(coverage.as_mut()).is_pending(),
+        "coverage must park on the worker's reconcile"
+    );
+    let barrier_after = node.repo.quiescence_probe_barrier_for_test().await?;
+    assert_ne!(
+        barrier_after, barrier_before,
+        "routing work to a doc worker must restart the pending probe, got barrier {barrier_after:?}"
+    );
+
+    // Release the probe. It may only resolve after the worker has run the
+    // coverage (its fence is enqueued behind it), so the reconcile's response
+    // is already available when the wait returns.
+    hold.resume().await?;
+    wait.as_mut().await?;
+    match futures::poll!(coverage.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result?;
+        }
+        std::task::Poll::Pending => {
+            panic!("quiescence returned before the coverage routed behind its fence ran")
+        }
+    }
+    drop(hold);
     Ok(())
 }

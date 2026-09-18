@@ -1,6 +1,8 @@
 //! FIXME: find a way to avoid blocking on BigSyncMachineCommands
-//! FIXME: wire up reporting for UnkownParts errors
-//! FIXME: the machine will break on UnkownParts actually
+//! A part the peer answers it does not know keeps full sync blocked until the embedder
+//! drops it from the subscription set: the refusal is usually a race, and the machine
+//! does not decide that a part its peer cannot answer for is synced. The answer is
+//! reported once per transition as [`SyncStatEvent::PeerPartUnanswered`].
 
 mod interlude {
     pub use utils_rs::prelude::*;
@@ -214,6 +216,18 @@ structstruck::strike! {
             peer_id: PeerKey,
             part_id: PartKey,
         },
+        /// The peer answered that it does not know this part, so the part has
+        /// no strategy and no cursor, and it keeps full sync blocked until the
+        /// embedder drops it from the subscription set — or the part reaches the
+        /// peer, which is the common case since the answer is usually a race.
+        ///
+        /// Emitted once per transition into the unanswered state: the machine
+        /// re-asks on a timer, and the fact, not the attempt, is what a
+        /// subscriber acts on.
+        PeerPartUnanswered {
+            peer_id: PeerKey,
+            part_id: PartKey,
+        },
         PartFullySynced {
             part_id: PartKey,
         },
@@ -367,6 +381,10 @@ structstruck::strike! {
                 /// (Pending decision task) — an undecided part must block
                 /// full sync.
                 pending: bool,
+                /// True once the peer has answered that it does not know this
+                /// part. Not a negotiation in flight: it is the answer, and the
+                /// embedder owns whether the part stays subscribed.
+                unanswered: bool,
             }>,
             fully_synced_parts: Set<PartKey>,
         }>,
@@ -581,11 +599,32 @@ impl SyncStatMachine {
         let peer_state = self.peers.entry(peer_id.clone()).or_default();
         let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
         peer_part_state.pending = pending;
+        if !pending {
+            // A decided strategy is the answer to what the event reported.
+            peer_part_state.unanswered = false;
+        }
         if pending {
             self.__check_peer_part_stale(peer_id, part_id);
         } else {
             self.__check_peer_part_synced(peer_id, part_id);
         }
+    }
+
+    /// Record the peer's answer that it does not know `part_id`.
+    ///
+    /// Reports the fact once per transition. The part is deliberately left
+    /// blocking full sync: the machine does not decide that a part the peer
+    /// cannot answer for is synced, so the embedder removes it from the
+    /// subscription set when that is its policy, or leaves it to resolve.
+    fn mark_peer_part_unanswered(&mut self, peer_id: PeerKey, part_id: PartKey) {
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        let peer_part_state = peer_state.parts.entry(part_id.clone()).or_default();
+        if peer_part_state.unanswered {
+            return;
+        }
+        peer_part_state.unanswered = true;
+        self.stat_evts
+            .push(SyncStatEvent::PeerPartUnanswered { peer_id, part_id });
     }
 
     fn __check_peer_part_synced(&mut self, peer_id: PeerKey, part_id: PartKey) {
@@ -1212,6 +1251,8 @@ impl BigSyncMachine {
                         part_id.clone(),
                         false,
                     );
+                    self.stat_machine
+                        .mark_peer_part_unanswered(peer_id.clone(), part_id.clone());
                     parts_retry.insert(part_id);
                     continue;
                 }
@@ -1340,6 +1381,10 @@ impl BigSyncMachine {
             DecidePeerStrategyErrorDeets::ListError(ListPartsError::UnkownParts {
                 unkown_parts,
             }) => {
+                for part_id in &unkown_parts {
+                    self.stat_machine
+                        .mark_peer_part_unanswered(peer_id.clone(), part_id.clone());
+                }
                 // The peer does not (yet) know these parts — e.g. its part
                 // row appears after the route was set (a pending want on the
                 // remote is only advertiseable once its part exists). Do NOT
@@ -1476,6 +1521,12 @@ impl BigSyncMachine {
     /// re-issued request keeps the peer-level replay-done stat honest.
     fn spawn_replay_page(&mut self, peer_id: PeerKey, target: SubscriptionTarget, caught_up: bool) {
         let route = ReplayRoute::of(&target);
+        tracing::debug!(
+            peer_id = %peer_id,
+            ?target,
+            caught_up,
+            "spawning replay page"
+        );
         let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
             peer_id: peer_id.clone(),
             target,
@@ -1601,11 +1652,23 @@ impl BigSyncMachine {
         }
         let caught_up;
         let mut delayed_retry = None;
+        // The page's own position to ask from again, when it answered with one.
+        let mut page_resume = None;
         match result.outcome {
             ReplayPageOutcome::Events(page) => {
-                // No resume point means the peer's log is caught up as of the
-                // last event: the paged form of the old replay barrier.
-                caught_up = page.next_cursor.is_none();
+                // The verdict is the page's own: only its `drained` says the peer's
+                // replay is exhausted. A page that merely ran out of its hold is not
+                // caught up and must be asked again.
+                caught_up = page.drained;
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    ?target,
+                    events = page.events.len(),
+                    resume = page.resume,
+                    drained = page.drained,
+                    "replay page answered"
+                );
+                page_resume = Some(page.resume);
                 for evt in page.events {
                     peer_state
                         .cursor_machine
@@ -1613,22 +1676,33 @@ impl BigSyncMachine {
                 }
             }
             ReplayPageOutcome::UnknownPart => {
-                // The peer no longer (or does not yet) know this part. Keep the
-                // route and retry slowly: a restarting peer re-creates its part
-                // rows, and dropping the route here would tear it permanently.
+                // The peer no longer (or does not yet) know this part. That is not the
+                // part being synced: record it as unanswered so full sync stays blocked,
+                // keep the route and retry slowly — a restarting peer re-creates its
+                // part rows, and dropping the route here would tear it permanently.
                 tracing::debug!(
                     peer_id = %peer_id,
                     ?target,
                     "replay page saw an unknown part; keeping route and retrying",
                 );
-                caught_up = true;
+                caught_up = false;
+                if let SubscriptionTarget::Part { part_id, .. } = &target {
+                    self.stat_machine
+                        .mark_peer_part_unanswered(peer_id.clone(), part_id.clone());
+                }
                 delayed_retry = Some(Duration::from_secs(2));
             }
             ReplayPageOutcome::Unauthorized => {
                 // Absent access rows cannot distinguish a revocation from a grant
                 // that has not landed yet, and routes come from the embedder's
                 // part set. Back off rather than tear the route down: dropping it
-                // here would strand a part whose grant is still in flight.
+                // here would strand a part whose grant is still in flight. This
+                // caller is done with the route either way: a peer that will not
+                // serve a part will not serve it later, so there is nothing further
+                // to wait for, and this is deliberately *not* recorded as
+                // unanswered — unlike the unknown-part race above, blocking full
+                // sync on a part this caller may never read hangs every topology
+                // whose access matrix leaves a part unreadable to one side.
                 tracing::debug!(
                     peer_id = %peer_id,
                     ?target,
@@ -1639,7 +1713,22 @@ impl BigSyncMachine {
             }
         }
         self.drain_cursor_machine_cmds(peer_id.clone());
-        let next_target = self.refreshed_replay_target(peer_id.clone(), &target);
+        // A page's own resume is the position to ask from again. A `Part` route resumes
+        // exactly there; an `Object` route keeps resuming from its acknowledged replay
+        // position, which is what re-delivers an event until the object's content sync
+        // settles.
+        let next_target = match (
+            self.refreshed_replay_target(peer_id.clone(), &target),
+            page_resume,
+        ) {
+            (Some(SubscriptionTarget::Part { part_id, .. }), Some(resume)) => {
+                Some(SubscriptionTarget::Part {
+                    part_id,
+                    cursor: resume,
+                })
+            }
+            (next, _) => next,
+        };
         match next_target {
             Some(next_target) => match delayed_retry {
                 Some(delay) => {
@@ -1859,10 +1948,13 @@ impl BigSyncMachine {
                     cursor,
                 } => {
                     // Trim the hint from any in-flight sync task for this
-                    // object; stop it if nothing is left to fetch.
+                    // object. An object-routed task is not obsolete at zero hints —
+                    // its route owes the content (see `SetPeer`) — so only a
+                    // part-routed task with nothing left to fetch stops here.
+                    let object_routed = peer_state.objects.contains(&obj_id);
                     let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
                         worker.part_hints.remove(&part_id);
-                        worker.part_hints.is_empty().then_some(worker.task_id)
+                        (worker.part_hints.is_empty() && !object_routed).then_some(worker.task_id)
                     });
                     if let Some(task_id) = stop_task {
                         let worker = peer_state
@@ -2200,9 +2292,12 @@ impl BigSyncMachine {
                     );
                 }
                 BucketMachineCommand::RemoveObjFromParts { obj_id, part_id } => {
+                    // As in the cursor-strategy arm: an object-routed task stays
+                    // live at zero hints because its route owes the content.
+                    let object_routed = peer_state.objects.contains(&obj_id);
                     let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
                         worker.part_hints.remove(&part_id);
-                        worker.part_hints.is_empty().then_some(worker.task_id)
+                        (worker.part_hints.is_empty() && !object_routed).then_some(worker.task_id)
                     });
                     if let Some(task_id) = stop_task {
                         let worker = peer_state
@@ -2668,22 +2763,13 @@ impl BigSyncMachine {
                 part_hints.remove(&part_id);
             }
             for &cursor in &completion.cursors {
-                // A removal can supersede this cursor while the sync it started
-                // is still in flight, dropping the sync lane. Settling a lane
-                // the waiter no longer owes panics the job board.
-                if !peer_state.cursor_machine.owes_obj_job_lane(
-                    &completion.obj_id,
-                    cursor,
-                    CursorJobCompletionKind::Sync,
-                ) {
-                    tracing::debug!(
-                        peer_id = %evt.peer_id,
-                        obj_id = %completion.obj_id,
-                        cursor,
-                        "sync completion holds a cursor that no longer owes the sync lane",
-                    );
-                    continue;
-                }
+                // The machine decides what this completion settles: the part board
+                // owes a lane only where a part-scoped replay registered it, while
+                // the sync's own acknowledgement belongs to the object. That
+                // acknowledgement is applied for every cursor the backend reports,
+                // so a cursor shared with a removal's membership lane cannot strand
+                // the object route it acknowledges; the membership lane stays owed
+                // until its own task completes.
                 peer_state.cursor_machine.on_obj_sync_job_evt(
                     completion.obj_id.clone(),
                     cursor,
@@ -2813,6 +2899,67 @@ impl BigSyncMachine {
 mod tests {
     use super::*;
 
+    /// A part the peer answers it does not know is reported to the embedder once
+    /// per transition, and it keeps blocking full sync: the machine does not
+    /// decide that a part its peer cannot answer for is synced. Dropping the part
+    /// from the subscription set is the embedder's call.
+    #[test]
+    fn an_unanswered_part_is_reported_once_and_still_blocks_full_sync() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+        machine.drain_stat_evts().for_each(drop);
+
+        let refusal = || DecidePeerStrategyTaskError {
+            peer_id: peer.clone(),
+            deets: DecidePeerStrategyErrorDeets::ListError(ListPartsError::UnkownParts {
+                unkown_parts: vec![part.clone()],
+            }),
+        };
+        let retry = || crate::scheduler::Retry {
+            attempt_no: 0,
+            backoff: Duration::ZERO,
+            queued_at: std::time::Instant::now(),
+        };
+
+        machine.handle_decide_peer_strat_err(1, retry(), refusal());
+        let reported: Vec<_> = machine.drain_stat_evts().collect();
+        assert_eq!(reported.len(), 1, "the answer is a fact, reported once");
+        assert!(
+            matches!(reported[0], SyncStatEvent::PeerPartUnanswered { .. }),
+            "the report is the unanswered part"
+        );
+        assert!(
+            !machine
+                .stat_machine
+                .peer_part_is_fully_synced(peer.clone(), part.clone()),
+            "an unanswered part keeps blocking full sync until the embedder drops it"
+        );
+
+        machine.handle_decide_peer_strat_err(1, retry(), refusal());
+        assert!(
+            machine.drain_stat_evts().next().is_none(),
+            "re-asking the same question is not a new fact"
+        );
+
+        // A strategy landing answers the question, so a later refusal is new.
+        machine
+            .stat_machine
+            .mark_peer_part_pending(peer.clone(), part.clone(), false);
+        machine.drain_stat_evts().for_each(drop);
+        machine.handle_decide_peer_strat_err(1, retry(), refusal());
+        assert_eq!(
+            machine.drain_stat_evts().count(),
+            1,
+            "a later refusal of the same part is reported again"
+        );
+    }
+
     /// A waiter registered for a peer+part must NOT remain stranded after that
     /// peer is removed. `SyncStatMachine::remove_peer` cleans up the peer and
     /// satisfies waiters when their last remaining peer is removed.
@@ -2894,6 +3041,61 @@ mod tests {
                 cursor: 7,
             }),
             "the re-issued page resumes from the acknowledged replay position"
+        );
+    }
+
+    /// Regression guard: an object-target replay registers no part job, so the
+    /// part JobBoard owes nothing for its cursors and its completion has to be
+    /// settled by the claim `object_replays` holds. Dropping that completion left
+    /// `acknowledged` at 0, so the route re-read the object's first page forever.
+    #[test]
+    fn an_object_only_replay_completion_advances_the_route_it_acknowledged() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: [obj.clone()].into(),
+        }));
+        let route = SubscriptionTarget::Object {
+            obj_id: obj.clone(),
+            cursor: 0,
+        };
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 7,
+                    part_ids: Vec::new(),
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 7}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
+
+        // The object-only replay completed: the backend observed it, so the route
+        // it belongs to must resume past it.
+        machine.handle_evt(BigSyncEvent::SyncCompleted(SyncCompletedEvent {
+            task_id,
+            peer_id: peer.clone(),
+            completion: SyncTaskCompletion {
+                obj_id: obj.clone(),
+                deets: SyncCompletionDeets::ChangedObject,
+            },
+        }));
+
+        assert_eq!(
+            machine.refreshed_replay_target(peer, &route),
+            Some(SubscriptionTarget::Object {
+                obj_id: obj,
+                cursor: 7,
+            }),
+            "an object-target replay's completion must advance the route it acknowledged"
         );
     }
 
@@ -3578,6 +3780,134 @@ mod tests {
             machine
                 .drain_stop_queue()
                 .any(|stopped| stopped == removal_task)
+        );
+    }
+
+    /// An object-routed content fetch is not obsolete when a membership removal
+    /// empties its part hints: the *route* owes the content. Stopping the task
+    /// also abandoned the object's replay claim, and object pages are only
+    /// re-issued when a route is rebuilt, so the peer never got the payload.
+    #[test]
+    fn a_removal_keeps_an_object_routed_content_fetch_alive() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: [obj.clone()].into(),
+        }));
+
+        // Touched on the part it sits in, which leaves the worker a hint while
+        // its route is the object's.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 5,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 5}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        assert_eq!(
+            machine.peers[&peer].sync_workers[&obj].part_hints,
+            [part.clone()].into()
+        );
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 6,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+
+        assert!(
+            machine.peers[&peer].sync_workers.contains_key(&obj),
+            "the object route still owes the object's content"
+        );
+        // The claim survived as well: an abandoned claim drops this
+        // acknowledgement, which is what makes the route re-read page one.
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_obj_sync_job_evt(
+                obj.clone(),
+                5,
+                CursorJobCompletionKind::Sync,
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        assert_eq!(
+            machine.refreshed_replay_target(
+                peer.clone(),
+                &SubscriptionTarget::Object {
+                    obj_id: obj.clone(),
+                    cursor: 0,
+                },
+            ),
+            Some(SubscriptionTarget::Object {
+                obj_id: obj.clone(),
+                cursor: 5,
+            }),
+            "the surviving route still acknowledges the replay it was owed"
+        );
+    }
+
+    /// Control for the test above: a worker with no object route is still stopped
+    /// once its last part hint is removed, so this does not make removals inert.
+    #[test]
+    fn a_removal_still_stops_a_part_routed_fetch_with_no_hints_left() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 5,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 5}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        assert!(machine.peers[&peer].sync_workers.contains_key(&obj));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 6,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+
+        assert!(
+            !machine.peers[&peer].sync_workers.contains_key(&obj),
+            "a part-routed worker with no hints left is obsolete"
         );
     }
 }

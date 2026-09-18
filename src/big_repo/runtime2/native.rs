@@ -673,8 +673,10 @@ where
                 ed25519_dalek::VerifyingKey::from_bytes(&self.local_peer_id.to_bytes32())
                     .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
+            // The document id can be a peer-supplied object key routed to a worker, so it
+            // converts fallibly; the local peer id is this process's own 32-byte identity.
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -708,7 +710,7 @@ where
                     .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -1396,9 +1398,17 @@ where
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
-            // TEMP-HUNT: has_doc_fetch_access shortcircuit disabled — see below.
             let doc_id = crate::DocumentId::new(sed_id.as_bytes());
-            // match self.has_doc_fetch_access(doc_id).await {
+            // The local fail-fast preflight is DISABLED. Enabling it makes a reader that
+            // has already applied a revocation answer `Policy(DocumentNotFound)` from its
+            // own Keyhive view, before the serving side gets to answer `Unauthorized` at
+            // the wire; whether the local gate should pre-empt the wire's answer is an
+            // open decision, so the gate stays off until that decision is made. The tier6
+            // revocation tests do not settle it: both boot with
+            // `Pair::boot_without_keyhive_notifs`, which keeps the reader's view stale on
+            // purpose, so they assert the wire-level answer without exercising this gate.
+            //
+            // match self.has_doc_fetch_access(doc_id.clone()).await {
             //     Ok(true) => {}
             //     Ok(false) => {
             //         debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
@@ -2178,19 +2188,31 @@ where
     );
     {
         // Route sync completion through the same ordered event channel as
-        // membership events. The Keyhive protocol invokes its sync observer
-        // after applying events; sharing the channel with the keyhive listener
-        // keeps `KeyhiveSyncDone` from overtaking a preceding delegation event
-        // (single FIFO channel).
+        // membership events.
+        //
+        // The durable incorporation sink is awaited *inside*
+        // `KeyhiveProtocol::handle_message` before the exchange is considered
+        // incorporated, and this observer runs in the same task after that
+        // call returns — so in the healthy path the `KeyhiveAdmissionAdvanced`
+        // for this exchange is enqueued ahead of `KeyhiveSyncDone`. That is an
+        // ordering *convenience*, not the guarantee: the hub does not rely on
+        // it. The completion carries the store's admission watermark
+        // (`admitted_seq`) and `finish_keyhive_sync` resolves the round's
+        // waiters only once `admitted_head` has reached it, so a dropped or
+        // reordered admission event can no longer let a caller be told
+        // "reconciled" while this round's admissions are still unprojected.
         let evt_tx = evt_tx.clone();
+        let watermark_store = group_part_store.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerKey::new(*keyhive_peer_id.verifying_key());
+                let admitted_seq = watermark_store.admission_watermark();
                 if evt_tx
                     .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
                         peer_id: peer_id.clone(),
                         request_id,
                         changed,
+                        admitted_seq,
                     })
                     .is_err()
                 {

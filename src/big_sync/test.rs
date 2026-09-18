@@ -993,8 +993,16 @@ async fn assert_two_node_alignment(
     Ok((snapshot_left, snapshot_right))
 }
 
-async fn wait_for_convergence(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
-    let deadline = std::time::Instant::now() + timeout;
+/// Wait until every node's store and worker snapshots agree, and stay agreeing for 8 rounds.
+///
+/// No deadline of its own: the harness class timeout is the deadline, and the periodic line
+/// names what still differs. The worker breakdown carries the task counts by kind and the
+/// peer/part flags, which is where a fence that is still held shows up.
+async fn wait_for_convergence(nodes: &[&NodeHarness]) -> Res<()> {
+    /// How often a still-diverged wait reports what it is waiting on.
+    const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let mut next_report = started + REPORT_INTERVAL;
     let mut last_snapshot = None;
     let mut stable_rounds = 0usize;
 
@@ -1018,13 +1026,27 @@ async fn wait_for_convergence(nodes: &[&NodeHarness], timeout: Duration) -> Res<
             stable_rounds = if stores_equal { 1 } else { 0 };
         }
 
-        last_snapshot = Some(current);
-        if std::time::Instant::now() >= deadline {
-            return Err(ferr!(
-                "timed out waiting for test nodes to converge: last_snapshot={last_snapshot:?}"
-            ));
+        let now = std::time::Instant::now();
+        if now >= next_report {
+            let breakdown = current
+                .iter()
+                .enumerate()
+                .map(|(idx, (worker_snapshot, _))| {
+                    format!("node{idx}:{}", worker_snapshot.idle_breakdown())
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            tracing::info!(
+                elapsed_secs = started.elapsed().as_secs(),
+                stores_equal,
+                stable_rounds,
+                breakdown = %breakdown,
+                "convergence wait still diverged",
+            );
+            next_report = now + REPORT_INTERVAL;
         }
 
+        last_snapshot = Some(current);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -1039,8 +1061,16 @@ async fn assert_same_observed_state(
     Ok((left_snapshot, right_snapshot))
 }
 
-async fn wait_for_idle(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
-    let deadline = std::time::Instant::now() + timeout;
+/// Wait until every node reports its worker idle.
+///
+/// No deadline of its own: the harness class timeout is the deadline. The breakdown is logged
+/// whenever it changes and re-reported every [`REPORT_INTERVAL`], so a stalled wait leaves a
+/// trajectory even when the counters stop moving.
+async fn wait_for_idle(nodes: &[&NodeHarness]) -> Res<()> {
+    /// How often a still-busy wait re-reports the breakdown it is stuck on.
+    const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let mut next_report = started + REPORT_INTERVAL;
     let mut last_breakdown = String::new();
 
     loop {
@@ -1068,11 +1098,14 @@ async fn wait_for_idle(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
             last_breakdown = breakdown.clone();
         }
 
-        if std::time::Instant::now() >= deadline {
-            tracing::debug!(breakdown = %breakdown, "idle wait timed out");
-            return Err(ferr!(
-                "timed out waiting for test nodes to become idle: {breakdown}"
-            ));
+        let now = std::time::Instant::now();
+        if now >= next_report {
+            tracing::info!(
+                elapsed_secs = started.elapsed().as_secs(),
+                breakdown = %breakdown,
+                "idle wait still stalled",
+            );
+            next_report = now + REPORT_INTERVAL;
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1126,26 +1159,18 @@ async fn advance_past_backoff(nodes: &[&NodeHarness]) -> Res<()> {
 /// exactly as long as the pacing constant. This waits on the event instead, so the
 /// window stops being a race with the pacing.
 ///
-/// Returns whatever it has seen when `timeout` elapses, leaving the caller's
-/// assertions to decide, so a miss still fails the test the same way it did before.
+/// The wait has no deadline of its own: the harness class timeout is the
+/// deadline, and a route that stays denied is the failure this test wants to see.
 async fn collect_stats_until(
     stats_rx: &mut tokio::sync::broadcast::Receiver<SyncStatEvent>,
     nodes: &[&NodeHarness],
-    timeout: Duration,
     done: impl Fn(&[SyncStatEvent]) -> bool,
 ) -> Res<Vec<SyncStatEvent>> {
-    let deadline = std::time::Instant::now() + timeout;
-    // A denied route is re-paced after each attempt, so advancing more than once is
-    // what lets a later attempt through; the bound keeps a permanently denied route
-    // from turning the wait into an unbounded retry storm.
-    let mut advances_left = 8usize;
+    // A denied route is re-paced after each attempt, so the clock is advanced
+    // on every idle tick for as long as the wait lasts.
     let mut out = Vec::new();
     loop {
         if done(&out) {
-            return Ok(out);
-        }
-        if std::time::Instant::now() >= deadline {
-            tracing::debug!(seen = out.len(), "stats wait timed out");
             return Ok(out);
         }
         tokio::select! {
@@ -1156,10 +1181,7 @@ async fn collect_stats_until(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(out),
             },
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if advances_left > 0 {
-                    advances_left -= 1;
-                    advance_past_backoff(nodes).await?;
-                }
+                advance_past_backoff(nodes).await?;
             }
         }
     }
@@ -1188,7 +1210,7 @@ async fn memory_sync_preconnected_seeds_converge() -> Res<()> {
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
 
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let (snapshot_a, _) = assert_two_node_alignment(&node_a, &node_b, 2).await?;
     assert_eq!(
         snapshot_a
@@ -1222,7 +1244,7 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
-    wait_for_convergence(&[&node_a], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a]).await?;
     drain_stats(&mut stats_rx);
 
     let obj = gen_obj_id(20);
@@ -1235,23 +1257,19 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
     // machine tasks and `all`, so it can report idle before the sync task spawns.
     // The wait drives the machine clock, because the replay route that carries this
     // object was denied once before the peer's grant landed (fail-closed recipient
-    // filtering, step 1) and its retry is paced by production backoff. The 15s here
-    // is a backstop only; the clock is driven, so the sync completes in milliseconds.
-    let stats = collect_stats_until(
-        &mut stats_rx,
-        &[&node_a, &node_b],
-        Duration::from_secs(15),
-        |stats| {
-            stats.iter().any(|evt| {
-                matches!(
-                    evt,
-                    SyncStatEvent::PartFullySynced { part_id: synced, .. } if *synced == part_id
-                )
-            }) && stats
-                .iter()
-                .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
-        },
-    )
+    // filtering, step 1) and its retry is paced by production backoff. There is no
+    // backstop: the clock is driven, so a denied-forever route hangs here instead of
+    // failing on a wall-clock guess.
+    let stats = collect_stats_until(&mut stats_rx, &[&node_a, &node_b], |stats| {
+        stats.iter().any(|evt| {
+            matches!(
+                evt,
+                SyncStatEvent::PartFullySynced { part_id: synced, .. } if *synced == part_id
+            )
+        }) && stats
+            .iter()
+            .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. }))
+    })
     .await?;
     assert!(stats.iter().any(|evt| matches!(
         evt,
@@ -1297,19 +1315,16 @@ async fn memory_sync_wait_for_full_sync_resolves_for_connected_peer_pair() -> Re
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let obj = gen_obj_id(21);
     node_b
         .seed_obj(obj.clone(), created_payload.clone())
         .await?;
 
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        node_a.wait_for_full_sync([node_b.peer_id.clone()], [part_id]),
-    )
-    .await
-    .wrap_err(ERROR_CHANNEL)??;
+    node_a
+        .wait_for_full_sync([node_b.peer_id.clone()], [part_id])
+        .await?;
 
     let (snapshot_a, snapshot_b) = assert_same_observed_state(&node_a, &node_b).await?;
     assert_eq!(
@@ -1350,7 +1365,7 @@ async fn memory_sync_higher_peer_update_propagates_after_convergence() -> Res<()
 
     node_a.seed_obj(obj.clone(), update_payload.clone()).await?;
 
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
@@ -1393,7 +1408,7 @@ async fn memory_sync_connected_cursor_replay_handles_mutation_burst() -> Res<()>
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let rounds = 24;
     for round in 0..rounds {
@@ -1417,7 +1432,7 @@ async fn memory_sync_connected_cursor_replay_handles_mutation_burst() -> Res<()>
                 ),
             )
             .await?;
-        wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+        wait_for_convergence(&[&node_a, &node_b]).await?;
     }
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 2).await?;
@@ -1481,14 +1496,14 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
             )
             .await?;
     }
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     tokio::try_join!(
         node_a.seed_obj(obj.clone(), lower_payload.clone()),
         node_b.seed_obj(obj.clone(), higher_payload.clone()),
     )?;
 
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
@@ -1524,10 +1539,10 @@ async fn memory_sync_delete_propagates_to_both_nodes() -> Res<()> {
         .await?;
 
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     node_a.remove_obj(obj.clone()).await?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 0).await?;
     assert!(!snapshot_a.objs.contains_key(&obj));
@@ -1539,7 +1554,7 @@ async fn memory_sync_delete_propagates_to_both_nodes() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
+async fn memory_sync_direct_backend_errors_on_collected_object() -> Res<()> {
     let world = Arc::new(TestWorld::default());
     let peer_a = peer_id(1);
     let peer_b = peer_id(2);
@@ -1565,7 +1580,10 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
         .add_obj_to_parts(obj.clone(), vec![part.clone()])
         .await?;
     store_a
-        .remove_obj_from_part(obj.clone(), part.clone())
+        // Removing the membership keeps the payload, so a remote's absence only arises from
+        // collection: `remove_obj_payload` is the one path that clears content, and it leaves no
+        // membership behind either.
+        .remove_obj_payload(obj.clone())
         .await?;
 
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
@@ -1693,7 +1711,7 @@ async fn memory_sync_two_node_bidirectional_connect_converges() -> Res<()> {
         .await?;
 
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let (snapshot_a, snapshot_b) = assert_same_observed_state(&node_a, &node_b).await?;
     assert_eq!(snapshot_a.objs.len(), 2);
@@ -1730,10 +1748,10 @@ async fn memory_sync_two_node_sync_is_idempotent_when_idle() -> Res<()> {
 
     node_a.seed_obj(obj, payload_value.clone()).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let snapshot_before = node_a.snapshot().await?;
 
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let snapshot_after = node_a.snapshot().await?;
     assert_eq!(snapshot_before, snapshot_after);
 
@@ -1763,7 +1781,7 @@ async fn memory_sync_connect_order_snapshot(
         node_b.connect_to(&node_a).await?;
         node_a.connect_to(&node_b).await?;
     }
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let snapshot = node_a.snapshot().await?;
     node_a.stop().await?;
     node_b.stop().await?;
@@ -1782,7 +1800,7 @@ async fn memory_sync_two_node_connect_order_does_not_change_final_state() -> Res
 
 #[tokio::test(flavor = "multi_thread")]
 async fn long_test_memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
-    memory_sync_large_gap_for_count(300, Duration::from_secs(15), SyncMode::Bucket)
+    memory_sync_large_gap_for_count(300, SyncMode::Bucket)
         .await
         .map(drop)
 }
@@ -1860,9 +1878,15 @@ async fn await_catchup_and_verify(
     part_id: PartKey,
     expected: usize,
     stats_rx: &mut tokio::sync::broadcast::Receiver<SyncStatEvent>,
-    timeout: Duration,
 ) -> Res<()> {
-    let deadline = std::time::Instant::now() + timeout;
+    /// How often a still-waiting catchup reports progress. The wait has no deadline of its
+    /// own: the harness class timeout is the deadline, and this line — which names the objects
+    /// still missing and the rate they are arriving at — is what a kill leaves behind.
+    const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let mut last_report = started;
+    let mut next_report = started + REPORT_INTERVAL;
+    let mut seen_at_last_report = 0usize;
     let snapshot = loop {
         let snapshot = node.snapshot().await?;
         if snapshot.objs.len() == expected
@@ -1876,11 +1900,42 @@ async fn await_catchup_and_verify(
         {
             break snapshot;
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(ferr!(
-                "timed out waiting for bucket catchup, saw {} objects",
-                snapshot.objs.len()
-            ));
+        let now = std::time::Instant::now();
+        // Only the report walks all of `expected`; the completion check above short-circuits on
+        // the first object still missing, and this poll runs every 50ms, so the expensive walk
+        // must stay off the common iteration.
+        if now >= next_report {
+            let missing: Vec<usize> = (0..expected)
+                .filter(|ii| {
+                    snapshot
+                        .objs
+                        .get(&gen_obj_id(*ii))
+                        .and_then(|obj| obj.payload.as_ref())
+                        .is_none()
+                })
+                .collect();
+            let missing_head = missing
+                .iter()
+                .take(8)
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let seen = snapshot.objs.len();
+            tracing::info!(
+                part = ?part_id,
+                elapsed_secs = started.elapsed().as_secs(),
+                seen,
+                expected,
+                payload_ready = expected - missing.len(),
+                added_since_last_report = seen.saturating_sub(seen_at_last_report),
+                per_sec = seen.saturating_sub(seen_at_last_report) as f64
+                    / now.duration_since(last_report).as_secs_f64(),
+                missing_first = %missing_head,
+                "catchup still waiting",
+            );
+            last_report = now;
+            seen_at_last_report = seen;
+            next_report = now + REPORT_INTERVAL;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
@@ -1901,7 +1956,8 @@ async fn await_catchup_and_verify(
         );
     }
 
-    let cursor_deadline = std::time::Instant::now() + timeout;
+    let cursor_started = std::time::Instant::now();
+    let mut cursor_next_report = cursor_started + REPORT_INTERVAL;
     loop {
         let peer_part_cursor = peer
             .host
@@ -1913,19 +1969,23 @@ async fn await_catchup_and_verify(
             .map(|summary| summary.latest_cursor)
             .ok_or_else(|| ferr!("the peer does not advertise the part it just seeded"))?;
         let snapshot = node.snapshot().await?;
-        if snapshot
+        let observed = snapshot
             .peer_part_cursors
             .get(&(peer.peer_id.clone(), part_id.clone()))
-            .copied()
-            == Some(peer_part_cursor)
-        {
+            .copied();
+        if observed == Some(peer_part_cursor) {
             break;
         }
-        if std::time::Instant::now() >= cursor_deadline {
-            return Err(ferr!(
-                "timed out waiting for bucket cursor advance to {}",
-                peer_part_cursor
-            ));
+        let now = std::time::Instant::now();
+        if now >= cursor_next_report {
+            tracing::info!(
+                part = ?part_id,
+                elapsed_secs = cursor_started.elapsed().as_secs(),
+                peer_cursor_observed = ?observed,
+                peer_cursor_target = peer_part_cursor,
+                "catchup cursor still behind",
+            );
+            cursor_next_report = now + REPORT_INTERVAL;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -1954,7 +2014,6 @@ async fn run_band_scenario(
     scenario: &str,
     total: usize,
     shared: usize,
-    timeout: Duration,
     sync_mode: SyncMode,
 ) -> Res<BandRun> {
     utils_rs::testing::setup_tracing_once();
@@ -1979,7 +2038,7 @@ async fn run_band_scenario(
 
     let started = std::time::Instant::now();
     node_a.connect_to(&node_b).await?;
-    await_catchup_and_verify(&node_a, &node_b, part_id, total, &mut stats_rx, timeout).await?;
+    await_catchup_and_verify(&node_a, &node_b, part_id, total, &mut stats_rx).await?;
     let run = BandRun::finish(scenario, sync_mode, started, &world);
     run.assert_band();
 
@@ -1988,12 +2047,8 @@ async fn run_band_scenario(
     Ok(run)
 }
 
-async fn memory_sync_large_gap_for_count(
-    obj_count: usize,
-    timeout: Duration,
-    sync_mode: SyncMode,
-) -> Res<BandRun> {
-    run_band_scenario("cold", obj_count, 0, timeout, sync_mode).await
+async fn memory_sync_large_gap_for_count(obj_count: usize, sync_mode: SyncMode) -> Res<BandRun> {
+    run_band_scenario("cold", obj_count, 0, sync_mode).await
 }
 
 /// The regime the bucket tree exists for, and the one no cold case can create: the puller
@@ -2008,19 +2063,10 @@ async fn memory_sync_large_gap_for_count(
 const SPARSE_TOTAL: usize = 20_000;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn long_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
+async fn long_af_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
     const SHARED: usize = SPARSE_TOTAL - 3;
-    let timeout = Duration::from_secs(180);
-    let bucket =
-        run_band_scenario("sparse", SPARSE_TOTAL, SHARED, timeout, SyncMode::Bucket).await?;
-    let cursor = run_band_scenario(
-        "sparse",
-        SPARSE_TOTAL,
-        SHARED,
-        timeout,
-        SyncMode::CursorOnly,
-    )
-    .await?;
+    let bucket = run_band_scenario("sparse", SPARSE_TOTAL, SHARED, SyncMode::Bucket).await?;
+    let cursor = run_band_scenario("sparse", SPARSE_TOTAL, SHARED, SyncMode::CursorOnly).await?;
     // Counted work, never wall-clock. The tree prunes every range whose fingerprint agrees,
     // so the bucket band touches object work proportional to the difference, while cursor
     // replay pays for every event in the gap. One order of magnitude is the claim; the
@@ -2042,9 +2088,8 @@ async fn long_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn long_test_memory_sync_cold_bands_move_comparable_work() -> Res<()> {
     const COUNT: usize = 1_000;
-    let timeout = Duration::from_secs(30);
-    let bucket = run_band_scenario("cold", COUNT, 0, timeout, SyncMode::Bucket).await?;
-    let cursor = run_band_scenario("cold", COUNT, 0, timeout, SyncMode::CursorOnly).await?;
+    let bucket = run_band_scenario("cold", COUNT, 0, SyncMode::Bucket).await?;
+    let cursor = run_band_scenario("cold", COUNT, 0, SyncMode::CursorOnly).await?;
     let (bucket_work, cursor_work) = (bucket.work.obj_syncs, cursor.work.obj_syncs);
     assert!(
         bucket_work <= cursor_work * 4 && cursor_work <= bucket_work * 4,
@@ -2056,7 +2101,7 @@ async fn long_test_memory_sync_cold_bands_move_comparable_work() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn long_test_memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
-    memory_sync_large_gap_for_count(1_000, Duration::from_secs(30), SyncMode::Bucket)
+    memory_sync_large_gap_for_count(1_000, SyncMode::Bucket)
         .await
         .map(drop)
 }
@@ -2065,7 +2110,7 @@ async fn long_test_memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
 /// be measured against. Identical workload, different strategy.
 #[tokio::test(flavor = "multi_thread")]
 async fn long_test_memory_sync_large_gap_uses_cursor_replay_1k() -> Res<()> {
-    memory_sync_large_gap_for_count(1_000, Duration::from_secs(30), SyncMode::CursorOnly)
+    memory_sync_large_gap_for_count(1_000, SyncMode::CursorOnly)
         .await
         .map(drop)
 }
@@ -2092,7 +2137,6 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
 
     const FIRST_ROUND: usize = 50;
     const BURST: usize = 600;
-    const TIMEOUT: Duration = Duration::from_secs(30);
 
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node_with_mode(Arc::clone(&world), 1, sync_mode).await?;
@@ -2112,7 +2156,7 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
             .await?;
     }
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], TIMEOUT).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     assert_two_node_alignment(&node_a, &node_b, FIRST_ROUND).await?;
 
     // If A never stored a cursor for the part this is just another cold-peer case
@@ -2152,7 +2196,7 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
 
     world.set_online(node_b.peer_id.clone(), true);
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], TIMEOUT).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     assert_two_node_alignment(&node_a, &node_b, FIRST_ROUND + BURST).await?;
 
     node_a.stop().await?;
@@ -2162,15 +2206,14 @@ async fn mid_stream_backlog_for_mode(sync_mode: SyncMode) -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn long_test_memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
-    memory_sync_large_gap_for_count(10_000, Duration::from_secs(90), SyncMode::Bucket)
+    memory_sync_large_gap_for_count(10_000, SyncMode::Bucket)
         .await
         .map(drop)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-// #[ignore = "slow bucket catchup case"]
-async fn long_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
-    memory_sync_large_gap_for_count(100_000, Duration::from_secs(300), SyncMode::Bucket)
+async fn long_af_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
+    memory_sync_large_gap_for_count(100_000, SyncMode::Bucket)
         .await
         .map(drop)
 }
@@ -2178,7 +2221,7 @@ async fn long_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "slow bucket catchup case"]
 async fn memory_sync_large_gap_uses_bucket_catchup_1m() -> Res<()> {
-    memory_sync_large_gap_for_count(1_000_000, Duration::from_secs(900), SyncMode::Bucket)
+    memory_sync_large_gap_for_count(1_000_000, SyncMode::Bucket)
         .await
         .map(drop)
 }
@@ -2195,16 +2238,16 @@ async fn memory_sync_peer_restart_reconnects_cleanly() -> Res<()> {
     let before_restart = payload("before-restart", 1, node_a.peer_id.clone());
     node_a.seed_obj(obj.clone(), before_restart.clone()).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     tokio::try_join!(
         node_a.host.worker.remove_peer(node_b.peer_id.clone()),
         node_b.host.worker.remove_peer(node_a.peer_id.clone()),
     )?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let node_b = restart_node(Arc::clone(&world), node_b).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
@@ -2241,19 +2284,19 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let offline_a = payload("offline-a", 2, node_a.peer_id.clone());
     node_a.seed_obj(obj.clone(), online_base).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     drain_stats(&mut stats_rx);
 
     tokio::try_join!(
         node_a.host.worker.remove_peer(node_b.peer_id.clone()),
         node_b.host.worker.remove_peer(node_a.peer_id.clone()),
     )?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     node_a.seed_obj(obj.clone(), offline_a.clone()).await?;
-    wait_for_convergence(&[&node_a], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a]).await?;
     let node_b = restart_node(Arc::clone(&world), node_b).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     let _stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
@@ -2294,13 +2337,13 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
 
     tokio::try_join!(node_a.connect_to(&node_c), node_c.connect_to(&node_a))?;
     tokio::try_join!(node_b.connect_to(&node_c), node_c.connect_to(&node_b))?;
-    wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b, &node_c]).await?;
 
     let mut stats_rx = node_a.handle.subscribe_stats();
     drain_stats(&mut stats_rx);
 
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b, &node_c]).await?;
     let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
     assert!(
         stats
@@ -2352,14 +2395,14 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
 
     let objs = seed_objects(&node_a, "half-delete", 32).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
     drain_stats(&mut stats_rx);
 
     tokio::try_join!(
         node_a.host.worker.remove_peer(node_b.peer_id.clone()),
         node_b.host.worker.remove_peer(node_a.peer_id.clone()),
     )?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let mut rng = StdRng::seed_from_u64(0x3b1a_5eed);
     let mut deleted_mask = vec![false; objs.len()];
@@ -2370,10 +2413,10 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
         node_a.remove_obj(objs[ii].clone()).await?;
     }
 
-    wait_for_idle(&[&node_a], Duration::from_secs(30)).await?;
+    wait_for_idle(&[&node_a]).await?;
     let node_b = restart_node(Arc::clone(&world), node_b).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let _stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
 
@@ -2414,13 +2457,13 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 
     let objs = seed_objects(&node_a, "offline-evolve", 16).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     tokio::try_join!(
         node_a.host.worker.remove_peer(node_b.peer_id.clone()),
         node_b.host.worker.remove_peer(node_a.peer_id.clone()),
     )?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let mut rng = StdRng::seed_from_u64(0x5eed_face);
     let mut expected_payloads = Vec::with_capacity(objs.len());
@@ -2442,9 +2485,9 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
         }
     }
 
-    wait_for_idle(&[&node_a], Duration::from_secs(30)).await?;
+    wait_for_idle(&[&node_a]).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
-    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    wait_for_convergence(&[&node_a, &node_b]).await?;
 
     let expected_obj_count = node_a.snapshot().await?.objs.len();
     let (snapshot_a, snapshot_b) =

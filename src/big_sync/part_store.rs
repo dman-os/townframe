@@ -96,9 +96,14 @@ impl PartRevisionReader {
             (PartFrontierKey::Part { obj_id, part_id }, value)
                 if self.selects_object(&obj_id) && !self.selects_part(&part_id) =>
             {
+                // Content only: a touch carries the object's payload, and an object reader that
+                // selected neither the part nor its own part lane has nothing else to book.
                 let payload = match value {
                     Some(PartEvent::Changed(event)) => event.payload,
-                    Some(PartEvent::Removed(_)) | None => serde_json::Value::Null,
+                    // A part-level deletion is a part-lane fact. Inventing a payload-less
+                    // `Changed` here would mean *resolve the membership*, which the cursor
+                    // machine books as a content delivery.
+                    Some(PartEvent::Removed(_)) | None => return None,
                 };
                 Some(SubEvent::Changed(ObjChanged {
                     cursor: revision,
@@ -248,6 +253,22 @@ impl Default for HostPartStoreConfig {
 //     Applied,
 //     Stale,
 // }
+
+/// Bytes-and-counts summary used by an embedder's janitorial loop: how much payload the scope is
+/// holding, how many objects are candidates for collection, and how much of the membership state
+/// is tombstones.
+pub struct PartStoreStats {
+    /// Objects holding a payload.
+    pub payload_objects: u64,
+    /// Bytes of stored payload, counted over the stored encoding.
+    pub payload_bytes: u64,
+    /// Objects holding a payload and in no part: the GC candidates.
+    pub partless_objects: u64,
+    /// Membership rows naming a part whose member is present.
+    pub live_rows: u64,
+    /// Membership rows naming a part whose member is removed (tombstones).
+    pub dead_rows: u64,
+}
 
 #[async_trait]
 pub trait HostPartStore: Send + Sync {
@@ -421,12 +442,13 @@ pub trait HostPartStore: Send + Sync {
         // carry, so a zero limit carries none. Answering here, before anything is
         // drained, is what makes the bound deterministic: comparing after a push
         // would hand back one event whenever one happened to be waiting. The
-        // resume point stays the caller's own position rather than `None`, because
-        // nothing was drained and an empty page may not claim caught-up.
+        // resume point stays the caller's own position, because nothing was
+        // drained and an empty page may not claim caught-up.
         if limit == 0 {
             return Ok(ReplayPageOutcome::Events(PartPage {
                 events: Vec::new(),
-                next_cursor: Some(cursor),
+                resume: cursor,
+                drained: false,
             }));
         }
         let limit = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
@@ -469,17 +491,13 @@ pub trait HostPartStore: Send + Sync {
         }
         Ok(ReplayPageOutcome::Events(PartPage {
             events,
-            // `Some` means more is waiting, so the caller resumes from it.
-            // `None` means the log is caught up as of the last event.
-            //
-            // NOTE: an empty page that expires on the hold *without* the replay half
-            // having said `ReplayComplete` also lands here as `None`, which reads as
-            // caught up but is only "nothing arrived in time". That is deliberately
-            // left as-is here: a caller re-issuing from a cursor derived from a
-            // page that returned nothing would re-drive the responder's replay, and
-            // the verdict wants to come from the replay's own completion rather than
-            // from the page's resume point.
-            next_cursor: if drained { None } else { resume },
+            // The caller's own position when this page carried nothing, otherwise
+            // past the last event it carried.
+            resume: resume.unwrap_or(cursor),
+            // Only the replay half reporting `ReplayComplete` means caught up. A
+            // page that merely ran out of its hold keeps asking; the hold is what
+            // paces it.
+            drained,
         }))
     }
     /// Subscribe a trusted local consumer without remote authorization or
@@ -579,6 +597,19 @@ pub trait HostPartStore: Send + Sync {
     ) -> Res<Option<Vec<PartKey>>> {
         Ok(None)
     }
+
+    /// Drop an object's payload, leaving no membership behind: remove it from every part it is in
+    /// (emitting the same events and frontier updates as `remove_obj_from_part` per part, in one
+    /// transaction), then drop the payload. Idempotent: an unknown object or an object with no payload
+    /// is a no-op. This is the only path that clears content.
+    async fn remove_obj_payload(&self, obj_id: ObjKey) -> Res<()>;
+
+    /// Objects with a payload and no live membership row, ordered by `obj_id`, keyset-paginated:
+    /// pass the last returned key as `after` for the next page. GC candidates.
+    async fn partless_objects(&self, limit: u32, after: Option<ObjKey>) -> Res<Vec<ObjKey>>;
+
+    /// Scope-wide counters for the janitorial loop and for seeing a part's tombstone pressure.
+    async fn part_store_stats(&self) -> Res<PartStoreStats>;
 }
 
 /// The candidate part set an outbound event is about, to be filtered down to the
@@ -650,6 +681,37 @@ pub fn bucket_index_bounds(bucket_id: BuckId) -> (u16, Option<u16>) {
         (upper <= u32::from(u16::MAX)).then_some(upper as u16),
     )
 }
+
+/// The bytes one leaf-page entry adds to its bucket's page on the wire.
+///
+/// An entry is the key, the `dead` flag, and the keyed fingerprint's `u64`. The key is the
+/// only variable-width part — ADR 012 decision 1 makes identity *is* the byte string, so any
+/// length is a valid key — and IRPC encodes messages as postcard, which frames a byte string
+/// as a varint length followed by the bytes. This is that arithmetic and nothing else: a
+/// responder decides what a page costs from the key alone, because the fingerprint hashes the
+/// payload without ever carrying it.
+#[must_use]
+pub fn leaf_entry_wire_bytes(key_len: usize) -> usize {
+    varint_wire_bytes(key_len) + key_len + 1 + 8
+}
+
+/// The bytes postcard spends on a byte string's length prefix.
+fn varint_wire_bytes(value: usize) -> usize {
+    // Base-128 groups, and never fewer than one byte for the zero case.
+    (usize::BITS - value.leading_zeros()).div_ceil(7).max(1) as usize
+}
+
+/// The encoded size one bucket's leaf page is bounded by, whatever `limit_hint` asks for.
+///
+/// `LeafBucketsRequest::limit_hint` bounds entries, and an entry is its key's width, so the rpc
+/// layer's `MAX_BUCKET_LIMIT` (1024) entries of 32-byte keys is ~42 KiB and a page of longer
+/// keys is more: trusting the hint alone leaves the per-page cost unbounded. At 64 KiB this
+/// budget holds ~1560 of 32-byte keys, so the entry hint still binds first for ordinary keys
+/// and this budget binds once 1024 entries average wider than ~64 bytes.
+///
+/// A page is never empty: one entry is sent even when it alone exceeds the budget, because a
+/// page with no entries reads as `done` while entries remain, which would strand the tail.
+pub const LEAF_PAGE_BYTE_BUDGET: usize = 64 * 1024;
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -757,10 +819,6 @@ pub mod contract {
             assert!(
                 !live_ids.contains(obj_id),
                 "live and dead object sets must be disjoint"
-            );
-            assert!(
-                store.obj_payload(obj_id.clone()).await?.is_none(),
-                "dead object must not have payload"
             );
             dead_fp = dead_fp.wrapping_add(
                 Fingerprint::new(
@@ -992,6 +1050,9 @@ pub mod host_contract {
     use keyhive_core::access::Access;
     use tokio::time::{Duration, timeout};
 
+    #[cfg(test)]
+    use crate::test_support::ObservedStore;
+
     use super::contract::grant_bucket_read;
 
     #[async_trait]
@@ -1039,6 +1100,51 @@ pub mod host_contract {
             counter = counter
                 .checked_add(1)
                 .expect("some key must hash into the requested bucket");
+        }
+    }
+
+    /// An object key of `key_len` bytes that lands in `bucket_id` at its own level.
+    ///
+    /// [`obj_in_bucket`]'s wide twin: only the leading counter bytes are searched and the tail
+    /// is filler, so a key's *width* is a parameter while the bucket it lands in is still found
+    /// rather than assumed.
+    fn wide_obj_in_bucket(bucket_id: BuckId, key_len: usize, salt: u8) -> ObjKey {
+        assert!(key_len > 4, "the counter needs room in front of the filler");
+        let mut matches: u8 = 0;
+        let mut counter: u32 = 0;
+        loop {
+            let mut bytes = vec![0u8; key_len];
+            bytes[..4].copy_from_slice(&counter.to_be_bytes());
+            let obj_id = ObjKey::new(bytes);
+            if BuckId::from_obj_key(bucket_id.level(), &obj_id) == bucket_id {
+                matches += 1;
+                if matches == salt {
+                    return obj_id;
+                }
+            }
+            counter = counter
+                .checked_add(1)
+                .expect("some key must hash into the requested bucket");
+        }
+    }
+
+    /// A 32-byte key that lands in `bucket_id` and sorts strictly after `after`.
+    ///
+    /// The keyset page resumes at `obj_id > after_id`, so pinning "the byte budget
+    /// stops the page" needs a row the budget rejected to be followed by a narrower
+    /// row that would fit; only a key ordered after the wide one makes skipping it
+    /// observable. The search walks counters upward, so the first match is the next
+    /// key in `obj_id` order.
+    fn narrow_obj_after(bucket_id: BuckId, after: &ObjKey) -> ObjKey {
+        let mut counter: u32 = 0;
+        loop {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&counter.to_be_bytes());
+            let obj_id = ObjKey::new(bytes);
+            if BuckId::from_obj_key(bucket_id.level(), &obj_id) == bucket_id && obj_id > *after {
+                return obj_id;
+            }
+            counter = counter.checked_add(1).expect("some key must sort after");
         }
     }
 
@@ -1118,7 +1224,7 @@ pub mod host_contract {
         assert_peer_cursor_monotonicity_contract(harness).await?;
         assert_obj_occupancy_contract(harness).await?;
         assert_remove_obj_advances_latest_cursor_contract(harness).await?;
-        assert_list_events_next_cursor_exactness_contract(harness).await?;
+        assert_list_events_page_verdict_contract(harness).await?;
         assert_local_revision_reader_contract(harness).await?;
         assert_local_revision_reader_all_contract(harness).await?;
         assert_latest_revision_is_a_read_contract(harness).await?;
@@ -1127,6 +1233,11 @@ pub mod host_contract {
         assert_zero_page_limit_carries_no_events(harness).await?;
         assert_bucket_limit_hints_agree_across_endpoints(harness).await?;
         assert_subscribing_allocates_no_revision_contract(harness).await?;
+        assert_payload_survives_membership_removal_contract(harness).await?;
+        assert_tombstone_added_at_contract(harness).await?;
+        assert_subscribe_part_target_bounds_are_per_target_contract(harness).await?;
+        assert_object_lane_carries_no_membership_contract(harness).await?;
+        assert_mixed_part_and_object_subscription_cursors_are_independent(harness).await?;
         Ok(())
     }
 
@@ -1147,36 +1258,64 @@ pub mod host_contract {
         Ok(())
     }
 
-    /// Materializing an object part allocates no revision: subscribing is not a sync event, so
-    /// the membership row an object subscription derives can only be stamped with a revision the
-    /// store already had.
+    /// A subscribe writes nothing and emits nothing to any other subscriber.
     ///
-    /// The stores differ in whether that row is *also* their keyed-frontier entry — sqlite's
-    /// membership row is, memory keeps its frontier separately — and so they differ in whether a
-    /// subscriber who is behind that revision is told the derived part exists. That is a storage
-    /// layout difference rather than a semantic one, and it is bounded by the read filters: a
-    /// cursor is only advanced by a write, so a store that records the row never delivers it to a
-    /// subscriber that had already passed the revision. What both stores must agree on, and what
-    /// this pins, is that a subscriber asking for an object cannot move the cursor space forward.
+    /// Subscribing is not a sync event: it consumes no revision, creates no frontier entry,
+    /// writes no derived membership row, and hands no event to a subscriber that is already
+    /// caught up. The object route is the interesting one, because it resolves an object's
+    /// containing parts at read time rather than deriving a part for it, so this subscribes to
+    /// the object while the object lives in a part the subscriber and the observer both hold.
     pub async fn assert_subscribing_allocates_no_revision_contract<H>(harness: &H) -> Res<()>
     where
         H: HostPartStoreContractHarness + Sync,
     {
         let store = harness.store();
-        let obj_id = test_obj(240);
-        let subscriber = PeerKey::new([241u8; 32]);
-        store
-            .set_obj_payload(obj_id.clone(), serde_json::json!({"value": "materialize"}))
-            .await?;
-        // The derived part has to be readable, or the subscription is denied before it can
-        // materialize anything.
+        let part = test_part(247);
+        let obj_id = test_obj(248);
+        let subscriber = PeerKey::new([0xd0u8; 32]);
+        let observer = PeerKey::new([0xd1u8; 32]);
+        store.ensure_part(part.clone()).await?;
         store
             .set_part_members(
-                obj_id.object_part_key(),
-                HashMap::from([(subscriber.clone(), Access::Read)]),
+                part.clone(),
+                HashMap::from([
+                    (subscriber.clone(), Access::Read),
+                    (observer.clone(), Access::Read),
+                ]),
             )
             .await?;
+        seed_live_obj(
+            store,
+            obj_id.clone(),
+            payload("subscribe-writes-nothing", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+
         let before = store.latest_revision().await?;
+        let parts_before = store.obj_parts(obj_id.clone()).await?;
+
+        // An observer that is already caught up: anything this subscribe emitted would reach it.
+        let observer_rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: before,
+                    targets: HashSet::from([SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: before,
+                    }]),
+                },
+                observer,
+            )
+            .await??;
+        loop {
+            if matches!(
+                recv_sub_event(&observer_rx).await?,
+                SubEvent::ReplayComplete
+            ) {
+                break;
+            }
+        }
 
         let rx = store
             .subscribe(
@@ -1191,8 +1330,7 @@ pub mod host_contract {
             )
             .await??;
         loop {
-            let event = recv_sub_event(&rx).await?;
-            if matches!(event, SubEvent::ReplayComplete) {
+            if matches!(recv_sub_event(&rx).await?, SubEvent::ReplayComplete) {
                 break;
             }
         }
@@ -1202,6 +1340,317 @@ pub mod host_contract {
             before,
             "subscribing to an object must not allocate a revision"
         );
+        assert_eq!(
+            store.obj_parts(obj_id.clone()).await?,
+            parts_before,
+            "subscribing must not write a derived membership row"
+        );
+        let mut reader = store.open_local_revision_reader_all(before).await??;
+        while let RevisionRead::Entries { entries, .. } = reader
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(1).expect("literal is non-zero"),
+            })
+            .await?
+        {
+            assert!(
+                entries.is_empty(),
+                "subscribing must not create a frontier entry: {entries:?}"
+            );
+        }
+        match timeout(Duration::from_millis(100), observer_rx.recv()).await {
+            Err(_) => {}
+            Ok(Ok(event)) => panic!("a subscribe emitted {event:?} to another subscriber"),
+            Ok(Err(err)) => panic!("the observer's subscription closed: {err}"),
+        }
+        Ok(())
+    }
+
+    /// A payload is never dropped implicitly: removing the object from its last part keeps the
+    /// payload and leaves no membership, and `remove_obj_payload` is what clears it. Both
+    /// directions are asserted, together with the janitorial view that tells the two apart.
+    pub async fn assert_payload_survives_membership_removal_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(251);
+        let obj_id = test_obj(252);
+        store.ensure_part(part.clone()).await?;
+        let payload = payload("payload-outlives-membership", 1);
+        seed_live_obj(
+            store,
+            obj_id.clone(),
+            payload.clone(),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        assert!(
+            !store
+                .partless_objects(u32::MAX, None)
+                .await?
+                .contains(&obj_id),
+            "a live member is not a GC candidate"
+        );
+
+        let before = store.part_store_stats().await?;
+        store
+            .remove_obj_from_part(obj_id.clone(), part.clone())
+            .await?;
+        assert_eq!(
+            store.obj_payload(obj_id.clone()).await?,
+            Some(payload),
+            "removing the object from its last part must not drop the payload"
+        );
+        assert_eq!(store.obj_parts(obj_id.clone()).await?, Vec::new());
+        assert_eq!(store.member_count(part.clone()).await?, 0);
+        assert!(
+            store
+                .partless_objects(u32::MAX, None)
+                .await?
+                .contains(&obj_id),
+            "a payload with no live membership is a GC candidate"
+        );
+        let after = store.part_store_stats().await?;
+        assert_eq!(after.payload_objects, before.payload_objects);
+        assert_eq!(after.payload_bytes, before.payload_bytes);
+        assert_eq!(after.partless_objects, before.partless_objects + 1);
+        assert_eq!(after.live_rows, before.live_rows - 1);
+        assert_eq!(after.dead_rows, before.dead_rows + 1);
+
+        store.remove_obj_payload(obj_id.clone()).await?;
+        assert_eq!(
+            store.obj_payload(obj_id.clone()).await?,
+            None,
+            "remove_obj_payload is the path that clears content"
+        );
+        assert_eq!(store.obj_parts(obj_id.clone()).await?, Vec::new());
+        assert!(
+            !store
+                .partless_objects(u32::MAX, None)
+                .await?
+                .contains(&obj_id),
+            "an object without a payload is not a GC candidate"
+        );
+        let cleared = store.part_store_stats().await?;
+        assert_eq!(cleared.payload_objects, before.payload_objects - 1);
+        assert_eq!(cleared.partless_objects, before.partless_objects);
+        assert_eq!(
+            cleared.dead_rows, after.dead_rows,
+            "clearing the content leaves the tombstone"
+        );
+        // Idempotent: an object with no payload and an unknown object are both no-ops.
+        store.remove_obj_payload(obj_id.clone()).await?;
+        store.remove_obj_payload(test_obj(253)).await?;
+        assert_eq!(store.obj_payload(obj_id).await?, None);
+
+        // Keyset pagination over whatever the scope holds: ordered, one key per page, and the
+        // page after `after` is the next key.
+        let all = store.partless_objects(u32::MAX, None).await?;
+        assert!(
+            all.windows(2).all(|pair| pair[0] < pair[1]),
+            "partless objects come back ordered by obj_id"
+        );
+        let first = store.partless_objects(1, None).await?;
+        assert_eq!(first, all.iter().take(1).cloned().collect::<Vec<_>>());
+        assert_eq!(
+            store.partless_objects(1, first.first().cloned()).await?,
+            all.iter().skip(1).take(1).cloned().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// A `Removed` at cursor `T` reaches a reader at cursor `c` exactly when
+    /// `added_at <= c < T`: a removal for a member the reader never saw as present carries no
+    /// information for it, and one whose add it did see has to arrive. Two subscribers at
+    /// different cursors pin both directions.
+    pub async fn assert_tombstone_added_at_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(254);
+        let obj_id = test_obj(255);
+        let reader_before = PeerKey::new([0xd2u8; 32]);
+        let reader_after = PeerKey::new([0xd3u8; 32]);
+        store.ensure_part(part.clone()).await?;
+        store
+            .set_part_members(
+                part.clone(),
+                HashMap::from([
+                    (reader_before.clone(), Access::Read),
+                    (reader_after.clone(), Access::Read),
+                ]),
+            )
+            .await?;
+        seed_live_obj(
+            store,
+            obj_id.clone(),
+            payload("added-at", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+
+        // The member's own transition is its add, so the cursor it is reported at is the stamp.
+        let added_at = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??
+            .get(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => changed.cursor,
+                PartEvent::Removed(removed) => removed.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        store
+            .remove_obj_from_part(obj_id.clone(), part.clone())
+            .await?;
+        let removed_at = store
+            .list_events(HashSet::from([part.clone()]), added_at, 8)
+            .await??
+            .get(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => changed.cursor,
+                PartEvent::Removed(removed) => removed.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        assert!(
+            removed_at > added_at,
+            "the tombstone cursor is newer than the add it removes"
+        );
+
+        let before = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: 0,
+                    }]),
+                },
+                reader_before,
+            )
+            .await??;
+        assert_eq!(
+            collect_sub_events(&before).await?,
+            vec![SubEvent::ReplayComplete],
+            "a tombstone for a member this reader never saw is not delivered"
+        );
+
+        let after = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: added_at,
+                    targets: HashSet::from([SubscriptionTarget::Part {
+                        part_id: part.clone(),
+                        cursor: added_at,
+                    }]),
+                },
+                reader_after,
+            )
+            .await??;
+        assert_eq!(
+            collect_sub_events(&after).await?,
+            vec![
+                SubEvent::Removed(ObjRemovedFromPart {
+                    cursor: removed_at,
+                    part_id: part,
+                    obj_id,
+                }),
+                SubEvent::ReplayComplete,
+            ],
+            "a reader that saw the add is handed the removal"
+        );
+        Ok(())
+    }
+
+    /// The object lane carries content only: a membership transition is a part-lane fact, so
+    /// removing the object from a part yields no event on the object lane — least of all a
+    /// payload-less `Changed`, which means *resolve the membership* and books as content.
+    pub async fn assert_object_lane_carries_no_membership_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_a = test_part(0xe0);
+        let part_b = test_part(0xe1);
+        let obj_id = test_obj(0xe2);
+        let peer = PeerKey::new([0xe3u8; 32]);
+        for part in [part_a.clone(), part_b.clone()] {
+            store.ensure_part(part.clone()).await?;
+            store
+                .set_part_members(part, HashMap::from([(peer.clone(), Access::Read)]))
+                .await?;
+        }
+        seed_live_obj(
+            store,
+            obj_id.clone(),
+            payload("object-lane", 0),
+            &[part_a.clone(), part_b.clone()],
+        )
+        .await?;
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([SubscriptionTarget::Object {
+                        obj_id: obj_id.clone(),
+                        cursor: 0,
+                    }]),
+                },
+                peer,
+            )
+            .await??;
+        loop {
+            if matches!(recv_sub_event(&rx).await?, SubEvent::ReplayComplete) {
+                break;
+            }
+        }
+
+        // Content does reach the object lane, so the silence below is about membership rather
+        // than about a subscription that is not delivering anything at all. A store is free to
+        // report the object's one change once or once per part it names, so this waits for the
+        // payload rather than counting events.
+        store
+            .set_obj_payload(obj_id.clone(), payload("object-lane", 1))
+            .await?;
+        let mut saw_content = false;
+        while !saw_content {
+            match recv_sub_event(&rx).await? {
+                SubEvent::Changed(changed) => {
+                    assert_eq!(changed.obj_id, obj_id);
+                    assert!(
+                        changed.part_ids.is_empty(),
+                        "an object page reports content, not membership: {:?}",
+                        changed.part_ids
+                    );
+                    saw_content = changed.payload == payload("object-lane", 1);
+                }
+                SubEvent::Removed(removed) => {
+                    panic!("the object lane must not carry a membership removal, got {removed:?}")
+                }
+                SubEvent::ReplayComplete => {}
+            }
+        }
+
+        for part in [part_a, part_b] {
+            store
+                .remove_obj_from_part(obj_id.clone(), part.clone())
+                .await?;
+            match timeout(Duration::from_millis(100), rx.recv()).await {
+                Err(_) => {}
+                Ok(Ok(event)) => panic!(
+                    "removing {part} emitted {event:?} on the object lane, which carries content only"
+                ),
+                Ok(Err(err)) => panic!("the object subscription closed: {err}"),
+            }
+        }
         Ok(())
     }
 
@@ -1355,8 +1804,12 @@ pub mod host_contract {
                 page.events.len()
             );
             assert!(
-                page.next_cursor.is_some(),
+                !page.drained,
                 "a page that carried nothing must not claim caught-up"
+            );
+            assert_eq!(
+                page.resume, 0,
+                "a page that carried nothing resumes from the caller's own cursor"
             );
         }
 
@@ -1643,7 +2096,11 @@ pub mod host_contract {
             panic!("a granted part with nothing to send is an empty page, got {empty:?}");
         };
         assert!(page.events.is_empty(), "this part has nothing to send");
-        assert_eq!(page.next_cursor, None, "and nothing to resume from");
+        assert!(page.drained, "an exhausted replay is the caught-up answer");
+        assert_eq!(
+            page.resume, 0,
+            "and it resumes from the caller's own cursor"
+        );
         Ok(())
     }
 
@@ -2254,7 +2711,8 @@ pub mod host_contract {
             events_before.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
                 events: Vec::new(),
-                next_cursor: None,
+                resume: 0,
+                drained: true,
             }
         );
         store
@@ -2350,7 +2808,8 @@ pub mod host_contract {
             obj,
             payload("late-payload", 99),
         );
-        assert_eq!(page_after.next_cursor, None);
+        assert!(page_after.drained, "the page is short of its limit");
+        assert_eq!(page_after.resume, touched_cursor);
         Ok(())
     }
 
@@ -2577,6 +3036,328 @@ pub mod host_contract {
         Ok(())
     }
 
+    /// The budget's arithmetic, pinned as the framing it claims to be.
+    ///
+    /// [`leaf_entry_wire_bytes`] decides where a page stops, so its numbers are load-bearing: a
+    /// 32-byte key costs 42 bytes (one length group, the flag, and the fingerprint), and the
+    /// length prefix widens at 128 and 16384 bytes.
+    #[test]
+    fn leaf_entry_wire_bytes_matches_the_postcard_framing() {
+        assert_eq!(
+            leaf_entry_wire_bytes(0),
+            10,
+            "a length prefix is paid even for an empty key"
+        );
+        assert_eq!(leaf_entry_wire_bytes(32), 42);
+        assert_eq!(leaf_entry_wire_bytes(127), 137);
+        assert_eq!(
+            leaf_entry_wire_bytes(128),
+            139,
+            "the length prefix widens at 128"
+        );
+        assert_eq!(leaf_entry_wire_bytes(16_384), 16_396, "and again at 16384");
+        assert_eq!(
+            LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(32),
+            1560,
+            "the entry hint of 1024 still binds for 32-byte keys"
+        );
+        assert!(
+            LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(4096) < 1024,
+            "the budget binds for wide keys"
+        );
+    }
+
+    /// A leaf page stops at the byte budget before it stops at the entry hint.
+    ///
+    /// `limit_hint` counts entries and an entry is its key's width, so a page of long keys is
+    /// unbounded work for the peer that receives it. This asks for far more entries than the
+    /// budget allows and asserts that the page stops at the budget, that stopping strands
+    /// nothing — paging with `next_after` still reaches every entry — and that a key wider than
+    /// the whole budget still yields one entry, because a page with no entries reads as `done`
+    /// while entries remain.
+    pub async fn assert_leaf_page_byte_budget_contract<S>(store: &S) -> Res<()>
+    where
+        S: HostPartStore + Sync + ?Sized,
+    {
+        use std::collections::BTreeSet;
+
+        let part = test_part(0xed);
+        let bucket = BuckId::new(1, 5);
+        let seed = FingerprintSeed::new(0x5eed_5eed, 0xb0d6_0b0d);
+        // Twenty 4 KiB keys against the budget: one page cannot hold the bucket, so a full walk
+        // needs two pages and the cap has to resume rather than drop.
+        const WIDE_KEY_LEN: usize = 4096;
+        const WIDE_COUNT: u32 = 20;
+        let per_page = LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(WIDE_KEY_LEN);
+        assert!(
+            per_page >= 2,
+            "the fixture needs more than one entry per page"
+        );
+        assert!(
+            per_page < WIDE_COUNT as usize,
+            "the fixture needs the budget to bind below the hint"
+        );
+
+        store.ensure_part(part.clone()).await?;
+        let subscriber = grant_bucket_read(store, [part.clone()]).await?;
+        let mut expected = BTreeSet::new();
+        for salt in 1..=u8::try_from(WIDE_COUNT).expect(ERROR_IMPOSSIBLE) {
+            let obj_id = wide_obj_in_bucket(bucket, WIDE_KEY_LEN, salt);
+            expected.insert(obj_id.clone());
+            seed_live_obj(
+                store,
+                obj_id,
+                payload("leaf-budget", u64::from(salt)),
+                std::slice::from_ref(&part),
+            )
+            .await?;
+        }
+
+        let mut after = None;
+        let mut seen = BTreeSet::new();
+        let mut pages = 0u32;
+        loop {
+            pages += 1;
+            assert!(pages <= WIDE_COUNT, "a walk must advance: {seen:?}");
+            let page = store
+                .leaf_buckets(
+                    LeafBucketsRequest {
+                        part_id: part.clone(),
+                        since: 0,
+                        buckets: vec![LeafBucketRequest {
+                            buck_id: bucket,
+                            after: after.clone(),
+                        }],
+                        seed,
+                        limit_hint: 1024,
+                    },
+                    subscriber.clone(),
+                )
+                .await??
+                .bucks
+                .remove(&bucket)
+                .expect(ERROR_IMPOSSIBLE);
+            let encoded: usize = page
+                .entries
+                .iter()
+                .map(|entry| leaf_entry_wire_bytes(entry.obj_id.as_bytes().len()))
+                .sum();
+            assert!(
+                encoded <= LEAF_PAGE_BYTE_BUDGET,
+                "every entry here fits the budget, so the page must not exceed it: {encoded} over {} entries",
+                page.entries.len()
+            );
+            if pages == 1 {
+                assert_eq!(
+                    page.entries.len(),
+                    per_page,
+                    "the byte budget binds before a hint of 1024 entries"
+                );
+                assert!(!page.done, "the cap strands nothing");
+                assert_eq!(
+                    page.next_after.clone(),
+                    Some(page.entries.last().expect(ERROR_IMPOSSIBLE).obj_id.clone()),
+                    "a full page resumes after its last entry"
+                );
+            }
+            for entry in &page.entries {
+                seen.insert(entry.obj_id.clone());
+            }
+            if page.done {
+                break;
+            }
+            after = page.next_after.clone();
+        }
+        assert_eq!(
+            seen, expected,
+            "paging past the byte cap reaches every entry"
+        );
+
+        // A key wider than the whole budget: one entry is always sent, so the walk advances
+        // instead of reporting `done` on a page it could not fill.
+        let huge_bucket = BuckId::new(1, 6);
+        let huge = wide_obj_in_bucket(huge_bucket, 80 * 1024, 1);
+        let normal = obj_in_bucket(huge_bucket, 2);
+        seed_live_obj(
+            store,
+            huge.clone(),
+            payload("leaf-huge", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        seed_live_obj(
+            store,
+            normal.clone(),
+            payload("leaf-huge", 2),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        let first_page = store
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: huge_bucket,
+                        after: None,
+                    }],
+                    seed,
+                    limit_hint: 1024,
+                },
+                subscriber.clone(),
+            )
+            .await??
+            .bucks
+            .remove(&huge_bucket)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            first_page.entries.len(),
+            1,
+            "one entry is always sent, even when it alone is over budget"
+        );
+        assert!(
+            !first_page.done,
+            "the entry that did not fit is not reported as done"
+        );
+        let second_page = store
+            .leaf_buckets(
+                LeafBucketsRequest {
+                    part_id: part.clone(),
+                    since: 0,
+                    buckets: vec![LeafBucketRequest {
+                        buck_id: huge_bucket,
+                        after: first_page.next_after.clone(),
+                    }],
+                    seed,
+                    limit_hint: 1024,
+                },
+                subscriber.clone(),
+            )
+            .await??
+            .bucks
+            .remove(&huge_bucket)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(second_page.entries.len(), 1);
+        assert!(second_page.done, "the second page has nothing left");
+        let walked: BTreeSet<_> = first_page
+            .entries
+            .iter()
+            .map(|entry| entry.obj_id.clone())
+            .chain(second_page.entries.iter().map(|entry| entry.obj_id.clone()))
+            .collect();
+        assert_eq!(
+            walked,
+            BTreeSet::from([huge, normal]),
+            "a key wider than the budget still costs one page each way"
+        );
+
+        // The budget must stop the page, not skip ahead. A row the budget rejects has to
+        // be the first row of the next page: skipping it and taking a later, narrower key
+        // would advance `next_after` past it, and the keyset walk could never reach it
+        // again. A wide row that does not fit followed by a narrow row that does is the
+        // shape that separates stopping from skipping — the fixture above uses one width
+        // per bucket, where both behave the same.
+        let stop_bucket = BuckId::new(1, 7);
+        let stop_wide: Vec<ObjKey> = (1..=u8::try_from(per_page + 1).expect(ERROR_IMPOSSIBLE))
+            .map(|salt| wide_obj_in_bucket(stop_bucket, WIDE_KEY_LEN, salt))
+            .collect();
+        let stop_narrow = narrow_obj_after(stop_bucket, stop_wide.last().expect(ERROR_IMPOSSIBLE));
+        let mut stop_expected: BTreeSet<ObjKey> = BTreeSet::new();
+        for (index, obj_id) in stop_wide.iter().enumerate() {
+            stop_expected.insert(obj_id.clone());
+            seed_live_obj(
+                store,
+                obj_id.clone(),
+                payload("leaf-budget-stop", index as u64),
+                std::slice::from_ref(&part),
+            )
+            .await?;
+        }
+        stop_expected.insert(stop_narrow.clone());
+        seed_live_obj(
+            store,
+            stop_narrow,
+            payload("leaf-budget-stop", 0),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+
+        let mut after = None;
+        let mut stop_seen = BTreeSet::new();
+        loop {
+            let page = store
+                .leaf_buckets(
+                    LeafBucketsRequest {
+                        part_id: part.clone(),
+                        since: 0,
+                        buckets: vec![LeafBucketRequest {
+                            buck_id: stop_bucket,
+                            after: after.clone(),
+                        }],
+                        seed,
+                        limit_hint: 1024,
+                    },
+                    subscriber.clone(),
+                )
+                .await??
+                .bucks
+                .remove(&stop_bucket)
+                .expect(ERROR_IMPOSSIBLE);
+            for entry in &page.entries {
+                stop_seen.insert(entry.obj_id.clone());
+            }
+            if page.done {
+                break;
+            }
+            after = page.next_after.clone();
+        }
+        assert_eq!(
+            stop_seen, stop_expected,
+            "the byte budget must stop the page, not skip the row it rejected"
+        );
+        Ok(())
+    }
+
+    /// A payload that outlives its last part is not observable state.
+    ///
+    /// Removing an object from a part keeps its payload by design, and the object route reads
+    /// membership to decide what it may show a peer, so a part-less payload is not part of the
+    /// store's observable contents. The memory store counted it once and the sqlite store did
+    /// not — the divergence this pins.
+    #[cfg(test)]
+    pub(crate) async fn assert_observed_snapshot_excludes_partless_payload(
+        store: &dyn ObservedStore,
+    ) -> Res<()> {
+        let part = test_part(0xee);
+        let obj_id = test_obj(0xef);
+
+        store.ensure_part(part.clone()).await?;
+        seed_live_obj(
+            store,
+            obj_id.clone(),
+            payload("observed", 1),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        assert!(
+            store.observed_snapshot().await?.objs.contains_key(&obj_id),
+            "a live member is observable"
+        );
+        store
+            .remove_obj_from_part(obj_id.clone(), part.clone())
+            .await?;
+        assert_eq!(
+            store.obj_payload(obj_id.clone()).await?,
+            Some(payload("observed", 1)),
+            "the payload outlives its last part"
+        );
+        assert!(
+            !store.observed_snapshot().await?.objs.contains_key(&obj_id),
+            "an object in no part is not remotely deliverable, so it is not observable"
+        );
+        Ok(())
+    }
+
     pub async fn assert_list_events_contract<H>(harness: &H) -> Res<()>
     where
         H: HostPartStoreContractHarness + Sync,
@@ -2620,32 +3401,85 @@ pub mod host_contract {
             other => panic!("unexpected list_events result: {other:?}"),
         }
 
-        let page1 = store
+        // The object joined `part_a` at cursor 2 and left it at cursor 5, so a reader at cursor
+        // 0 never saw it in the part and is not handed the removal (`added_at <= cursor < T`),
+        // while a reader that did see the add is.
+        let page_a_at_zero = store
             .list_events(HashSet::from([part_a.clone()]), 0, 10)
             .await??
             .remove(&part_a)
             .expect(ERROR_IMPOSSIBLE);
-        match &page1.events[..] {
-            [PartEvent::Removed(removed)] => {
-                assert_eq!(removed.part_id, part_a);
-                assert_eq!(removed.obj_id, obj);
-            }
-            other => panic!("unexpected part_a page1: {other:?}"),
-        }
+        assert!(
+            page_a_at_zero.events.is_empty(),
+            "a tombstone for a member this reader never saw is not delivered: {:?}",
+            page_a_at_zero.events
+        );
+        assert!(
+            page_a_at_zero.drained,
+            "a page that carried nothing and had nothing waiting is caught up"
+        );
+        assert_eq!(page_a_at_zero.resume, 0);
 
         let page_b = store
             .list_events(HashSet::from([part_b.clone()]), 0, 10)
             .await??
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
-        match &page_b.events[..] {
+        let part_b_cursor = match &page_b.events[..] {
             [PartEvent::Changed(changed)] => {
                 assert_eq!(changed.part_ids, vec![part_b]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("events-3", 3));
+                changed.cursor
             }
             other => panic!("unexpected latest part_b page: {other:?}"),
+        };
+
+        // The tombstone is delivered from exactly the cursor the member became present on, and no
+        // reader before that boundary is handed it. The boundary is derived from the store rather
+        // than hardcoded, then pinned against the `part_b` write that must follow the add.
+        let latest = store.latest_revision().await?;
+        let mut boundaries = Vec::new();
+        for cursor in 0..=latest {
+            let page = store
+                .list_events(HashSet::from([part_a.clone()]), cursor, 10)
+                .await??
+                .remove(&part_a)
+                .expect(ERROR_IMPOSSIBLE);
+            match page.events[..] {
+                [] => {}
+                [PartEvent::Removed(ref removed)] => {
+                    assert_eq!(removed.part_id, part_a);
+                    assert_eq!(removed.obj_id, obj);
+                    boundaries.push((cursor, removed.cursor));
+                }
+                ref other => panic!("unexpected part_a page at cursor {cursor}: {other:?}"),
+            }
         }
+        assert!(
+            !boundaries.is_empty(),
+            "the tombstone is delivered to some reader: {boundaries:?}"
+        );
+        let (first_delivered, removed_cursor) = boundaries[0];
+        let (last_delivered, _) = *boundaries.last().expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            last_delivered + 1,
+            removed_cursor,
+            "the tombstone stops being delivered at its own cursor: {boundaries:?}"
+        );
+        assert_eq!(
+            boundaries.len() as u64,
+            removed_cursor - first_delivered,
+            "every cursor from the add to the removal is delivered: {boundaries:?}"
+        );
+        assert!(
+            first_delivered > 0,
+            "a reader that never saw the add is not handed the removal"
+        );
+        assert!(
+            first_delivered < part_b_cursor,
+            "the boundary is the add, not a later touch: {first_delivered} vs {part_b_cursor}"
+        );
         Ok(())
     }
 
@@ -3783,6 +4617,255 @@ pub mod host_contract {
         Ok(())
     }
 
+    /// A part target's cursor is resolved against the request's lower bound per target, not once
+    /// for every target in the request.
+    ///
+    /// A reader that saw a membership start and asks from a lower bound below it is still handed
+    /// that member's tombstone, because the target's own cursor wins the `max` — and a sibling
+    /// part asking from that same lower bound is not dragged up to it. A store that resolves one
+    /// bound for the whole request loses the tombstone; a store that folds the targets together
+    /// loses the sibling's earlier row.
+    pub async fn assert_subscribe_part_target_bounds_are_per_target_contract<H>(
+        harness: &H,
+    ) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        /// The newest cursor a part reports from `from` on.
+        async fn last_cursor(
+            store: &dyn HostPartStore,
+            part: &PartKey,
+            from: CursorIndex,
+        ) -> Res<CursorIndex> {
+            let page = store
+                .list_events(HashSet::from([part.clone()]), from, 8)
+                .await??
+                .remove(part)
+                .expect(ERROR_IMPOSSIBLE);
+            Ok(page
+                .events
+                .iter()
+                .map(|event| match event {
+                    PartEvent::Changed(changed) => changed.cursor,
+                    PartEvent::Removed(removed) => removed.cursor,
+                })
+                .max()
+                .expect(ERROR_IMPOSSIBLE))
+        }
+
+        let store = harness.store();
+        let part_a = test_part(0xe4);
+        let part_b = test_part(0xe5);
+        let obj_a = test_obj(0xe6);
+        let obj_b = test_obj(0xe7);
+        let reader = PeerKey::new([0xe8u8; 32]);
+
+        store.ensure_part(part_a.clone()).await?;
+        store.ensure_part(part_b.clone()).await?;
+        for part in [part_a.clone(), part_b.clone()] {
+            store
+                .set_part_members(part, HashMap::from([(reader.clone(), Access::Read)]))
+                .await?;
+        }
+
+        // The sibling's row lands first, so a store that folded the targets onto one bound
+        // would page it from `added_at` and skip it.
+        seed_live_obj(
+            store,
+            obj_b.clone(),
+            payload("per-target-b", 1),
+            std::slice::from_ref(&part_b),
+        )
+        .await?;
+        let sibling_cursor = last_cursor(store, &part_b, 0).await?;
+        seed_live_obj(
+            store,
+            obj_a.clone(),
+            payload("per-target-a", 1),
+            std::slice::from_ref(&part_a),
+        )
+        .await?;
+        let added_at = last_cursor(store, &part_a, 0).await?;
+        store
+            .remove_obj_from_part(obj_a.clone(), part_a.clone())
+            .await?;
+        let removed_at = last_cursor(store, &part_a, added_at).await?;
+        assert!(
+            removed_at > added_at,
+            "the tombstone cursor is newer than the add it removes"
+        );
+        assert!(
+            sibling_cursor < added_at,
+            "the sibling's row must sit below the other target's cursor, or this case proves nothing"
+        );
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([
+                        SubscriptionTarget::Part {
+                            part_id: part_a.clone(),
+                            cursor: added_at,
+                        },
+                        SubscriptionTarget::Part {
+                            part_id: part_b.clone(),
+                            cursor: 0,
+                        },
+                    ]),
+                },
+                reader,
+            )
+            .await??;
+        let events = collect_sub_events(&rx).await?;
+
+        assert!(
+            events.contains(&SubEvent::Removed(ObjRemovedFromPart {
+                cursor: removed_at,
+                part_id: part_a.clone(),
+                obj_id: obj_a.clone(),
+            })),
+            "a target asking from its own cursor keeps the tombstone below the shared lower bound: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SubEvent::Changed(changed)
+                    if changed.obj_id == obj_b && changed.part_ids == vec![part_b.clone()]
+            )),
+            "a sibling part asking from the lower bound is not dragged up to another target's cursor: {events:?}"
+        );
+        Ok(())
+    }
+
+    /// In a mixed subscription the object route keeps its own position: part events do not
+    /// advance it.
+    ///
+    /// A part target asking from far ahead must not cost the object route its backlog. The routes
+    /// have separate cursors, so resolving one bound for the request as a whole silently drops
+    /// the object's events that sit below the part's.
+    pub async fn assert_mixed_part_and_object_subscription_cursors_are_independent<H>(
+        harness: &H,
+    ) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(0xe9);
+        let obj_backlog = test_obj(0xea);
+        let obj_other = test_obj(0xeb);
+        let reader = PeerKey::new([0xecu8; 32]);
+
+        store.ensure_part(part.clone()).await?;
+        store
+            .set_part_members(
+                part.clone(),
+                HashMap::from([(reader.clone(), Access::Read)]),
+            )
+            .await?;
+        seed_live_obj(
+            store,
+            obj_backlog.clone(),
+            payload("mixed", 0),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        let first = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => changed.cursor,
+                PartEvent::Removed(removed) => removed.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        store
+            .set_obj_payload(obj_backlog.clone(), payload("mixed", 1))
+            .await?;
+        let second = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => changed.cursor,
+                PartEvent::Removed(removed) => removed.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        // A second object puts the part's own cursor above the whole backlog.
+        seed_live_obj(
+            store,
+            obj_other.clone(),
+            payload("mixed", 2),
+            std::slice::from_ref(&part),
+        )
+        .await?;
+        let part_cursor = store
+            .list_events(HashSet::from([part.clone()]), 0, 8)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => changed.cursor,
+                PartEvent::Removed(removed) => removed.cursor,
+            })
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        assert!(
+            first < second && second < part_cursor,
+            "the part's newest cursor must sit above the object's backlog: {first} {second} {part_cursor}"
+        );
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    lower_bound: 0,
+                    targets: HashSet::from([
+                        SubscriptionTarget::Part {
+                            part_id: part.clone(),
+                            cursor: part_cursor,
+                        },
+                        SubscriptionTarget::Object {
+                            obj_id: obj_backlog.clone(),
+                            cursor: 0,
+                        },
+                    ]),
+                },
+                reader,
+            )
+            .await??;
+        let events = collect_sub_events(&rx).await?;
+        let backlog: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SubEvent::Changed(changed) if changed.obj_id == obj_backlog => Some(changed.cursor),
+                _ => None,
+            })
+            .collect();
+        // Which of the object's own events a route reports is its projection's business — the
+        // part-less write and the member write can both appear — but the route must not have been
+        // dragged up to the part target's cursor, which would leave the backlog empty.
+        assert_eq!(
+            backlog.iter().max().copied(),
+            Some(second),
+            "the object route replays the object's own events below the part target's cursor: {events:?}"
+        );
+        assert!(
+            backlog.iter().all(|cursor| *cursor < part_cursor),
+            "no event above the part target's cursor is part of the backlog: {events:?}"
+        );
+        Ok(())
+    }
+
     pub async fn assert_list_events_pagination_contract<H>(harness: &H) -> Res<()>
     where
         H: HostPartStoreContractHarness + Sync,
@@ -3803,7 +4886,7 @@ pub mod host_contract {
                 .await?;
         }
 
-        // Paginate with limit=1, following next_cursor until exhaustion.
+        // Paginate with limit=1, following `resume` until the page reports drained.
         let mut cursor = 0;
         let mut collected: Vec<(CursorIndex, ObjKey)> = Vec::new();
         loop {
@@ -3822,9 +4905,9 @@ pub mod host_contract {
                     }
                 }
             }
-            match page.next_cursor {
-                Some(next) => cursor = next,
-                None => break,
+            cursor = page.resume;
+            if page.drained {
+                break;
             }
         }
 
@@ -3943,7 +5026,7 @@ pub mod host_contract {
         Ok(())
     }
 
-    pub async fn assert_list_events_next_cursor_exactness_contract<H>(harness: &H) -> Res<()>
+    pub async fn assert_list_events_page_verdict_contract<H>(harness: &H) -> Res<()>
     where
         H: HostPartStoreContractHarness + Sync,
     {
@@ -3957,15 +5040,16 @@ pub mod host_contract {
 
         // Seed 2 objects
         store
-            .set_obj_payload(obj1.clone(), payload("exactness", 1))
+            .set_obj_payload(obj1.clone(), payload("verdict", 1))
             .await?;
         store.add_obj_to_parts(obj1, vec![part.clone()]).await?;
         store
-            .set_obj_payload(obj2.clone(), payload("exactness", 2))
+            .set_obj_payload(obj2.clone(), payload("verdict", 2))
             .await?;
         store.add_obj_to_parts(obj2, vec![part.clone()]).await?;
 
-        // Query exactly limit=2 matching 2 events: next_cursor MUST be None
+        // limit=2 matching exactly 2 events: the page fills its limit, so it is not
+        // drained (a successor may still exist), and it resumes past its last event.
         let page_exact = store
             .list_events(HashSet::from([part.clone()]), 0, 2)
             .await??
@@ -3973,18 +5057,44 @@ pub mod host_contract {
             .expect(ERROR_IMPOSSIBLE);
 
         assert_eq!(page_exact.events.len(), 2);
-        assert_eq!(
-            page_exact.next_cursor, None,
-            "next_cursor must be None when no further events remain beyond limit page"
+        assert!(
+            !page_exact.drained,
+            "a page that filled its limit may still have a successor"
         );
+        let last_exact = match page_exact.events.last().expect(ERROR_IMPOSSIBLE) {
+            PartEvent::Changed(changed) => changed.cursor,
+            PartEvent::Removed(_) => panic!("a single-object part yields Changed"),
+        };
+        assert_eq!(
+            page_exact.resume, last_exact,
+            "a full page resumes past its last event"
+        );
+
+        // Asking again from that resume comes up short, and only there does the
+        // verdict turn caught-up.
+        let page_exact_tail = store
+            .list_events(HashSet::from([part.clone()]), page_exact.resume, 2)
+            .await??
+            .remove(&part)
+            .expect(ERROR_IMPOSSIBLE);
+        assert!(
+            page_exact_tail.events.is_empty(),
+            "nothing waits beyond the exact page"
+        );
+        assert!(
+            page_exact_tail.drained,
+            "the short page is where caught-up is learned"
+        );
+        assert_eq!(page_exact_tail.resume, page_exact.resume);
 
         // Seed 3rd object
         store
-            .set_obj_payload(obj3.clone(), payload("exactness", 3))
+            .set_obj_payload(obj3.clone(), payload("verdict", 3))
             .await?;
         store.add_obj_to_parts(obj3, vec![part.clone()]).await?;
 
-        // Query limit=2 when 3 events exist: next_cursor MUST be Some
+        // limit=2 when 3 events exist: a full page that stops short of drained, and
+        // resumes past the last event it carried.
         let page_more = store
             .list_events(HashSet::from([part.clone()]), 0, 2)
             .await??
@@ -3992,26 +5102,21 @@ pub mod host_contract {
             .expect(ERROR_IMPOSSIBLE);
 
         assert_eq!(page_more.events.len(), 2);
-        let next = page_more
-            .next_cursor
-            .expect("next_cursor must be Some when matching events remain beyond limit page");
+        assert!(!page_more.drained, "more events wait beyond the page");
 
-        // Fetching page starting from next_cursor gets the 3rd event with next_cursor == None
+        // Fetching from `resume` gets the 3rd event and is short, so it is drained.
         let page_tail = store
-            .list_events(HashSet::from([part.clone()]), next, 2)
+            .list_events(HashSet::from([part.clone()]), page_more.resume, 2)
             .await??
             .remove(&part)
             .expect(ERROR_IMPOSSIBLE);
 
         assert_eq!(page_tail.events.len(), 1);
-        assert_eq!(
-            page_tail.next_cursor, None,
-            "next_cursor must be None on tail page"
-        );
+        assert!(page_tail.drained, "the tail page has nothing beyond it");
         // A zero limit is a legal request for "no events right now": it answers
         // nothing, and while anything is waiting it must not claim the log is caught
-        // up — a caller reads `None` as "nothing further is waiting" and would strand
-        // the events it never received.
+        // up — a caller reads `drained` as "nothing further is waiting" and would
+        // strand the events it never received.
         let page_zero = store
             .list_events(HashSet::from([part.clone()]), 0, 0)
             .await??
@@ -4024,8 +5129,12 @@ pub mod host_contract {
             page_zero.events
         );
         assert!(
-            page_zero.next_cursor.is_some(),
+            !page_zero.drained,
             "a zero limit must not report caught-up while events are waiting"
+        );
+        assert_eq!(
+            page_zero.resume, 0,
+            "and it resumes from the caller's own cursor"
         );
 
         // The same request against a part with nothing waiting is caught up.
@@ -4038,9 +5147,178 @@ pub mod host_contract {
             .expect(ERROR_IMPOSSIBLE);
 
         assert!(page_zero_empty.events.is_empty());
-        assert_eq!(
-            page_zero_empty.next_cursor, None,
+        assert!(
+            page_zero_empty.drained,
             "a zero limit on a part with nothing waiting is caught up"
+        );
+        assert_eq!(page_zero_empty.resume, 0);
+        Ok(())
+    }
+
+    /// A store whose subscription opens but never delivers anything, so a page can
+    /// only end on its hold. Real stores replay a caught-up target's completion
+    /// promptly, which makes an expired hold untestable against them.
+    #[cfg(test)]
+    #[derive(Default)]
+    struct SilentSubscriptionStore {
+        /// Held so the subscription channel stays open. Dropping it would end the
+        /// page on a closed channel — also `drained: false`, but not the hold path.
+        senders: std::sync::Mutex<Vec<mpsc::Sender<SubEvent>>>,
+    }
+
+    #[cfg(test)]
+    #[async_trait]
+    impl HostPartStore for SilentSubscriptionStore {
+        async fn summarize_parts(
+            &self,
+            _parts: HashSet<PartKey>,
+        ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>> {
+            Ok(Ok(HashMap::new()))
+        }
+
+        async fn subscribe(
+            &self,
+            _reqs: SubPartsRequest,
+            _subscriber: PeerKey,
+        ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
+            let (tx, rx) = mpsc::unbounded("SilentSubscriptionStore".into(), "test".into());
+            self.senders.lock().expect("no poisoning").push(tx);
+            Ok(Ok(rx))
+        }
+
+        async fn latest_revision(&self) -> Res<CursorIndex> {
+            unreachable!("the page path does not read the latest revision")
+        }
+        async fn get_changed_buckets(
+            &self,
+            _req: GetChangedBucketsRequest,
+            _subscriber: PeerKey,
+        ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
+            unreachable!("the page path does not walk buckets")
+        }
+        async fn leaf_buckets(
+            &self,
+            _req: LeafBucketsRequest,
+            _subscriber: PeerKey,
+        ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+            unreachable!("the page path does not read leaf buckets")
+        }
+        async fn member_count(&self, _part_id: PartKey) -> Res<u64> {
+            unreachable!("the page path does not count members")
+        }
+        async fn part_dirty_count(
+            &self,
+            _part_id: PartKey,
+            _principal: Option<PeerKey>,
+            _since: CursorIndex,
+        ) -> Res<PartDirtyCount> {
+            unreachable!("the page path does not count dirty rows")
+        }
+        async fn get_bucket_summary(&self, _part_id: PartKey, _id: BuckId) -> Res<BucketSummary> {
+            unreachable!("the page path does not read bucket summaries")
+        }
+        async fn obj_parts(&self, _obj_id: ObjKey) -> Res<Vec<PartKey>> {
+            unreachable!("the page path does not read object parts")
+        }
+        async fn obj_exists(&self, _obj_id: ObjKey) -> Res<bool> {
+            unreachable!("the page path does not test object existence")
+        }
+        async fn set_obj_payload(&self, _obj_id: ObjKey, _payload: ObjPayload) -> Res<()> {
+            unreachable!("the page path does not write payloads")
+        }
+        async fn obj_payload(&self, _obj_id: ObjKey) -> Res<Option<ObjPayload>> {
+            unreachable!("the page path does not read payloads")
+        }
+        async fn add_obj_to_parts(&self, _obj_id: ObjKey, _parts: Vec<PartKey>) -> Res<()> {
+            unreachable!("the page path does not write membership")
+        }
+        async fn remove_obj_from_part(&self, _obj_id: ObjKey, _part_id: PartKey) -> Res<()> {
+            unreachable!("the page path does not write membership")
+        }
+        async fn set_peer_part_cursor(
+            &self,
+            _peer_id: PeerKey,
+            _part_id: PartKey,
+            _cursor: CursorIndex,
+        ) -> Res<()> {
+            unreachable!("the page path does not write peer cursors")
+        }
+        async fn get_peer_part_cursor(
+            &self,
+            _peer_id: PeerKey,
+            _part_id: PartKey,
+        ) -> Res<CursorIndex> {
+            unreachable!("the page path does not read peer cursors")
+        }
+        async fn list_events(
+            &self,
+            _parts: HashSet<PartKey>,
+            _cursor: CursorIndex,
+            _limit: u32,
+        ) -> Res<Result<HashMap<PartKey, PartPage>, ListPartsError>> {
+            unreachable!("the page path does not list events")
+        }
+        async fn ensure_part(&self, _part_id: PartKey) -> Res<()> {
+            unreachable!("the page path does not create parts")
+        }
+        async fn set_part_members(
+            &self,
+            _part: PartKey,
+            _agents: HashMap<PeerKey, Access>,
+        ) -> Res<()> {
+            unreachable!("the page path does not set access")
+        }
+        async fn add_part_member(
+            &self,
+            _part: PartKey,
+            _member: PeerKey,
+            _access: Access,
+        ) -> Res<()> {
+            unreachable!("the page path does not set access")
+        }
+        async fn remove_part_member(&self, _part: PartKey, _member: PeerKey) -> Res<()> {
+            unreachable!("the page path does not set access")
+        }
+        async fn remove_obj_payload(&self, _obj_id: ObjKey) -> Res<()> {
+            unreachable!("the page path does not clear content")
+        }
+        async fn partless_objects(&self, _limit: u32, _after: Option<ObjKey>) -> Res<Vec<ObjKey>> {
+            unreachable!("the page path does not enumerate GC candidates")
+        }
+        async fn part_store_stats(&self) -> Res<PartStoreStats> {
+            unreachable!("the page path does not read store stats")
+        }
+    }
+
+    /// A page that carried nothing and did not observe its replay half completing is
+    /// not a verdict: it answers `drained: false` with the caller's own cursor. This is
+    /// the answer a page that runs out of its hold gives, pinned literally against a
+    /// subscription that never delivers anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_page_that_times_out_on_its_hold_is_not_caught_up() -> Res<()> {
+        let store = SilentSubscriptionStore::default();
+        let outcome = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: test_part(171),
+                    cursor: 7,
+                },
+                8,
+                PeerKey::new([172; 32]),
+                Duration::from_millis(20),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(page) = outcome else {
+            panic!("a subscribed page answers with events, got {outcome:?}");
+        };
+        assert!(page.events.is_empty(), "the subscription delivered nothing");
+        assert!(
+            !page.drained,
+            "a page that ran out of its hold did not complete its replay"
+        );
+        assert_eq!(
+            page.resume, 7,
+            "and it resumes from the caller's own cursor"
         );
         Ok(())
     }

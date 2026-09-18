@@ -97,6 +97,21 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     frozen_cmd_buffer: Vec<Runtime2Cmd>,
     /// A resolving `WaitForQuiescence { freeze: true }` freezes the hub.
     freeze_on_resolve: bool,
+    /// Test-only: queue events instead of handling them (see
+    /// [`Runtime2Cmd::HoldEvents`]). Zero production cost — absent from
+    /// non-test builds along with its command arms.
+    #[cfg(test)]
+    hold_events: bool,
+    /// Test-only: the events queued while `hold_events` is set, replayed in
+    /// channel order by [`Runtime2Cmd::ResumeEvents`].
+    #[cfg(test)]
+    held_events: Vec<Runtime2Evt>,
+    /// Test-only: fail the next content-carrying sync-session apply route for
+    /// this document by closing the worker's mailbox, reproducing the
+    /// worker-stopping race deterministically (see
+    /// [`Runtime2Cmd::FailNextContentApplyRoute`]).
+    #[cfg(test)]
+    poisoned_content_apply: Option<DocumentId>,
     /// Set once the commands channel closes (the stop token dropped its
     /// sender); no new background work is admitted and the machine loop
     /// exits once tracked work drains.
@@ -197,6 +212,11 @@ struct KeyhiveSyncRound {
     /// Ids of the waiters queued when this round started; the round resolves
     /// them on completion. Waiters admitted during the round cascade.
     admitted_ids: std::collections::HashSet<u64>,
+    /// Set when a completion arrived whose admission watermark the hub's
+    /// `admitted_head` had not yet reached. The round is held (waiters
+    /// unresolved, no follow-up round) until `KeyhiveAdmissionAdvanced` brings
+    /// `admitted_head` up to this seq, at which point the round finishes.
+    pending_admission_seq: Option<u64>,
 }
 
 /// Keyhive sync waiters for one peer: those owned by the active round plus
@@ -475,15 +495,20 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let result = if has_doc_worker {
-                Ok(true)
-            } else {
+            // The document id arrives from the sync backend, so its width is peer input:
+            // derive the fixed-width sedimentree id fallibly and report the failure to the
+            // caller's receipt instead of the hub loop.
+            let result = async {
+                if has_doc_worker {
+                    return Ok(true);
+                }
                 runtime_io
                     .contains_sedimentree(sedimentree_core::id::SedimentreeId::new(
-                        doc_id.to_bytes32(),
+                        doc_id.try_to_bytes32()?,
                     ))
                     .await
-            };
+            }
+            .await;
             resp.send(result)
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
@@ -640,15 +665,38 @@ where
     #[tracing::instrument(skip(self))]
     fn handle_cmd(&mut self, cmd: Runtime2Cmd) -> eyre::Result<()> {
         trace!(?cmd, "runtime2 command received");
-        if !matches!(
+        let control_only = matches!(
             &cmd,
             Runtime2Cmd::WaitForQuiescence { .. }
                 | Runtime2Cmd::Unfreeze
                 | Runtime2Cmd::RegisterDocLease { .. }
                 | Runtime2Cmd::ReleaseDocLease { .. }
                 | Runtime2Cmd::ReleaseInternalLease { .. }
-                | Runtime2Cmd::EnsureCausalCoverage { .. }
-        ) {
+                // Read-only doc-worker queries: never restart a pending probe,
+                // or a caller polling head state while waiting for quiescence
+                // would restart it forever. Everything that routes *work* into
+                // a worker — `PutDoc`, `CommitDelta`, `GetDocHandle`'s
+                // `AcquireHandle`, `ApplySyncSession`, and
+                // `EnsureCausalCoverage`'s `ReconcileCausalCoverage` — is
+                // activity and must bump, so a probe placed before that routing
+                // restarts and fences the work rather than resolving over it.
+                | Runtime2Cmd::DocHeadState { .. }
+                | Runtime2Cmd::InspectDocHeadState { .. }
+        );
+        // The test-only event-hold seam performs no domain work, so it must not
+        // restart a quiescence probe either; the same goes for the test-only
+        // state/barrier queries.
+        #[cfg(test)]
+        let control_only = control_only
+            || matches!(
+                &cmd,
+                Runtime2Cmd::HoldEvents { .. }
+                    | Runtime2Cmd::ResumeEvents { .. }
+                    | Runtime2Cmd::HasDocWorker { .. }
+                    | Runtime2Cmd::HasConnectedPeer { .. }
+                    | Runtime2Cmd::QuiescenceProbeBarrierForTest { .. }
+            );
+        if !control_only {
             self.note_activity();
         }
         match cmd {
@@ -801,27 +849,23 @@ where
                 closed,
                 resp,
             } => {
-                // The connection is being closed by its consumer: mark it
-                // dead up front so syncs through its handle fail fast. Only
-                // the peer's *current* connection owns the peer's
-                // registration — a superseded connection's close must not
-                // disturb the replacement (the closed flag's pointer
-                // identity is the connection id, matching
-                // `handle_connection_lost`'s stale-conn gate).
+                // The connection is being closed by its consumer: mark it dead
+                // up front so syncs through its handle fail fast, and
+                // deregister it *before* `close_connection_async` resolves the
+                // caller's response. That ordering is the point — a sync issued
+                // the instant `close_connection` returns must not start a round
+                // against the connection this call closed. Only the peer's
+                // *current* connection owns the peer's registration; a
+                // superseded connection's close must not disturb the
+                // replacement (the closed flag's pointer identity is the
+                // connection id, matching `handle_connection_lost`'s stale-conn
+                // gate).
                 closed.store(true, std::sync::atomic::Ordering::SeqCst);
-                let is_current = matches!(
-                    self.connected_peers.get(&peer_id),
-                    // FIXME: use a wrapper type on the atomic bool if we're going
-                    // to use it like this and use internal uuids afterwards
-                    Some(deets) if std::sync::Arc::ptr_eq(&deets.closed, &closed)
-                );
-                if is_current {
-                    self.cancel_pending_keyhive_syncs(&peer_id, "keyhive peer closed");
-                    self.connected_peers.remove(&peer_id);
-                } else {
+                if !self.deregister_connection(&peer_id, &closed, "keyhive peer closed") {
                     debug!(
                         peer_id = %peer_id,
-                        "closing superseded connection; current registration left intact"
+                        "close left no current registration to tear down \
+                         (superseded, or its establishment had not landed)"
                     );
                 }
                 self.spawn_tracked(
@@ -847,6 +891,18 @@ where
                     ),
                     nonce: waiter_id,
                 };
+                // The document id reaches this command from the sync backend, so its width
+                // is peer input: derive the fixed-width sedimentree id fallibly, and fail
+                // this sync attempt rather than the hub loop when it does not fit.
+                let doc_key = match doc_id.try_to_bytes32() {
+                    Ok(doc_key) => doc_key,
+                    Err(error) => {
+                        resp.send(Err(crate::runtime2::types::SyncDocError::Other(error)))
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
+                        return self.try_resolve_quiescence();
+                    }
+                };
                 self.pending_doc_syncs.insert(
                     waiter_id,
                     PendingDocSyncWaiter {
@@ -855,7 +911,7 @@ where
                         resp,
                     },
                 );
-                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_key);
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::SyncDoc,
                     F::sync_doc_with_peer(
@@ -863,46 +919,9 @@ where
                         Arc::clone(&self.runtime_io),
                         peer_id,
                         sed_id,
-                        self.cmd_tx.clone(),
+                        self.evt_tx.clone(),
                     ),
                 )?;
-            }
-            Runtime2Cmd::DocSyncRoundDone { request_id } => {
-                // Transport round succeeded: resolve the waiter (if still
-                // pending) with a worker reconsider so the receipt reflects
-                // the fully-persisted tree.
-                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
-                    return self.try_resolve_quiescence();
-                };
-                debug!(
-                    request_nonce = request_id.nonce,
-                    doc_id = %waiter.doc_id,
-                    remote_peer_id = %waiter.peer_id,
-                    "doc sync round resolved; resolving waiter",
-                );
-                self.route_sync_session_apply(
-                    waiter.doc_id,
-                    waiter.peer_id,
-                    Vec::new(),
-                    Vec::new(),
-                    Some(waiter.resp),
-                )?;
-            }
-            Runtime2Cmd::DocSyncFailed { request_id, error } => {
-                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
-                    return self.try_resolve_quiescence();
-                };
-                debug!(
-                    ?error,
-                    doc_id = %waiter.doc_id,
-                    remote_peer_id = %waiter.peer_id,
-                    "doc sync round failed; failing waiter",
-                );
-                waiter
-                    .resp
-                    .send(Err(error))
-                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                    .ok();
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
                 peer_id,
@@ -1004,6 +1023,12 @@ where
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
+            #[cfg(test)]
+            Runtime2Cmd::HasConnectedPeer { peer_id, resp } => {
+                resp.send(Ok(self.connected_peers.contains_key(&peer_id)))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::InspectStoredDocBlobs,
@@ -1015,6 +1040,66 @@ where
             }
             Runtime2Cmd::Unfreeze => {
                 debug!(local_peer_id = %self.local_peer_id, "unfreeze: hub not frozen");
+            }
+            #[cfg(test)]
+            Runtime2Cmd::HoldEvents { resp } => {
+                self.hold_events = true;
+                debug!(local_peer_id = %self.local_peer_id, "holding hub event processing (test seam)");
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+            }
+            #[cfg(test)]
+            Runtime2Cmd::ResumeEvents { resp } => {
+                self.hold_events = false;
+                let held = std::mem::take(&mut self.held_events);
+                debug!(
+                    local_peer_id = %self.local_peer_id,
+                    held = held.len(),
+                    "resuming hub event processing (test seam)"
+                );
+                for evt in held {
+                    self.handle_evt(evt)?;
+                }
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+            }
+            #[cfg(test)]
+            Runtime2Cmd::FailNextContentApplyRoute { doc_id, resp } => {
+                self.poisoned_content_apply = Some(doc_id);
+                debug!(
+                    local_peer_id = %self.local_peer_id,
+                    "arming next content-apply route failure (test seam)"
+                );
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+            }
+            #[cfg(test)]
+            Runtime2Cmd::InjectKeyhiveCompletionForTest { peer_id, resp } => {
+                let result = match self.active_keyhive_syncs.get(&peer_id) {
+                    Some(round) => {
+                        let request_id = round.request_id.clone();
+                        // One seq ahead of the hub's current head: the
+                        // completion must be deferred until a matching
+                        // admission event lands.
+                        let admitted_seq = self.admitted_head.wrapping_add(1);
+                        self.handle_keyhive_sync_done(peer_id, request_id, admitted_seq)
+                            .map(|()| admitted_seq)
+                    }
+                    None => Err(ferr!("no active keyhive round for {peer_id}")),
+                };
+                resp.send(result)
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
+            #[cfg(test)]
+            Runtime2Cmd::InjectRuntime2EvtForTest { evt, resp } => {
+                let result = self.handle_evt(*evt);
+                resp.send(result)
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
+            #[cfg(test)]
+            Runtime2Cmd::QuiescenceProbeBarrierForTest { resp } => {
+                resp.send(self.quiescence_probe.as_ref().map(|probe| probe.barrier_id))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
             }
         }
         self.try_resolve_quiescence()
@@ -1069,6 +1154,12 @@ pub(crate) trait HubBackgroundFuture<F: FutureForm> {
     ) -> F::Future<'static, eyre::Result<()>>;
     /// Wrap a finite background future so a `TrackedWorkDone` event is emitted
     /// after its own emissions (keeps channel order for the in-flight counter).
+    ///
+    /// The wrapper owns the [`TrackedWorkGuard`](crate::runtime2::TrackedWorkGuard)
+    /// from construction, not just from its first poll: the in-flight count is
+    /// incremented in [`spawn_tracked`](Runtime2Hub::spawn_tracked) before this
+    /// future exists, so the matching decrement must survive a task that is
+    /// dropped or aborted before it is ever polled.
     fn track_work(
         kind: crate::runtime2::TrackedWorkKind,
         fut: F::Future<'static, eyre::Result<()>>,
@@ -1130,7 +1221,7 @@ pub(crate) trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>>
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerKey,
         sed_id: sedimentree_core::id::SedimentreeId,
-        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -1323,8 +1414,19 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         fut: F::Future<'static, eyre::Result<()>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>> {
+        // Construct the guard *before* wrapping the future and let the wrapper
+        // own it, rather than creating it inside the async body on first poll.
+        // The in-flight count is incremented in `spawn_tracked` before this
+        // future exists, so the decrement must be structural: `Abortable` (the
+        // task set's wrapper) drops an aborted task's future without polling
+        // it, and a body-created guard would then never be dropped — leaking
+        // the count so the shutdown drain never completes. Owning it here means
+        // it drops on every path (completion, abort, or an unpolled drop), and
+        // it still drops *after* `fut`, preserving `TrackedWorkDone` ordering
+        // for the normal path.
+        let guard = crate::runtime2::TrackedWorkGuard::new(evt_tx, kind);
         F::from_future(async move {
-            let _guard = crate::runtime2::TrackedWorkGuard::new(evt_tx, kind);
+            let _guard = guard;
             fut.await
         })
     }
@@ -1564,7 +1666,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerKey,
         sed_id: sedimentree_core::id::SedimentreeId,
-        cmd_tx: async_channel::Sender<Runtime2Cmd>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!(
             "document_sync",
@@ -1608,21 +1710,23 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 };
                 match result {
                     Ok(()) => {
-                        // The emitted session(s) carry `request_id`; the hub
-                        // resolves the waiter from the session or, if no
-                        // session is observed, from this round-done signal.
-                        // A closed commands channel means the runtime is
-                        // draining; the waiter is dropped with the hub and
-                        // the caller observes the closure.
-                        cmd_tx
-                            .send(Runtime2Cmd::DocSyncRoundDone { request_id })
+                        // Report the round's completion on the event channel:
+                        // the round's session observation(s) are emitted into
+                        // it before this signal is sent, so the hub cannot
+                        // resolve the caller's receipt before the session that
+                        // carries this round's content has been applied. A
+                        // closed event channel means the runtime is draining;
+                        // the waiter is dropped with the hub and the caller
+                        // observes the closure.
+                        evt_tx
+                            .send(Runtime2Evt::DocSyncRoundDone { request_id })
                             .await
                             .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
                     }
                     Err(error) => {
-                        cmd_tx
-                            .send(Runtime2Cmd::DocSyncFailed { request_id, error })
+                        evt_tx
+                            .send(Runtime2Evt::DocSyncFailed { request_id, error })
                             .await
                             .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                             .ok();
@@ -1690,6 +1794,19 @@ impl<
 where
     F: 'static,
 {
+    /// Hand `evt` to the hub, unless event processing is held by the test-only
+    /// [`Runtime2Cmd::HoldEvents`] seam, in which case it is queued for
+    /// [`Runtime2Cmd::ResumeEvents`]. One gate for the machine loop, so the
+    /// hold covers every event path (including the shutdown drain).
+    fn handle_or_hold_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
+        #[cfg(test)]
+        if self.hold_events {
+            self.held_events.push(evt);
+            return Ok(());
+        }
+        self.handle_evt(evt)
+    }
+
     #[tracing::instrument(skip(self))]
     fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
         trace!(?evt, "runtime2 event received");
@@ -1714,11 +1831,13 @@ where
                 peer_id,
                 request_id,
                 changed,
+                admitted_seq,
             } => debug!(
                 local_peer_id = %self.local_peer_id,
                 %peer_id,
                 ?request_id,
                 changed,
+                admitted_seq,
                 "runtime2 event: Keyhive sync completed",
             ),
             Runtime2Evt::KeyhiveSyncFailed {
@@ -1787,8 +1906,9 @@ where
                 peer_id,
                 request_id,
                 changed: _,
+                admitted_seq,
             } => {
-                self.finish_keyhive_sync(peer_id, request_id)?;
+                self.handle_keyhive_sync_done(peer_id, request_id, admitted_seq)?;
             }
             Runtime2Evt::KeyhiveSyncFailed {
                 peer_id,
@@ -1800,6 +1920,49 @@ where
             Runtime2Evt::KeyhiveChangeNotif { peer_id } => {
                 self.handle_keyhive_change_notif(peer_id)?;
             }
+            Runtime2Evt::DocSyncRoundDone { request_id } => {
+                // Transport round succeeded: resolve the waiter (if still
+                // pending) with a worker reconsider so the receipt reflects
+                // the fully-persisted tree. Reaching here means every session
+                // observation this round emitted has already been routed (the
+                // round sent them into this channel first), so a received
+                // commit is applied to the document worker ahead of the
+                // reconsider that resolves the caller's receipt.
+                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
+                    self.try_resolve_quiescence()?;
+                    return Ok(());
+                };
+                debug!(
+                    request_nonce = request_id.nonce,
+                    doc_id = %waiter.doc_id,
+                    remote_peer_id = %waiter.peer_id,
+                    "doc sync round resolved; resolving waiter",
+                );
+                self.route_sync_session_apply(
+                    waiter.doc_id,
+                    waiter.peer_id,
+                    Vec::new(),
+                    Vec::new(),
+                    Some(waiter.resp),
+                )?;
+            }
+            Runtime2Evt::DocSyncFailed { request_id, error } => {
+                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
+                    self.try_resolve_quiescence()?;
+                    return Ok(());
+                };
+                debug!(
+                    ?error,
+                    doc_id = %waiter.doc_id,
+                    remote_peer_id = %waiter.peer_id,
+                    "doc sync round failed; failing waiter",
+                );
+                waiter
+                    .resp
+                    .send(Err(error))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
             Runtime2Evt::KeyhiveAdmissionAdvanced { seq } => {
                 self.admitted_head = self.admitted_head.max(seq);
                 tracing::debug!(
@@ -1809,6 +1972,24 @@ where
                     group_part_settled_seq = self.group_part_settled_seq,
                     "keyhive admission head advanced"
                 );
+                // Release every keyhive round whose completion was deferred
+                // waiting for exactly this watermark. `finish_keyhive_sync`
+                // runs the same resolution it would have run on the
+                // completion, now that `admitted_head` covers the round's
+                // admissions.
+                let released: Vec<(PeerKey, subduction_keyhive::message::RequestId)> = self
+                    .active_keyhive_syncs
+                    .iter()
+                    .filter(|(_, round)| {
+                        round
+                            .pending_admission_seq
+                            .is_some_and(|watermark| watermark <= self.admitted_head)
+                    })
+                    .map(|(peer_id, round)| (peer_id.clone(), round.request_id.clone()))
+                    .collect();
+                for (peer_id, request_id) in released {
+                    self.finish_keyhive_sync(peer_id, request_id)?;
+                }
                 self.try_resolve_quiescence()?;
                 // Admitted Keyhive state (CGKA ops, delegations, keys) can
                 // unblock a doc that entered the pending set before its
@@ -2107,13 +2288,22 @@ where
         )
     }
 
-    /// Route a sync-session apply to the doc worker, resolving the receipt
-    /// directly when no (or no live) worker exists.
+    /// Route a sync-session apply to the doc worker.
     ///
     /// `reply: Some` resolves a caller's sync receipt with the worker's
     /// outcome; `None` is fire-and-forget (passive sessions). Empty `commit_ids`
     /// / `fragment_ids` make the worker only reconsider a pending doc / report
-    /// its current state.
+    /// its current state. A document without a local worker is spawned lazily,
+    /// which is intentional: a round can complete for a doc with no handle and
+    /// its reconsider must still report the stored state.
+    ///
+    /// A send failure is never swallowed. The mailbox is unbounded, so a
+    /// failure means the worker closed its receiver (it is stopping) and the
+    /// apply — with any receipt it carried — was dropped. The waiting caller is
+    /// failed directly; a dropped *content* apply additionally fails every
+    /// pending round for the document, because the completion path resolves a
+    /// waiter with an empty reconsider whose success would claim content that
+    /// was never applied.
     fn route_sync_session_apply(
         &mut self,
         doc_id: DocumentId,
@@ -2129,24 +2319,129 @@ where
             >,
         >,
     ) -> eyre::Result<()> {
+        let content_carrying = !commit_ids.is_empty() || !fragment_ids.is_empty();
         // Received content must pass through the document worker even without
         // an application handle: writable overlap nodes use cold/transient
-        // materialization to publish causal-key healing checkpoints.
-        let (worker, _lease) = self.doc_worker_handle(doc_id.clone())?;
-        if let Err(err) = worker.send(DocWorkerMsg::ApplySyncSession {
-            peer_id,
+        // materialization to publish causal-key healing checkpoints. Failing to
+        // resolve one is an apply-route failure, not a hub failure: surface it
+        // to the waiter rather than aborting the loop. The lazy spawn is
+        // intentional, so this only trips on a spawn error.
+        let (worker, _lease) = match self.doc_worker_handle(doc_id.clone()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                warn!(
+                    doc_id = %doc_id,
+                    %peer_id,
+                    ?error,
+                    "sync session apply could not resolve a document worker"
+                );
+                self.fail_sync_session_apply_route(doc_id, peer_id, content_carrying, reply);
+                return Ok(());
+            }
+        };
+
+        // Test-only: close the resolved worker's mailbox so the send below
+        // fails, standing in for the worker-stopping race that cannot be
+        // reached deterministically from a test.
+        #[cfg(test)]
+        if content_carrying && self.poisoned_content_apply.as_ref() == Some(&doc_id) {
+            self.poisoned_content_apply = None;
+            worker.msg_tx.close();
+        }
+
+        let msg = DocWorkerMsg::ApplySyncSession {
+            peer_id: peer_id.clone(),
             commit_ids,
             fragment_ids,
             reply,
             _lease,
-        }) {
-            debug!(
-                doc_id = %doc_id,
-                ?err,
-                "failed to route sync session to doc worker (worker closed or full)"
-            );
-        }
+        };
+        let error = match worker.msg_tx.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        // Recover the reply before dropping the rest: the caller that sent it
+        // must still learn the apply was dropped.
+        let reply = match error {
+            async_channel::TrySendError::Closed(DocWorkerMsg::ApplySyncSession {
+                reply, ..
+            })
+            | async_channel::TrySendError::Full(DocWorkerMsg::ApplySyncSession { reply, .. }) => {
+                reply
+            }
+            other => unreachable!("apply route sent a non-apply message: {other:?}"),
+        };
+        debug!(
+            doc_id = %doc_id,
+            %peer_id,
+            content_carrying,
+            "sync session apply dropped: document worker mailbox closed"
+        );
+        self.fail_sync_session_apply_route(doc_id, peer_id, content_carrying, reply);
         Ok(())
+    }
+
+    /// Surface a failed sync-session apply route to whoever was waiting.
+    ///
+    /// A caller awaiting a receipt is failed directly. A dropped *content*
+    /// apply (fire-and-forget, no receipt) additionally fails and forgets every
+    /// pending round for the document, so the completion path's empty
+    /// reconsider cannot resolve them with a success receipt for content that
+    /// was never applied.
+    fn fail_sync_session_apply_route(
+        &mut self,
+        doc_id: DocumentId,
+        peer_id: PeerKey,
+        content_carrying: bool,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
+        >,
+    ) {
+        if let Some(reply) = reply {
+            reply
+                .send(Err(crate::runtime2::types::SyncDocError::WorkerUnavailable))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+        } else if content_carrying {
+            self.fail_pending_doc_syncs_for(doc_id, peer_id);
+        }
+    }
+
+    /// Fail and forget every pending doc-sync round for `(doc_id, peer_id)`.
+    ///
+    /// A dropped content apply means those rounds' content never reached the
+    /// live document, so the completion path's empty reconsider must not be
+    /// allowed to resolve them with a success receipt — removing them here
+    /// makes that completion a no-op.
+    fn fail_pending_doc_syncs_for(&mut self, doc_id: DocumentId, peer_id: PeerKey) {
+        let waiter_ids: Vec<u64> = self
+            .pending_doc_syncs
+            .iter()
+            .filter(|(_, waiter)| waiter.doc_id == doc_id && waiter.peer_id == peer_id)
+            .map(|(waiter_id, _)| *waiter_id)
+            .collect();
+        for waiter_id in waiter_ids {
+            let waiter = self
+                .pending_doc_syncs
+                .remove(&waiter_id)
+                .expect("waiter id collected from pending_doc_syncs");
+            warn!(
+                waiter_id,
+                doc_id = %doc_id,
+                %peer_id,
+                "failing doc sync waiter: content apply was dropped"
+            );
+            waiter
+                .resp
+                .send(Err(crate::runtime2::types::SyncDocError::WorkerUnavailable))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+        }
     }
 
     // ─── connection lifecycle ──────────────────────────────────────────────
@@ -2160,6 +2455,20 @@ where
         peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
+        if closed.load(std::sync::atomic::Ordering::SeqCst) {
+            // Commands are polled ahead of events, so an explicit `CloseConn`
+            // can be processed before the `ConnEstablished` it overtook.
+            // Registering this connection now would make a closed connection
+            // look live and start doomed sync rounds against it, so a sync
+            // issued the instant `close_connection` returned could be told the
+            // peer is gone by a spurious failure. The close path already marked
+            // the connection dead; ignore its establishment.
+            debug!(
+                %peer_id,
+                "ignoring establishment for an already-closed connection"
+            );
+            return Ok(());
+        }
         self.connected_peers.insert(
             peer_id.clone(),
             ConnDeets {
@@ -2190,17 +2499,45 @@ where
         peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
-        let Some(current) = self.connected_peers.get(&peer_id) else {
-            debug!(%peer_id, "ignoring connection loss for untracked connection");
-            return Ok(());
-        };
-        if !Arc::ptr_eq(&current.closed, &closed) {
-            debug!(%peer_id, "ignoring stale connection loss after reconnect");
-            return Ok(());
+        if !self.deregister_connection(&peer_id, &closed, "keyhive connection lost") {
+            // Already torn down by an explicit close, or superseded by a
+            // replacement connection: a no-op, not a double teardown.
+            debug!(
+                %peer_id,
+                "ignoring connection loss for an untracked or superseded connection"
+            );
         }
-        self.cancel_pending_keyhive_syncs(&peer_id, "keyhive connection lost");
-        self.connected_peers.remove(&peer_id);
         Ok(())
+    }
+
+    /// Tear down `peer_id`'s connection registration iff it still belongs to the
+    /// connection identified by `closed`.
+    ///
+    /// Both the explicit close path (`CloseConn`) and the transport-loss path
+    /// (`ConnLost`) route through here, so there is exactly one
+    /// deregistration. It is `Arc::ptr_eq`-gated on the connection id, which
+    /// keeps a superseded connection's teardown from disturbing its
+    /// replacement (matching `handle_connection_lost`'s stale-conn gate) and
+    /// makes a `ConnLost` that lands after an explicit close a no-op instead of
+    /// a double-deregistration. Returns whether a registration was removed.
+    fn deregister_connection(
+        &mut self,
+        peer_id: &PeerKey,
+        closed: &Arc<std::sync::atomic::AtomicBool>,
+        reason: &'static str,
+    ) -> bool {
+        let is_current = matches!(
+            self.connected_peers.get(peer_id),
+            // FIXME: use a wrapper type on the atomic bool if we're going
+            // to use it like this and use internal uuids afterwards
+            Some(deets) if Arc::ptr_eq(&deets.closed, closed)
+        );
+        if !is_current {
+            return false;
+        }
+        self.cancel_pending_keyhive_syncs(peer_id, reason);
+        self.connected_peers.remove(peer_id);
+        true
     }
 
     // ─── keyhive sync ──────────────────────────────────────────────────────
@@ -2233,6 +2570,7 @@ where
                 request_id: request_id.clone(),
                 slow_warned: false,
                 admitted_ids,
+                pending_admission_seq: None,
             },
         );
         debug!(
@@ -2328,6 +2666,49 @@ where
         debug!(%peer_id, "keyhive change notification; starting sync round");
         self.start_keyhive_sync(peer_id)?;
         Ok(())
+    }
+
+    /// Handle a keyhive sync completion, deferring it until the hub's
+    /// `admitted_head` covers the completion's admission watermark.
+    ///
+    /// A completion whose watermark is already reached behaves exactly as
+    /// before (the common case: the peer admitted nothing new, or the
+    /// admission event landed ahead of the completion on the shared channel).
+    /// Otherwise the round is held — waiters unresolved and no follow-up round
+    /// started — and [`Self::finish_keyhive_sync`] runs from the
+    /// `KeyhiveAdmissionAdvanced` arm once `admitted_head` catches up. Without
+    /// this the caller could return, capture a stale `admitted_head` in its
+    /// follow-up reconciliation wait, and be told "reconciled" while this
+    /// round's admissions were never projected.
+    fn handle_keyhive_sync_done(
+        &mut self,
+        peer_id: PeerKey,
+        request_id: subduction_keyhive::message::RequestId,
+        admitted_seq: u64,
+    ) -> eyre::Result<()> {
+        let admitted_head = self.admitted_head;
+        if let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id)
+            && round.request_id == request_id
+        {
+            // Deferral is sticky: once a watermark is required, a later
+            // duplicate completion stamped lower cannot release the round.
+            let required = round
+                .pending_admission_seq
+                .map_or(admitted_seq, |pending| pending.max(admitted_seq));
+            if required > admitted_head {
+                round.pending_admission_seq = Some(required);
+                debug!(
+                    %peer_id,
+                    ?request_id,
+                    admitted_seq,
+                    required,
+                    admitted_head,
+                    "keyhive completion deferred until the admission watermark catches up"
+                );
+                return Ok(());
+            }
+        }
+        self.finish_keyhive_sync(peer_id, request_id)
     }
 
     /// Complete a keyhive protocol round and resolve any eligible waiters.
@@ -2623,7 +3004,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             self.evt_tx.clone(),
             generation,
             self.span.clone(),
-        );
+        )?;
         let handle = worker.handle;
         let stop = worker.stop;
         self.child_tasks.spawn(worker.run)?;
@@ -2730,6 +3111,41 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             .map(ToString::to_string)
             .collect();
         pending_docs.sort();
+        // Which peer and round is holding the fence, not just how many. A count
+        // cannot distinguish one stuck round from a revolving set.
+        let mut active_keyhive_rounds: Vec<String> = self
+            .active_keyhive_syncs
+            .iter()
+            .map(|(peer_id, round)| {
+                format!(
+                    "{}:round{}:{:.0}s",
+                    &peer_id.to_string()[..8],
+                    round.round_id,
+                    round.started_at.elapsed().as_secs_f64(),
+                )
+            })
+            .collect();
+        active_keyhive_rounds.sort();
+        let mut keyhive_waiter_peers: Vec<String> = self
+            .keyhive_waiters
+            .keys()
+            .map(|peer_id| peer_id.to_string()[..8].to_string())
+            .collect();
+        keyhive_waiter_peers.sort();
+        // Name the outstanding doc syncs the same way: a count cannot say which
+        // peer or document the fence is waiting for.
+        let mut pending_doc_sync_details: Vec<String> = self
+            .pending_doc_syncs
+            .iter()
+            .map(|(waiter_id, waiter)| {
+                format!(
+                    "{waiter_id}:{}:{}",
+                    &waiter.doc_id.to_string()[..10],
+                    &waiter.peer_id.to_string()[..8],
+                )
+            })
+            .collect();
+        pending_doc_sync_details.sort();
         warn!(
             local_peer_id = %self.local_peer_id,
             stalled_secs = since.elapsed().as_secs(),
@@ -2746,8 +3162,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             pending_docs = ?pending_docs,
             retries_in_flight = self.materialization_retries_in_flight.len(),
             pending_doc_syncs = self.pending_doc_syncs.len(),
+            pending_doc_sync_details = ?pending_doc_sync_details,
             keyhive_waiters = self.keyhive_waiters.len(),
             active_keyhive_syncs = self.active_keyhive_syncs.len(),
+            active_keyhive_rounds = ?active_keyhive_rounds,
+            keyhive_waiter_peers = ?keyhive_waiter_peers,
             admitted_head = self.admitted_head,
             group_part_settled_seq = self.group_part_settled_seq,
             "quiescence fence stalled",
@@ -3061,7 +3480,7 @@ impl<
                                 futures::select_biased! {
                                     _ = sleep.as_mut() => {}
                                     evt = evt.as_mut() => match evt {
-                                        Ok(evt) => hub.handle_evt(evt)?,
+                                        Ok(evt) => hub.handle_or_hold_evt(evt)?,
                                         Err(_) => break,
                                     },
                                 }
@@ -3079,7 +3498,7 @@ impl<
                                         }
                                     },
                                     evt = evt.as_mut() => match evt {
-                                        Ok(evt) => hub.handle_evt(evt)?,
+                                        Ok(evt) => hub.handle_or_hold_evt(evt)?,
                                         Err(_) => break,
                                     },
                                 }
@@ -3191,6 +3610,12 @@ where
         frozen: false,
         frozen_cmd_buffer: Vec::new(),
         freeze_on_resolve: false,
+        #[cfg(test)]
+        hold_events: false,
+        #[cfg(test)]
+        held_events: Vec::new(),
+        #[cfg(test)]
+        poisoned_content_apply: None,
         cmd_closed: false,
         activity_generation: 0,
         tracked_in_flight: 0,
@@ -3282,6 +3707,7 @@ mod tests {
             },
             slow_warned: false,
             admitted_ids: std::collections::HashSet::from([7]),
+            pending_admission_seq: None,
         };
 
         // A fresh round is not reportable, and must not be latched by asking.
@@ -3299,5 +3725,42 @@ mod tests {
         assert_eq!(report.elapsed_secs, 31);
         assert_eq!(report.admitted_waiters, 1);
         assert!(stale.latch_if_unresolved(now, threshold).is_none());
+    }
+
+    /// The in-flight count is incremented in `spawn_tracked` before the task
+    /// exists, so the matching decrement must not depend on the task being
+    /// polled. A tracked future aborted before its first poll must still emit
+    /// `TrackedWorkDone`, or the count leaks and the shutdown drain never
+    /// completes. `Abortable` (the task set's wrapper) drops an aborted task's
+    /// future without polling it, which is the shape reproduced here.
+    #[tokio::test]
+    async fn tracked_work_aborted_before_first_poll_still_emits_done() {
+        use crate::runtime2::{TaskRuntime, TaskSet, TokioTaskRuntime, TrackedWorkKind};
+        use future_form::{FutureForm, Sendable};
+
+        // Current-thread runtime: there is no await between `spawn` and
+        // `abort`, so the task cannot have been polled yet.
+        let set = TokioTaskRuntime.task_set();
+        let (evt_tx, evt_rx) = async_channel::unbounded::<super::Runtime2Evt>();
+        let tracked = <Sendable as super::HubBackgroundFuture<Sendable>>::track_work(
+            TrackedWorkKind::SyncDoc,
+            Sendable::from_future(async { crate::eyre::Ok(()) }),
+            evt_tx,
+        );
+        let abort = set.spawn(tracked).expect("task set accepts work");
+        abort.abort();
+        set.stop(std::time::Duration::from_secs(5))
+            .await
+            .expect("task set stops");
+
+        match evt_rx.try_recv() {
+            Ok(super::Runtime2Evt::TrackedWorkDone { kind }) => {
+                assert_eq!(kind, TrackedWorkKind::SyncDoc);
+            }
+            other => panic!(
+                "a tracked future aborted before its first poll must still emit \
+                 TrackedWorkDone, got: {other:?}"
+            ),
+        }
     }
 }

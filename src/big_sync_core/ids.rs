@@ -75,41 +75,6 @@ alias_byte_key!(PartKey);
 alias_byte_key!(ObjKey);
 alias_byte_key!(PeerKey);
 
-impl ObjKey {
-    /// The derived part key of this object's single-object part.
-    ///
-    /// ADR 012 decision 3: an object part is an ordinary one-member part whose key is
-    /// derived from the object key, so anyone holding the object key can compute it and
-    /// it cannot collide with an unrelated part. The reserved key space of decision 1
-    /// makes that the literal `o:{object_key}`: the `o:` scheme keeps the boundary
-    /// between scheme and value readable for a key that is itself a path
-    /// (`o:/object/path`), which neither a `/o/` prefix (a doubled slash) nor a bare
-    /// `/o` (no readable boundary) gives.
-    ///
-    /// The appended value is the object key's own bytes, not its textual form, so the
-    /// derivation is injective on identity: a 32-byte digest renders as `o:z…` and a
-    /// textual key as `o:/object/path`, and either round-trips through `ByteKey::from_str`.
-    #[must_use]
-    pub fn object_part_key(&self) -> PartKey {
-        let mut bytes = b"o:".to_vec();
-        bytes.extend_from_slice(self.as_bytes());
-        PartKey::new(bytes)
-    }
-}
-
-impl PartKey {
-    /// The object key this part is derived from, for an object part.
-    ///
-    /// ADR 012 decision 3: the derivation is the reserved `o:` scheme followed by the
-    /// object key's own bytes, so it round-trips exactly. `None` for a key outside the
-    /// reserved object-part space — the reserved scheme is what makes the distinction
-    /// decidable without consulting storage.
-    #[must_use]
-    pub fn object_key(&self) -> Option<ObjKey> {
-        self.as_bytes().strip_prefix(b"o:").map(ObjKey::new)
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteKey(std::sync::Arc<[u8]>);
 
@@ -137,9 +102,11 @@ impl ByteKey {
     ///
     /// ADR 012 decision 1 makes keys variable-length, but the fixed-width consumers at
     /// the workspace edges — ed25519 verifying keys, `KeyhivePeerId`, keyhive archive
-    /// reservations, automerge change hashes — still take a `[u8; 32]`. Every key that
-    /// reaches them is a 32-byte digest by construction, so a different length is an
-    /// invariant break rather than something to handle.
+    /// reservations, automerge change hashes — still take a `[u8; 32]`. A key this
+    /// process minted is a 32-byte digest by construction, so a different length there is
+    /// an invariant break rather than something to handle. A key a peer delivered is not:
+    /// the sync edges convert that one through a fallible path of their own instead of
+    /// reaching for this assertion.
     #[must_use]
     pub fn to_bytes32(&self) -> [u8; 32] {
         self.as_bytes()
@@ -415,8 +382,8 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
-    /// ADR 012 decision 1: a reserved key space is its own name, and an object part keeps
-    /// the `o:` scheme readable over both a path-shaped and a digest object key.
+    /// ADR 012 decision 1: a reserved key space is its own name, and the `o:` scheme stays
+    /// readable over both a path-shaped and a digest payload.
     #[test]
     fn reserved_key_spaces_read_as_their_text() {
         assert_eq!(PartKey::new("/seds").to_string(), "/seds");
@@ -424,13 +391,19 @@ mod tests {
 
         let path = ObjKey::new(b"/object/path");
         assert_eq!(path.to_string(), "/object/path");
-        assert_eq!(path.object_part_key().to_string(), "o:/object/path");
+        assert_eq!(
+            PartKey::new(b"o:/object/path").to_string(),
+            "o:/object/path"
+        );
 
-        // A digest renders as multibase, and the object part keeps the scheme in front of
-        // it, so the part reads as an object part rather than as an unrelated digest.
+        // A digest renders as multibase, and an `o:`-prefixed key keeps the scheme in
+        // front of it, so it reads as an object part name rather than as an unrelated
+        // digest.
         let digest = ObjKey::new([7; 32]);
         assert!(digest.to_string().starts_with('z'), "{digest}");
-        let part = digest.object_part_key().to_string();
+        let mut part_bytes = b"o:".to_vec();
+        part_bytes.extend_from_slice(digest.as_bytes());
+        let part = PartKey::new(part_bytes).to_string();
         assert!(part.starts_with("o:z"), "{part}");
         assert_eq!(
             part.strip_prefix("o:")

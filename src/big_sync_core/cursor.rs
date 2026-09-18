@@ -225,7 +225,7 @@ impl CursorSyncMachine {
                         .in_flight
                         .is_some_and(|in_flight| evt.cursor <= in_flight)
                     {
-                        tracing::trace!(
+                        tracing::debug!(
                             ?evt.obj_id,
                             ?evt.cursor,
                             in_flight = ?replay.in_flight,
@@ -297,9 +297,12 @@ impl CursorSyncMachine {
         // A membership completion is not that evidence: it reports a part
         // membership mutation being applied, so treating it as a content
         // acknowledgement would suppress a content replay the backend never saw.
-        if kind == CursorJobCompletionKind::Sync
-            && let Some(replay) = self.object_replays.get_mut(&obj_id)
-        {
+        if kind == CursorJobCompletionKind::Sync {
+            // Seed the entry: a part-scoped sync can be the *first* completion
+            // this machine sees for the object, and the cursor it records is
+            // what a later object route resumes from. Without the seed nothing
+            // is recorded and that route replays the object from the start.
+            let replay = self.object_replays.entry(obj_id.clone()).or_default();
             if cursor > replay.acknowledged {
                 replay.acknowledged = cursor;
             }
@@ -309,10 +312,27 @@ impl CursorSyncMachine {
             {
                 replay.in_flight = None;
             }
+            // The claim released above is the *object's*, not the board's, so the
+            // acknowledgement is applied whether or not the part board owes a lane
+            // for this cursor. The board owes one only where a part-scoped replay
+            // registered it: an object-target replay registers no part job at all
+            // ([`Self::on_subscription_evt`] takes its object-only branch), and a
+            // removal's membership lane can sit at the same cursor (a `Changed`
+            // and a `Removed` sharing one). That lane stays owed — settling it
+            // here would free a cursor whose membership write never landed.
+            if !self.jobs.owes_lane(&obj_id, cursor, &kind) {
+                tracing::debug!(
+                    ?obj_id,
+                    cursor,
+                    "sync completion acknowledged an object claim the part board owes no sync lane for",
+                );
+                return;
+            }
         }
         // A completion for a job/cursor that is not tracked is stale, not an
-        // error; the primitive returns nothing for it. A completion for a lane
-        // the waiter never owed still panics inside the primitive.
+        // error; the primitive returns nothing for it. A membership completion
+        // for a lane the waiter never owed still panics inside the primitive, and
+        // a sync completion only reaches this call where the board owes its lane.
         let advances = self.jobs.settle(obj_id, cursor, kind);
         self.emit_advances(advances, out);
     }
@@ -538,6 +558,39 @@ mod tests {
         );
     }
 
+    /// A part-scoped sync is often the *first* completion the machine sees for an
+    /// object: the object was replayed as part of a part and no object-target
+    /// touch ever created its replay entry. The cursor it records is what a later
+    /// object route resumes from — without it that route starts at 0 and re-reads
+    /// events the backend already observed.
+    #[test]
+    fn a_part_scoped_sync_records_the_object_cursor_of_an_object_with_no_replay_yet() {
+        let (o, p) = (obj(27), part(28));
+        let mut machine = CursorSyncMachine::default();
+
+        assert_eq!(
+            feed(&mut machine, touched(5, &o, std::slice::from_ref(&p))),
+            vec![sync_obj(&o, 5, vec![p.clone()])]
+        );
+        assert_eq!(machine.obj_resume_cursor(&o), 0);
+
+        assert_eq!(
+            settle(&mut machine, &o, 5, CursorJobCompletionKind::Sync),
+            vec![set_cursor(&p, 5), idle(&p)]
+        );
+
+        assert_eq!(
+            machine.obj_resume_cursor(&o),
+            5,
+            "the part-scoped sync acknowledged the object's content at its cursor"
+        );
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(5, &o)),
+            Vec::<CursorMachineCommand>::new(),
+            "and a later object-target touch at that cursor is a duplicate"
+        );
+    }
+
     /// Regression guard: the claim an emitted replay holds is released when the job
     /// that owed it dies, so the same cursor is replayed again instead of being
     /// suppressed forever. Without the release the object is owed a replay nobody
@@ -619,6 +672,54 @@ mod tests {
             "only a sync completion settles the object's own replay"
         );
         assert_eq!(machine.obj_resume_cursor(&o), 6);
+    }
+
+    /// Regression guard: an object-only content replay and a removal's membership
+    /// lane can share one cursor, and the sync completion must still release the
+    /// object's claim. The claim is what an object route resumes from, so dropping
+    /// the completion left `acknowledged` at 0 and the route re-read its first page
+    /// forever — while the membership lane, which that completion does not own, has
+    /// to stay owed until its own task completes.
+    #[test]
+    fn a_sync_completion_acknowledges_the_object_beside_a_membership_lane() {
+        let (o, p) = (obj(29), part(30));
+        let mut machine = CursorSyncMachine::default();
+
+        // The object's content replay at cursor 7, and the removal of the same
+        // object from a part, at that same cursor.
+        assert_eq!(
+            feed(&mut machine, touched_obj_only(7, &o)),
+            vec![sync_obj(&o, 7, Vec::new())]
+        );
+        assert_eq!(
+            feed(&mut machine, removed(7, &o, &p)),
+            vec![removal_command(&o, &p, 7)]
+        );
+        assert_eq!(machine.obj_resume_cursor(&o), 0);
+
+        // The content replay the backend was owed completes. Nothing advances on
+        // the part: the membership write has not landed.
+        assert_eq!(
+            settle(&mut machine, &o, 7, CursorJobCompletionKind::Sync),
+            Vec::<CursorMachineCommand>::new()
+        );
+
+        assert_eq!(
+            machine.obj_resume_cursor(&o),
+            7,
+            "the acknowledged replay is what the object route resumes from"
+        );
+        assert!(
+            machine.owes_obj_job_lane(&o, 7, CursorJobCompletionKind::Membership),
+            "the removal's membership lane is not the sync completion's to settle"
+        );
+
+        // The membership completion still finishes its own lane, and the part only
+        // then advances to the shared cursor.
+        assert_eq!(
+            settle(&mut machine, &o, 7, CursorJobCompletionKind::Membership),
+            vec![set_cursor(&p, 7), idle(&p)]
+        );
     }
 
     /// Regression guard: a touch spanning several parts is one object sync listing them in

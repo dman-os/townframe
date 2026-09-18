@@ -4,8 +4,6 @@ use crate::{
     DocumentId, handler::BigRepoKeyhiveProtocol, keyhive_listener::BigRepoKeyhiveListener,
 };
 use keyhive_core::access::Access;
-use keyhive_core::crypto::signed_ext::SignedSubjectId;
-use keyhive_core::event::Event;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
@@ -159,6 +157,28 @@ pub struct BigKeyhiveHandle {
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
+/// What an admitted Keyhive event names.
+///
+/// The difference between "names no graph" and "names a graph this hive cannot
+/// resolve *yet*" is load-bearing. The first is a property of the event: a
+/// prekey op changes which peers can be reached, not who is a member of what.
+/// The second is a property of this hive's ingest position and clears itself
+/// once the dependency lands — Keyhive classifies exactly it as a missing
+/// dependency (`ReceiveStaticDelegationError::is_missing_dependency`). A caller
+/// that takes the two for one thing either fails over a delivery race or drops
+/// an access change it cannot yet name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventSubject {
+    /// The graph the event changes.
+    Named(Identifier),
+    /// The event names no graph, so it cannot change a closure.
+    Unnamed,
+    /// The event's proof chain is not resolvable here yet: the hive has not
+    /// applied a delegation the chain names. The event is early rather than
+    /// undecodable, and the caller retries once the missing link lands.
+    Unresolved,
+}
+
 // a background task. rename to new
 impl BigKeyhiveHandle {
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
@@ -428,7 +448,7 @@ impl BigKeyhiveHandle {
             .is_some()
     }
 
-    /// The graph an admitted event names, or `None` when it names none.
+    /// The graph an admitted event names, or why it names none.
     ///
     /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the
     /// graph Keyhive dispatched the operation to, which is the proof chain's
@@ -444,36 +464,36 @@ impl BigKeyhiveHandle {
     ///
     /// Prekey events change which peers can be *reached*, not who is a member
     /// of what, so they name no graph and cannot change a closure.
-    pub(crate) async fn event_subject_id(
-        &self,
-        event: StaticEvent<Vec<u8>>,
-    ) -> Res<Option<Identifier>> {
-        if matches!(
-            event,
-            StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_)
-        ) {
-            return Ok(None);
-        }
-        let resolved = self
-            .keyhive
-            .static_event_to_event(event)
-            .await
-            .map_err(|err| ferr!("resolving an admitted Keyhive event's subject failed: {err}"))?;
-        Ok(Some(match resolved {
-            Event::CgkaOperation(operation) => Identifier::from(ed25519_dalek::VerifyingKey::from(
-                *operation.payload().doc_id(),
-            )),
-            // The proof chain's *root* issuer, not the immediate signer: `subject_id`
-            // walks `proof` to its head and answers that head's issuer, which is the graph
-            // Keyhive dispatched the operation to. Using `delegation.issuer` here is the
-            // B19 hazard and would name a non-membered id whenever a non-root member
-            // re-delegates.
-            Event::Delegated(delegation) => delegation.subject_id(),
-            Event::Revoked(revocation) => revocation.subject_id(),
-            Event::PrekeysExpanded(_) | Event::PrekeyRotated(_) => {
-                unreachable!("prekey events name no subject and returned above")
+    ///
+    /// The graph is named from the event's own proof chain and never from the
+    /// *delegate*: materializing the event needs the delegate's installed `Agent`
+    /// record, and a replica that only observes a graph is never sent one — measured
+    /// in the private-reader topology, where the delegate stayed unknown for at least
+    /// 77s and a decode that waited for it never ran. Naming the graph needs none of
+    /// that ([`Keyhive::static_membership_subject`]).
+    ///
+    /// An unresolvable chain is reported as [`EventSubject::Unresolved`] and not as a
+    /// failure: the event is early, its source row is not settled yet, and the caller
+    /// retries once the missing link lands. Anything else is an error.
+    pub(crate) async fn event_subject_id(&self, event: StaticEvent<Vec<u8>>) -> Res<EventSubject> {
+        Ok(match &event {
+            StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {
+                EventSubject::Unnamed
             }
-        }))
+            StaticEvent::CgkaOperation(operation) => EventSubject::Named(Identifier::from(
+                ed25519_dalek::VerifyingKey::from(*operation.payload().doc_id()),
+            )),
+            // The proof chain's *root* issuer, not the immediate signer: the walk
+            // answers the chain head's issuer, which is the graph Keyhive dispatched
+            // the operation to. Using the immediate issuer is the B19 hazard and would
+            // name a non-membered id whenever a non-root member re-delegates.
+            StaticEvent::Delegated(_) | StaticEvent::Revoked(_) => {
+                match self.keyhive.static_membership_subject(&event).await {
+                    Some(subject) => EventSubject::Named(subject),
+                    None => EventSubject::Unresolved,
+                }
+            }
+        })
     }
 
     /// What [`Access`] does `agent` have on this doc/group? None if unreachable.
@@ -1066,7 +1086,10 @@ impl BigKeyhiveHandle {
 }
 
 fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    // A document key is a BigSync object key, which ADR 012 decision 1 makes arbitrary
+    // bytes: the keyhive identifier is a fixed-width consumer, so a wrong-width key is an
+    // error here rather than a panicking assertion.
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
         .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

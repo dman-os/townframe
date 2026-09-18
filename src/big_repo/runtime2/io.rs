@@ -197,10 +197,10 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn has_doc_write_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Whether the local principal may fetch or sync this document (Fetch/Relay access
-    /// or better). Used for early fail-fast validation prior to network sync.
-    // TEMP-HUNT: the sync_doc_with_peer call site is temporarily disabled in
-    // native.rs; keep the trait surface until it is re-enabled.
-    #[expect(dead_code)]
+    /// or better). Written for the local sync preflight, which is currently disabled
+    /// (`NativeRuntimeIo::sync_doc_with_peer`); the surface stays until whether the
+    /// local gate should pre-empt the wire's `Unauthorized` is decided.
+    #[expect(dead_code, reason = "the disabled sync preflight is its only caller")]
     fn has_doc_fetch_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Store a raw fragment bundle at a boundary commit. The implementation

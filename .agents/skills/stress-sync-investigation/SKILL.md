@@ -245,3 +245,115 @@ A diagnostic that has never been shown to fire is not evidence. Pair each probe 
 must produce a positive result, and let it falsify your assumption. A hash-to-object mapping probe
 in this repo decoded fine but matched nothing; the control is what exposed the mapping as wrong
 before it was used to explain a failure.
+
+### Four-editor stress: settlement finishes but heads disagree
+
+A recent run finished final settlement at 69s, then reported the same one-document
+sedimentree-head mismatch on editor-4 until nextest killed it at 240s. Every node had
+16/16 documents and both compared head sets had cardinality one. This is an alignment
+fence, not a quiescence stall; head counts cannot identify which revision is missing.
+Log actual head hashes for differing documents before rerunning under load. The last
+local edit on the divergent node resolved `doc_groups={}`; investigate its replication
+routes, but do not assume an empty group set is itself wrong (use a working document
+as a positive control). Strip tracing span prefixes before truncating log events;
+otherwise the useful payload can be entirely hidden behind a long span.
+
+
+RESOLVED (later session): it was not an alignment fence. Editor-4 was *ahead*: its local commit's
+part event was published before that commit was visible in the frontier the sync server serves, so
+the peers' sync tasks were answered `Noop`, settled their cursors, and were never re-spawned. A
+single-hold write path (subduction `entry_guard_hydrated`, one hold across persist and the in-RAM
+apply) fixed it; the test went from a 240s timeout to a ~30s pass, and the republish workaround
+was deleted. See "Read-only state that is published before it is servable" below.
+## Read the log levels first
+
+Start from `WARN`/`ERROR`, not from debug probes. They exist because someone judged the condition
+worth surfacing, they are bounded in volume, and in this system they usually name the missing
+message outright. Survey them before adding instrumentation:
+
+    python3 scripts/bounded-log.py <log> 'WARN|ERROR'     # then group by normalised message
+
+A full run carries ~180 distinct WARN/ERROR signatures. The informative ones are the low-frequency,
+high-information lines (`unknown peer`, `no registered application peer identity`, `missing entry
+encryption key while materializing`, `peer disconnected while sending ...`), not the per-event
+chatter (`INSTR ...`, `ERROR_CALLER=caller dropped`). Do not add `debug!` noise for a condition a
+`WARN`/`ERROR` already states, and never raise a level just to make a probe greppable.
+
+## Fence -> job -> missing message
+
+Name the await, then the tracked work, then the message that never arrived:
+
+- `wait_for_full_sync` is the big_sync stat machine's waiter (daybook bootstrap and big_sync tests
+  use it). big_repo's stress harness does not: its settle fence is the hub quiescence probe
+  (`wait_for_quiescence`), whose stall report lists outstanding work by `TrackedWorkKind`.
+- A stall report of the shape `tracked_in_flight=0 tracked_work={} probe_pending_docs=0
+  pending_doc_syncs=0 keyhive_waiters=0` with only `active_keyhive_syncs>0` set means a keyhive
+  sync round has not returned: go to the keyhive lane, not big_sync.
+- Distinguish "the machine reports fully synced while heads differ" (a convergence-loop failure with
+  no fence outstanding) from "the machine never settles" (quiescence failure, tracked work
+  outstanding). They are different bugs with different fences.
+
+## Identity keys are conventional, not typed
+
+`PeerKey`, `KeyhivePeerId`, and subduction's `PeerId` are byte newtypes over 32 bytes, so a transport
+(endpoint) id and an application identity differ only by convention. `UnknownPeer` raised in
+`sign_and_send` (`subduction_keyhive/src/protocol.rs`) means the target was never `add_peer`ed under
+that id: the keyhive map is keyed by `BigRepoKeyhiveConnAdapter::peer_id()` =
+`KeyhivePeerId::from_bytes(*auth.peer_id().as_bytes())` (`big_repo/keyhive_conn.rs`) while the sync
+path looks up `KeyhivePeerId::from_bytes(peer_id.to_bytes32())` (`runtime2/native.rs`). Log both
+values when they disagree, and watch for `PeerKey::new(endpoint_id.as_bytes())`-style fallbacks
+(`big_repo/rpc.rs`) that mint an application identity from a transport one.
+
+## Read-only state that is published before it is servable
+
+Two caches, one commit. A write path can emit its "this part changed" event from the *storage*
+mutation while the in-RAM tree the sync server answers from is updated only afterwards (subduction:
+"persist before the in-RAM mutation"). A peer that reacts immediately is served the *previous*
+frontier, completes `Noop`, and — because a completion settles the cursor — never asks again.
+Nothing re-notifies, so the divergence is permanent and presents as a convergence-loop failure
+with no fence outstanding.
+
+Signature, from the hunt that pinned it: the writer publishes event `cursor=N` for the object; peers
+spawn object-sync tasks for it within milliseconds; every one returns `deets=Noop cursors={N}`; after
+that no task is ever spawned for that object again; the group-part replay advances and stays
+`drained=true`; the resident heads update ~90ms *after* the publish.
+
+Fix shape: make the served state never lag the advertised state — one lock hold spanning persist and
+the in-RAM apply, for *every* write path (per-commit, batch ingest, and the bulk local writes).
+Republishing the event afterwards also works, but it doubles event traffic and only patches the
+origin you remembered; prefer the lock and delete the republish. Never "fix" it by retrying on
+`Noop`: an ack that does not advance what the other side compares is an infinite re-arm.
+
+## A completion is not proof of its own effect
+
+The hub polls commands before events and handlers enqueue with `try_send`, so a message pair is
+ordered only when both halves are enqueued by the *same task* (or one channel from one sender).
+When a hunt surfaces the symptom, audit the whole message surface instead of the single site — the
+same inversion usually exists in two or three places. See
+`.agents/skills/message-ordering-audit/SKILL.md`.
+
+Symptoms worth recognising immediately:
+
+- a caller gets a success receipt for content that was never applied (a dropped route resolved the
+  waiter anyway);
+- a "reconciled" Keyhive sync whose admissions are not yet projected;
+- a spurious sync failure against a connection that was just closed/re-established;
+- a quiescence probe resolving while work it should have fenced is still queued behind the fence.
+
+## Test windows are not verdicts
+
+An expired hold/poll window is not evidence about the log, and an `expect` on a value that an
+asynchronous callback fills races that callback. Under load both produce failures that vanish in
+isolation. Re-express the test as the contract the client actually follows:
+
+- poll from the same position until delivered/drained (the `big_sync` replay-page tests);
+- register-then-check for a notification (`Notified::enable`) instead of checking then awaiting;
+- never add a sleep, and never widen an internal timeout to make a load failure disappear.
+
+## Counting iterations in a stress run
+
+With fail-fast on, a `--stress-duration` run ends at the first failure; with everything green it runs
+the whole duration. Count progress by the last test of each pass completing (`(N/N)` lines appear
+once per iteration) rather than by a `Summary` line, which only appears at the end or on failure.
+Do not combine `--no-fail-fast` with a long duration.
+
