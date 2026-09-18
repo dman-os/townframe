@@ -422,7 +422,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .rcx
             .blob_part_store
             .add_obj_to_parts(
-                crate::blobs::blob_id_from_hash(&hash.to_string()),
+                ObjKey::from(crate::blobs::blob_id_from_hash(&hash.to_string())?),
                 vec![blob_part.clone()],
             )
             .await?;

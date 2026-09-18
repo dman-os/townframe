@@ -103,7 +103,7 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
             .any(|target| matches!(target, AutomergeFrontierTarget::All))
         {
             self.store
-                .open_local_revision_reader_all(after)
+                .open_revision_reader_all(after)
                 .await
                 .wrap_err("opening all physical document revisions")??
         } else {
@@ -128,7 +128,7 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
                     .collect(),
             };
             self.store
-                .open_local_revision_reader(reqs)
+                .open_revision_reader(reqs)
                 .await
                 .wrap_err("opening physical document revisions")??
         };

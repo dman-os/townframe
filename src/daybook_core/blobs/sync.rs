@@ -96,7 +96,11 @@ impl SyncBackend for BlobSyncBackend {
         parts: Vec<PartKey>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
-        let blob_id = BlobId::new(obj_id.as_bytes());
+        // The key was written by whichever peer holds this part, so a key that
+        // names no blob digest names no blob here: an error, not a path and not
+        // a panic.
+        let blob_id = BlobId::try_from(&obj_id)
+            .wrap_err_with(|| format!("blob object key is not a blob digest: {obj_id}"))?;
         let local_has_blob = self.blobs_repo.has_blob_on_disk(blob_id.clone()).await?;
         let local_payload = self.part_store.obj_payload(obj_id.clone()).await?;
         if local_has_blob {
@@ -244,14 +248,14 @@ mod tests {
             SyncBackendScenario::noop(
                 "noop_when_membership_and_payload_match",
                 PeerKey::new([2; 32]),
-                noop_blob_id,
+                ObjKey::from(noop_blob_id),
                 noop_payload.clone(),
                 parts.clone(),
             ),
             SyncBackendScenario {
                 name: "noop_when_remote_payload_is_missing_and_blob_exists",
                 peer_id: PeerKey::new([2; 32]),
-                obj_id: noop_missing_remote_blob_id,
+                obj_id: ObjKey::from(noop_missing_remote_blob_id),
                 initial_payload: Some(noop_payload.clone()),
                 initial_parts: parts.clone(),
                 remote_payload: None,
@@ -263,7 +267,7 @@ mod tests {
             SyncBackendScenario::changed_object(
                 "changed_object_applies_remote_payload",
                 PeerKey::new([2; 32]),
-                changed_blob_id,
+                ObjKey::from(changed_blob_id),
                 old_payload.clone(),
                 new_payload.clone(),
                 parts.clone(),
@@ -271,7 +275,7 @@ mod tests {
             SyncBackendScenario::changed_object(
                 "changed_object_with_empty_part_hints",
                 PeerKey::new([2; 32]),
-                changed_empty_hints_blob_id,
+                ObjKey::from(changed_empty_hints_blob_id),
                 old_payload.clone(),
                 new_payload.clone(),
                 vec![],
@@ -279,7 +283,7 @@ mod tests {
             SyncBackendScenario::changed_object(
                 "changed_object_with_multiple_part_hints",
                 PeerKey::new([2; 32]),
-                changed_multi_hints_blob_id,
+                ObjKey::from(changed_multi_hints_blob_id),
                 old_payload.clone(),
                 new_payload.clone(),
                 vec![parts[0].clone(), extra_part],
@@ -287,11 +291,46 @@ mod tests {
             SyncBackendScenario::added_member(
                 "added_member_materializes_missing_blob",
                 PeerKey::new([2; 32]),
-                added_blob_id,
+                ObjKey::from(added_blob_id),
                 new_payload.clone(),
                 parts.clone(),
             ),
         ]
+    }
+
+    /// The blob part store is synced from peers, so an object key in it is
+    /// whatever the peer wrote. A key that names no digest names no blob: it
+    /// must be an error, never a path built outside the blob root.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blob_sync_obj_rejects_a_key_that_is_not_a_digest() -> Res<()> {
+        let (backend, _part_store, _blobs_repo, temp_root) = build_blob_backend().await?;
+        // An absolute spelling: `Path::join` reads it as a replacement for the
+        // blob root, so a key like this must never reach path construction.
+        let escape_target = temp_root.path().join("daybook-escape");
+        // The on-disk name a digest-shaped path gets: `<digest>.blob`.
+        let escape_blob = PathBuf::from(format!("{}.blob", escape_target.display()));
+        let obj_id = ObjKey::new(escape_target.to_string_lossy().as_bytes());
+
+        let err = backend
+            .sync_obj(
+                PeerKey::new([2; 32]),
+                obj_id.clone(),
+                test_parts(),
+                Some(serde_json::json!({ "lengthOctets": 1 })),
+            )
+            .await
+            .expect_err("an object key that is not a blob digest must not be accepted");
+
+        assert!(
+            err.to_string().contains(&obj_id.to_string()),
+            "error must name the offending key: {err}"
+        );
+        assert!(
+            !tokio::fs::try_exists(&escape_blob).await?,
+            "the reserved key produced {}",
+            escape_blob.display()
+        );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -461,7 +500,7 @@ mod tests {
         // Case 1: Remote Blob Added — Node B is missing blob bytes and sync_obj materializes it from Node A over iroh downloader
         let payload_added = b"contract-multi-node-added-blob".to_vec();
         let hash_added = blobs_repo_a.put(&payload_added).await?;
-        let obj_id_added = ObjKey::new(hash_added.as_bytes());
+        let obj_id_added = ObjKey::from(hash_added.clone());
 
         assert!(!blobs_repo_b.has_hash(hash_added.clone()).await?);
 
@@ -595,7 +634,7 @@ mod tests {
         // Phase 2: Node 1 syncs all blobs from Node 0
         let peer_0 = PeerKey::new(*nodes[0].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjKey::new(hash.as_bytes());
+            let obj_id = ObjKey::from(hash.clone());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[1]
                 .backend
@@ -626,7 +665,7 @@ mod tests {
         // Phase 4: Node 2 syncs all 8 blobs from Node 1
         let peer_1 = PeerKey::new(*nodes[1].endpoint.id().as_bytes());
         for (hash, payload) in &created_blobs {
-            let obj_id = ObjKey::new(hash.as_bytes());
+            let obj_id = ObjKey::from(hash.clone());
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[2]
                 .backend

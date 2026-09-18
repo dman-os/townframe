@@ -28,7 +28,7 @@
 //! admission log is not exposed (§1).
 
 use crate::interlude::*;
-use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::{BigKeyhiveHandle, EventSubject};
 use crate::runtime2::keyhive_admission;
 use crate::runtime2::tasks::TokioTimer;
 use crate::store::sqlite::SqliteBigRepoStore;
@@ -314,8 +314,21 @@ where
         for row in rows {
             let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
                 .map_err(|err| ferr!("admitted Keyhive event decode failed: {err}"))?;
-            let Some(id) = self.keyhive.event_subject_id(event).await? else {
-                continue;
+            let id = match self.keyhive.event_subject_id(event).await? {
+                EventSubject::Named(id) => id,
+                EventSubject::Unnamed => continue,
+                // The event is early, not wrong: its delegate has not been
+                // ingested yet, so this revision names no subject this hive can
+                // read. The closure is read-time state and a later row naming
+                // that subject carries it, so the row produces no entry instead
+                // of failing the reader — the disposition an id with no local
+                // graph already gets.
+                EventSubject::Unresolved => {
+                    tracing::debug!(
+                        "keyhive access row names a proof chain this hive cannot resolve yet"
+                    );
+                    continue;
+                }
             };
             let Some(subject) = self.access_subject(id).await? else {
                 continue;
@@ -459,6 +472,30 @@ mod tests {
             bincode::serialize(&StaticEvent::Delegated(delegation)).expect("serialize event")
         }
 
+        /// A delegation event whose *delegate* this hive has not ingested: the
+        /// wire form names an agent that only a hive which received that
+        /// agent's own event can resolve.
+        fn unknown_delegate_event(&self) -> (Identifier, Vec<u8>) {
+            let stranger = Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&[11; 32]).expect("verifying key"),
+            );
+            let delegation = Signed::new(
+                StaticDelegation::<Vec<u8>> {
+                    can: Access::Read,
+                    proof: None,
+                    delegate: stranger,
+                    after_revocations: Vec::new(),
+                    after_content: BTreeMap::new(),
+                },
+                stranger.verifying_key(),
+                ed25519_dalek::Signature::from_bytes(&[0; 64]),
+            );
+            (
+                stranger,
+                bincode::serialize(&StaticEvent::Delegated(delegation)).expect("serialize event"),
+            )
+        }
+
         /// Admit one event as one atomic revision, returning its seq.
         async fn admit(&self, bytes: Vec<u8>) -> u64 {
             let index = self.admissions.fetch_add(1, Ordering::SeqCst);
@@ -589,7 +626,7 @@ mod tests {
                 .event_subject_id(StaticEvent::PrekeysExpanded(Box::new((*expanded).clone())))
                 .await
                 .expect("resolve prekey expansion"),
-            None,
+            EventSubject::Unnamed,
             "an expanded prekey changes reachability, not membership"
         );
 
@@ -611,7 +648,7 @@ mod tests {
                 .event_subject_id(StaticEvent::PrekeyRotated(Box::new((*rotated).clone())))
                 .await
                 .expect("resolve prekey rotation"),
-            None,
+            EventSubject::Unnamed,
             "a rotated prekey changes reachability, not membership"
         );
     }
@@ -638,7 +675,7 @@ mod tests {
                 .event_subject_id(event)
                 .await
                 .expect("resolve delegation"),
-            Some(subject),
+            EventSubject::Named(subject),
             "the subject is the graph Keyhive dispatched to, not the signer"
         );
     }
@@ -670,7 +707,7 @@ mod tests {
                 .event_subject_id(StaticEvent::CgkaOperation(Box::new(operation)))
                 .await
                 .expect("resolve cgka operation"),
-            Some(doc_identifier),
+            EventSubject::Named(doc_identifier),
             "a cgka operation names the document whose tree it edits"
         );
     }
@@ -688,6 +725,28 @@ mod tests {
         assert!(
             page(&mut reader).await.is_empty(),
             "an id this hive holds no graph for has no closure to read"
+        );
+    }
+
+    /// The fixture for a delegation whose *delegate* this hive does not hold: a
+    /// delegate is an agent only a hive that received that agent's own event can name.
+    /// Keyhive reports exactly this as a missing dependency, and a replica that only
+    /// observes a graph is never sent the record — so naming the graph must not need it.
+    #[tokio::test]
+    async fn delegation_to_an_unknown_delegate_is_early_not_undecodable() {
+        let harness = Harness::new().await;
+        let (stranger, bytes) = harness.unknown_delegate_event();
+        let event: StaticEvent<Vec<u8>> =
+            bincode::deserialize(&bytes).expect("decode delegation event");
+
+        assert_eq!(
+            harness
+                .keyhive
+                .event_subject_id(event)
+                .await
+                .expect("an unknown delegate is a state of this hive, not a failure"),
+            EventSubject::Named(stranger),
+            "the graph comes from the event's own chain, never from its delegate"
         );
     }
 

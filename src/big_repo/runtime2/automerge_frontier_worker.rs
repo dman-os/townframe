@@ -446,7 +446,7 @@ impl RevisionedStore for LocalPartRevisionStore {
         // walker's source-wide durable revision.
         let inner = self
             .store
-            .open_local_revision_reader_all(after)
+            .open_revision_reader_all(after)
             .await
             .wrap_err("opening local part revision reader")??;
         Ok(LocalPartRevisionReaderAdapter { inner })

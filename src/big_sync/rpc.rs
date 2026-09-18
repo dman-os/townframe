@@ -1109,4 +1109,239 @@ mod tests {
         server_endpoint.close().await;
         Ok(())
     }
+
+    /// A held page must not wedge the dispatch loop. The handlers are spawned for
+    /// exactly this reason (see `MAX_INFLIGHT_RPC_HANDLERS`), so a request parked on
+    /// its hold cannot serialize the peers behind it. A client that gives up mid-hold
+    /// leaves the responder holding; the next request must still be answered instead
+    /// of waiting out the cancelled hold.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_held_page_request_does_not_wedge_the_dispatch_loop() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let part_id = test_part();
+        let store = Arc::new(MemoryPartStore::new());
+        // The part exists and is granted, but holds nothing: a page for it can only
+        // leave on its hold.
+        store.ensure_part(part_id.clone()).await?;
+
+        let rpc_store: Arc<dyn HostPartStore> = Arc::<MemoryPartStore>::clone(&store) as _;
+        let (rpc_handle, rpc_stop) =
+            spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), rpc_store)])).await?;
+
+        let server_endpoint = test_endpoint().await?;
+        let router = Router::builder(server_endpoint.clone())
+            .accept(BIG_SYNC_RPC_ALPN, rpc_handle.protocol_handler())
+            .spawn();
+        let server_addr = router.endpoint().addr();
+
+        let granted_endpoint = test_endpoint().await?;
+        let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
+        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr);
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(granted_peer.clone(), Access::Read)]),
+            )
+            .await?;
+
+        let page_request = |hold_ms: u32| ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: ReplayPageRequest {
+                target: SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor: 0,
+                },
+                limit: 16,
+                hold_ms,
+            },
+        };
+
+        // Parked, not answered: nothing is waiting on the part, so the responder holds
+        // the request until its hold elapses. The client then gives up on it.
+        let held = granted.replay_page(page_request(5_000));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), held)
+                .await
+                .is_err(),
+            "a page with nothing to send is held rather than answered early"
+        );
+
+        // The cancelled request is still parked on the responder. A fresh page is
+        // answered anyway, and it is answered *before* the parked request's hold
+        // elapses: a loop that handled pages inline would serialize behind the parked
+        // one and only answer after its full 5s. The margin is wide enough that only
+        // serialization can trip it.
+        let started = std::time::Instant::now();
+        let fresh = granted.replay_page(page_request(50)).await??;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "a parked page must not serialize the next request behind its hold, waited {:?}",
+            started.elapsed()
+        );
+        let ReplayPageOutcome::Events(page) = fresh else {
+            panic!("a granted part answers a page, got {fresh:?}");
+        };
+        assert!(page.events.is_empty(), "the part still has nothing to send");
+
+        rpc_stop.stop().await?;
+        router.shutdown().await?;
+        server_endpoint.close().await;
+        Ok(())
+    }
+
+    /// A page carries its verdict explicitly, so the wire can tell "nothing further is
+    /// waiting" from "nothing was drained": a quiet part whose replay half reported
+    /// completion is `drained: true`, while a page that cannot drain anything (a zero
+    /// limit) reports `drained: false` with the caller's own cursor. Both sides are
+    /// pinned, plus that the event landing after a quiet page is still fetchable from
+    /// the cursor the caller already holds, that a page stopping on its limit leaves
+    /// backlog, and that a drain-only request never waits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_page_that_carried_nothing_is_not_a_verdict_about_the_log() -> Res<()> {
+        use keyhive_core::access::Access;
+
+        let part_id = test_part();
+        let store = Arc::new(MemoryPartStore::new());
+        store.ensure_part(part_id.clone()).await?;
+
+        let rpc_store: Arc<dyn HostPartStore> = Arc::<MemoryPartStore>::clone(&store) as _;
+        let (rpc_handle, rpc_stop) =
+            spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), rpc_store)])).await?;
+
+        let server_endpoint = test_endpoint().await?;
+        let router = Router::builder(server_endpoint.clone())
+            .accept(BIG_SYNC_RPC_ALPN, rpc_handle.protocol_handler())
+            .spawn();
+        let server_addr = router.endpoint().addr();
+
+        let granted_endpoint = test_endpoint().await?;
+        let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
+        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr);
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(granted_peer.clone(), Access::Read)]),
+            )
+            .await?;
+
+        let page_request = |hold_ms: u32, limit: u32| ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: ReplayPageRequest {
+                target: SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor: 0,
+                },
+                limit,
+                hold_ms,
+            },
+        };
+
+        // A page that carries nothing without the replay half reporting completion is not
+        // a verdict: it answers `drained: false` and carries the caller's own cursor. A
+        // zero limit reaches that branch without draining anything, which is the same
+        // answer a page that runs out of its hold gives.
+        let undrained = granted.replay_page(page_request(50, 0)).await??;
+        let ReplayPageOutcome::Events(undrained) = undrained else {
+            panic!("a granted part answers a page, got {undrained:?}");
+        };
+        assert!(
+            undrained.events.is_empty(),
+            "a page that carries nothing has no events"
+        );
+        assert!(
+            !undrained.drained,
+            "a page that carried nothing is not a caught-up verdict"
+        );
+        assert_eq!(
+            undrained.resume, 0,
+            "and it resumes from the caller's own cursor"
+        );
+
+        // Nothing has joined the part, so this page can only leave on its hold — and
+        // this time the replay half has reported completion, which *is* the caught-up
+        // verdict.
+        let quiet = granted.replay_page(page_request(50, 16)).await??;
+        let ReplayPageOutcome::Events(quiet) = quiet else {
+            panic!("a granted part answers a page, got {quiet:?}");
+        };
+        assert!(quiet.events.is_empty(), "a quiet part carries no events");
+        assert!(
+            quiet.drained,
+            "a quiet part whose replay completed is caught up"
+        );
+        assert_eq!(
+            quiet.resume, 0,
+            "and it resumes from the caller's own cursor"
+        );
+
+        // The event that lands after the quiet page is still the caller's to fetch, from
+        // the cursor the caller already holds.
+        seed_test_store(&store, part_id.clone()).await?;
+        let late = granted.replay_page(page_request(250, 16)).await??;
+        let ReplayPageOutcome::Events(late) = late else {
+            panic!("a granted part answers a page, got {late:?}");
+        };
+        assert!(
+            !late.events.is_empty(),
+            "the event written after the quiet page must still be fetchable",
+        );
+        assert!(
+            late.drained,
+            "the page ran to the end of the log, so it is caught up"
+        );
+        // The write's own touch has to be fetchable. The page may also carry the
+        // object's previous state as a removal row: the reader reports removals the
+        // old subscription suppressed, and that is a log fact, not a defect.
+        assert!(
+            late.events.iter().any(|event| matches!(
+                event,
+                PartEvent::Changed(changed) if changed.part_ids.contains(&part_id)
+            )),
+            "the late page carries the granted part's own event, got {late:?}"
+        );
+
+        // The other side of the verdict still exists where it means something: a
+        // page that stops on its own limit is not caught up, because backlog
+        // remains, and the caller asks again from the cursor it got back.
+        let truncated = granted.replay_page(page_request(250, 1)).await??;
+        let ReplayPageOutcome::Events(truncated) = truncated else {
+            panic!("a granted part answers a page, got {truncated:?}");
+        };
+        assert_eq!(
+            truncated.events.len(),
+            1,
+            "a one-event page carries one event"
+        );
+        assert!(
+            !truncated.drained,
+            "a page that stopped on its limit leaves backlog"
+        );
+
+        // `hold_ms == 0` is a drain-only request: it answers out of the log and
+        // never enters the wait, so it cannot take its hold's worth of time.
+        let started = std::time::Instant::now();
+        let drain_only = granted.replay_page(page_request(0, 16)).await??;
+        let ReplayPageOutcome::Events(drain_only) = drain_only else {
+            panic!("a granted part answers a page, got {drain_only:?}");
+        };
+        assert!(
+            !drain_only.events.is_empty(),
+            "a drain-only page still carries the backlog"
+        );
+        assert!(
+            drain_only.drained,
+            "a drain-only page still reports the reader's caught-up verdict"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "hold_ms == 0 must not wait: it took {:?}",
+            started.elapsed()
+        );
+
+        rpc_stop.stop().await?;
+        router.shutdown().await?;
+        server_endpoint.close().await;
+        Ok(())
+    }
 }

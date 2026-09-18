@@ -249,16 +249,28 @@ impl<'a> SqliteFrontierWrite<'a> {
             Some(part_id) => self.part_ref(part_id).await?,
             None => 0,
         };
+        // `added_at` is the cursor at which this row most recently became present: set on
+        // insert and on the tombstone-to-present transition (a re-add), and preserved by a
+        // present-to-present touch. A row that stays a tombstone keeps whatever stamp it had,
+        // because the stamp is what tells a reader the removal is its business.
         sqlx::query(
-            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
+            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                 event_type = excluded.event_type,
+                 txid = excluded.txid,
+                 added_at = CASE
+                     WHEN big_sync_members.event_type = ? THEN excluded.txid
+                     ELSE big_sync_members.added_at
+                 END",
         )
         .bind(self.scope_id)
         .bind(obj_ref)
         .bind(maybe_part_ref)
         .bind(event_type)
         .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
+        .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
+        .bind(EVENT_REMOVED)
         .execute(&mut **self.transaction_mut())
         .await
         .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;

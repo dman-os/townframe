@@ -370,7 +370,18 @@ structstruck::strike! {
                 pub obj_id: ObjKey,
             }),
         }>,
-        pub next_cursor: Option<CursorIndex>,
+        /// Always a position the caller can ask from again: the caller's own cursor when
+        /// this page carried nothing, otherwise advanced past the last event in the page.
+        ///
+        /// This is the request's next `target` cursor, never a verdict — an exhausted
+        /// replay and a page that only ran out of its hold both hand back a position to
+        /// ask from again.
+        pub resume: CursorIndex,
+        /// The responder's replay of this target is exhausted as of the last event in
+        /// this page (its replay half reported `ReplayComplete`). Only this means caught
+        /// up; a page that ran out of its hold is `drained: false` with `resume` = the
+        /// caller's own cursor, so the caller keeps asking and the hold paces it.
+        pub drained: bool,
     }
 }
 fn value_as_string<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
@@ -407,6 +418,15 @@ impl From<PartEvent> for SubEvent {
 }
 
 /// A request for one bounded page of a single target's events.
+///
+/// The page lane is deliberately transport-agnostic: the same request can be
+/// carried by a stream (WebSocket/NATS) or by an HTTP long-poll. The caller's
+/// own pacing therefore travels in the request (`hold_ms`) instead of being a
+/// server-side timeout, and a hold that expires is a normal answer
+/// ([`ReplayPageOutcome::Events`] with `drained: false`), never an error — an
+/// HTTP responder answering 5xx for it would make clients retry the whole
+/// request. On a push transport `hold_ms = 0` degenerates cleanly to plain
+/// polling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayPageRequest {
     /// The one target being paged. A `Part` target carries the cursor to resume
@@ -416,22 +436,26 @@ pub struct ReplayPageRequest {
     pub limit: u32,
     /// How long the responder may hold the request while the target has nothing
     /// to send. This is the caller's pacing choice, so a caller that has other
-    /// work can ask for a short hold; the responder caps it.
+    /// work can ask for a short hold; the responder caps it. Zero means do not
+    /// hold at all.
     pub hold_ms: u32,
 }
 
 /// What a page request answered.
 ///
-/// An empty page and a denied part are deliberately different answers: the
-/// first means caught up, the second means the peer may no longer read the
-/// part, which a caller must not have to infer from an empty page.
+/// An empty page and a denied part are deliberately different answers: an
+/// empty page that is `drained` means caught up, the second means the peer may
+/// no longer read the part, which a caller must not have to infer from an empty
+/// page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplayPageOutcome {
     /// Events after the target's cursor, filtered for the asking principal.
     ///
-    /// `PartPage::next_cursor` is the resume point: `Some` means more is waiting,
-    /// `None` means the responder's log is caught up as of the last event, which
-    /// is how a caller learns that replay is complete.
+    /// The verdict is explicit and never encoded in the position: `drained`
+    /// says the responder's replay is complete as of the page's last event, and
+    /// `resume` is always a cursor the caller can ask from again (its own when
+    /// the page carried nothing). A page that only ran out of its hold is
+    /// `drained: false`, so the caller keeps asking.
     Events(PartPage),
     /// The target names a part this scope does not know.
     UnknownPart,

@@ -126,9 +126,10 @@ round trip is a network cost (latency, radio wake-up), not a free control messag
   distribution requirement over it is served by a separate, chosen hash.
 - **Part** — the unit of membership and of authorization. A part holds members; an
   object records the parts it resides in.
-- **Object part** (`o:{object_key}`) — a part reserved for one object, whose key
-  is derived from that object's key. What an object subscription reconciles over.
-  Formerly called a "virtual part".
+- **Object lane / object part key** (`o:{object_key}`) — the reserved key *name* an object
+  subscription is expressed under, derived from the object's key. A name, not a storage
+  class: nothing stores, enumerates or interprets it (decision 3). Formerly called a
+  "virtual part".
 - **`/seds`** — the reserved part key for the locally saved sedimentrees: the
   owner's own list. Not a special case in any mechanism, only in its meaning.
 - **View** — the set a reconciliation runs over: a part. *Not* a peer.
@@ -307,15 +308,15 @@ membership is resolved and then filtered.
 Local subscriptions remain unfiltered (`principal == None` permits), because local
 reads cross no trust boundary.
 
-While the object-part lane does not yet exist (decision 3), an object that resides
-in no part has an empty containing set, so its events filter to empty and are
-**not remotely deliverable**. This is fail-closed and deliberate: the alternatives
-were an unauthenticated lane (any peer knowing an object key could pull it) or
-materializing per-object grants again. Local subscriptions are unaffected. Step 4
-restores remote single-object delivery through real authorization.
+An object that resides in no part has an empty containing set, so its events filter to
+empty and are **not remotely deliverable**. This is fail-closed and deliberate: the
+alternatives were an unauthenticated lane (any peer knowing an object key could pull it) or
+per-object grant rows, and decision 3's revision declined both. Local subscriptions are
+unaffected, and remote single-object delivery is the containing-part existential above —
+not a per-object grant.
 
-Directly granted objects outside any part are no longer collection reconciliation;
-decision 3 covers how that case is served.
+A directly granted object outside any part is not served: there is no per-object grant row, so it
+stays fail-closed (decision 3's revision).
 
 **Revocation is not an event.** There are no authorization events, so there are no
 revocation events either. Because delivery is paged (decision 9), a page request
@@ -333,6 +334,16 @@ tests pin the whole rule from both sides: a revoked peer and a never-authorized 
 neither the advance nor a payload-free hint nor a replayed removal, while a peer that keeps
 access still receives the removal.
 
+
+**Access is a property of the part, not of an interval.** A page is a list operation over one
+part, and the only authorization question it asks is whether the caller may read that part *now*:
+no event carries an access epoch, and nothing is protected according to when a grant was made. A
+reader that keeps access can therefore read the whole retained history of a part back to its
+cursor, and a reader that regains access reads exactly what its cursor still has behind it — the
+bound is retention, not authorization. One consequence is worth stating because it is easy to get
+backwards: the filter is evaluated at page time against current access, so no ordering between an
+access change and a membership change is part of the contract. A reader either sees the membership
+removal or is refused the part it names, and both are correct.
 ### 3. Object subscriptions are object parts under a reserved `key` space
 
 Object subscriptions exist today as a separate lane. The reason they were separate
@@ -350,77 +361,63 @@ is mechanical, and now removable:
 **Key space.** Object parts live under a reserved prefix, `o:{object_key}`. The
 key is therefore *derived from the object key*: anyone holding the object key can
 compute it, so it discloses nothing beyond the object key itself, and it cannot
-collide with an unrelated part named with arbitrary bytes. No `kind` column or
-classification lookup is needed.
+collide with an unrelated part named with arbitrary bytes. Nothing branches on the
+prefix: it is a reserved *name*, not a storage class, so a part whose arbitrary key
+happens to begin `o:` is an ordinary part like any other — the reserved scheme is
+collision-free in behaviour, not merely in intent.
 
-**Membership is one row, not a fan-out.** The object is the part's member. This is
-definitional, but it is also load-bearing: filtering gates delivery on the event
-*naming* a part the recipient may read, so without that membership row an object
-part's events filter to empty and nothing is delivered.
+**Membership is the object's own rows in real parts.** There is no part whose single
+member is "the object": an object lane reads the object's rows in the parts that
+actually contain it. Nothing is materialized for an object subscription and nothing is
+enumerated for it — the reserved key is a *name*, not a storage class.
 
-**Access to an object part is inherited.** If a principal can read any part
-containing the object, it can read `o:{object_key}`. That is *exactly* the
-existing derivation rule (an explicit row, else the existential over containing
-parts), so object parts need no new authorization mechanism — they are ordinary
-parts that happen to have one member. Explicit rows on `o:{object_key}` are then
-**additive direct shares**: they grant an object to a principal that has no
-containing part. Two consequences:
+**Authorization is the containing-part existential.** An object subscription is
+authorized exactly as decision 2 authorizes an object event: the object is syncable to
+a peer iff at least one part it resides in is accessible to that peer, resolved from
+membership. No derived part takes part in that decision, so there is no object-granular
+row to materialize, inherit, collect or revoke — and **access stays purely additive:
+there are no deny rows.** Revocation is expressed by membership (remove the object from
+parts) or by part access, never by a negative row; a per-object deny remains a new
+decision, not an inference.
 
-- derived access must never be materialized; writing an `o:X` row per containing
-  part is the fan-out we are deleting;
-- **access is purely additive — there are no deny rows.** Revocation is expressed
-  by membership (remove the object from parts) or by part access, never by a
-  negative row. If a genuine per-object deny is ever needed, that is a new
-  decision, not an inference.
+**An object in no part is not remotely deliverable.** Its containing set is empty, so its
+events filter to empty (decision 2) and an object page is refused rather than answered
+empty. Fail-closed and deliberate: the alternatives were an unauthenticated lane (any
+peer holding the key could pull it) or a per-object grant mechanism. Local subscriptions
+are unaffected.
 
-**Lifecycle.** Because the key is derivable, the part row is *materialization*, not
-identity. Create it lazily on first subscription or first explicit access row, and
-collect it when nothing references it (no peer cursors, no access rows). Since it
-is always recreatable, no correctness depends on the row surviving.
+**The object lane carries content, not membership.** A membership transition — removal
+included — is a part-lane fact: delivered to peers that may read that part, never
+projected onto the object lane. In particular the object lane must not synthesize a
+payload-less `Changed` for a deletion (decision 9): a `Changed` with no part ids means
+*resolve the membership*, not "the object left a part", and conflating the two spends the
+object lane's own cursor bookkeeping on a fact it cannot name.
 
-**Machinery must not know the distinction.** A one-member part needs no special
-handling: its range structure is trivial (a single leaf), its dirty count is the
-same indexed query, and its cursor path is identical. The bucket machine and its
-peers should be able to reconcile an object part without knowing that is what it
-is. The only real difference is *data*, not machinery: materializing an object part
-allocates no revision, because subscribing is not a sync event.
+**Machinery must not know the distinction, and after this revision it cannot**: an object
+subscription reaches the same store surfaces as a part subscription (`subscribe` on
+`SubscriptionTarget::Object`, `replay_page` on `ReadTarget::Object`) and resolves content
+through the same frontier rows, with no part to name. The difference inventory is
+therefore answered rather than deferred, and the *only* asymmetry left is that an object
+route carries its cursor in the target rather than in `big_sync_peer_cursors` — the
+part-keyed cursor table (decision 1) cannot key it.
 
-**API unification is a conclusion we have not earned yet.** The subscription and
-part-store surfaces should be unified only where a *difference inventory* justifies
-it. That inventory — object versus part across key derivation, cursor semantics,
-event kinds, authorization, storage, and machinery — is the first artifact of
-step 4. Where unification turns out to be costly or confusing, explicit separation
-is acceptable and preferable to a forced isomorphism, as the current subscription
-API demonstrates.
-
-This does not imply per-object authorization for the local case, which stays
-unfiltered, and it does not resurrect per-object grant rows.
-
-**As built.** The key is the literal reserved-prefix key of decision 1: `o:` followed by
-the object key's own bytes, so `o:/object/path` and `o:z…` each read as what they are and
-the key stays computable by anyone holding the object key. (While keys were fixed-width
-this was a domain-separated digest, `ObjKey::object_part_key()`; step 7 replaced it.) Derivation triggers on
-a remote object subscription, which materializes the part row and the object's single live
-membership row; the local lane is untouched. Inheritance needed no new authorization code:
-the materialized row makes the object part one of the object's containing parts, so the
-existing `FromObject` resolution grants it, and an explicit row becomes additive through the
-same path. Materialization allocates no revision — it reuses the current one — so it cannot
-advance the scope cursor. Two things stay open by choice: nothing collects an unreferenced
-object part, and the inventory above was answered in the implementation rather than as a
-separate artifact, with the conclusion that the explicit APIs remain separate for now. The
-third is closed: an event that *names* `o:{O}` resolves through `Part`/`AnyOf` candidate
-inheritance like any other object part. `PartKey::object_key` reverse-derives the object from
-the reserved key, and the lookup falls back to that object's containing parts, which is the
-same rule `FromObject` applies. It had to be closed rather than deferred because filtering
-gates delivery on the event naming a readable part, and no access row is ever written for a
-derived part, so an object-lane event filtered to empty and was never deliverable remotely. One store divergence to carry, and it is now bounded rather
-than open: in sqlite `big_sync_members` *is* the keyed frontier, so a materialization is
-observable as a single touch at the current revision, while the memory store keeps its
-frontier separately and records nothing. That is a storage-layout difference, not a semantic
-one — reads only hand back events past the asking cursor, so a recorded row never reaches a
-subscriber that had already passed that revision — and the invariant the stores do share,
-that subscribing allocates no revision, is pinned for both by the shared host contract
-(`assert_subscribing_allocates_no_revision_contract`).
+**As built, and the revision.** The key is the literal reserved-prefix key of decision 1:
+`o:` followed by the object key's own bytes, so `o:/object/path` and `o:z…` each read as
+what they are (step 7 replaced the earlier domain-separated digest). What first shipped
+went past the key: a remote object subscription *materialized* a part row plus the
+object's single live membership row, and an event naming `o:{O}` resolved through
+candidate inheritance because a derived part holds no access row and would otherwise
+filter to empty. Both are removed. The materialization wrote state on a read — in sqlite
+the membership row *is* the keyed frontier, so the write was observable to other
+subscribers as a touch at the current revision — it put a derived part into `obj_parts()`
+where the frontier reconciler then removed it as "not desired", producing a removal for a
+part nobody had asked about, and it left the object lane synthesizing a payload-less
+`Changed` for that deletion. **Case 10 below is dropped with it**: a direct single-object
+share to a principal with no containing part had no production writer, and every
+mechanism above existed to serve it, so the mechanism is deleted and a future per-object
+grant is a new decision. `ObjKey::object_part_key` and `PartKey::object_key` go with it:
+after the revision nothing derives or interprets the reserved key, and a part whose
+arbitrary key happens to begin `o:` is simply an ordinary part.
 
 ### 4. Keep the bucket tree; the fix is the boundary, not the tree
 
@@ -728,13 +725,103 @@ per key rather than a history, so it cannot honour one: an object added at one r
 changed at a later one is simply `Changed` to a subscriber behind both, and two subscribers
 at the same cursor can be shown different kinds for the same object — an untrustworthy
 label, not merely a redundant one. Whether something is new is also a fact only the reader's
-own replica can answer exactly, and it answers it correctly under lag, which is the same
-argument that removed the stored `added_at`/`changed_at` stamps. Nothing branched on the
+own replica can answer exactly, and it answers it correctly under lag. Nothing branched on the
 distinction: `Added` and `Changed` projected to the same object sync. `Removed` stays
 because silence is ambiguous between "nothing happened" and "it is gone", and it keeps its
 tombstone. A backend wanting richer kinds carries them in the frontier's generic value,
 which widens what an embedder may assert rather than narrowing it.
 
+**The add stamp returns, as a predicate rather than a kind.** Dropping `Added` also dropped the
+stored `added_at`/`changed_at` stamps from the sqlite membership row (the memory store kept them in
+its member state all along, which is where the divergence started), and a page that cannot tell
+when an object became a member must hand every retained `Removed` to every reader. For a
+long-lived or intermittently connected
+subscriber on an active part — the triage case of ADR 010 above all — that is a wire cost paid
+for dead slots nobody asked for. The fix is not the `Added` kind: it is one stamp, `added_at` per
+`(object, part)` membership row, holding the cursor at which that row most recently became
+*present* — set on the absent-to-present transition, preserved by present-to-present touches. A
+deleted row at cursor `T` is then delivered to a reader at `c` exactly when `added_at <= c < T`:
+if the row became present after the reader's cursor, the reader cannot have seen the object in
+that part, so the removal carries no information for it. `cursor = 0` falls out of the same
+predicate, since no stamp is zero. The stamp is invisible on the wire, so the "two subscribers
+can be shown different kinds" objection above does not return with it: the kinds stay two, and
+only the set of rows a page is drawn from depends on the reader's cursor. The stamp is per-key
+metadata on the frontier's own row — a column beside `event_type` and `txid`, not a field of
+`PartEvent`, because `PartPage.events: Vec<PartEvent>` is the postcard wire type — and the page
+query uses it as a predicate, never copying it into a delivered event.
+
+**On the object lane the vocabulary is content only.** A membership transition, removal
+included, is a part-lane fact: an object page reports content changes, and a peer that may
+no longer read any part containing the object is refused rather than handed a membership
+event (decision 2) — which is why a deletion has no object-lane shape to invent. The
+projection must therefore not turn a part-level deletion into a payload-less `Changed`:
+that shape means *resolve the membership*, and the machine books it as content.
+
+
+**As built, a page hands out tombstones it cannot know are wanted.** The stamps went with `Added`
+(above), so for an arbitrary cursor the server cannot tell whether the reader ever saw the object,
+and the membership row's `txid` is overwritten by each transition rather than kept per kind. The
+page therefore spends its row budget on `event_type = 2` rows like any other —
+`list_events_with_policy`'s cutoff and row queries select them unconditionally — which a fresh
+subscriber on a long-lived part pays in round trips before it reaches content. Correctness is
+unaffected: applying a removal for an object the replica does not hold is a no-op on both sides
+(`remove_obj_from_part` returns early on an unknown object ref, and the reader's replica knows its
+own membership). So this is a cost, not a bug, and the `added_at` predicate above is its fix.
+
+**Membership removal is not payload removal.** An object removed from every part does **not** lose
+its payload: `remove_obj_from_part` nulls the payload when the live count reaches zero, and that is
+wrong — a big_repo object's payload outlives a part letting go of it, and an object is not new
+merely because every part released it. The invariant is instead **live membership implies a
+payload, and a payload is dropped only explicitly**: an object with no payload cannot be in a part,
+`add_obj_to_parts` on such an object records pending membership and emits nothing (so re-adding
+before the payload arrives is silence, exactly as the first add is), and payload removal is one
+transaction that removes the object from every part it is in and then drops the payload. It needs
+no new event kind: every reader that could hold the content acquired it through a part it may
+still read, so it receives the `Removed` that empties its containing set and its own replica drops
+the content — an inference, not a notice. Which payload-less objects are collected, and when, is
+the embedder's policy on top of this: the sync backend owns object GC rather than a membership
+removal doing it as a side effect.
+
+**GC, and why tombstone vacuuming is blocked.** Two things can be collected, with different
+prerequisites. Payloads are collectable now: the invariant above means an object keeps its payload
+after every part releases it, so collection is explicit and belongs to the embedder — the store
+offers `remove_obj_payload` (one transaction: remove from every containing part, emit those
+`Removed`s, drop the payload), a listing of part-less objects, and counters (live versus dead rows,
+payload bytes, tombstone bytes, dead-to-live ratio per part) for a janitorial loop to read.
+Dead membership rows are the other thing, and under a hard partition rule they cannot be pruned at
+all. Pruning is safe only if the removal is either delivered to every observer or reconstructible
+afterwards, and neither holds: a removal is not addressed to anyone — a tombstone records the
+object and the part, not which peer holds it — and in a symmetric difference between two peers a
+pruned absence is indistinguishable from a stale presence, because "A has no row, B says present"
+has no rule that makes A's absence win.
+
+A cursor epoch does not repair that. It was my earlier sketch: a per-part epoch, carried as part of
+the cursor's identity, so a rotation invalidates old cursors and a stale reader re-bases from the
+full view, where absence is the signal. It fails on two counts. It makes the bucket strategy's
+meaning depend on a per-part flag that two partitioned peers cannot agree on — specialization in
+the wrong place — and it still has no answer for A syncing from B, where B's stale presence simply
+resurrects what A pruned. What pruning actually requires is an **authority for the part**: a rule
+saying whose membership set wins when two sides disagree. big_repo can offer that (peers compare
+authority for a partition); keyhive cannot, because its authority is over which objects exist, not
+over part membership. Detection is already there — bucket state separates `live_count`/`dead_count`
+and `live_fp`/`dead_fp`, so "one side says dead, the other says live" is visible — so the missing
+piece is only the direction. Until such a rule exists, dead rows are kept and paid for locally, in
+storage and in the dead fingerprint; `added_at` removes the *wire* cost, which is what it was for.
+Vacuuming is deferred behind the authority model rather than behind an epoch.
+
+**The authority it needs already exists in both canonical deployments.** The sync backend is not
+the authority on what may be removed; it is told. In big_repo, partitions are derived from keyhive
+groups, keyhive tracks the causal relation for object removal with permanent revocations, and a
+removal is therefore derivable from keyhive state rather than from a peer's replay event — which
+is the honest reason removals were modelled this loosely here: the primary consumer of the replay
+stream does not use remote removal events to change content. In triage (ADR 010) the authority is
+the router: a removal traced to a router is respected, and a healed partition re-derives from the
+historical routers, so a removal's validity is a function of which router it came from rather than
+of who still happens to hold the object. That is the "whose membership set wins" rule vacuuming
+was missing; only the plumbing into a part store's pruning decision is, which is why the mechanism
+stays deferred although the authority does not. It also bounds the wire cost honestly: on a
+two-device deployment that syncs everything, per-object authorization is not the question at all,
+and on a relay the ratio counters are what say when the local cost is worth acting on.
 Two costs and one divergence, all open. Each page is drawn from a fresh subscription, so a
 deep backlog pays setup per page; the page bound was set to 1024 events because 256 made the
 100k catchup case take 64s against 31s, and the real fix is a bounded query with the
@@ -803,21 +890,18 @@ Copy`, streams taken by value) are invalidated by step 7, so the new signature m
 `Clone + Ord` and by-reference stream parameters or step 7 re-opens this API. Last, whether one slot can
 carry two objects was settled rather than assumed, and it cannot: **two objects cannot share one
 part cursor.** Every membership-mutating path allocates a cursor per `(object, part)` mutation, and
-the one path that genuinely shares a single cursor across a batch — `materialize_object_parts`,
-which takes a `Vec<ObjKey>` — gives each object its own derived part, so the share never collides:
+the one path that once shared a single cursor across a batch — the deleted object-part
+materialization — gave each object its own derived part, so a share never collided there either:
 the slot key is `(part, cursor)`, and a shared cursor in *different* parts is harmless. With the
 tracked half this is no longer load-bearing — a waiter is addressed by `(job, cursor, lane)`, so
 two objects on one slot would settle independently — but it is what keeps the slot-level
 `finish` sound for anyone who reaches for it, and it is enforced by construction rather than by
 schema or type — nothing prevents a future writer from putting two objects' events in one part at
 one cursor — which is why the reason belongs written down here rather than left for a reader to
-guess. One caution on the materialization site, since it reads like a
-bug at first glance: the memory store's materialization reads the cursor (`peek`) and consumes
-nothing, which matches its own "quiet" documentation. An experimental change to consume a revision
-there was justified by an A/B over a roughly-50% flaky test, and did not survive measurement — both
-arms of that A/B sit at about half. Whether this store should instead emit an event, as sqlite does
-with a keyed-frontier `Changed`, or consume a revision, is the undecided materialization question,
-and not something a coin flip can settle. The **bucket machine
+guess. One caution that no longer applies: the materialization site this note was written about
+has been **deleted** (decision 3's revision — no derived part is stored), so the memory-versus-sqlite
+divergence it worried about is closed by construction rather than settled by a coin flip, and "a
+subscribe writes nothing and emits nothing" is now a shared assertion instead of a choice. The **bucket machine
 has nothing to hand over yet**: one
 part per machine, a scalar since-bound rather than a slot book, a job map that is an
 object-to-bucket location with no cursor and a single completion event, and no durable cursor
@@ -886,13 +970,12 @@ recipient but reported the denial as an empty page (`assert_page_outcome_contrac
 (`assert_latest_revision_is_a_read_contract`). The trait default's stated justification for never
 answering `Unauthorized` — that the in-memory store hands every subscriber the same stream — was
 falsified by that store's own `select_memory_event`, which is why the behaviour had to change
-rather than the comment. What remains is object-part materialization: sqlite records it as one
-keyed-frontier `Changed` at the current revision, memory records nothing. It is deliberately still
-open — an earlier attempt to make memory consume a revision there was justified by an A/B over a
-test that was flaky for unrelated reasons, so the measurement supported nothing — and no shared
-contract asserts either behaviour, because whether *derived* state is observable is a decision
-rather than a detail. A primitive trusted with settling cannot have two stores emitting different
-events, so this is settled before or with the layering rather than after it.
+rather than the comment. The third divergence this paragraph used to leave open — object-part
+materialization, where sqlite recorded one keyed-frontier `Changed` at the current revision and memory
+recorded nothing — is **closed** by decision 3's revision: nothing materializes a derived part, so there
+is no derived state for a store to publish or withhold, and "a subscribe writes nothing and emits
+nothing" is asserted by the shared contract instead of left to a store. A primitive trusted with
+settling cannot have two stores emitting different events, and after the revision it cannot.
 
 **The remaining conversions, read and declined.** With the code in hand, none of the four
 retargeted sites is wiring. The machine's frame is a single `Scheduler<TaskSeed>` with one
@@ -1106,9 +1189,9 @@ frequency, not measurements; the ordering is the point.
 | 6 | publisher to many followers, one-way, heterogeneous positions | per follower | server CPU, wire | one structure per part, cached per cohort; paged stream per follower |
 | 7 | frequent small edits inside a live session | known, tiny `δ_part` | wire | **cursor replay**, with per-part cursors so it stays reachable |
 | 8 | many parts sharing objects, expensive link | known/stale, high overlap | wire | cohort-cached encoding; items stay (object, version) |
-| 9 | single-object subscription | object part `o:{object_key}` | wire | an ordinary one-member part; access inherited from any containing part, optional additive row for a direct share |
-| 10 | direct single-object share to a principal with no containing part | object part `o:{object_key}` | — | additive access row on the object part |
-| 11 | object in no part at all | — | — | not remotely deliverable until object parts exist (fail-closed); local subscriptions unaffected |
+| 9 | single-object subscription | object lane over the object's containing parts | wire | content events only; authorization is the containing-part existential; membership transitions stay on the part lanes |
+| 10 | direct single-object share to a principal with no containing part | — | — | **dropped** with the derived part: it had no production writer, and a per-object grant is a new decision (decision 3) |
+| 11 | object in no part at all | — | — | not remotely deliverable (fail-closed); local subscriptions unaffected |
 | 12 | adversarial author, or collision grinding against summaries | any | — | count-compared summaries; per-request seeds wherever the summary is not materialized |
 | 13 | broad public part, mostly read | known-ish | server RAM | enumeration or paging for cold, fingerprints for steady state |
 | 14 | LAN or desktop-to-desktop, bandwidth cheap | any | CPU | enumeration; spend CPU rather than cleverness |
@@ -1120,8 +1203,8 @@ and are the bulk of real usage; (2) and (6) are the cost centres that must not
 degrade as peers accumulate; (3) and (4) are rare but expensive to get wrong, and
 they are the reason enumeration cannot be the only fallback; (8) is the case where
 per-part work multiplies without a shared view; (5), (9) and (14) are cheap and
-should stay simple; (10) and (11) are the small-object edges that object parts
-exist to make ordinary; (15) shows why paging makes the authorization model
+should stay simple; (10) is dropped with the derived object part (decision 3) and (11) is
+fail-closed by the same revision; (15) shows why paging makes the authorization model
 simpler rather than more complex; (12) is a constraint on every summary we keep;
 (13) is the shape that motivates keeping an aggregate structure at all; (16) is why
 `/seds` is retained.
@@ -1145,10 +1228,11 @@ The store and the protocol need to expose, for a view:
 6. **A paged event read** that returns *filtered* events: `(part, from_cursor,
    limit) → (events with recipient-filtered part keys, next_cursor)`, with empty
    pages, long-poll holds, and explicit unknown/unauthorized outcomes.
-7. **Derived part keys** for object parts, `o:{object_key}`, computable by any
-   holder of the object key without a lookup.
+7. **Derived part key names** for object parts, `o:{object_key}`, computable by any
+   holder of the object key without a lookup. A name only: after decision 3's revision nothing
+   stores, derives or interprets it.
 8. **One reconciliation surface for parts and object parts alike**, with any API
-   separation justified by the difference inventory rather than assumed.
+   separation justified by the difference inventory (answered by that revision) rather than assumed.
 
 ## Consequences
 
@@ -1237,12 +1321,13 @@ The store and the protocol need to expose, for a view:
    else, so there is no second level input to plumb (decision 4). The opt-in-only gate is
    inverted (landed): bucket is the default and the embedders that had opted out run it
    too, with the offline-reopen coverage their recorded reason asked for (decision 6).
-4. **Object parts.** Landed: object
-   subscriptions have a derived `o:{object_key}` part, one membership row, lazy
-   lifecycle, and inherited access with optional additive rows. This restored
-   remote single-object delivery through real authorization, and retired the
-   partless lane's special cases. The difference inventory was answered in the
-   implementation rather than as a separate artifact (decision 3).
+4. **Object parts.** Landed, then revised. Object subscriptions first materialized a derived
+   `o:{object_key}` part with one membership row, lazy lifecycle, inherited access and optional
+   additive rows. That materialization wrote state on a read (observable in sqlite, whose membership
+   row is its keyed frontier), put a derived part in front of the frontier reconciler, and existed to
+   serve a direct single-object share that had no production writer. Decision 3's revision deletes it:
+   the reserved key is a name, nothing derives or interprets it, and a per-object grant is a new
+   decision rather than a carried-over mechanism.
 5. **Long-poll delivery.** Landed: `PeerReplayTask` is gone, replaced by paged reads
    driven by the cursor machine, with explicit unknown/unauthorized page outcomes and
    filtered events, and the push-stream path is deleted. The event vocabulary is two
@@ -1282,13 +1367,15 @@ keys leaking to unauthorized peers.
 
 ## Deferred decisions
 
-- The object-versus-part **difference inventory**, and therefore how much of the
-  subscription and part-store API can be unified versus deliberately kept apart.
+- ~~The object-versus-part **difference inventory**~~ — **closed** by decision 3's revision: the
+  only remaining asymmetry is where an object route keeps its cursor, and the two store
+  surfaces are unified on the parts that matter (subscription, page, authorization).
 - Whether a per-object **deny** is ever needed. Today access is purely additive;
   a deny would be a new mechanism, not an inference.
-- The **lifecycle and GC policy** for object parts precisely: how aggressive
-  collection is, and whether an unreferenced part row is kept as a cache.
-- Whether **derived access** for object parts is ever materialized (we expect not).
+- ~~The **lifecycle and GC policy** for object parts~~ — **closed** by decision 3's revision: no
+  derived part is stored, so there is no row to collect or keep as a cache.
+- ~~Whether **derived access** for object parts is ever materialized~~ — **closed**, and answered
+  no: not on subscription, not on access, and nothing derives or interprets the reserved key.
 - The **enumeration-versus-pull** split for `/seds`, and the shape of a future
   `sync_unknown` call.
 - The `/seds` **migration**: how to re-derive keys and whether the old marker key
@@ -1339,5 +1426,18 @@ keys leaking to unauthorized peers.
   complete would reserve "caught up" for when it is true.
   its side from local state.
 - Retention and pruning rules for range summaries and for stale peer cursors.
+- ~~**Cursor epochs** as the way to prune tombstones~~ — **withdrawn** (decision 9): it makes the
+  bucket strategy's meaning depend on a per-part flag two partitioned peers cannot agree on, and it
+  does not stop a stale peer's presence from resurrecting a pruned removal.
+- **Tombstone vacuuming, blocked on an authority rule for a part.** Pruning needs "whose membership
+  set wins on disagreement"; big_repo's per-part authority comparison is the candidate and
+  keyhive's object-existence authority is not. Until then dead rows are kept, and the counters
+  that would have triggered a rotation only measure the local cost.
+- The **janitorial loop's inputs**: the part-less object listing and the counters (live versus dead
+- The **leaf page's byte budget**: `LeafBucketsRequest::limit_hint` bounds *entries*, so a page of
+  32-byte keys at the cap is ~42 KB and a longer key is worse. A byte bound beside the entry cap is
+  the direct fix, and it is worth doing before the leaf page grows a payload-carrying variant.
+  rows, payload bytes, tombstone bytes, dead-to-live ratio) — what a backend's collection policy
+  reads.
 - The `unscoped`/all mode question: what "mirror everything" means once `/seds` is
   an ordinary part, and whether that mode becomes "all parts" or a real group.

@@ -76,6 +76,10 @@ pub enum SyncDocError {
     TransportError,
     /// IO error: {0}
     IoError(#[source] eyre::Report),
+    /// The local document worker was stopping, so the received session could
+    /// not be applied to the live document. Retryable: the next round spawns a
+    /// fresh worker.
+    WorkerUnavailable,
     /// Unexpected {0}
     Other(#[from] eyre::Report),
 }

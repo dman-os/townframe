@@ -226,9 +226,22 @@ impl SqliteBigRepoStore {
             next_seq += i64::try_from(chunk.len()).expect(ERROR_IMPOSSIBLE);
         }
         tx.commit().await?;
-        Ok(Self::u64_from_db(
-            head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE),
-        ))
+        let seq = Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE));
+        // Record the committed head at the durable choke point. Read back
+        // synchronously by the keyhive sync-done observer to stamp a completion
+        // with how far admission has actually progressed. `fetch_max` keeps the
+        // watermark monotonic under concurrent appends racing their commits
+        // (a lower committed seq never regresses it).
+        self.admission_watermark
+            .fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
+        Ok(seq)
+    }
+
+    /// Cheap synchronous read of the last committed admission seq (see the
+    /// `admission_watermark` field docs). No DB round-trip.
+    pub(crate) fn admission_watermark(&self) -> u64 {
+        self.admission_watermark
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) async fn admission_head(&self) -> Res<u64> {

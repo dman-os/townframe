@@ -19,6 +19,10 @@
 //!   `survives_remote_restart_and_reconnect`) must converge deterministically
 //!   at this layer;
 //! - syncs on a closed connection must fail fast, never hang;
+//! - `close_connection` must deregister before it returns, so a peer-keyed sync
+//!   issued immediately after stays queued for a reconnect rather than starting
+//!   a doomed round against the closed connection (and an establishment that
+//!   loses the command/event race to its own close must not register);
 //! - double `stop` and simultaneous cross-dialing must not panic or deadlock.
 //!
 //! Every test uses explicit sync barriers (`sync_keyhive_with_peer` /
@@ -286,6 +290,117 @@ async fn tier5_conn_sync_on_closed_conn_fails_fast() -> Res<()> {
     let res = conn.sync_doc_with_peer(id).await;
     assert!(res.is_err(), "doc sync on closed conn must error");
 
+    Ok(())
+}
+
+/// After `close_connection` returns, the hub must already be deregistered for
+/// the connection it closed: a keyhive sync issued the moment `stop` returns
+/// must not start a round against that dead connection and fail spuriously.
+///
+/// The peer-keyed `BigRepo::sync_keyhive_with_peer` is the entry point that
+/// bypasses the caller-facing `BigRepoConnection` `is_closed` guard. Its pinned
+/// semantic for a peer that is not currently connected — which is what the peer
+/// is once this close lands — is to *queue* the waiter for a future reconnect
+/// (the reconnect gap the establishment handler serves), never to start a
+/// doomed round. Holding hub events orders the close's deregistration and the
+/// sync command's processing deterministically.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_conn_sync_after_close_is_queued_not_failed() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(172, 173, "Owner", "Reader").await?;
+    let peer = pair.right().peer_id();
+
+    // The connection is established and registered.
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    assert!(
+        pair.left().repo.has_connected_peer(peer.clone()).await?,
+        "the established connection must be registered"
+    );
+
+    // Hold left's events so a late `ConnLost` cannot race the ordering.
+    let hold = pair.left().repo.hold_hub_events().await?;
+
+    let old_left = pair.left_conn.take().expect("left conn");
+    let _old_right = pair.right_conn.take().expect("right conn");
+    old_left.stop().await?;
+
+    assert!(
+        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        "the hub must be deregistered before close_connection returns"
+    );
+
+    // Peer-keyed sync, driven onto its response await.
+    let sync = pair.left().repo.sync_keyhive_with_peer(peer.clone());
+    futures::pin_mut!(sync);
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "sync must park on its response until the hub handles it"
+    );
+    // FIFO barrier: the hub has now handled the sync command.
+    pair.left()
+        .repo
+        .contains_sedimentree_id(crate::DocumentId::new([0u8; 32]))
+        .await?;
+
+    // Release held events: the closed connection's `ConnLost` must be a no-op,
+    // not a spurious failure of the parked waiter.
+    hold.resume().await?;
+    assert!(
+        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        "a late ConnLost for the closed connection must not re-register it"
+    );
+
+    match futures::poll!(sync.as_mut()) {
+        std::task::Poll::Pending => {}
+        std::task::Poll::Ready(result) => {
+            panic!("sync after close must stay parked for a reconnect, got: {result:?}")
+        }
+    }
+    Ok(())
+}
+
+/// `CloseConn` is a command while `ConnEstablished` is an event, and the hub
+/// polls commands ahead of events. A connection can therefore be marked closed
+/// before its establishment is processed; the late establishment must not
+/// register the dead connection, or a subsequent sync would start a doomed
+/// round against it. The end flag set here is the same signal the transport
+/// watcher sets when a connection dies, so it is the minimal trigger for the
+/// guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_conn_sync_ignores_establish_after_end() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot_disconnected(174, 175, "Owner", "Reader").await?;
+    let peer = pair.right().peer_id();
+
+    // Hold left's events so its `ConnEstablished` stays unprocessed while the
+    // connection's end flag is set.
+    let hold = pair.left().repo.hold_hub_events().await?;
+    let conn = pair
+        .left()
+        .repo
+        .open_connection_iroh(
+            pair.left().endpoint.clone(),
+            pair.right().endpoint.addr(),
+            peer.clone(),
+            None,
+        )
+        .await?;
+    // Let the far side accept so the transport is real; its events are not held.
+    let _right_conn = pair.right().accepted_connection().await;
+    conn.closed_flag()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(
+        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        "the peer cannot be registered while its establishment is still held"
+    );
+
+    // Release the establishment; the already-ended connection must be ignored.
+    hold.resume().await?;
+    assert!(
+        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        "an establishment for an already-ended connection must not register it"
+    );
     Ok(())
 }
 

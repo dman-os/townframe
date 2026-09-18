@@ -14,7 +14,8 @@ use big_sync_core::rpc::{
 use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
 
 use super::PartFrontierKey;
-use super::{HostPartStore, PartScope, ReadTarget, bucket_index_bounds};
+use super::{HostPartStore, PartScope, PartStoreStats, ReadTarget, bucket_index_bounds};
+use super::{LEAF_PAGE_BYTE_BUDGET, leaf_entry_wire_bytes};
 use crate::keyed_frontier::{
     MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
     MemoryKeyedFrontierView, open_memory_keyed_frontier,
@@ -60,9 +61,14 @@ structstruck::strike! {
                 event_frontier: MemoryKeyedFrontierTable<PartFrontierKey, PartEvent>,
                 bus: struct MemorySubsBus {
                     #![derive(Default)]
-                    buf: Vec<PartEvent>
+                    buf: Vec<PartEvent>,
+                    /// Frontier keys whose *value* goes away without a `PartEvent` to say so:
+                    /// `remove_obj_payload` drops an object's content, and the object lane's
+                    /// frontier value is that content. A keyed frontier with no event to carry
+                    /// needs this side channel; a `Delete` is a mutation like any other.
+                    dropped_keys: Vec<PartFrontierKey>
                 },
-                objs: HashMap<
+                objs: BTreeMap<
                     ObjKey,
                     struct ObjDeets {
                         #![derive(Default)]
@@ -140,6 +146,18 @@ impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
     fn emit_empty_progress(&self) -> bool {
         true
     }
+
+    fn initial_after(&self) -> FrontierRevision {
+        if let Some(after) = self.all {
+            return after;
+        }
+        self.part_cursors
+            .values()
+            .copied()
+            .chain(self.object_bounds.values().copied())
+            .min()
+            .unwrap_or(0)
+    }
 }
 
 impl Default for MemoryPartStore {
@@ -158,67 +176,6 @@ impl MemoryPartStore {
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
             hidden_parts: Arc::new(config.hidden_parts),
         }
-    }
-}
-
-impl MemoryPartStore {
-    /// See the sqlite store's counterpart: derive and materialize the single-object part for
-    /// each object a remote subscriber asked for, so that an explicit share on
-    /// `o:{object_key}` has a membership row to be reached through.
-    ///
-    /// Quiet: no revision is consumed and no event is emitted, because subscribing is not a sync
-    /// event. `peek` is the documented call for this: it exists for callers that only want to
-    /// observe the cursor, or to stamp state that allocates no revision of its own — which is
-    /// exactly a silent materialization — while `next` is reserved for write paths.
-    ///
-    /// This store keeps its keyed frontier separately from its membership rows, so a materialized
-    /// row is not also a frontier entry and a subscriber that is behind the current revision is
-    /// not told the derived part exists; sqlite's membership row *is* its frontier entry, so it
-    /// is. The difference is bounded by the read filters, which only ever hand back events past
-    /// the asking cursor, and the invariant the stores do share — that subscribing allocates no
-    /// revision — is pinned for both by `assert_subscribing_allocates_no_revision_contract`.
-    fn materialize_object_parts(&self, obj_ids: Vec<ObjKey>) {
-        surelock::key::lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.inner);
-            let guard = &mut *guard;
-            let cursor = guard.global_cursor.peek();
-            for obj_id in obj_ids {
-                let part_id = obj_id.object_part_key();
-                let payload = {
-                    let obj_state = guard.objs.entry(obj_id.clone()).or_default();
-                    obj_state.parts.insert(part_id.clone());
-                    obj_state.payload.clone()
-                };
-                let Some(payload) = payload else {
-                    continue;
-                };
-                let part = guard.parts.entry(part_id.clone()).or_default();
-                let old_state = part.members.get(&obj_id).cloned();
-                let new_state = PartMemberState {
-                    buck_index: BuckId::deepest_from_obj_key(&obj_id).index(),
-                    added_at: cursor,
-                    changed_at: cursor,
-                    removed_at: None,
-                };
-                match old_state {
-                    Some(old) if old.removed_at.is_none() => continue,
-                    Some(_) => part.apply_bucket_transition(
-                        obj_id.clone(),
-                        cursor,
-                        BucketMemberKind::Dead,
-                        BucketMemberKind::Live(&payload),
-                    ),
-                    None => part.apply_bucket_transition(
-                        obj_id.clone(),
-                        cursor,
-                        BucketMemberKind::Absent,
-                        BucketMemberKind::Live(&payload),
-                    ),
-                }
-                part.members.insert(obj_id, new_state);
-                part.latest_cursor = cursor;
-            }
-        });
     }
 }
 
@@ -377,14 +334,9 @@ fn project_part_event(
             }))
         }
         PartEvent::Removed(inner) if !selected.is_empty() => Some(SubEvent::Removed(inner)),
-        PartEvent::Removed(inner) if object_selected => {
-            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor: inner.cursor,
-                part_ids: Vec::new(),
-                obj_id: inner.obj_id,
-                payload: serde_json::Value::Null,
-            }))
-        }
+        // An object reader that did not select the part has nothing to book for a membership
+        // transition: a deletion is a part-lane fact, and a payload-less `Changed` would mean
+        // *resolve the membership*, which the cursor machine books as a content delivery.
         _ => None,
     }
 }
@@ -422,22 +374,33 @@ impl MemoryPartStoreScopeState {
 
     fn flush(&mut self) {
         let pending_events = std::mem::take(&mut self.bus.buf);
-        if pending_events.is_empty() {
+        let dropped_keys = std::mem::take(&mut self.bus.dropped_keys);
+        if pending_events.is_empty() && dropped_keys.is_empty() {
             return;
         }
-        let revision = pending_events
+        let event_revision = pending_events
             .iter()
             .map(|event| match event {
                 PartEvent::Changed(inner) => inner.cursor,
                 PartEvent::Removed(inner) => inner.cursor,
             })
-            .max()
-            .expect(ERROR_IMPOSSIBLE);
-        assert!(pending_events.iter().all(|event| match event {
-            PartEvent::Changed(inner) => inner.cursor == revision,
-            PartEvent::Removed(inner) => inner.cursor == revision,
-        }));
+            .max();
+        // A flush that only drops a key is still a mutation of the scope's state, and the
+        // keyed frontier refuses a revision it has already applied.
+        let revision = match event_revision {
+            Some(revision) => {
+                assert!(pending_events.iter().all(|event| match event {
+                    PartEvent::Changed(inner) => inner.cursor == revision,
+                    PartEvent::Removed(inner) => inner.cursor == revision,
+                }));
+                revision
+            }
+            None => self.global_cursor.next(),
+        };
         let mut frontier_mutations = Vec::new();
+        for key in dropped_keys {
+            frontier_mutations.push(FrontierMutation::Delete { key });
+        }
         for evt in pending_events {
             let (evt_parts, evt_obj_id) = match &evt {
                 PartEvent::Changed(inner) => (inner.part_ids.clone(), inner.obj_id.clone()),
@@ -479,6 +442,11 @@ impl MemoryPartStoreScopeState {
 impl MemorySubsBus {
     fn queue_evt(&mut self, evt: PartEvent) {
         self.buf.push(evt);
+    }
+
+    /// Drop a frontier key whose value goes away without a `PartEvent` that says so.
+    fn queue_key_drop(&mut self, key: PartFrontierKey) {
+        self.dropped_keys.push(key);
     }
 }
 impl GlobalCursor {
@@ -631,7 +599,20 @@ impl HostPartStore for MemoryPartStore {
                 // `LeafBucketsRequest::limit_hint` is a hint, not a bound: zero
                 // means no preference, so the smallest useful page is one entry.
                 let take = req.limit_hint.max(1) as usize;
-                let end = (start + take).min(items.len());
+                // The entry hint and the byte budget each bound the page, and whichever is
+                // reached first ends it. The first entry is always taken, because a page with
+                // no entries reads as `done` while entries remain, which would strand the tail.
+                let mut bytes = 0usize;
+                let mut taken = 0usize;
+                for (obj_id, _cursor, _dead) in items.iter().skip(start).take(take) {
+                    let entry_bytes = leaf_entry_wire_bytes(obj_id.as_bytes().len());
+                    if taken > 0 && bytes + entry_bytes > LEAF_PAGE_BYTE_BUDGET {
+                        break;
+                    }
+                    bytes += entry_bytes;
+                    taken += 1;
+                }
+                let end = start + taken;
                 let done = end == items.len();
                 let next_after = if done || start >= end {
                     None
@@ -641,7 +622,7 @@ impl HostPartStore for MemoryPartStore {
                 let entries = items
                     .into_iter()
                     .skip(start)
-                    .take(take)
+                    .take(taken)
                     .map(|(obj_id, _cursor, dead)| {
                         let fp = if dead {
                             Fingerprint::new(
@@ -882,6 +863,10 @@ impl HostPartStore for MemoryPartStore {
                             BucketMemberKind::Live(&payload),
                         );
                         if let Some(old) = part.members.get_mut(&obj_id) {
+                            // The absent-to-present transition re-stamps: a re-add after a
+                            // removal is a new add, and the tombstone predicate is about when a
+                            // row most recently became present.
+                            old.added_at = cursor;
                             old.changed_at = cursor;
                             old.removed_at = None;
                         }
@@ -967,14 +952,144 @@ impl HostPartStore for MemoryPartStore {
                     obj_id: obj_id.clone(),
                 }));
             if obj_state.parts.is_empty() {
+                // The object keeps its payload: a membership removal is not a content removal.
+                // The entry stays, with the tombstone beside it, until `remove_obj_payload`
+                // drops the content.
                 let cursor = part.latest_cursor;
                 guard.tombstoned_objs.insert(obj_id.clone(), cursor);
-                guard.objs.remove(&obj_id);
             }
 
             guard.flush();
 
             Ok(())
+        })
+    }
+
+    /// Remove the object from every part it is in and drop its payload, in one transaction.
+    ///
+    /// The per-part half is `remove_obj_from_part`'s: the same bucket transition, member
+    /// tombstone and frontier deletion, at one shared revision so the parts it leaves move
+    /// together. That shared revision is also why the public per-part method cannot be called
+    /// in a loop.
+    async fn remove_obj_payload(&self, obj_id: ObjKey) -> Res<()> {
+        tracing::debug!(obj_id = %obj_id, "memory store remove obj payload");
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let guard = &mut *guard;
+
+            let Some(obj_state) = guard.objs.get(&obj_id) else {
+                // Unknown object: nothing to drop.
+                return Ok(());
+            };
+            let Some(old_payload) = obj_state.payload.clone() else {
+                // No payload, nothing to drop: a live membership implies one, so an object
+                // without one has no membership this could clear either.
+                return Ok(());
+            };
+            let parts: Vec<PartKey> = obj_state.parts.iter().cloned().collect();
+            let cursor = if parts.is_empty() {
+                None
+            } else {
+                Some(guard.global_cursor.next())
+            };
+            for part_id in parts {
+                let cursor = cursor.expect(ERROR_IMPOSSIBLE);
+                let part = guard.parts.entry(part_id.clone()).or_default();
+                let Some(member) = part.members.get(&obj_id) else {
+                    continue;
+                };
+                if member.removed_at.is_some() {
+                    continue;
+                }
+                if let Some(member) = part.members.get_mut(&obj_id) {
+                    member.removed_at = Some(cursor);
+                    member.changed_at = cursor;
+                }
+                part.apply_bucket_transition(
+                    obj_id.clone(),
+                    cursor,
+                    BucketMemberKind::Live(&old_payload),
+                    BucketMemberKind::Dead,
+                );
+                part.latest_cursor = cursor;
+                guard
+                    .bus
+                    .queue_evt(PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                        cursor,
+                        part_id,
+                        obj_id: obj_id.clone(),
+                    }));
+            }
+            guard.objs.remove(&obj_id);
+            let tombstone = cursor.unwrap_or_else(|| guard.global_cursor.peek());
+            guard.tombstoned_objs.insert(obj_id.clone(), tombstone);
+            // The object lane's frontier value *is* the content, so it goes with the payload:
+            // the removals above are what tells a reader holding the content to drop it.
+            if guard
+                .event_frontier
+                .get(&PartFrontierKey::Object(obj_id.clone()))
+                .is_some()
+            {
+                guard
+                    .bus
+                    .queue_key_drop(PartFrontierKey::Object(obj_id.clone()));
+            }
+
+            guard.flush();
+
+            Ok(())
+        })
+    }
+
+    async fn partless_objects(&self, limit: u32, after: Option<ObjKey>) -> Res<Vec<ObjKey>> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let range = (
+                after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+                std::ops::Bound::Unbounded,
+            );
+            Ok(guard
+                .objs
+                .range(range)
+                .filter(|(_, obj)| obj.payload.is_some() && obj.parts.is_empty())
+                .take(usize::try_from(limit).expect(ERROR_IMPOSSIBLE))
+                .map(|(obj_id, _)| obj_id.clone())
+                .collect())
+        })
+    }
+
+    async fn part_store_stats(&self) -> Res<PartStoreStats> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let mut stats = PartStoreStats {
+                payload_objects: 0,
+                payload_bytes: 0,
+                partless_objects: 0,
+                live_rows: 0,
+                dead_rows: 0,
+            };
+            for obj in guard.objs.values() {
+                let Some(payload) = obj.payload.as_ref() else {
+                    continue;
+                };
+                stats.payload_objects += 1;
+                stats.payload_bytes +=
+                    u64::try_from(serde_json::to_string(payload).wrap_err(ERROR_JSON)?.len())
+                        .expect(ERROR_IMPOSSIBLE);
+                if obj.parts.is_empty() {
+                    stats.partless_objects += 1;
+                }
+            }
+            for part in guard.parts.values() {
+                for member in part.members.values() {
+                    if member.removed_at.is_some() {
+                        stats.dead_rows += 1;
+                    } else {
+                        stats.live_rows += 1;
+                    }
+                }
+            }
+            Ok(stats)
         })
     }
 
@@ -1032,6 +1147,12 @@ impl HostPartStore for MemoryPartStore {
                     .filter_map(|(obj_id, member)| {
                         let (event_cursor, event) = if let Some(removed_cursor) = member.removed_at
                         {
+                            // `added_at <= cursor < removed_at`: a removal for a member this
+                            // reader never saw as present carries no information for it, and
+                            // excluding it here keeps it from consuming the page's limit.
+                            if member.added_at > cursor {
+                                return None;
+                            }
                             (
                                 removed_cursor,
                                 PartEvent::Removed(ObjRemovedFromPart {
@@ -1075,22 +1196,28 @@ impl HostPartStore for MemoryPartStore {
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by_key(|(event_cursor, _)| *event_cursor);
-                let has_more = candidates.len() > limit as usize;
+                // A snapshot read knows how many candidates it found, so the verdict
+                // is "the page did not fill": a full page may still have a successor,
+                // and only a page that came up short is caught up. A zero-limit page
+                // carries nothing, so it may only claim caught-up when nothing at all
+                // is waiting.
+                let drained = if limit == 0 {
+                    candidates.is_empty()
+                } else {
+                    candidates.len() < limit as usize
+                };
                 candidates.truncate(limit as usize);
-                // The resume point is the last event this page returned. A page that
-                // returned none (a zero limit) resumes from where the caller already is
-                // rather than reporting caught-up: `None` means nothing further is
-                // waiting, and events are.
-                let next_cursor = has_more.then(|| {
-                    candidates
-                        .last()
-                        .map_or(cursor, |(event_cursor, _)| *event_cursor)
-                });
+                // Always a position to ask from again: past the last event this page
+                // carried, or the caller's own cursor when it carried none.
+                let resume = candidates
+                    .last()
+                    .map_or(cursor, |(event_cursor, _)| *event_cursor);
                 out.insert(
                     part_id.clone(),
                     PartPage {
                         events: candidates.into_iter().map(|(_, event)| event).collect(),
-                        next_cursor,
+                        resume,
+                        drained,
                     },
                 );
             }
@@ -1106,138 +1233,7 @@ impl HostPartStore for MemoryPartStore {
         Ok(result)
     }
 
-    async fn subscribe(
-        &self,
-        reqs: SubPartsRequest,
-        subscriber: PeerKey,
-    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        use big_sync_core::rpc::SubscriptionTarget;
-
-        let part_cursors: HashMap<PartKey, CursorIndex> = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, cursor } => {
-                    Some((part_id.clone(), reqs.lower_bound.max(*cursor)))
-                }
-                SubscriptionTarget::Object { .. } => None,
-            })
-            .collect();
-        let objects: HashSet<ObjKey> = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
-                SubscriptionTarget::Part { .. } => None,
-            })
-            .collect();
-        if !objects.is_empty() {
-            self.materialize_object_parts(objects.iter().cloned().collect());
-        }
-        let unknown_parts = surelock::key::lock_scope(|key| {
-            let (guard, _key) = key.lock(&self.inner);
-            part_cursors
-                .keys()
-                .filter(|part_id| {
-                    self.hidden_parts.contains(part_id) || !guard.parts.contains_key(part_id)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        if !unknown_parts.is_empty() {
-            return Ok(Err(ListPartsError::UnkownParts {
-                unkown_parts: unknown_parts,
-            }));
-        }
-
-        let selector = MemoryPartEventSelector {
-            all: None,
-            part_cursors,
-            objects,
-            object_bounds: reqs
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id, .. } => {
-                        Some((obj_id.clone(), reqs.lower_bound))
-                    }
-                    SubscriptionTarget::Part { .. } => None,
-                })
-                .collect(),
-        };
-        let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
-            Arc::new(MemoryPartEventSource {
-                state: Arc::clone(&self.inner),
-            });
-        let mut reader: Box<dyn KeyedFrontierReader<PartFrontierKey, PartEvent>> =
-            open_memory_keyed_frontier(source, selector.clone()).await?;
-        let state = Arc::clone(&self.inner);
-        let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
-        tokio::spawn(async move {
-            loop {
-                match reader.next(FrontierReadLimits::default()).await.unwrap() {
-                    FrontierRead::Entries { entries, .. } => {
-                        let events = surelock::key::lock_scope(|key| {
-                            let (guard, _key) = key.lock(&state);
-                            let mut projected = Vec::new();
-                            for entry in entries {
-                                let event = match (entry.key, entry.value) {
-                                    (PartFrontierKey::Object(_), None) => continue,
-                                    (PartFrontierKey::Part { obj_id, part_id }, None) => {
-                                        PartEvent::Removed(ObjRemovedFromPart {
-                                            cursor: entry.revision,
-                                            part_id,
-                                            obj_id,
-                                        })
-                                    }
-                                    (_, Some(event)) => event,
-                                };
-                                let Some(event) = project_part_event(
-                                    &guard,
-                                    event,
-                                    &selector,
-                                    subscriber.clone(),
-                                ) else {
-                                    continue;
-                                };
-                                if let SubEvent::Changed(changed) = &event
-                                    && let Some(SubEvent::Changed(existing)) =
-                                        projected.iter_mut().find(|candidate| {
-                                            matches!(candidate, SubEvent::Changed(candidate)
-                                                if candidate.cursor == changed.cursor
-                                                    && candidate.obj_id == changed.obj_id)
-                                        })
-                                {
-                                    for part_id in &changed.part_ids {
-                                        if !existing.part_ids.contains(part_id) {
-                                            existing.part_ids.push(part_id.clone());
-                                        }
-                                    }
-                                    existing.payload = changed.payload.clone();
-                                    continue;
-                                }
-                                projected.push(event);
-                            }
-                            projected
-                        });
-                        for event in events {
-                            if tx.send(event).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    FrontierRead::ReplayComplete { .. } => {
-                        if tx.send(SubEvent::ReplayComplete).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-        Ok(Ok(rx))
-    }
-
-    async fn open_local_revision_reader(
+    async fn open_revision_reader(
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
@@ -1283,8 +1279,12 @@ impl HostPartStore for MemoryPartStore {
                 .targets
                 .iter()
                 .filter_map(|target| match target {
-                    SubscriptionTarget::Object { obj_id, .. } => {
-                        Some((obj_id.clone(), reqs.lower_bound))
+                    // An object target carries its own position, the same way a
+                    // part target does: a set request can name targets whose
+                    // replays have reached different points, so the floor cannot
+                    // stand in for a target's own cursor.
+                    SubscriptionTarget::Object { obj_id, cursor } => {
+                        Some((obj_id.clone(), reqs.lower_bound.max(*cursor)))
                     }
                     SubscriptionTarget::Part { .. } => None,
                 })
@@ -1300,7 +1300,7 @@ impl HostPartStore for MemoryPartStore {
         ))))
     }
 
-    async fn open_local_revision_reader_all(
+    async fn open_revision_reader_all(
         &self,
         after: CursorIndex,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
@@ -1650,6 +1650,11 @@ impl From<MemoryPartStoreSnapshot> for ObservedStoreSnapshot {
             objs: value
                 .objs
                 .into_iter()
+                // Only live membership is observable: an object with no part is not remotely
+                // deliverable, so a payload retained past its last part is policy state rather
+                // than part of the store's observable contents. The sqlite store reads
+                // membership for the same reason.
+                .filter(|(_, snapshot)| !snapshot.parts.is_empty())
                 .map(|(obj_id, snapshot)| {
                     (
                         obj_id,
@@ -1676,7 +1681,7 @@ impl ObservedStore for MemoryPartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
+    use crate::part_store::host_contract::{self, HostPartStoreContractHarness, PageEventStore};
     use big_sync_core::ByteKey;
     use std::{collections::HashSet, time::Duration};
 
@@ -1697,6 +1702,19 @@ mod tests {
             store: MemoryPartStore::new(),
         };
         host_contract::assert_host_part_store_contract(&harness).await
+    }
+
+    /// The leaf page's byte budget, which the store applies beside the entry hint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_leaf_page_byte_budget_contract() -> Res<()> {
+        host_contract::assert_leaf_page_byte_budget_contract(&MemoryPartStore::new()).await
+    }
+
+    /// What the store shows a peer, which a part-less payload is not part of.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_observed_snapshot_excludes_partless_payload_contract() -> Res<()> {
+        host_contract::assert_observed_snapshot_excludes_partless_payload(&MemoryPartStore::new())
+            .await
     }
 
     /// A hidden part stays physically present but is invisible to remote part access,
@@ -1849,14 +1867,14 @@ mod tests {
 
         // The in-process path is not gated: this is a peer-facing rule.
         let local = store
-            .subscribe_local(SubPartsRequest {
+            .page_events_local(SubPartsRequest {
                 lower_bound: 0,
                 targets: HashSet::from([target(hidden)]),
             })
             .await??;
         let mut saw_member = false;
         while !saw_member {
-            let evt = tokio::time::timeout(Duration::from_secs(5), local.recv())
+            let evt = tokio::time::timeout(Duration::from_secs(5), local.next())
                 .await
                 .expect("the local reader answers within the timeout")?;
             match evt {
@@ -1868,54 +1886,6 @@ mod tests {
         assert!(
             saw_member,
             "a trusted local reader still sees the hidden part"
-        );
-        Ok(())
-    }
-
-    /// The memory store's counterpart to the sqlite direct-share test: an explicit row on the
-    /// derived object part is a direct share, and it resolves because subscribing materializes
-    /// the object's single membership row.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn memory_subscribe_object_part_direct_share_is_delivered_remotely() -> Res<()> {
-        use big_sync_core::rpc::SubscriptionTarget;
-
-        let store = MemoryPartStore::new();
-        let obj_id = ObjKey(ByteKey::new([65u8; 32]));
-        let peer = PeerKey::new([66u8; 32]);
-        let payload = serde_json::json!({"value": 1});
-        store
-            .set_obj_payload(obj_id.clone(), payload.clone())
-            .await?;
-        store
-            .set_part_members(
-                obj_id.object_part_key(),
-                HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
-            )
-            .await?;
-
-        let rx = store
-            .subscribe(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([SubscriptionTarget::Object {
-                        obj_id: obj_id.clone(),
-                        cursor: 0,
-                    }]),
-                },
-                peer,
-            )
-            .await?
-            .map_err(eyre::Report::from)?;
-        match rx.recv().await.expect("subscription channel stays open") {
-            SubEvent::Changed(changed) => {
-                assert_eq!(changed.obj_id, obj_id);
-                assert_eq!(changed.payload, payload);
-            }
-            event => panic!("expected the directly shared object, got {event:?}"),
-        }
-        assert_eq!(
-            rx.recv().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
         );
         Ok(())
     }
@@ -2016,7 +1986,7 @@ mod tests {
             .await?;
 
         let rx = store
-            .subscribe(
+            .page_events(
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2035,7 +2005,7 @@ mod tests {
 
         let mut seen = HashSet::new();
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.next()).await??;
             match event {
                 SubEvent::Changed(event) => {
                     seen.insert(event.obj_id);
@@ -2045,7 +2015,7 @@ mod tests {
             }
         }
         if !seen.contains(&second) {
-            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.next()).await??;
             assert!(
                 matches!(&event, SubEvent::Changed(event) if event.obj_id == second),
                 "immediate mutation was not delivered after replay: {event:?}"
@@ -2075,7 +2045,7 @@ mod tests {
 
         // Subscribe as reader — should receive the Added event.
         let rx = store
-            .subscribe(
+            .page_events(
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2089,7 +2059,7 @@ mod tests {
         store.add_obj_to_parts(obj, vec![part.clone()]).await?;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                match rx.recv().await {
+                match rx.next().await {
                     Ok(SubEvent::Changed(_)) => return Ok::<_, eyre::Report>(()),
                     Ok(SubEvent::ReplayComplete) => continue,
                     Ok(_) => continue,
@@ -2101,7 +2071,7 @@ mod tests {
 
         // Subscribe as non-reader — should NOT receive the Added event.
         let rx2 = store
-            .subscribe(
+            .page_events(
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2113,7 +2083,7 @@ mod tests {
             )
             .await??;
         tokio::time::timeout(Duration::from_secs(2), async {
-            match rx2.recv().await {
+            match rx2.next().await {
                 Ok(SubEvent::ReplayComplete) => Ok::<_, eyre::Report>(()),
                 Ok(event) => Err(ferr!("denied replay leaked event: {event:?}")),
                 Err(_) => Err(ferr!("denied subscriber closed during replay")),
@@ -2126,7 +2096,7 @@ mod tests {
             .set_obj_payload(second_obj.clone(), serde_json::json!("content2"))
             .await?;
         store.add_obj_to_parts(second_obj, vec![part]).await?;
-        match tokio::time::timeout(Duration::from_millis(200), rx2.recv()).await {
+        match tokio::time::timeout(Duration::from_millis(200), rx2.next()).await {
             Err(_) => {}
             Ok(Ok(event)) => return Err(ferr!("denied live event leaked: {event:?}")),
             Ok(Err(_)) => return Err(ferr!("denied subscriber closed unexpectedly")),
@@ -2153,7 +2123,7 @@ mod tests {
         store.set_part_members(part.clone(), agents).await?;
 
         let rx = store
-            .subscribe(
+            .page_events(
                 SubPartsRequest {
                     lower_bound: 0,
                     targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2171,7 +2141,7 @@ mod tests {
             let mut saw_touch = false;
             let mut saw_replay_complete = false;
             loop {
-                match rx.recv().await {
+                match rx.next().await {
                     Ok(SubEvent::Changed(_)) => saw_touch = true,
                     Ok(SubEvent::ReplayComplete) => saw_replay_complete = true,
                     Ok(event) => return Err(ferr!("unexpected authorized event: {event:?}")),
@@ -2189,7 +2159,7 @@ mod tests {
         // Should receive Added event.
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                match rx.recv().await {
+                match rx.next().await {
                     Ok(SubEvent::Changed(_)) => return,
                     Ok(SubEvent::ReplayComplete) => continue,
                     Ok(_) => continue,
@@ -2205,7 +2175,7 @@ mod tests {
         store
             .set_obj_payload(obj, serde_json::json!("updated"))
             .await?;
-        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        match tokio::time::timeout(Duration::from_millis(200), rx.next()).await {
             Err(_) => {}
             Ok(Ok(event)) => return Err(ferr!("revoked subscriber received event: {event:?}")),
             Ok(Err(_)) => return Err(ferr!("revoked subscriber closed unexpectedly")),

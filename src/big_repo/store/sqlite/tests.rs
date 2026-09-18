@@ -22,7 +22,7 @@ async fn sqlite_big_repo_host_part_store_contract() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sqlite_big_repo_local_subscription_bypasses_remote_policy_and_hidden_parts() -> Res<()> {
+async fn sqlite_big_repo_reader_bypasses_remote_policy_and_hidden_parts() -> Res<()> {
     let sql = SqlCtx::memory().await?;
     let part = PartKey(ByteKey::new([221; 32]));
     let obj = ObjKey(ByteKey::new([222; 32]));
@@ -40,7 +40,7 @@ async fn sqlite_big_repo_local_subscription_bypasses_remote_policy_and_hidden_pa
     HostPartStore::ensure_part(&store, part.clone()).await?;
     HostPartStore::add_obj_to_parts(&store, obj.clone(), vec![part.clone()]).await?;
 
-    let rx = HostPartStore::subscribe_local(
+    let mut reader = HostPartStore::open_revision_reader(
         &store,
         SubPartsRequest {
             lower_bound: 0,
@@ -53,18 +53,42 @@ async fn sqlite_big_repo_local_subscription_bypasses_remote_policy_and_hidden_pa
     .await??;
     let mut saw_added = false;
     loop {
-        match rx.recv().await? {
-            SubEvent::Changed(event) if event.obj_id == obj && event.part_ids[0] == part => {
-                saw_added = true;
+        match reader
+            .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
+            .await?
+        {
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
+                for event in entries {
+                    if let SubEvent::Changed(event) = event
+                        && event.obj_id == obj
+                        && event.part_ids[0] == part
+                    {
+                        saw_added = true;
+                    }
+                }
             }
-            SubEvent::ReplayComplete => break,
-            _ => {}
+            big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => break,
         }
     }
     assert!(saw_added);
 
     HostPartStore::set_obj_payload(&store, obj.clone(), serde_json::json!({"value": 2})).await?;
-    assert!(matches!(rx.recv().await?, SubEvent::Changed(event) if event.obj_id == obj));
+    let live = loop {
+        match reader
+            .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
+            .await?
+        {
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
+                if let Some(event) = entries.into_iter().next() {
+                    break event;
+                }
+            }
+            // The replay half already completed: the next read is the live wait, which
+            // is what makes the write above reach this reader with no push at all.
+            big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => {}
+        }
+    };
+    assert!(matches!(live, SubEvent::Changed(event) if event.obj_id == obj));
     Ok(())
 }
 
@@ -117,40 +141,101 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
             cursor,
         }]),
     };
-    let rx = HostPartStore::subscribe(&store, subscription_request(0), peer.clone()).await??;
-    assert!(matches!(rx.recv().await?, SubEvent::Changed(changed) if changed.obj_id == obj));
-    assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
-    let witness_rx =
-        HostPartStore::subscribe(&store, subscription_request(0), witness.clone()).await??;
-    assert!(
-        matches!(witness_rx.recv().await?, SubEvent::Changed(changed) if changed.obj_id == obj)
-    );
-    assert!(matches!(witness_rx.recv().await?, SubEvent::ReplayComplete));
+
+    /// The next event a reader hands back, walking the batches it returns. The batches
+    /// these reads produce carry one row each, so one entry is one event.
+    async fn next_event(reader: &mut Box<dyn LocalPartRevisionReader>) -> Res<SubEvent> {
+        loop {
+            match reader
+                .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
+                .await?
+            {
+                big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
+                    if let Some(event) = entries.into_iter().next() {
+                        return Ok(event);
+                    }
+                }
+                big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => {
+                    return Ok(SubEvent::ReplayComplete);
+                }
+            }
+        }
+    }
+
+    let mut peer_reader =
+        HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
+    let add_cursor = match next_event(&mut peer_reader).await? {
+        SubEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
+        other => panic!("unexpected first event for the revocable peer: {other:?}"),
+    };
+    assert!(matches!(
+        next_event(&mut peer_reader).await?,
+        SubEvent::ReplayComplete
+    ));
+    let mut witness_reader =
+        HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
+    let witness_cursor = match next_event(&mut witness_reader).await? {
+        SubEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
+        other => panic!("unexpected first event for the witness: {other:?}"),
+    };
+    assert_eq!(witness_cursor, add_cursor);
+    assert!(matches!(
+        next_event(&mut witness_reader).await?,
+        SubEvent::ReplayComplete
+    ));
 
     // Revoke `peer` and drop the doc out of `part` in the same reconcile, so a
-    // removal for `part` is published to a peer that may no longer read it.
+    // removal for `part` is published for a peer that may no longer read it.
     let only_seds = HashSet::from([crate::global_part_id()]);
     store
         .reconcile_group_part_batch(&[grant(vec![witness.clone()], only_seds)], 2, true)
         .await?;
 
     assert!(matches!(
-        witness_rx.recv().await?,
+        next_event(&mut witness_reader).await?,
         SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
     ));
-    assert!(rx.try_recv().is_err());
+    // The revoked peer is not told that the doc left the part. The reader is the store's
+    // unfiltered seam, so the omission is the responder's answer rather than a stream that
+    // filtered the event out: the removal is unreadable to that peer, and its page for the
+    // part is refused.
+    let removal = PartEvent::Removed(ObjRemovedFromPart {
+        cursor: witness_cursor,
+        part_id: part.clone(),
+        obj_id: obj.clone(),
+    });
+    assert!(
+        !store
+            .page_event_is_readable(&removal, peer.clone())
+            .await?,
+        "a revoked peer must not be able to read the removal"
+    );
+    let refused = store
+        .replay_page(
+            SubscriptionTarget::Part {
+                part_id: part.clone(),
+                cursor: add_cursor,
+            },
+            16,
+            peer.clone(),
+            Duration::from_millis(50),
+        )
+        .await?;
+    assert!(
+        matches!(refused, big_sync_core::rpc::ReplayPageOutcome::Unauthorized),
+        "a revoked peer's replay must be refused; got {refused:?}"
+    );
 
-    // Replay agrees with live delivery for both peers.
-    let replay = HostPartStore::subscribe(&store, subscription_request(0), peer).await??;
-    assert!(matches!(replay.recv().await?, SubEvent::ReplayComplete));
-    let witness_replay =
-        HostPartStore::subscribe(&store, subscription_request(0), witness).await??;
+    // Replay agrees with live delivery for the peer that kept access.
+    let mut witness_replay =
+        HostPartStore::open_revision_reader(&store, subscription_request(witness_cursor)).await??;
+    let first = next_event(&mut witness_replay).await?;
+    assert!(
+        matches!(&first, SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part),
+        "unexpected first witness replay event (add_cursor={add_cursor}, witness_cursor={witness_cursor}): {first:?}"
+    );
     assert!(matches!(
-        witness_replay.recv().await?,
-        SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
-    ));
-    assert!(matches!(
-        witness_replay.recv().await?,
+        next_event(&mut witness_replay).await?,
         SubEvent::ReplayComplete
     ));
     Ok(())
@@ -2526,12 +2611,18 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
     let store = SqliteBigRepoStore::new(sql, "reconcile-syncable-fail", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([90; 32]));
     let part = PartKey(ByteKey::new([91; 32]));
+    let left_part = PartKey(ByteKey::new([93; 32]));
     let peer = PeerKey(ByteKey::new([92; 32]));
+    let witness = PeerKey(ByteKey::new([94; 32]));
 
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(part.clone()).await?;
-    // Put doc in part so a later removal has stale parts to process.
-    HostPartStore::add_obj_to_parts(&store, doc.clone(), vec![part.clone()]).await?;
+    store.ensure_part(left_part.clone()).await?;
+    // Put doc in both parts so a later removal has stale parts to process.
+    HostPartStore::add_obj_to_parts(&store, doc.clone(), vec![part.clone(), left_part.clone()])
+        .await?;
+    // The reconciliation owns `part`'s rows (it derives an agent set for it), and its
+    // replacement delete is the syncable write this test fails.
     store
         .set_part_members(
             part.clone(),
@@ -2550,21 +2641,19 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
 
     let mutations = vec![GroupPartReconciliation {
         doc: doc.clone(),
-        agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
-        managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id()]),
-        part_agents: HashSet::<PartKey>::new()
-            .iter()
-            .map(|part| {
-                (
-                    part.clone(),
-                    Arc::new(HashMap::from([(
-                        peer.clone(),
-                        keyhive_core::access::Access::Read,
-                    )])),
-                )
-            })
-            .collect(),
+        agents: HashMap::from([
+            (peer.clone(), keyhive_core::access::Access::Read),
+            (witness.clone(), keyhive_core::access::Access::Read),
+        ]),
+        managed_group_parts: HashSet::from([part.clone(), left_part.clone()]),
+        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        part_agents: HashMap::from([(
+            part.clone(),
+            Arc::new(HashMap::from([
+                (peer.clone(), keyhive_core::access::Access::Read),
+                (witness.clone(), keyhive_core::access::Access::Read),
+            ])),
+        )]),
     }];
     assert!(
         store
@@ -2580,10 +2669,17 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
         0,
         "cursor must remain at initial value after syncable-write rollback"
     );
-    // Doc should still be in the part (no removal applied).
+    // Doc should still be in both parts (no removal applied).
+    let parts = HostPartStore::obj_parts(&store, doc).await?;
     assert!(
-        HostPartStore::obj_parts(&store, doc).await?.contains(&part),
+        parts.contains(&part) && parts.contains(&left_part),
         "part membership must survive syncable-write rollback"
+    );
+    // The replacement's inserts rolled back with its failed delete.
+    assert_eq!(
+        syncable_principals(&store, part).await?,
+        vec![SqliteBigRepoStore::peer_blob(peer)],
+        "no access row may survive the syncable-write rollback"
     );
     Ok(())
 }
@@ -2753,6 +2849,201 @@ async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() ->
     );
     assert_eq!(store.keyhive_group_part_cursor().await?, 0);
     assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
+    Ok(())
+}
+
+/// The access rows on a part, as the principals they name. Rows are keyed by
+/// `(part_ref, principal_id)`, so this is the whole set for the part.
+async fn syncable_principals(store: &SqliteBigRepoStore, part: PartKey) -> Res<Vec<Vec<u8>>> {
+    // Runtime query: the test-only shape is not in the checked-in `.sqlx` cache.
+    let rows = sqlx::query_scalar(
+        "SELECT s.principal_id FROM big_sync_syncable s
+          JOIN big_sync_parts p ON p.part_ref = s.part_ref
+         WHERE s.scope_id = ?1 AND p.part_id = ?2
+         ORDER BY s.principal_id",
+    )
+    .bind(store.scope_id)
+    .bind(SqliteBigRepoStore::part_blob(part))
+    .fetch_all(&store.sql.read_pool)
+    .await?;
+    Ok(rows)
+}
+
+/// A document materialized into a part outside its managed set — gossip, or the pin
+/// worker's `add_obj_to_parts` — must not cost that part its access rows. This
+/// reconciliation derives no agent set for such a part, so the rows belong to that
+/// part's own access owner. The part it *does* derive an agent set for still has its
+/// rows replaced, so a principal revoked from a group still loses its row.
+#[tokio::test]
+async fn reconcile_group_part_batch_does_not_revoke_a_foreign_parts_rows() -> Res<()> {
+    let store = SqliteBigRepoStore::new(
+        SqlCtx::memory().await?,
+        "reconcile-foreign-part-rows",
+        BuckId::MAX_LEVEL,
+    )
+    .await?;
+    let doc = ObjKey(ByteKey::new([60; 32]));
+    let group_part = PartKey(ByteKey::new([61; 32]));
+    let foreign_part = PartKey(ByteKey::new([62; 32]));
+    let peer = PeerKey(ByteKey::new([63; 32]));
+    let witness = PeerKey(ByteKey::new([64; 32]));
+    let read = keyhive_core::access::Access::Read;
+
+    HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
+    store.ensure_part(group_part.clone()).await?;
+    store.ensure_part(foreign_part.clone()).await?;
+    // The foreign part's rows are its own owner's, and they predate the document.
+    store
+        .set_part_members(
+            foreign_part.clone(),
+            HashMap::from([(witness.clone(), read)]),
+        )
+        .await?;
+
+    let both = Arc::new(HashMap::from([
+        (peer.clone(), read),
+        (witness.clone(), read),
+    ]));
+    let seed = [GroupPartReconciliation {
+        doc: doc.clone(),
+        agents: HashMap::from([(peer.clone(), read), (witness.clone(), read)]),
+        part_agents: HashMap::from([(group_part.clone(), Arc::clone(&both))]),
+        managed_group_parts: HashSet::from([group_part.clone(), crate::global_part_id()]),
+        desired_group_parts: HashSet::from([group_part.clone(), crate::global_part_id()]),
+    }];
+    store.reconcile_group_part_batch(&seed, 1, true).await?;
+
+    // Gossip materializes the doc into a part no reconciliation for it manages.
+    HostPartStore::add_obj_to_parts(&store, doc.clone(), vec![foreign_part.clone()]).await?;
+    assert!(
+        HostPartStore::obj_parts(&store, doc.clone())
+            .await?
+            .contains(&foreign_part)
+    );
+    assert_eq!(
+        syncable_principals(&store, foreign_part.clone()).await?,
+        vec![SqliteBigRepoStore::peer_blob(witness.clone())]
+    );
+
+    // The doc leaves its group part (managed, no longer desired) and `peer` is revoked
+    // from that group, while the doc stays in the foreign part.
+    let revoked = Arc::new(HashMap::from([(witness.clone(), read)]));
+    let mutations = [GroupPartReconciliation {
+        doc: doc.clone(),
+        agents: HashMap::from([(witness.clone(), read)]),
+        part_agents: HashMap::from([(group_part.clone(), Arc::clone(&revoked))]),
+        managed_group_parts: HashSet::from([group_part.clone()]),
+        desired_group_parts: HashSet::from([crate::global_part_id()]),
+    }];
+    store
+        .reconcile_group_part_batch(&mutations, 2, true)
+        .await?;
+
+    // The foreign part's membership stays — it was never this reconciliation's to remove
+    // — and so do its rows.
+    assert!(
+        HostPartStore::obj_parts(&store, doc.clone())
+            .await?
+            .contains(&foreign_part),
+        "a part outside the managed set keeps its membership"
+    );
+    assert_eq!(
+        syncable_principals(&store, foreign_part).await?,
+        vec![SqliteBigRepoStore::peer_blob(witness.clone())],
+        "a reconciliation must not revoke a part it derives no agent set for"
+    );
+
+    // Its own managed part still loses the doc and replaces its rows with the current
+    // agent set, so `peer`'s revocation lands there.
+    assert!(
+        !HostPartStore::obj_parts(&store, doc)
+            .await?
+            .contains(&group_part),
+        "a part that is no longer desired loses its membership"
+    );
+    assert_eq!(
+        syncable_principals(&store, group_part).await?,
+        vec![SqliteBigRepoStore::peer_blob(witness)],
+        "an owned part's rows are still replaced by its current agent set"
+    );
+    Ok(())
+}
+
+/// `/seds` is in every document's managed set but carries no derived agent set: its rows
+/// come from part-level grants, such as an embedder's mirror grant. A doc leaving `/seds`
+/// removes the membership and must leave those rows to that part's own owner.
+#[tokio::test]
+async fn reconcile_group_part_batch_keeps_seds_rows_when_the_doc_leaves_seds() -> Res<()> {
+    let store = SqliteBigRepoStore::new(
+        SqlCtx::memory().await?,
+        "reconcile-seds-rows",
+        BuckId::MAX_LEVEL,
+    )
+    .await?;
+    let doc = ObjKey(ByteKey::new([70; 32]));
+    let group_part = PartKey(ByteKey::new([71; 32]));
+    let embedder = PeerKey(ByteKey::new([72; 32]));
+    let member = PeerKey(ByteKey::new([73; 32]));
+    let read = keyhive_core::access::Access::Read;
+
+    HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
+    store.ensure_part(group_part.clone()).await?;
+    store.ensure_part(crate::global_part_id()).await?;
+    // The part-level owner's rows, written as a full replacement (`set_part_members`).
+    store
+        .set_part_members(
+            crate::global_part_id(),
+            HashMap::from([(embedder.clone(), read), (member.clone(), read)]),
+        )
+        .await?;
+
+    let group_agents = Arc::new(HashMap::from([(member.clone(), read)]));
+    let seds = crate::global_part_id();
+    let seed = [GroupPartReconciliation {
+        doc: doc.clone(),
+        agents: HashMap::from([(member.clone(), read)]),
+        part_agents: HashMap::from([(group_part.clone(), Arc::clone(&group_agents))]),
+        managed_group_parts: HashSet::from([group_part.clone(), seds.clone()]),
+        desired_group_parts: HashSet::from([group_part.clone(), seds.clone()]),
+    }];
+    store.reconcile_group_part_batch(&seed, 1, true).await?;
+    assert!(
+        HostPartStore::obj_parts(&store, doc.clone())
+            .await?
+            .contains(&seds)
+    );
+
+    // The local principal stops reading the doc: `/seds` is managed but no longer
+    // desired, and this reconciliation derives no agent set for it.
+    let mutations = [GroupPartReconciliation {
+        doc: doc.clone(),
+        agents: HashMap::new(),
+        part_agents: HashMap::from([(group_part.clone(), Arc::clone(&group_agents))]),
+        managed_group_parts: HashSet::from([group_part.clone(), seds.clone()]),
+        desired_group_parts: HashSet::from([group_part.clone()]),
+    }];
+    store
+        .reconcile_group_part_batch(&mutations, 2, true)
+        .await?;
+
+    let parts = HostPartStore::obj_parts(&store, doc).await?;
+    assert!(
+        !parts.contains(&seds),
+        "`/seds` loses its membership when it is no longer desired"
+    );
+    assert!(parts.contains(&group_part));
+    assert_eq!(
+        syncable_principals(&store, seds).await?,
+        vec![
+            SqliteBigRepoStore::peer_blob(embedder),
+            SqliteBigRepoStore::peer_blob(member.clone())
+        ],
+        "leaving `/seds` must not revoke the part-level rows the doc does not own"
+    );
+    assert_eq!(
+        syncable_principals(&store, group_part).await?,
+        vec![SqliteBigRepoStore::peer_blob(member)]
+    );
     Ok(())
 }
 

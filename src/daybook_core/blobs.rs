@@ -76,11 +76,156 @@ pub enum BlobMaterializeRequest {
 
 pub const BLOB_SCHEME: &str = "db+blob";
 
-pub type BlobId = ObjKey;
+/// The content digest of a blob: the blake3 hash of its bytes.
+///
+/// Deliberately not an `ObjKey` alias, though a blob's object key in the blob
+/// part store is these bytes. ADR 012 made an object key any byte string, and a
+/// key read back from a peer's part store or written into a facet is whatever
+/// its author wrote; a digest is exactly 32 bytes. Keeping that width an
+/// invariant of the type is what stops text that is not a digest from reaching
+/// the on-disk layout, where `Path::join` reads an absolute spelling as a
+/// replacement for the blob root, and what makes the conversions every real
+/// consumer needs (iroh `Hash`, the multihash digest text) total instead of
+/// panicking on a length that cannot vary.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobId([u8; 32]);
 
-pub fn blob_id_from_hash(hash: &str) -> BlobId {
-    use std::str::FromStr;
-    BlobId::from_str(hash).expect("invalid blob hash")
+impl BlobId {
+    /// A digest from its 32 bytes.
+    #[must_use]
+    pub fn new(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    /// A digest no blob is expected to have, for tests and "missing" lookups.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+
+    /// The digest bytes every fixed-width consumer takes. Total: the width is
+    /// the type's invariant, so no caller guards a length that cannot vary.
+    #[must_use]
+    pub fn to_bytes32(&self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl From<BlobId> for ObjKey {
+    /// The object key a blob's object carries in the blob part store: the
+    /// digest itself, not the text it was authored as (the digest spelling and
+    /// the `Display` spelling of one digest are the same object).
+    fn from(blob_id: BlobId) -> Self {
+        ObjKey::new(blob_id.0)
+    }
+}
+
+impl TryFrom<&ObjKey> for BlobId {
+    type Error = BlobIdDecodeError;
+
+    /// The digest a blob part store object key names, if it names one.
+    ///
+    /// Fallible because that key came from a peer: a key that is not a digest
+    /// names no blob here, and saying so must not be able to become a panic or
+    /// a path outside the blob root.
+    fn try_from(obj_key: &ObjKey) -> Result<Self, Self::Error> {
+        obj_key
+            .as_bytes()
+            .try_into()
+            .map(Self)
+            .map_err(|_| BlobIdDecodeError)
+    }
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+/// Blob id text is neither a blake3 multihash nor a 32-byte multibase digest
+pub struct BlobIdDecodeError;
+
+impl std::fmt::Display for BlobId {
+    /// The digest as multibase base58btc, which is what names the blob's object
+    /// on disk and in a `db+blob` URL. It never contains a path separator, and
+    /// that is the point: the blob's paths are built from this text.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
+    }
+}
+
+impl std::fmt::Debug for BlobId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::str::FromStr for BlobId {
+    type Err = BlobIdDecodeError;
+
+    /// The two spellings of one digest, and nothing else.
+    ///
+    /// One is the blake3 multihash text [`blob_id_to_digest_str`] emits and
+    /// that facet digests carry, the other is the plain multibase text
+    /// `Display` emits and that `db+blob` URLs carry. Both decode to the same
+    /// 32 bytes and so name the same blob; reserved `/…` keys, `o:` object-part
+    /// keys, arbitrary text and the empty string are not digests and are
+    /// rejected here, at the boundary the text enters through.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Ok(digest) = utils_rs::hash::decode_base58_multihash_blake3(value) {
+            return Ok(Self(digest));
+        }
+        // Not `utils_rs::hash::decode_base58_multibase`: it indexes the first
+        // byte and so panics on the empty string rather than rejecting it.
+        if value.is_empty() {
+            return Err(BlobIdDecodeError);
+        }
+        let bytes =
+            utils_rs::hash::decode_base58_multibase(value).map_err(|_| BlobIdDecodeError)?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map(Self)
+            .map_err(|_| BlobIdDecodeError)
+    }
+}
+
+impl Serialize for BlobId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_string())
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let text = String::deserialize(deserializer)?;
+            std::str::FromStr::from_str(&text).map_err(serde::de::Error::custom)
+        } else {
+            let bytes = <Vec<u8>>::deserialize(deserializer)?;
+            bytes
+                .as_slice()
+                .try_into()
+                .map(Self)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// The blob id a text spelling names.
+///
+/// The text is peer-authored (a facet digest, a `db+blob` URL, a pin in the
+/// local state), so text that names no digest is an error rather than a fresh
+/// identity or a panic.
+pub fn blob_id_from_hash(hash: &str) -> Res<BlobId> {
+    hash.parse()
+        .map_err(|_| eyre::eyre!("not a valid blob hash: {hash}"))
 }
 
 pub(crate) fn blob_hash_from_id(blob_id: BlobId) -> String {
@@ -475,17 +620,16 @@ impl BlobsRepo {
         Ok(())
     }
 
+    /// The on-disk paths of a blob's object.
+    ///
+    /// The two fan-out levels are taken from the digest text, which is multibase
+    /// base58 of 32 bytes by construction: no part of it can read as an absolute
+    /// path or a parent, so every consumer of these paths stays inside the blob
+    /// root.
     fn object_paths(&self, blob_id: BlobId) -> Res<ObjectPaths> {
         let hash = blob_hash_from_id(blob_id);
-        if hash.len() < 4 {
-            eyre::bail!("invalid blob hash: {hash}");
-        }
-        let Some(l0) = hash.get(0..2) else {
-            eyre::bail!("invalid blob hash: {hash}");
-        };
-        let Some(l1) = hash.get(2..4) else {
-            eyre::bail!("invalid blob hash: {hash}");
-        };
+        let (l0, rest) = hash.split_at_checked(2).ok_or_eyre("invalid blob hash")?;
+        let (l1, _) = rest.split_at_checked(2).ok_or_eyre("invalid blob hash")?;
         let dir = self.root.join("objects").join(l0).join(l1);
         Ok(ObjectPaths {
             blob: dir.join(format!("{hash}.blob")),
@@ -751,6 +895,9 @@ pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
     iroh_blobs::Hash::from_bytes(blob_id.to_bytes32())
 }
 
+/// The digest in the blake3 multihash spelling our writers put in facet
+/// digests and blob URLs. [`BlobId`]'s `FromStr` decodes it back to the same
+/// digest as `Display` does.
 pub fn blob_id_to_digest_str(blob_id: BlobId) -> String {
     utils_rs::hash::encode_base58_multihash_blake3(blob_id.to_bytes32())
 }
@@ -1108,6 +1255,53 @@ mod tests {
 
         repo.cleanup_staging().await?;
         assert!(!tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    /// Blob id text arrives from peers (facet digests, `db+blob` URLs, part
+    /// store keys). Text that is not a digest must be rejected where it enters:
+    /// a blob id is what the on-disk path is built from, and `Path::join` reads
+    /// an absolute spelling as a replacement for the blob root.
+    #[tokio::test]
+    async fn blob_id_rejects_reserved_and_non_digest_spellings() -> Res<()> {
+        for spelling in [
+            "/etc/daybook-escape",
+            "o:/object/path",
+            "../daybook-escape",
+            "not_base58_hash",
+            "",
+        ] {
+            assert!(
+                spelling.parse::<BlobId>().is_err(),
+                "not a blob digest, must not be a blob id: {spelling:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The multihash spelling our writers put in facet digests
+    /// (`blob_id_to_digest_str`) and the plain `Display` spelling of a `db+blob`
+    /// URL name one digest: both parse to the same 32 bytes, and so to the same
+    /// blob on disk.
+    #[tokio::test]
+    async fn blob_digest_spelling_names_the_same_blob_on_disk() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let blob_id = repo.put(b"digest-spelling-round-trip").await?;
+
+        let digest = blob_id_to_digest_str(blob_id.clone());
+        let from_digest = digest.parse::<BlobId>()?;
+        assert_eq!(from_digest, blob_id, "digest spelling: {digest:?}");
+        assert_eq!(digest_str_to_blob_id(&digest)?, blob_id, "{digest:?}");
+        assert_eq!(blob_id_to_digest_str(from_digest.clone()), digest);
+
+        let from_display = blob_id.to_string().parse::<BlobId>()?;
+        assert_eq!(from_display, blob_id, "display spelling: {blob_id}");
+
+        assert_eq!(
+            repo.get_path(from_digest).await?,
+            repo.get_path(blob_id).await?,
+            "the digest spelling must resolve to the blob's object on disk"
+        );
         Ok(())
     }
 }

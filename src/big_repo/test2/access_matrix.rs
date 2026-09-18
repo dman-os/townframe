@@ -378,6 +378,119 @@ async fn tier2_nested_group_edit_propagates_member_update() -> crate::Res<()> {
     Ok(())
 }
 
+// ─── A round's receipt follows that round's content apply ─────────────────────
+//
+// `tier2_nested_group_edit_propagates_member_update` failed under load with
+// `nested_note = None` after the owner's sync. The hub polls commands before
+// events (`select_biased!`), so the round's `DocSyncRoundDone` command was
+// handled ahead of the `SyncSessionObserved` event carrying the round's
+// received commit, and the receipt resolved from a live bundle that had not
+// applied that commit yet — a caller reading immediately after the receipt saw
+// pre-round content. The round's completion now rides the same event stream as
+// its own session observation, so the apply is always routed ahead of the
+// receipt.
+//
+// The inversion is forced with the test-only hub event hold rather than waiting
+// for a loaded hub to produce it: while events are held, the round still runs
+// and its content still lands in the durable sedimentree, so a completion that
+// travels the command channel resolves the receipt (failing the assertion
+// below) where an event-borne completion cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_sync_receipt_follows_its_rounds_content_apply() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(76, 77, "Owner", "ReceiptEditor").await?;
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "receipt-ordering"))
+        .map_err(|err| crate::ferr!("failed creating receipt-ordering doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &editor_agent, Access::Edit).await?;
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
+    editor_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "edit", "editor-edit"))
+                .map_err(|err| crate::ferr!("failed editor write: {err:?}"))
+        })
+        .await??;
+    let edit_head = editor_doc
+        .with_document_read(|doc| doc.get_heads())
+        .await
+        .into_iter()
+        .next()
+        .expect("the editor's edit produces a head");
+
+    // Hold hub events: the owner's round completes while the session
+    // observation that applies its received commit sits queued behind the hold.
+    // The guard reopens processing even if an assertion unwinds.
+    let hold = pair.left().repo.hold_hub_events().await?;
+
+    let conn = pair.left_conn().clone();
+    let sync_doc_id = doc_id.clone();
+    let sync = tokio::spawn(async move { conn.sync_doc_with_peer_receipt(sync_doc_id).await });
+
+    // Only the hub's event handling is held: the transport and the store are
+    // not, so the owner's *durable* sedimentree takes the edit. Reading that
+    // state is itself a hub command, so a ready answer also means the hub has
+    // cycled its command queue past the round's completion signal.
+    let mut stored = false;
+    for _ in 0..1000 {
+        let state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
+        if state.sedimentree_heads.contains(&edit_head) {
+            stored = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        stored,
+        "the owner's durable sedimentree never received the editor's edit"
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        pair.left()
+            .repo
+            .contains_sedimentree_id(doc_id.clone())
+            .await?;
+    }
+    assert!(
+        !sync.is_finished(),
+        "the doc-sync receipt resolved while the round's own content event was still \
+         queued: the caller's next read would race the content apply"
+    );
+
+    // Releasing replays the held events in channel order: the session applies
+    // the round's content, then the round completion resolves the receipt.
+    hold.resume().await?;
+    let receipt = sync
+        .await
+        .map_err(|err| crate::ferr!("doc sync task failed: {err}"))??;
+    assert!(
+        matches!(
+            receipt.outcome,
+            crate::runtime2::types::SyncDocOutcome::Ready
+        ),
+        "a held document with applied content reports Ready: {:?}",
+        receipt.outcome
+    );
+    assert_eq!(
+        read_optional_text(&owner_doc, "edit").await.as_deref(),
+        Some("editor-edit"),
+        "the receipt must not be produced before the round's received content is applied"
+    );
+
+    drop(hold);
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &editor_doc).await?;
+    drop(owner_doc);
+    drop(editor_doc);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tier2_grant_after_content_while_offline_read() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();

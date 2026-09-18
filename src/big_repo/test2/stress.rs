@@ -5,6 +5,7 @@
 //! the resulting durable frontier after the runner reconnects the full mesh.
 
 use super::harness::fixtures::wait_for_agent;
+use super::harness::log_nickname;
 use super::harness::topo::Node;
 use crate::{BigKeyhiveGroup, DocumentId, PeerKey, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
@@ -14,6 +15,7 @@ use big_sync::{
 };
 use big_sync_core::{ObjKey, PartKey};
 use futures::future::try_join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use keyhive_core::access::Access;
 use rand::rngs::StdRng;
 use std::{
@@ -26,6 +28,22 @@ use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0002;
+
+/// How often a settle barrier that is still outstanding reports which nodes hold it.
+const SETTLE_STALL_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How many tracked documents one stall report names per node.
+const SETTLE_STALL_REPORT_DOCS: usize = 6;
+
+/// A key's display text, truncated to `limit` characters.
+///
+/// These diagnostics name ADR 012 keys, whose width is not fixed: a reserved textual key
+/// renders as its own text (`/seds` is six bytes), so a fixed *byte* offset panics on any
+/// key shorter than it. Truncating by characters bounds the same display for every key
+/// and cannot panic.
+fn key_prefix(key: &impl std::fmt::Display, limit: usize) -> String {
+    key.to_string().chars().take(limit).collect()
+}
 
 #[derive(Clone)]
 pub struct BigRepoStressConfig {
@@ -95,6 +113,26 @@ impl BigRepoStressFixture {
                 doc_id,
                 state.sedimentree_heads.iter().map(|head| head.0).collect(),
             );
+        }
+        Ok(result)
+    }
+
+    /// The heads published inside the object payload: what big_sync advertises to
+    /// peers and what the sync backend's convergence fast path compares. Distinct from
+    /// `sedimentree_heads`, which is the durable storage frontier.
+    async fn collect_payload_heads(
+        &self,
+        node: &Node,
+    ) -> Res<BTreeMap<DocumentId, BTreeSet<[u8; 32]>>> {
+        let mut result = BTreeMap::new();
+        for doc_id in self.tracked_docs().await {
+            let heads = node
+                .repo
+                .doc_payload_heads(doc_id.clone())
+                .await?
+                .map(|heads| heads.iter().map(|head| head.0).collect())
+                .unwrap_or_default();
+            result.insert(doc_id, heads);
         }
         Ok(result)
     }
@@ -205,6 +243,103 @@ impl BigRepoStressFixture {
         }
         parts.into_iter().collect()
     }
+    /// A compact `doc:stage` list for one node, capped so a report stays readable.
+    async fn doc_stage_summary(&self, node: &Node, docs: &BTreeSet<DocumentId>) -> String {
+        let mut stages = Vec::new();
+        for doc_id in docs.iter().take(SETTLE_STALL_REPORT_DOCS) {
+            let stage = node
+                .repo
+                .document_sync_snapshot(doc_id.clone())
+                .await
+                .map(|snapshot| format!("{:?}", snapshot.stage))
+                .unwrap_or_else(|error| format!("error({error})"));
+            stages.push(format!("{}:{stage}", key_prefix(doc_id, 12)));
+        }
+        if docs.len() > SETTLE_STALL_REPORT_DOCS {
+            stages.push(format!("+{}", docs.len() - SETTLE_STALL_REPORT_DOCS));
+        }
+        stages.join(",")
+    }
+
+    /// Name what a still-outstanding settle barrier is waiting for: which nodes have not
+    /// returned, their BigSync part cursors, and their per-document sync stage.
+    ///
+    /// The hub reports its own internal fence state while a quiescence wait is stalled;
+    /// this is the cross-node view, and unlike the hub's report it needs the fence to be
+    /// armed at the moment it is written rather than continuously pending.
+    async fn report_settle_stall(
+        &self,
+        phase: &str,
+        nodes: &[&Node],
+        parts: &[PartKey],
+        holding: &BTreeSet<usize>,
+    ) {
+        let tracked_docs = self.tracked_docs().await;
+        let mut per_node = Vec::with_capacity(nodes.len());
+        for (idx, node) in nodes.iter().enumerate() {
+            let cursors = self
+                .collect_local_cursors(node, parts)
+                .await
+                .unwrap_or_else(|error| format!("error({error})"));
+            per_node.push(format!(
+                "{}(holding={} cursors={cursors} docs={})",
+                log_nickname::nickname(&node.peer_id()),
+                holding.contains(&idx),
+                self.doc_stage_summary(node, &tracked_docs).await,
+            ));
+        }
+        tracing::warn!(
+            phase,
+            holding = ?holding,
+            nodes = %per_node.join(" "),
+            "cluster settle still pending",
+        );
+    }
+
+    /// Await one settle barrier on every node in parallel, reporting every
+    /// [`SETTLE_STALL_REPORT_INTERVAL`] while it is still outstanding.
+    ///
+    /// The waits stay unbounded: the report is evidence for a kill that arrives from
+    /// outside (a harness hard timeout), never a deadline of its own.
+    async fn await_settle_with_stall_report<F>(
+        &self,
+        phase: &str,
+        nodes: &[&Node],
+        parts: &[PartKey],
+        waits: Vec<F>,
+    ) -> Res<()>
+    where
+        F: std::future::Future<Output = Res<()>>,
+    {
+        assert_eq!(
+            waits.len(),
+            nodes.len(),
+            "a settle barrier needs exactly one wait per node"
+        );
+        let mut in_flight: FuturesUnordered<_> = waits
+            .into_iter()
+            .enumerate()
+            .map(|(idx, wait)| async move { (idx, wait.await) })
+            .collect();
+        let mut holding: BTreeSet<usize> = (0..nodes.len()).collect();
+        let mut tick = tokio::time::interval(SETTLE_STALL_REPORT_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first interval tick is immediate; the report belongs after a full interval.
+        tick.tick().await;
+        while !holding.is_empty() {
+            tokio::select! {
+                Some((idx, result)) = in_flight.next() => {
+                    holding.remove(&idx);
+                    result?;
+                }
+                _ = tick.tick() => {
+                    self.report_settle_stall(phase, nodes, parts, &holding).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartKey>> {
         let _left_and_right = (left, right);
         Ok(self.sync_parts().await)
@@ -215,6 +350,9 @@ impl BigRepoStressFixture {
 pub struct BigRepoStressObservation {
     pub sedimentree_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
     pub parts: BTreeMap<DocumentId, Vec<PartKey>>,
+    /// Published payload heads per document, for comparing against the durable
+    /// `sedimentree_heads` of the same node.
+    pub payload_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
 }
 
 #[async_trait::async_trait]
@@ -383,6 +521,7 @@ impl StressFixture for BigRepoStressFixture {
         Ok(BigRepoStressObservation {
             sedimentree_heads: self.collect_heads(node).await?,
             parts: self.collect_parts(node).await?,
+            payload_heads: self.collect_payload_heads(node).await?,
         })
     }
 
@@ -524,22 +663,34 @@ impl StressFixture for BigRepoStressFixture {
         // alignment observation runs against a genuinely settled snapshot
         // instead of racing that drift.
         let barrier_nodes: Vec<&Node> = nodes.to_vec();
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "freeze",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.wait_for_quiescence_freeze(None).await }),
+                .map(|node| async move { node.repo.wait_for_quiescence_freeze(None).await })
+                .collect(),
         )
         .await?;
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "unfreeze",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.unfreeze().await }),
+                .map(|node| async move { node.repo.unfreeze().await })
+                .collect(),
         )
         .await?;
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "settle",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.wait_for_quiescence(None).await }),
+                .map(|node| async move { node.repo.wait_for_quiescence(None).await })
+                .collect(),
         )
         .await?;
 
@@ -598,7 +749,7 @@ impl StressFixture for BigRepoStressFixture {
                             .count();
                         format!(
                             "{}:{synced}/{}",
-                            &peer_id.to_string()[..12],
+                            key_prefix(peer_id, 12),
                             tracked_docs.len()
                         )
                     })
@@ -624,24 +775,101 @@ impl StressFixture for BigRepoStressFixture {
                                     .get(doc_id)
                                     .cloned()
                                     .unwrap_or_default();
-                                format!("{}:{}", &peer_id.to_string()[..12], actual.len())
+                                format!(
+                                    "{}:heads={actual:?} payload={:?}",
+                                    key_prefix(peer_id, 12),
+                                    observation
+                                        .payload_heads
+                                        .get(doc_id)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                )
                             })
                             .collect();
                         (!differing.is_empty()).then(|| {
                             format!(
-                                "{}:ref={} [{}]",
-                                &doc_id.to_string()[..12],
-                                expected.len(),
+                                "{}:reference_heads={expected:?} [{}]",
+                                doc_id,
                                 differing.join(",")
                             )
                         })
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
+                let tracked_docs_ref = &tracked_docs;
+                let stage_detail = try_join_all(nodes.iter().map(|node| async move {
+                    Ok::<_, crate::interlude::eyre::Report>(format!(
+                        "{}={}",
+                        log_nickname::nickname(&node.peer_id()),
+                        self.doc_stage_summary(node, tracked_docs_ref).await,
+                    ))
+                }))
+                .await?
+                .join(" ");
+                // TEMP-DIAGNOSTIC: per-node sync-machine state. A head mismatch alone
+                // cannot say which part, strategy flag, or stalled object sync is holding
+                // the cluster apart; `waiters` names the exact (peer, part) full sync is
+                // still waiting on, and `last_synced` ages say which paths went silent.
+                let sync_state = try_join_all(nodes.iter().map(|node| async move {
+                    let snapshot = node.worker.snapshot().await?;
+                    let routes = snapshot
+                        .peer_parts
+                        .iter()
+                        .flat_map(|(peer, parts)| {
+                            parts.iter().map(move |(part, backend)| {
+                                format!(
+                                    "{}:{}=>{backend}",
+                                    key_prefix(peer, 8),
+                                    key_prefix(part, 10),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let flags = snapshot
+                        .peer_part_sync_flags
+                        .iter()
+                        .map(|(peer, part, pending, multi, replay_done, cursor_active)| {
+                            format!(
+                                "{}:{}:pending={pending},multi={multi},replay_done={replay_done},cursor_active={cursor_active}",
+                                key_prefix(peer, 8),
+                                key_prefix(part, 10),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let last_synced = snapshot
+                        .last_object_syncs
+                        .iter()
+                        .map(|(peer, part, obj, at)| {
+                            format!(
+                                "{}:{}->{} age={:.1}s",
+                                key_prefix(peer, 8),
+                                key_prefix(part, 10),
+                                key_prefix(obj, 12),
+                                at.elapsed().as_secs_f64(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    Ok::<_, crate::interlude::eyre::Report>(format!(
+                        "{}[routes=[{routes}] flags=[{flags}] waiters={:?} last_synced=[{last_synced}] tasks={:?} machine={} sync={} zombies={}]",
+                        log_nickname::nickname(&node.peer_id()),
+                        snapshot.full_sync_waiters,
+                        snapshot.task_counts,
+                        snapshot.active_machine_tasks,
+                        snapshot.active_sync_tasks,
+                        snapshot.zombie_tasks,
+                    ))
+                }))
+                .await?
+                .join(" ");
                 tracing::info!(
                     converged,
                     per_node,
                     mismatch = mismatch_detail,
+                    stages = %stage_detail,
+                    sync_state = %sync_state,
                     "convergence poll",
                 );
                 last_report = tokio::time::Instant::now();

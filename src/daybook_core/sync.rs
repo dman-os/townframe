@@ -860,6 +860,18 @@ impl IrohSyncRepo {
                     partition: part_id.to_string(),
                 }]);
             }
+            big_sync_core::SyncStatEvent::PeerPartUnanswered { peer_id, part_id } => {
+                // Report-only: the part keeps full sync blocked until the
+                // embedder drops it from the subscription set, and the machine
+                // re-asks on its own timer, so there is no work to do here
+                // beyond recording the fact.
+                info!(
+                    local_peer_id = %self.router.endpoint().id(),
+                    %peer_id,
+                    %part_id,
+                    "BigSync peer partition unanswered"
+                );
+            }
             big_sync_core::SyncStatEvent::PeerPartStale { .. } => {}
             big_sync_core::SyncStatEvent::PartFullySynced { .. } => {}
             big_sync_core::SyncStatEvent::PartStale { .. } => {}

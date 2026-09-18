@@ -33,12 +33,14 @@ pub fn spawn_doc_worker<F>(
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
     generation: u64,
     parent_span: tracing::Span,
-) -> SpawnedDocWorker<F>
+) -> Res<SpawnedDocWorker<F>>
 where
     F: FutureForm + DocWorkerLoop<F> + 'static,
 {
+    // The doc id can reach a worker straight from the sync edge (a peer-supplied object id
+    // resolved by a sync round), so the fixed-width sedimentree id derivation is fallible.
+    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.try_to_bytes32()?);
     let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
-    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
 
     let worker = DocWorker2 {
         doc_id: doc_id.clone(),
@@ -70,11 +72,11 @@ where
         parent_span,
     );
 
-    SpawnedDocWorker {
+    Ok(SpawnedDocWorker {
         handle: DocWorkerHandle { msg_tx },
         stop: DocWorkerStopToken { abort: stop_abort },
         run,
-    }
+    })
 }
 
 // ─── Mailbox loop trait (discharges from_send_future for wasm) ──────────
@@ -445,6 +447,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 Ok(())
             }
             DocWorkerMsg::Fence { reply, _lease } => {
+                debug!(
+                    doc_id = %self.doc_id,
+                    queued_waiters = self.quiescence_waiters.len() + 1,
+                    pending_fragment_requests = self.pending_fragment_requests.len(),
+                    quiescent = self.is_quiescent(),
+                    "TEMP-DIAGNOSTIC: doc worker fence queued",
+                );
                 self.quiescence_waiters.push((reply, _lease));
                 Ok(())
             }
@@ -1075,6 +1084,18 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         let DocState::Live(bundle) = &self.state else {
+            let state = match &self.state {
+                DocState::Unloaded => "Unloaded",
+                DocState::Transient(_) => "Transient",
+                DocState::Live(_) => "Live",
+                DocState::PendingMaterialization => "PendingMaterialization",
+            };
+            debug!(
+                doc_id = %self.doc_id,
+                pending_fragment_requests = self.pending_fragment_requests.len(),
+                state,
+                "TEMP-DIAGNOSTIC: fragment requests deferred while doc is not live",
+            );
             return Ok(());
         };
         let requests = std::mem::take(&mut self.pending_fragment_requests);
@@ -2138,6 +2159,11 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         let waiters = std::mem::take(&mut self.quiescence_waiters);
+        debug!(
+            doc_id = %self.doc_id,
+            released = waiters.len(),
+            "TEMP-DIAGNOSTIC: doc worker fence replies released",
+        );
         for (reply, _lease) in waiters {
             // A dropped reply receiver means the hub-side fence awaiter was
             // aborted (shutdown) — benign.

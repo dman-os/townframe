@@ -1,6 +1,7 @@
 mod interlude {
     pub use big_sync_core::{ObjKey, PartKey, PeerKey};
 
+    pub(crate) use crate::TryKeyBytes32;
     pub use future_form::{FutureForm, Local, Sendable};
     pub use utils_rs::prelude::*;
 }
@@ -81,6 +82,30 @@ pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyh
 pub use keyhive_core;
 
 pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
+
+/// Test-only guard for [`BigRepo::hold_hub_events`]: drops reopen hub event
+/// processing, so a failed assertion cannot leave the hub holding events (and
+/// with them the in-flight counter's release) for the rest of the process. A
+/// test that needs the replay to have happened calls [`Self::resume`].
+#[cfg(test)]
+pub(crate) struct HubEventsHold {
+    runtime: runtime2::Runtime2Handle<future_form::Sendable>,
+}
+
+#[cfg(test)]
+impl HubEventsHold {
+    pub(crate) async fn resume(&self) -> Res<()> {
+        self.runtime.resume_events_for_test().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for HubEventsHold {
+    fn drop(&mut self) {
+        self.runtime.resume_events_for_test_on_drop();
+    }
+}
 pub use changes::{
     BigRepoChangeNotification, BigRepoChangeOrigin, BigRepoLocalNotification,
     ChangeFilter as BigRepoChangeFilter,
@@ -106,6 +131,47 @@ pub fn global_part_id() -> big_sync_core::PartKey {
 /// Return the deterministic BigSync partition derived from a Keyhive group.
 pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartKey {
     runtime2::group_part_id(group_id)
+}
+
+/// Fallible counterpart of [`big_sync_core::ByteKey::to_bytes32`], for the keys a peer
+/// delivered.
+///
+/// ADR 012 decision 1 makes a key an arbitrary byte string, so the width of a key that
+/// arrived from the sync edge is external input: a length other than the 32 bytes the
+/// fixed-width consumers at the workspace edges require is something to report, not an
+/// invariant break, and must not panic the process. `to_bytes32` stays the assertion for
+/// keys this process minted — a local id is a 32-byte digest by construction, and a
+/// different length there is a programming error.
+///
+/// Implemented on `ByteKey` and reached on `ObjKey`, `PartKey` and `PeerKey` through
+/// their `Deref`, so the sync edge names the same conversion the infallible path does.
+pub(crate) trait TryKeyBytes32 {
+    /// The key's bytes, or an error naming the key's width if it is not 32 bytes.
+    fn try_to_bytes32(&self) -> Res<[u8; 32]>;
+}
+
+impl TryKeyBytes32 for big_sync_core::ByteKey {
+    fn try_to_bytes32(&self) -> Res<[u8; 32]> {
+        let bytes = self.as_bytes();
+        bytes
+            .try_into()
+            .map_err(|_| eyre::eyre!("key is {} bytes wide, expected 32", bytes.len()))
+    }
+}
+
+#[cfg(test)]
+mod key_bytes32_tests {
+    use super::*;
+
+    /// A 32-byte key converts on every key type through `Deref`; a key any other width is
+    /// an error, not the panic the infallible conversion would raise.
+    #[test]
+    fn fallible_key_conversion_reports_a_wrong_width() {
+        assert_eq!(ObjKey::new([3; 32]).try_to_bytes32().unwrap(), [3; 32]);
+
+        let error = ObjKey::new(b"/object/path").try_to_bytes32().unwrap_err();
+        assert!(error.to_string().contains("expected 32"), "{error}");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -698,6 +764,60 @@ impl BigRepo {
     /// Resume event/command processing after a frozen quiescence wait.
     pub async fn unfreeze(&self) -> Res<()> {
         self.runtime.unfreeze().await
+    }
+
+    /// Test-only seam: queue hub events instead of handling them (see
+    /// [`Runtime2Handle::hold_events_for_test`]). Returns a guard that reopens
+    /// event processing when dropped, so an assertion failure cannot leave the
+    /// hub holding events for the rest of the test process.
+    #[cfg(test)]
+    pub(crate) async fn hold_hub_events(&self) -> Res<HubEventsHold> {
+        self.runtime.hold_events_for_test().await?;
+        Ok(HubEventsHold {
+            runtime: self.runtime.clone(),
+        })
+    }
+
+    /// Test-only seam: close the local doc-worker mailbox for `doc_id` on the
+    /// next content-carrying sync-session apply, so that apply route fails
+    /// while a later empty reconsider can still spawn a fresh worker. See
+    /// [`Runtime2Handle::fail_next_content_apply_route_for_test`].
+    #[cfg(test)]
+    pub(crate) async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
+        self.runtime
+            .fail_next_content_apply_route_for_test(doc_id)
+            .await?;
+        Ok(())
+    }
+
+    /// Test-only: whether `peer_id` currently has a registered connection in
+    /// this repo's hub. Connection-lifecycle tests assert the deregistration
+    /// invariant with this instead of inferring it from a sync failure.
+    #[cfg(test)]
+    pub(crate) async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
+        self.runtime.has_connected_peer_for_test(peer_id).await
+    }
+
+    /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
+    /// active round, stamped one seq ahead of the hub's admitted head. Returns
+    /// the seq so the test can inject the matching admission event.
+    #[cfg(test)]
+    pub(crate) async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
+        self.runtime
+            .inject_keyhive_completion_for_test(peer_id)
+            .await
+    }
+
+    /// Test-only: hand an event directly to the hub's event handler.
+    #[cfg(test)]
+    pub(crate) async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
+        self.runtime.inject_runtime2_evt_for_test(evt).await
+    }
+
+    /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
+    #[cfg(test)]
+    pub(crate) async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
+        self.runtime.quiescence_probe_barrier_for_test().await
     }
 
     /// Whether the repository currently stores a sedimentree with `doc_id`.
