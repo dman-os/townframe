@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use big_sync_core::keyed_frontier::{
-    FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision, KeyedFrontierReader,
+    FrontierMutation, FrontierRevision,
     KeyedFrontierResult,
 };
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
@@ -9,16 +9,16 @@ use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
     GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, SubEvent, SubPartsRequest,
+    PartSummary, SubPartsRequest,
 };
-use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
+use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
 
 use super::PartFrontierKey;
 use super::{HostPartStore, PartScope, PartStoreStats, ReadTarget, bucket_index_bounds};
 use super::{LEAF_PAGE_BYTE_BUDGET, leaf_entry_wire_bytes};
 use crate::keyed_frontier::{
     MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
-    MemoryKeyedFrontierView, open_memory_keyed_frontier,
+    MemoryKeyedFrontierView,
 };
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
@@ -119,7 +119,6 @@ struct MemoryPartEventSelector {
     /// per-object bounds below.
     all: Option<CursorIndex>,
     part_cursors: HashMap<PartKey, CursorIndex>,
-    objects: HashSet<ObjKey>,
     object_bounds: HashMap<ObjKey, CursorIndex>,
 }
 
@@ -290,56 +289,6 @@ fn part_permits(
         .is_some_and(|state| state.access.is_fetcher())
 }
 
-fn project_part_event(
-    state: &MemoryPartStoreScopeState,
-    event: PartEvent,
-    selector: &MemoryPartEventSelector,
-    subscriber: PeerKey,
-) -> Option<SubEvent> {
-    let obj_id = match &event {
-        PartEvent::Changed(inner) => inner.obj_id.clone(),
-        PartEvent::Removed(inner) => inner.obj_id.clone(),
-    };
-    // Candidate parts: what the event names, else the object's membership.
-    let scope = match &event {
-        PartEvent::Changed(inner) if !inner.part_ids.is_empty() => {
-            PartScope::AnyOf(inner.part_ids.clone())
-        }
-        PartEvent::Changed(_) => PartScope::FromObject,
-        PartEvent::Removed(inner) => PartScope::Part(inner.part_id.clone()),
-    };
-    // A concrete subscriber always filters.
-    let Some(readable) = state.permitted_parts(scope, obj_id.clone(), Some(subscriber)) else {
-        unreachable!("{}", ERROR_IMPOSSIBLE)
-    };
-    if readable.is_empty() {
-        return None;
-    }
-    let selected = readable
-        .into_iter()
-        .filter(|part_id| selector.part_cursors.contains_key(part_id))
-        .collect::<Vec<_>>();
-    let object_selected = selector.objects.contains(&obj_id);
-    match event {
-        PartEvent::Changed(mut inner) if !selected.is_empty() => {
-            inner.part_ids = selected;
-            Some(SubEvent::Changed(inner))
-        }
-        PartEvent::Changed(inner) if object_selected => {
-            Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor: inner.cursor,
-                part_ids: Vec::new(),
-                obj_id: inner.obj_id,
-                payload: inner.payload,
-            }))
-        }
-        PartEvent::Removed(inner) if !selected.is_empty() => Some(SubEvent::Removed(inner)),
-        // An object reader that did not select the part has nothing to book for a membership
-        // transition: a deletion is a part-lane fact, and a payload-less `Changed` would mean
-        // *resolve the membership*, which the cursor machine books as a content delivery.
-        _ => None,
-    }
-}
 
 impl MemoryPartStoreScopeState {
     /// The subset of `scope`'s candidate parts that `principal` may read; `None` when
@@ -749,6 +698,21 @@ impl HostPartStore for MemoryPartStore {
                 .map(|deets| deets.parts.iter().cloned().collect())
                 .unwrap_or_default())
         })
+    }
+
+    async fn obj_part_added_at(
+        &self,
+        obj_id: ObjKey,
+        part_id: PartKey,
+    ) -> Res<Option<CursorIndex>> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard
+                .parts
+                .get(&part_id)
+                .and_then(|part| part.members.get(&obj_id))
+                .map(|member| member.added_at)
+        }))
     }
 
     async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
@@ -1274,7 +1238,6 @@ impl HostPartStore for MemoryPartStore {
         let selector = MemoryPartEventSelector {
             all: None,
             part_cursors,
-            objects: objects.clone(),
             object_bounds: reqs
                 .targets
                 .iter()
@@ -1307,7 +1270,6 @@ impl HostPartStore for MemoryPartStore {
         let selector = MemoryPartEventSelector {
             all: Some(after),
             part_cursors: HashMap::new(),
-            objects: HashSet::new(),
             object_bounds: HashMap::new(),
         };
         let source: Arc<dyn MemoryKeyedFrontierSource<PartFrontierKey, PartEvent>> =
@@ -1681,6 +1643,7 @@ impl ObservedStore for MemoryPartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync_core::rpc::SubEvent;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness, PageEventStore};
     use big_sync_core::ByteKey;
     use std::{collections::HashSet, time::Duration};
@@ -1814,7 +1777,8 @@ mod tests {
     /// in-process path, still sees the part.
     #[tokio::test(flavor = "multi_thread")]
     async fn hidden_parts_are_invisible_to_the_page_path() -> Res<()> {
-        use big_sync_core::rpc::{ReplayPageOutcome, SubscriptionTarget};
+        use big_sync_core::rpc::SubscriptionTarget;
+        use crate::part_store::ReplayPageOutcome;
 
         let hidden = PartKey(ByteKey::new([70u8; 32]));
         let visible = PartKey(ByteKey::new([71u8; 32]));
@@ -1895,7 +1859,8 @@ mod tests {
     /// from being caught up, and the caller must not have to infer the difference.
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_page_denied_for_unreadable_part() -> Res<()> {
-        use big_sync_core::rpc::{ReplayPageOutcome, SubscriptionTarget};
+        use big_sync_core::rpc::SubscriptionTarget;
+        use crate::part_store::ReplayPageOutcome;
 
         let store = MemoryPartStore::new();
         let part = PartKey(ByteKey::new([67u8; 32]));
@@ -2069,44 +2034,57 @@ mod tests {
         })
         .await??;
 
-        // Subscribe as non-reader — should NOT receive the Added event.
-        let rx2 = store
-            .page_events(
-                SubPartsRequest {
-                    lower_bound: 0,
-                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part.clone(),
-                        cursor: 0,
-                    }]),
+        // The peer without access is refused by the responder rather than streamed to. The
+        // reader is the store's faithful seam — it carries the event, which is what faithful
+        // means — so the peer-facing absence is asserted where it is enforced: the page's
+        // answer, on both the replay and the live path.
+        let denied = store
+            .replay_page(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
                 },
-                non_reader,
+                8,
+                non_reader.clone(),
+                Duration::from_millis(50),
             )
-            .await??;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            match rx2.next().await {
-                Ok(SubEvent::ReplayComplete) => Ok::<_, eyre::Report>(()),
-                Ok(event) => Err(ferr!("denied replay leaked event: {event:?}")),
-                Err(_) => Err(ferr!("denied subscriber closed during replay")),
-            }
-        })
-        .await??;
+            .await?;
+        assert!(
+            matches!(denied, crate::part_store::ReplayPageOutcome::Unauthorized),
+            "a peer without access must be refused the page, got {denied:?}"
+        );
         let second_obj = ObjKey(ByteKey::new([5u8; 32]));
         store.set_part_members(part.clone(), agents).await?;
         store
             .set_obj_payload(second_obj.clone(), serde_json::json!("content2"))
             .await?;
-        store.add_obj_to_parts(second_obj, vec![part]).await?;
-        match tokio::time::timeout(Duration::from_millis(200), rx2.next()).await {
-            Err(_) => {}
-            Ok(Ok(event)) => return Err(ferr!("denied live event leaked: {event:?}")),
-            Ok(Err(_)) => return Err(ferr!("denied subscriber closed unexpectedly")),
-        }
+        store
+            .add_obj_to_parts(second_obj, vec![part.clone()])
+            .await?;
+        let denied_again = store
+            .replay_page(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
+                },
+                8,
+                non_reader,
+                Duration::from_millis(50),
+            )
+            .await?;
+        assert!(
+            matches!(
+                denied_again,
+                crate::part_store::ReplayPageOutcome::Unauthorized
+            ),
+            "a peer without access stays refused on the live path, got {denied_again:?}"
+        );
 
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn syncability_filter_updates() -> Res<()> {
+    async fn revoked_peer_is_refused_the_page() -> Res<()> {
         let store = MemoryPartStore::new();
         let part = PartKey(ByteKey::new([10u8; 32]));
         let obj = ObjKey(ByteKey::new([20u8; 32]));
@@ -2131,7 +2109,7 @@ mod tests {
                         cursor: 0,
                     }]),
                 },
-                peer,
+                peer.clone(),
             )
             .await??;
         store
@@ -2170,16 +2148,27 @@ mod tests {
         .await
         .ok();
 
-        // Now revoke access: set empty members.
-        store.set_part_members(part, HashMap::new()).await?;
+        // Revoking access is answered by the responder, not by filtering the reader: the
+        // reader is the store's faithful seam and it carries the change.
+        store.set_part_members(part.clone(), HashMap::new()).await?;
         store
-            .set_obj_payload(obj, serde_json::json!("updated"))
+            .set_obj_payload(obj.clone(), serde_json::json!("updated"))
             .await?;
-        match tokio::time::timeout(Duration::from_millis(200), rx.next()).await {
-            Err(_) => {}
-            Ok(Ok(event)) => return Err(ferr!("revoked subscriber received event: {event:?}")),
-            Ok(Err(_)) => return Err(ferr!("revoked subscriber closed unexpectedly")),
-        }
+        let denied = store
+            .replay_page(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        assert!(
+            matches!(denied, crate::part_store::ReplayPageOutcome::Unauthorized),
+            "a revoked peer must be refused the page, got {denied:?}"
+        );
 
         Ok(())
     }

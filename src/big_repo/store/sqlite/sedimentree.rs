@@ -1,16 +1,9 @@
 use super::ids::IdCodec;
 use super::*;
-use sqlx::{QueryBuilder, Row};
-
+/// A replay page covers at most this many rows per part: the backlog a page must be
+/// able to describe before it can claim the part is caught up.
+#[cfg(test)]
 const REPLAY_RAW_BATCH_SIZE: u32 = 256;
-
-struct ReplayCandidate {
-    txid: CursorIndex,
-    obj_id: ObjKey,
-    _maybe_part_id: Option<PartKey>,
-    event_type: i64,
-    payload: ObjPayload,
-}
 
 impl SqliteBigRepoStore {
     /// Ensure the part row exists (idempotent). Inherent mirror of the
@@ -30,91 +23,6 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn replay_candidates(
-        &self,
-        parts: &HashSet<PartKey>,
-        objects: &HashSet<ObjKey>,
-        lower_bound: CursorIndex,
-        exact_txid: Option<CursorIndex>,
-        limit: Option<u32>,
-    ) -> Res<Vec<ReplayCandidate>> {
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT m.txid, o.obj_id, p.part_id, m.event_type, o.payload_json
-             FROM big_sync_members m
-             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
-             LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ",
-        );
-        query.push_bind(self.scope().id());
-        if let Some(txid) = exact_txid {
-            query.push(" AND m.txid = ");
-            query.push_bind(i64::try_from(txid).expect(ERROR_IMPOSSIBLE));
-        } else {
-            query.push(" AND m.txid > ");
-            query.push_bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
-        }
-        query.push(" AND (");
-        if parts.is_empty() {
-            query.push("0");
-        } else {
-            query.push(
-                "m.maybe_part_ref IN (
-                    SELECT part_ref FROM big_sync_parts
-                    WHERE scope_id = ",
-            );
-            query.push_bind(self.scope().id());
-            query.push(" AND part_id IN (");
-            let mut separated = query.separated(", ");
-            for part_id in parts {
-                separated.push_bind(Self::part_blob(part_id.clone()));
-            }
-            separated.push_unseparated("))");
-        }
-        query.push(" OR ");
-        if objects.is_empty() {
-            query.push("0");
-        } else {
-            query.push(
-                "m.obj_ref IN (
-                    SELECT obj_ref FROM big_sync_objs
-                    WHERE scope_id = ",
-            );
-            query.push_bind(self.scope().id());
-            query.push(" AND obj_id IN (");
-            let mut separated = query.separated(", ");
-            for obj_id in objects {
-                separated.push_bind(Self::obj_blob(obj_id.clone()));
-            }
-            separated.push_unseparated("))");
-        }
-        query.push(") ORDER BY m.txid, m.obj_ref, m.maybe_part_ref");
-        if let Some(limit) = limit {
-            query.push(" LIMIT ");
-            query.push_bind(i64::from(limit));
-        }
-
-        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
-        rows.into_iter()
-            .map(|row| {
-                let payload = row
-                    .try_get::<Option<String>, _>("payload_json")?
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
-                    .transpose()?
-                    .unwrap_or(serde_json::Value::Null);
-                Ok(ReplayCandidate {
-                    txid: u64::try_from(row.try_get::<i64, _>("txid")?).expect(ERROR_IMPOSSIBLE),
-                    obj_id: Self::obj_from_blob(row.try_get("obj_id")?),
-                    _maybe_part_id: row
-                        .try_get::<Option<Vec<u8>>, _>("part_id")?
-                        .map(Self::part_from_blob),
-                    event_type: row.try_get("event_type")?,
-                    payload,
-                })
-            })
-            .collect()
-    }
 
     pub(crate) async fn set_obj_payload_in_tx(
         &self,
@@ -1697,6 +1605,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync_core::rpc::SubscriptionTarget;
 
     /// A replay page covers at most [`REPLAY_RAW_BATCH_SIZE`] rows *per part*, and each part's
     /// position advances from its own page. A replay that carried one high-water mark across
@@ -1772,25 +1681,20 @@ mod tests {
 
         let mut replayed: HashSet<ObjKey> = HashSet::new();
         let mut saw_late = false;
-        loop {
-            match reader
-                .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
-                .await?
-            {
-                big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
-                    for event in entries {
-                        match event {
-                            SubEvent::Changed(changed) if changed.part_ids.contains(&part) => {
-                                replayed.insert(changed.obj_id);
-                            }
-                            SubEvent::Changed(changed) if changed.part_ids.contains(&sibling) => {
-                                saw_late = true;
-                            }
-                            _ => {}
-                        }
+        while let big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } = reader
+            .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
+            .await?
+        {
+            for event in entries {
+                match event {
+                    SubEvent::Changed(changed) if changed.part_ids.contains(&part) => {
+                        replayed.insert(changed.obj_id);
                     }
+                    SubEvent::Changed(changed) if changed.part_ids.contains(&sibling) => {
+                        saw_late = true;
+                    }
+                    _ => {}
                 }
-                big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => break,
             }
         }
 

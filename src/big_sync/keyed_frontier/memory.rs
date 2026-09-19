@@ -26,6 +26,12 @@ pub trait MemoryKeyedFrontierSelector<K>: Send + Sync + 'static {
 
     /// Whether a live reader should report source progress when every entry
     /// in the advanced range is filtered out.
+    ///
+    /// This is a live-only signal: it never covers a reader that scanned
+    /// nothing, because such a reader has no progress to report and parking is
+    /// how it waits. A reader that claimed progress without having scanned
+    /// anything would hand its caller an always-ready read arm, which starves
+    /// the hold and cancellation arms of the caller's select.
     fn emit_empty_progress(&self) -> bool {
         false
     }
@@ -330,6 +336,14 @@ where
                 break;
             }
         }
+        if scanned_through == after && !initial {
+            // A live reader that scanned nothing has no progress to report: it parks. Claiming
+            // the range end here would return an empty page on every call, giving the caller an
+            // always-ready read arm and turning its wait into an uncancellable spin. The replay
+            // phase still claims the range end, so its termination never depends on rows
+            // existing.
+            return (entries, after);
+        }
         if scanned_through == after
             || root
                 .keys_by_revision
@@ -357,7 +371,9 @@ where
         &mut self,
         limits: FrontierReadLimits,
     ) -> KeyedFrontierResult<FrontierRead<K, V>> {
+        let mut iters = 0u64;
         loop {
+            iters += 1;
             if let Some(root) = self.initial_root.as_ref() {
                 let (entries, through) = self.read_root(
                     root,
@@ -395,8 +411,21 @@ where
             if !entries.is_empty() {
                 return Ok(FrontierRead::Entries { entries, through });
             }
+            // Progress without rows is reported only for a range this reader scanned and whose
+            // every entry the selector filtered out. A reader that scanned nothing owns no
+            // progress, and `read_root` answers the range end only for the replay phase, so this
+            // arm cannot fire for the "nothing to scan" case.
             if self.selector.emit_empty_progress() && through > previous_after {
                 return Ok(FrontierRead::Entries { entries, through });
+            }
+            if iters.is_multiple_of(100_000) {
+                // Never monopolise a poll: a spin is diagnosable, not a hang.
+                tracing::warn!(
+                    selector = std::any::type_name::<S>(),
+                    iters, through, view_through = view.through,
+                    "keyed frontier reader iterated without progress; parking"
+                );
+                tokio::task::yield_now().await;
             }
             self.wakeups
                 .changed()

@@ -10,6 +10,9 @@ pub mod backend;
 pub mod delta_walker_state;
 pub mod keyed_frontier;
 mod part_store;
+/// The single-target answer shape the part-store contract tests assert.
+#[cfg(any(test, feature = "test-support"))]
+pub use part_store::ReplayPageOutcome;
 pub mod rpc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stress_support;

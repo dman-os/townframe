@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubPartsRequest,
+    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult,
 };
 use big_sync_core::{
     BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey, PeerKey, SyncMode, SyncStatEvent,
@@ -248,7 +248,7 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
         let req = req.inner;
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
-            target = ?req.target,
+            targets = ?req.targets,
             "memory rpc replay page"
         );
         if !self.world.is_online(self.target_peer_id.clone()) {
@@ -261,7 +261,12 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
         let hold = Duration::from_millis(u64::from(req.hold_ms)).min(Duration::from_millis(50));
         let outcome = self
             .target_part_store
-            .replay_page(req.target, req.limit, self.source_peer_id.clone(), hold)
+            .replay_page_round(
+                req,
+                self.source_peer_id.clone(),
+                hold,
+                CancellationToken::new(),
+            )
             .await?;
         Ok(Ok(outcome))
     }
@@ -2506,9 +2511,10 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
+async fn hidden_part_page_answers_unknown() -> Res<()> {
     use crate::HostPartStoreConfig;
     use big_sync_core::rpc::SubscriptionTarget;
+    use crate::part_store::ReplayPageOutcome;
 
     let part = test_part();
     let hidden = PartKey(ByteKey::new([99u8; 32]));
@@ -2516,40 +2522,53 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
         hidden_parts: HashSet::from([hidden.clone()]),
         ..Default::default()
     });
-    let peer = PeerKey::new([1u8; 32]);
+    let peer = PeerKey::new([98u8; 32]);
 
-    // Both parts exist in the store.
+    // Both parts exist in the store: hiding is a peer-facing answer, not an absence.
     store.ensure_part(part.clone()).await?;
     store.ensure_part(hidden.clone()).await?;
-
-    // Reading a visible part opens a reader.
-    let visible = store
-        .open_revision_reader(SubPartsRequest {
-            lower_bound: 0,
-            targets: HashSet::from([SubscriptionTarget::Part {
-                part_id: part,
-                cursor: 0,
-            }]),
-        })
+    // The visible part grants the asking peer read access, so its page is the positive
+    // control; the hidden one has no grant to give.
+    store
+        .set_part_members(
+            part.clone(),
+            std::collections::HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
+        )
         .await?;
-    assert!(visible.is_ok(), "a visible part must be readable");
 
-    // Reading a hidden part returns UnkownParts.
-    let err = store
-        .open_revision_reader(SubPartsRequest {
-            lower_bound: 0,
-            targets: HashSet::from([SubscriptionTarget::Part {
-                part_id: hidden.clone(),
-                cursor: 0,
-            }]),
-        })
-        .await?;
-    match err {
-        Err(ListPartsError::UnkownParts { unkown_parts }) => {
-            assert_eq!(unkown_parts, vec![hidden]);
+    let page = |part_id: PartKey| {
+        let store = &store;
+        let peer = peer.clone();
+        async move {
+            store
+                .replay_page(
+                    SubscriptionTarget::Part {
+                        part_id,
+                        cursor: 0,
+                    },
+                    8,
+                    peer,
+                    Duration::from_millis(50),
+                )
+                .await
         }
-        Ok(_) => panic!("expected UnkownParts for a hidden part, got a readable part"),
-    }
+    };
+
+    // A visible part is answered a page.
+    let visible = page(part).await?;
+    assert!(
+        matches!(visible, ReplayPageOutcome::Events(_)),
+        "a visible part must be answered a page, got {visible:?}"
+    );
+
+    // A hidden part is answered exactly as one that does not exist: the responder's
+    // `summarize_parts` pre-check is the peer-facing answer, and it is where the page path
+    // and the bucket walk already agree.
+    let hidden_page = page(hidden).await?;
+    assert!(
+        matches!(hidden_page, ReplayPageOutcome::UnknownPart),
+        "a hidden part must answer unknown, got {hidden_page:?}"
+    );
 
     Ok(())
 }

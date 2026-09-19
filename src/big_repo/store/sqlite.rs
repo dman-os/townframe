@@ -7,9 +7,9 @@ use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
-    SubEvent, SubPartsRequest, SubscriptionTarget,
+    SubEvent, SubPartsRequest,
 };
-use big_sync_core::{BuckId, ByteKey, Fingerprint, mpsc};
+use big_sync_core::{BuckId, ByteKey, Fingerprint};
 use futures::future::BoxFuture;
 use sedimentree_core::{
     blob::Blob,
@@ -443,17 +443,6 @@ impl SqliteBigRepoStore {
         SqliteCore::next_cursor(tx).await
     }
 
-    fn event_scope(event: &SubEvent) -> PartScope {
-        match event {
-            SubEvent::Changed(inner) => match inner.part_ids.as_slice() {
-                [] => PartScope::FromObject,
-                [part] => PartScope::Part(part.clone()),
-                parts => PartScope::AnyOf(parts.to_vec()),
-            },
-            SubEvent::Removed(inner) => PartScope::Part(inner.part_id.clone()),
-            SubEvent::ReplayComplete => PartScope::FromObject,
-        }
-    }
 
     fn event_kind(event: &SubEvent) -> &'static str {
         match event {

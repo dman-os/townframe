@@ -309,6 +309,7 @@ structstruck::strike! {
         /// and `caught_up` is what the peer-level replay-done stat aggregates.
         replay_pages: Map<ReplayRoute, struct ReplayPageState {
             task_id: TaskId,
+            request_id: crate::rpc::ReplayRequestId,
             caught_up: bool,
         }>,
         objects: Set<ObjKey>,
@@ -741,6 +742,11 @@ structstruck::strike! {
         /// wants the bucket path for every part it syncs sets this to
         /// [`SyncMode::Bucket`].
         default_sync_mode: SyncMode,
+
+        /// Every page request this machine issues carries a fresh id, so the round that
+        /// replaces one still in flight can name it and the responder can drop the older one
+        /// if it is only waiting. Monotone, and only ever compared for equality.
+        replay_request_seq: u64,
 
         cmds: VecDeque<(Uuid, BigSyncMachineCommand, Option<CursorIndex>, PeerKey)>,
         tasks: Scheduler<TaskSeed>,
@@ -1515,54 +1521,100 @@ impl BigSyncMachine {
         }
     }
 
-    /// Ask for one more page and record the request as in flight.
+    /// Ask for one more page over `targets` and record the round as in flight.
     ///
-    /// `caught_up` is the verdict of the last answer for this route, so a
-    /// re-issued request keeps the peer-level replay-done stat honest.
-    fn spawn_replay_page(&mut self, peer_id: PeerKey, target: SubscriptionTarget, caught_up: bool) {
-        let route = ReplayRoute::of(&target);
-        tracing::debug!(
-            peer_id = %peer_id,
-            ?target,
-            caught_up,
-            "spawning replay page"
-        );
-        let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
-            peer_id: peer_id.clone(),
-            target,
-            limit: ReplayPageTask::LIMIT,
-        }));
-        let task_id = self.tasks.spawn(std::time::Instant::now(), deets);
-        if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-            peer_state
-                .replay_pages
-                .insert(route, ReplayPageState { task_id, caught_up });
-        }
+    /// One request carries every target of the round, because each target's own cursor travels
+    /// with it: a page per part would be a request per part over the same connection. The
+    /// `caught_up` argument is the default for routes that have no answer yet (a route that
+    /// answered before keeps its own verdict, since a re-issue must not invent progress).
+    fn spawn_replay_pages(&mut self, peer_id: PeerKey, targets: Vec<SubscriptionTarget>, caught_up: bool) {
+        self.spawn_replay_pages_inner(peer_id, targets, caught_up, None);
     }
 
-    /// Re-issue a page for `target` after a delay, keeping its last verdict.
-    fn schedule_replay_page(
+    /// Re-issue a page for `targets` after a delay, keeping each route's last verdict.
+    fn schedule_replay_pages(
         &mut self,
         peer_id: PeerKey,
-        target: SubscriptionTarget,
+        targets: Vec<SubscriptionTarget>,
         caught_up: bool,
         retry: Retry,
         delay: Duration,
     ) {
-        let route = ReplayRoute::of(&target);
+        self.spawn_replay_pages_inner(peer_id, targets, caught_up, Some((retry, delay)));
+    }
+
+    fn spawn_replay_pages_inner(
+        &mut self,
+        peer_id: PeerKey,
+        targets: Vec<SubscriptionTarget>,
+        caught_up: bool,
+        delayed: Option<(Retry, Duration)>,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        self.replay_request_seq = self.replay_request_seq.wrapping_add(1);
+        let request_id = crate::rpc::ReplayRequestId(self.replay_request_seq);
+        // The newest round still in flight for this peer is superseded by this one. The
+        // responder drops a superseded request only if it is still waiting, so a page that
+        // already holds rows ships them: superseding never discards delivered work.
+        let supersede = self
+            .peers
+            .get(&peer_id)
+            .and_then(|state| state.replay_pages.values().map(|page| page.request_id).max());
+        let routes: Vec<ReplayRoute> = targets.iter().map(ReplayRoute::of).collect();
+        tracing::debug!(
+            peer_id = %peer_id,
+            target_count = targets.len(),
+            ?request_id,
+            ?supersede,
+            delayed = delayed.is_some(),
+            "spawning replay page"
+        );
         let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
             peer_id: peer_id.clone(),
-            target,
+            request_id,
+            targets,
+            supersede,
             limit: ReplayPageTask::LIMIT,
         }));
-        let task_id = self
-            .tasks
-            .spawn_delayed(deets, retry, delay, std::time::Instant::now());
+        let task_id = match delayed {
+            Some((retry, delay)) => {
+                self.tasks
+                    .spawn_delayed(deets, retry, delay, std::time::Instant::now())
+            }
+            None => self.tasks.spawn(std::time::Instant::now(), deets),
+        };
         if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-            peer_state
-                .replay_pages
-                .insert(route, ReplayPageState { task_id, caught_up });
+            for route in routes {
+                let caught_up = peer_state
+                    .replay_pages
+                    .get(&route)
+                    .map(|state| state.caught_up)
+                    .unwrap_or(caught_up);
+                peer_state.replay_pages.insert(
+                    route,
+                    ReplayPageState {
+                        task_id,
+                        request_id,
+                        caught_up,
+                    },
+                );
+            }
         }
+    }
+
+    /// The current position of every route still wanted, dropping the ones retired while a
+    /// round was in flight.
+    fn refresh_replay_targets(
+        &self,
+        peer_id: PeerKey,
+        targets: Vec<SubscriptionTarget>,
+    ) -> Vec<SubscriptionTarget> {
+        targets
+            .into_iter()
+            .filter_map(|target| self.refreshed_replay_target(peer_id.clone(), &target))
+            .collect()
     }
 
     /// The peer-level replay verdict: caught up when every wanted route has an
@@ -1613,9 +1665,9 @@ impl BigSyncMachine {
             target_count = missing.len(),
             "refresh peer replay pages"
         );
-        for target in missing {
-            self.spawn_replay_page(peer_id.clone(), target, false);
-        }
+        // One request for every route still missing an answer: the round carries the set, so
+        // a peer with many parts costs one request rather than one request per part.
+        self.spawn_replay_pages(peer_id.clone(), missing, false);
         self.update_peer_replay_done(peer_id);
     }
 
@@ -1626,130 +1678,106 @@ impl BigSyncMachine {
         result: ReplayPageResult,
     ) {
         let peer_id = result.peer_id;
-        let target = result.target;
-        let route = ReplayRoute::of(&target);
-        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
-            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
-            return;
-        };
-        // A page for a route we no longer want, or one superseded by a newer
-        // request, must not be applied: replay is per route now.
-        match peer_state.replay_pages.get(&route) {
-            Some(state) if state.task_id == task_id => {}
-            stale => {
-                // Upstream logged this drop when the replay worker was per-peer; with
-                // per-route pages the same guard rejects a result whose route was
-                // retired or superseded by a newer request.
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    ?task_id,
-                    ?route,
-                    active_task_id = ?stale.map(|state| state.task_id),
-                    "dropped peer replay page result: stale or retired route",
-                );
+        let page = result.page;
+        // The events are page-level: they are applied even when a newer round has replaced
+        // this one, because re-delivering them costs a watermark comparison while dropping
+        // them costs a round. The verdicts are per route, and a verdict for a route this round
+        // no longer owns is dropped: the round that replaced it has already been asked, and
+        // its answer is the one that counts.
+        let mut immediate: Vec<SubscriptionTarget> = Vec::new();
+        let mut backed_off: Vec<SubscriptionTarget> = Vec::new();
+        let mut backoff: Option<Duration> = None;
+        let mut unanswered: Vec<PartKey> = Vec::new();
+        {
+            let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+                assert!(self.all_seen_peer.contains(&peer_id), "fishy");
                 return;
+            };
+            tracing::debug!(
+                peer_id = %peer_id,
+                events = page.events.len(),
+                target_count = page.targets.len(),
+                "replay page answered"
+            );
+            for evt in page.events {
+                peer_state
+                    .cursor_machine
+                    .on_subscription_evt(evt.into(), &mut peer_state.cursors_cmd_buf);
+            }
+            for (target, verdict) in page.targets {
+                let route = ReplayRoute::of(&target);
+                match peer_state.replay_pages.get(&route) {
+                    Some(state) if state.task_id == task_id => {}
+                    stale => {
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            ?target,
+                            active_task_id = ?stale.map(|state| state.task_id),
+                            "dropped peer replay page verdict: stale or retired route",
+                        );
+                        continue;
+                    }
+                }
+                match verdict {
+                    TargetVerdict::Events { drained, .. } => {
+                        // A per-page verdict is pacing, never terminal: the round is re-issued
+                        // from this result either way, so "caught up" only decides that the
+                        // next round waits for an event instead of asking again immediately.
+                        if let Some(state) = peer_state.replay_pages.get_mut(&route) {
+                            state.caught_up = drained;
+                        }
+                        immediate.push(target);
+                    }
+                    TargetVerdict::UnknownPart => {
+                        // The peer does not know this part (yet). That is not the part being
+                        // synced: record it as unanswered so full sync stays blocked, keep the
+                        // route and retry slowly — a restarting peer re-creates its part rows,
+                        // and dropping the route here would tear it permanently.
+                        if let SubscriptionTarget::Part { part_id, .. } = &target {
+                            unanswered.push(part_id.clone());
+                        }
+                        if let Some(state) = peer_state.replay_pages.get_mut(&route) {
+                            state.caught_up = false;
+                        }
+                        backed_off.push(target);
+                        backoff = Some(Duration::from_secs(2));
+                    }
+                    TargetVerdict::Unauthorized => {
+                        // Absent access rows cannot distinguish a revocation from a grant that
+                        // has not landed yet, so back off rather than tear the route down:
+                        // dropping it here would strand a part whose grant is still in flight.
+                        // This caller is done with the route either way, and it is deliberately
+                        // not recorded as unanswered — blocking full sync on a part this caller
+                        // may never read hangs every topology whose access matrix leaves a part
+                        // unreadable to one side.
+                        if let Some(state) = peer_state.replay_pages.get_mut(&route) {
+                            state.caught_up = true;
+                        }
+                        backed_off.push(target);
+                        backoff = Some(UNAUTHORIZED_BACKOFF);
+                    }
+                }
             }
         }
-        let caught_up;
-        let mut delayed_retry = None;
-        // The page's own position to ask from again, when it answered with one.
-        let mut page_resume = None;
-        match result.outcome {
-            ReplayPageOutcome::Events(page) => {
-                // The verdict is the page's own: only its `drained` says the peer's
-                // replay is exhausted. A page that merely ran out of its hold is not
-                // caught up and must be asked again.
-                caught_up = page.drained;
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    ?target,
-                    events = page.events.len(),
-                    resume = page.resume,
-                    drained = page.drained,
-                    "replay page answered"
-                );
-                page_resume = Some(page.resume);
-                for evt in page.events {
-                    peer_state
-                        .cursor_machine
-                        .on_subscription_evt(evt.into(), &mut peer_state.cursors_cmd_buf);
-                }
-            }
-            ReplayPageOutcome::UnknownPart => {
-                // The peer no longer (or does not yet) know this part. That is not the
-                // part being synced: record it as unanswered so full sync stays blocked,
-                // keep the route and retry slowly — a restarting peer re-creates its
-                // part rows, and dropping the route here would tear it permanently.
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    ?target,
-                    "replay page saw an unknown part; keeping route and retrying",
-                );
-                caught_up = false;
-                if let SubscriptionTarget::Part { part_id, .. } = &target {
-                    self.stat_machine
-                        .mark_peer_part_unanswered(peer_id.clone(), part_id.clone());
-                }
-                delayed_retry = Some(Duration::from_secs(2));
-            }
-            ReplayPageOutcome::Unauthorized => {
-                // Absent access rows cannot distinguish a revocation from a grant
-                // that has not landed yet, and routes come from the embedder's
-                // part set. Back off rather than tear the route down: dropping it
-                // here would strand a part whose grant is still in flight. This
-                // caller is done with the route either way: a peer that will not
-                // serve a part will not serve it later, so there is nothing further
-                // to wait for, and this is deliberately *not* recorded as
-                // unanswered — unlike the unknown-part race above, blocking full
-                // sync on a part this caller may never read hangs every topology
-                // whose access matrix leaves a part unreadable to one side.
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    ?target,
-                    "peer may not read this replay route; backing off",
-                );
-                caught_up = true;
-                delayed_retry = Some(UNAUTHORIZED_BACKOFF);
-            }
+        for part_id in unanswered {
+            self.stat_machine
+                .mark_peer_part_unanswered(peer_id.clone(), part_id);
         }
         self.drain_cursor_machine_cmds(peer_id.clone());
-        // A page's own resume is the position to ask from again. A `Part` route resumes
-        // exactly there; an `Object` route keeps resuming from its acknowledged replay
-        // position, which is what re-delivers an event until the object's content sync
-        // settles.
-        let next_target = match (
-            self.refreshed_replay_target(peer_id.clone(), &target),
-            page_resume,
-        ) {
-            (Some(SubscriptionTarget::Part { part_id, .. }), Some(resume)) => {
-                Some(SubscriptionTarget::Part {
-                    part_id,
-                    cursor: resume,
-                })
-            }
-            (next, _) => next,
-        };
-        match next_target {
-            Some(next_target) => match delayed_retry {
-                Some(delay) => {
-                    self.schedule_replay_page(
-                        peer_id.clone(),
-                        next_target,
-                        caught_up,
-                        retry,
-                        delay,
-                    );
-                }
-                None => {
-                    self.spawn_replay_page(peer_id.clone(), next_target, caught_up);
-                }
-            },
-            None => {
-                // The route or its strategy is gone: stop asking for it.
-                if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-                    peer_state.replay_pages.remove(&route);
-                }
-            }
+        // The next round asks for the same routes at their current positions, which is the
+        // cursor machine's own bookkeeping: an applied event moved a position, and a route
+        // that answered with nothing has nothing to move. A route retired while this round was
+        // in flight is dropped here rather than asked for again.
+        let immediate = self.refresh_replay_targets(peer_id.clone(), immediate);
+        let backed_off = self.refresh_replay_targets(peer_id.clone(), backed_off);
+        if !immediate.is_empty() {
+            self.spawn_replay_pages(peer_id.clone(), immediate, false);
+        }
+        if !backed_off.is_empty() {
+            // A round that saw both an unknown and an unauthorized target backs off for the
+            // larger of the two: a delay is pacing, and both routes are retried either way.
+            let delay = backoff.unwrap_or_else(|| Duration::from_secs(2));
+            self.schedule_replay_pages(peer_id.clone(), backed_off, false, retry, delay);
         }
         self.update_peer_replay_done(peer_id);
     }
@@ -1760,38 +1788,44 @@ impl BigSyncMachine {
         retry: Retry,
         ReplayPageTaskError {
             peer_id,
-            target,
+            targets,
             deets,
         }: ReplayPageTaskError,
     ) {
-        let route = ReplayRoute::of(&target);
-        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
-            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+        // Only the routes this failed round still owns are rescheduled: a route whose round
+        // was replaced by a newer request belongs to that request now.
+        let mut caught_up = false;
+        let mut live = Vec::new();
+        {
+            let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+                assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+                return;
+            };
+            for target in targets {
+                let route = ReplayRoute::of(&target);
+                let Some(state) = peer_state
+                    .replay_pages
+                    .get(&route)
+                    .filter(|state| state.task_id == task_id)
+                else {
+                    // The page was already superseded or the route was dropped.
+                    continue;
+                };
+                caught_up = state.caught_up;
+                live.push(target);
+            }
+        }
+        if live.is_empty() {
             return;
-        };
-        let Some(state) = peer_state
-            .replay_pages
-            .get(&route)
-            .filter(|state| state.task_id == task_id)
-        else {
-            // The page was already superseded or the route was dropped.
-            return;
-        };
-        let caught_up = state.caught_up;
+        }
         tracing::debug!(
             peer_id = %peer_id,
-            ?target,
+            target_count = live.len(),
             retry = ?retry,
             deets = ?deets,
             "replay page failed; rescheduling",
         );
-        self.schedule_replay_page(
-            peer_id.clone(),
-            target,
-            caught_up,
-            retry,
-            Duration::from_secs(2),
-        );
+        self.schedule_replay_pages(peer_id.clone(), live, caught_up, retry, Duration::from_secs(2));
         self.update_peer_replay_done(peer_id);
     }
     fn drain_cursor_machine_cmds(&mut self, peer_id: PeerKey) {

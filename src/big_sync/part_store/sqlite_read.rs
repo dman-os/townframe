@@ -23,12 +23,6 @@ pub(crate) struct SqlitePartSelector {
     pub(crate) all: Option<FrontierRevision>,
     pub(crate) objects: BTreeMap<ObjKey, FrontierRevision>,
     pub(crate) parts: BTreeMap<PartKey, FrontierRevision>,
-    /// Apply the `added_at` predicate to tombstones: a `Removed` row is only selected for a
-    /// reader that could have seen the add (`added_at <= cursor < txid`). Off for the trusted
-    /// local readers, which replay a worker's own state rather than a peer's replica, and on
-    /// for the peer-facing pages, where a tombstone for a member the reader never saw costs a
-    /// round trip and carries no information.
-    pub(crate) added_at_predicate: bool,
 }
 
 impl SqlitePartSelector {
@@ -52,32 +46,6 @@ pub(crate) struct SqliteFrontierRow {
     pub(crate) payload_json: Option<String>,
 }
 
-const EVENT_REMOVED: i64 = 2;
-
-/// The `added_at` predicate for one keyed term: a tombstone is selected only for a reader
-/// whose cursor is at or after the add, and before the removal.
-///
-/// The reader's cursor is the later of the bound it opened with and the position it has
-/// reached, because a page advances the reader past the revisions it read even when every
-/// row in them was filtered out. A stamp of zero means the row predates the column and is
-/// always selected.
-fn push_added_at_predicate(
-    query: &mut QueryBuilder<Sqlite>,
-    selector: &SqlitePartSelector,
-    lower_bound: FrontierRevision,
-    after: FrontierRevision,
-) {
-    if !selector.added_at_predicate {
-        return;
-    }
-    let cursor = lower_bound.max(after);
-    query.push(" AND (m.event_type != ");
-    query.push_bind(EVENT_REMOVED);
-    query.push(" OR m.added_at <= ");
-    query.push_bind(i64::try_from(cursor).expect("frontier revision fits SQLite"));
-    query.push(")");
-}
-
 fn id_blob(id: ObjKey) -> Vec<u8> {
     id.as_bytes().to_vec()
 }
@@ -90,7 +58,6 @@ fn push_selector_predicate(
     query: &mut QueryBuilder<Sqlite>,
     selector: &SqlitePartSelector,
     scope_id: i64,
-    after: FrontierRevision,
 ) {
     query.push(" AND (");
     if selector.all.is_some() {
@@ -110,7 +77,6 @@ fn push_selector_predicate(
         query.push_bind(id_blob(obj_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
-        push_added_at_predicate(query, selector, *lower_bound, after);
         query.push(")");
     }
     for (part_id, lower_bound) in &selector.parts {
@@ -124,7 +90,6 @@ fn push_selector_predicate(
         query.push_bind(part_blob(part_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
-        push_added_at_predicate(query, selector, *lower_bound, after);
         query.push(")");
     }
     if first {
@@ -170,7 +135,7 @@ where
         query.push(" AND m.txid = ");
         query.push_bind(i64::try_from(exact_revision).expect("frontier revision fits SQLite"));
     }
-    push_selector_predicate(&mut query, selector, scope_id, after);
+    push_selector_predicate(&mut query, selector, scope_id);
     query.push(
         " ORDER BY m.txid\
                        , m.obj_ref\
@@ -211,7 +176,6 @@ mod tests {
             all: None,
             objects: BTreeMap::from([(object.clone(), 7)]),
             parts: BTreeMap::from([(part.clone(), 19)]),
-            ..Default::default()
         };
         assert_eq!(selector.objects[&object], 7);
         assert_eq!(selector.parts[&part], 19);

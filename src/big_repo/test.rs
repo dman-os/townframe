@@ -3379,11 +3379,11 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             Duration::from_millis(u64::from(req.inner.hold_ms)).min(Duration::from_millis(50));
         Ok(Ok(self
             .target_part_store
-            .replay_page(
-                req.inner.target,
-                req.inner.limit,
+            .replay_page_round(
+                req.inner,
                 self.subscriber.clone(),
                 hold,
+                tokio_util::sync::CancellationToken::new(),
             )
             .await?))
     }

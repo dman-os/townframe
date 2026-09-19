@@ -337,6 +337,32 @@ pub enum SubscriptionTarget {
     },
 }
 
+/// What the responder answered about one requested target.
+///
+/// An empty target and a denied target are deliberately different answers: `Events` with
+/// `drained` says the read of that target was exhausted (caught up to `resume`), and the
+/// denial variants say why it was not served. Neither is inferred from an empty page, and
+/// neither suppresses the other targets of the same page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetVerdict {
+    /// Events after this target's cursor, filtered for the asking principal, plus the
+    /// position this target resumes from.
+    ///
+    /// `resume` is always a position the caller can ask from again, and never a verdict:
+    /// it is the last position whose events this page delivered in full — the caller's own
+    /// cursor when the page delivered nothing, and the reader's own boundary when
+    /// `drained` is set, because that read covered the range in full. `drained` is a
+    /// per-page snapshot, never a durable "this replay is over": new events land past
+    /// `resume`, so the caller holds and asks again rather than stopping. A page that
+    /// filled on `limit` with rows still waiting is `drained: false`, so the caller re-asks
+    /// immediately.
+    Events { resume: CursorIndex, drained: bool },
+    /// The target names a part this scope does not know.
+    UnknownPart,
+    /// The asking principal may not read the target's part.
+    Unauthorized,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubPartsRequest {
     /// The lowest global transaction cursor whose events should be replayed.
@@ -370,19 +396,31 @@ structstruck::strike! {
                 pub obj_id: ObjKey,
             }),
         }>,
-        /// Always a position the caller can ask from again: the caller's own cursor when
-        /// this page carried nothing, otherwise advanced past the last event in the page.
+        /// Always a position the caller can ask from again, and never a verdict.
         ///
-        /// This is the request's next `target` cursor, never a verdict — an exhausted
-        /// replay and a page that only ran out of its hold both hand back a position to
-        /// ask from again.
+        /// It is the last position whose events this page has delivered in full: the
+        /// caller's own cursor when it delivered nothing, otherwise advanced past the
+        /// last scanned revision.
         pub resume: CursorIndex,
-        /// The responder's replay of this target is exhausted as of the last event in
-        /// this page (its replay half reported `ReplayComplete`). Only this means caught
-        /// up; a page that ran out of its hold is `drained: false` with `resume` = the
-        /// caller's own cursor, so the caller keeps asking and the hold paces it.
+        /// Whether this part's read was exhausted within this page. A page that filled on
+        /// `limit` with rows still waiting is `false`.
         pub drained: bool,
     }
+}
+
+/// One bounded page over a set of targets: what the responder answered about each.
+///
+/// This is the wire page. The storage-level [`PartPage`] is a different thing — one part's
+/// events with one position, as `list_events` returns them — so the two are named for what
+/// they carry rather than sharing a shape, and a page over a set never collapses one
+/// target's position into another's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReplayPage {
+    /// The events this page carries, collapsed per object and ordered by position.
+    pub events: Vec<PartEvent>,
+    /// One verdict per requested target, in the request's order, each carrying the position
+    /// that target resumes from.
+    pub targets: Vec<(SubscriptionTarget, TargetVerdict)>,
 }
 fn value_as_string<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -417,51 +455,99 @@ impl From<PartEvent> for SubEvent {
     }
 }
 
-/// A request for one bounded page of a single target's events.
+#[cfg(any(test, feature = "test-support"))]
+impl ReplayPage {
+    /// The answer of a round that named exactly one target, as one page.
+    ///
+    /// Test support: a round carries a verdict per target, so a test that asked about one
+    /// target reads its verdict as the single answer it is asserting on. Panics if the page
+    /// does not carry exactly one target, or if that target was not answered with events.
+    pub fn sole_target_answer(&self) -> PartPage {
+        assert_eq!(self.targets.len(), 1, "one target was asked about");
+        match &self.targets[0].1 {
+            TargetVerdict::Events { resume, drained } => PartPage {
+                events: self.events.clone(),
+                resume: *resume,
+                drained: *drained,
+            },
+            other => panic!("one target was answered with events, got {other:?}"),
+        }
+    }
+}
+
+impl ReplayPage {
+    /// What the responder answered about , if this page named it.
+    pub fn verdict(&self, target: &SubscriptionTarget) -> Option<&TargetVerdict> {
+        self.targets
+            .iter()
+            .find(|(named, _)| named == target)
+            .map(|(_, verdict)| verdict)
+    }
+}
+
+impl PartEvent {
+    /// The position this event was committed at.
+    pub fn cursor(&self) -> CursorIndex {
+        match self {
+            Self::Changed(inner) => inner.cursor,
+            Self::Removed(inner) => inner.cursor,
+        }
+    }
+}
+
+/// Identifies one in-flight page request on a connection.
+///
+/// The id is the caller's own: a peer names it in [`CancelReplayRequest`] to cancel
+/// exactly that request, and the responder remembers nothing about it past the
+/// request's lifetime.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+pub struct ReplayRequestId(pub u64);
+
+/// A request for one bounded page over a set of targets.
 ///
 /// The page lane is deliberately transport-agnostic: the same request can be
 /// carried by a stream (WebSocket/NATS) or by an HTTP long-poll. The caller's
 /// own pacing therefore travels in the request (`hold_ms`) instead of being a
-/// server-side timeout, and a hold that expires is a normal answer
-/// ([`ReplayPageOutcome::Events`] with `drained: false`), never an error — an
-/// HTTP responder answering 5xx for it would make clients retry the whole
-/// request. On a push transport `hold_ms = 0` degenerates cleanly to plain
-/// polling.
+/// server-side timeout, and a hold that expires is a normal answer (a drained
+/// page), never an error — an HTTP responder answering 5xx for it would make
+/// clients retry the whole request. On a push transport `hold_ms = 0` degenerates
+/// cleanly to plain polling.
+///
+/// One request covers every target the caller wants in this round, so a set of
+/// parts costs one request rather than one per part, and a target's own cursor
+/// still travels with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayPageRequest {
-    /// The one target being paged. A `Part` target carries the cursor to resume
-    /// from; an `Object` target replays that object's derived part.
-    pub target: SubscriptionTarget,
-    /// Upper bound on how many events this page may carry.
+    /// Identifies this request, so a later request can supersede it.
+    pub request_id: ReplayRequestId,
+    /// The in-flight request this one supersedes, if any.
+    ///
+    /// The responder cancels that request only if it is still waiting: a request whose read
+    /// already produced rows ships them anyway, so superseding never destroys a page that
+    /// was about to deliver. This travels in-band rather than as a separate message because
+    /// the machine's rpc trait is generic over the future form, and a new required method on
+    /// it would break every implementor outside this crate's reach.
+    pub supersede: Option<ReplayRequestId>,
+    /// The targets to page. A `Part` target carries the cursor to resume from; an
+    /// `Object` target replays that object's derived part.
+    pub targets: Vec<SubscriptionTarget>,
+    /// Upper bound on how many events this page may carry, sliced across the targets
+    /// so a target with a large backlog cannot starve a target with a small one.
     pub limit: u32,
-    /// How long the responder may hold the request while the target has nothing
+    /// How long the responder may hold the request while every target has nothing
     /// to send. This is the caller's pacing choice, so a caller that has other
     /// work can ask for a short hold; the responder caps it. Zero means do not
     /// hold at all.
     pub hold_ms: u32,
 }
 
-/// What a page request answered.
+/// What a page request answered: one bounded page over the requested targets.
 ///
-/// An empty page and a denied part are deliberately different answers: an
-/// empty page that is `drained` means caught up, the second means the peer may
-/// no longer read the part, which a caller must not have to infer from an empty
-/// page.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReplayPageOutcome {
-    /// Events after the target's cursor, filtered for the asking principal.
-    ///
-    /// The verdict is explicit and never encoded in the position: `drained`
-    /// says the responder's replay is complete as of the page's last event, and
-    /// `resume` is always a cursor the caller can ask from again (its own when
-    /// the page carried nothing). A page that only ran out of its hold is
-    /// `drained: false`, so the caller keeps asking.
-    Events(PartPage),
-    /// The target names a part this scope does not know.
-    UnknownPart,
-    /// The asking principal may not read the target's part.
-    Unauthorized,
-}
+/// The page itself is the answer, so the wire signatures that name an answer type name
+/// this one.
+pub type ReplayPageOutcome = ReplayPage;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,

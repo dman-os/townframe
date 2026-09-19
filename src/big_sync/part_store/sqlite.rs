@@ -11,7 +11,7 @@ use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnaps
 #[cfg(test)]
 use big_sync_core::ByteKey;
 use big_sync_core::keyed_frontier::{
-    FrontierRead, FrontierReadLimits, KeyedFrontier, KeyedFrontierTransaction,
+    KeyedFrontier, KeyedFrontierTransaction,
 };
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
@@ -21,7 +21,7 @@ use big_sync_core::rpc::{
     LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart,
     PartEvent, PartPage, PartSummary, SubEvent, SubPartsRequest,
 };
-use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey, mpsc};
+use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
 #[cfg(test)]
 use future_form::{FutureForm, Sendable};
 #[cfg(test)]
@@ -77,13 +77,10 @@ pub async fn open_sqlite_revision_reader(
             SubscriptionTarget::Object { .. } => None,
         })
         .collect::<HashSet<_>>();
-    // The `added_at` predicate is what the peer-facing read used, and what the local
-    // memory reader applies: a tombstone for a member this reader never saw is a round
-    // trip it cannot use. Both stores answer the same way.
-    let mut selector = SqlitePartSelector {
-        added_at_predicate: true,
-        ..Default::default()
-    };
+    // The reader is the faithful seam: it hands back what the log holds, tombstones
+    // included. Peer-facing policy lives in the responder, which knows the requested
+    // cursor and the peer, and the rev-store adapters keep their tombstones.
+    let mut selector = SqlitePartSelector::default();
     for target in reqs.targets {
         match target {
             SubscriptionTarget::Part { part_id, cursor } => {
@@ -690,6 +687,33 @@ impl HostPartStore for SqlitePartStore {
         }
         frontier_tx.commit().await?;
         Ok(())
+    }
+
+    async fn obj_part_added_at(
+        &self,
+        obj_id: ObjKey,
+        part_id: PartKey,
+    ) -> Res<Option<CursorIndex>> {
+        // The member row is the record of the add. A row that is gone, or one that
+        // predates the column, reports `None` — which delivers the tombstone rather than
+        // dropping a removal on the strength of a record we do not have.
+        let added_at: Option<i64> = sqlx::query_scalar(
+            "SELECT m.added_at
+               FROM big_sync_members m
+              WHERE m.scope_id = ?1
+                AND m.obj_ref = (
+                    SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+                )
+                AND m.maybe_part_ref = (
+                    SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3
+                )",
+        )
+        .bind(self.core.scope_id)
+        .bind(Self::obj_blob(obj_id))
+        .bind(Self::part_blob(part_id))
+        .fetch_optional(&self.core.sql.read_pool)
+        .await?;
+        Ok(added_at.map(|value| u64::try_from(value).expect(ERROR_IMPOSSIBLE)))
     }
 
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
@@ -1398,13 +1422,10 @@ impl HostPartStore for SqlitePartStore {
                 SubscriptionTarget::Object { .. } => None,
             })
             .collect::<HashSet<_>>();
-        // The `added_at` predicate is what the peer-facing read used, and what the local
-        // memory reader applies: a tombstone for a member this reader never saw is a
-        // round trip it cannot use. Both stores answer the same way.
-        let mut selector = SqlitePartSelector {
-            added_at_predicate: true,
-            ..Default::default()
-        };
+        // The reader is the faithful seam: it hands back what the log holds, tombstones
+        // included. Peer-facing policy lives in the responder, which knows the requested
+        // cursor and the peer.
+        let mut selector = SqlitePartSelector::default();
         for target in reqs.targets {
             match target {
                 SubscriptionTarget::Part { part_id, cursor } => {
@@ -1818,7 +1839,8 @@ mod tests {
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness, PageEventStore};
     use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
     use big_sync_core::part_store::contract;
-    use big_sync_core::rpc::{ReplayPageOutcome, SubscriptionTarget};
+    use big_sync_core::rpc::SubscriptionTarget;
+    use crate::part_store::ReplayPageOutcome;
 
     async fn test_sql() -> Res<SqlCtx> {
         let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
@@ -2360,7 +2382,7 @@ mod tests {
                         Duration::from_millis(50),
                     )
                     .await?,
-                big_sync_core::rpc::ReplayPageOutcome::Unauthorized
+                crate::part_store::ReplayPageOutcome::Unauthorized
             ),
             "a peer outside the part's members must be refused"
         );
@@ -2417,7 +2439,7 @@ mod tests {
                         Duration::from_millis(50),
                     )
                     .await?,
-                big_sync_core::rpc::ReplayPageOutcome::Unauthorized
+                crate::part_store::ReplayPageOutcome::Unauthorized
             ),
             "the refusal must survive a restart: it reads the persisted members"
         );
@@ -2430,7 +2452,7 @@ mod tests {
     /// `sqlite_partless_object_is_refused_to_a_remote_peer`), because access is granted per
     /// part and this object is in no part.
     #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_local_exact_object_receives_changed() -> Res<()> {
+    async fn sqlite_object_reader_delivers_a_partless_object_content() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://subscribe-object").await?;
         let obj_id = test_obj_id(210);
         put_frontier_event(
@@ -2504,7 +2526,7 @@ mod tests {
             .replay_page(target.clone(), 16, peer.clone(), Duration::from_millis(50))
             .await?;
         assert!(
-            matches!(refused, big_sync_core::rpc::ReplayPageOutcome::Unauthorized),
+            matches!(refused, crate::part_store::ReplayPageOutcome::Unauthorized),
             "a partless object must not be delivered to a remote subscriber; got {refused:?}"
         );
         let leaked = PartEvent::Changed(ObjChanged {
@@ -2537,7 +2559,7 @@ mod tests {
         assert!(
             matches!(
                 refused_again,
-                big_sync_core::rpc::ReplayPageOutcome::Unauthorized
+                crate::part_store::ReplayPageOutcome::Unauthorized
             ),
             "a partless object stays refused on the live path; got {refused_again:?}"
         );
@@ -2770,37 +2792,88 @@ mod tests {
             }
         };
 
-        // A reader whose cursor predates the add never saw the object in the part, so the
-        // tombstone is excluded rather than booked as a delivery.
+        // A faithful reader is handed the tombstone even when its cursor predates the add:
+        // it replays the log, not a peer's replica. Peer policy is the responder's, asserted
+        // below with the request's own cursor.
         let before = sub(0).await??;
-        assert_eq!(
-            before
-                .next()
-                .await
-                .expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
+        let mut before_events = Vec::new();
+        loop {
+            match before.next().await? {
+                SubEvent::ReplayComplete => break,
+                event => before_events.push(event),
+            }
+        }
+        assert!(
+            before_events
+                .iter()
+                .any(|event| matches!(event, SubEvent::Removed(_))),
+            "a faithful reader is handed the tombstone; got {before_events:?}"
         );
 
+        // A peer whose request started before the add is not told about the removal...
+        let before_page = store
+            .replay_page(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor: 0,
+                },
+                8,
+                peer.clone(),
+                Duration::from_millis(50),
+            )
+            .await?;
+        let crate::part_store::ReplayPageOutcome::Events(before_page) = before_page else {
+            panic!("a readable part must be answered a page, got {before_page:?}");
+        };
+        assert!(
+            before_page.events.is_empty(),
+            "a peer whose request started before the add is not told about the removal, got {:?}",
+            before_page.events
+        );
+
+        // ...and a peer whose request started at the add is.
         let after = sub(added_cursor).await??;
         assert_eq!(
-            after.next().await.expect("subscription channel stays open"),
+            after.next().await.expect("the reader stays open"),
             SubEvent::Removed(ObjRemovedFromPart {
                 cursor: tombstone_cursor,
-                part_id,
-                obj_id,
+                part_id: part_id.clone(),
+                obj_id: obj_id.clone(),
             })
         );
         assert_eq!(
-            after.next().await.expect("subscription channel stays open"),
+            after.next().await.expect("the reader stays open"),
             SubEvent::ReplayComplete
+        );
+        let at_add = store
+            .replay_page(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor: added_cursor,
+                },
+                8,
+                peer,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let crate::part_store::ReplayPageOutcome::Events(at_add) = at_add else {
+            panic!("a readable part must be answered a page, got {at_add:?}");
+        };
+        assert!(
+            at_add.events.iter().any(|event| matches!(
+                event,
+                PartEvent::Removed(removed) if removed.cursor == tombstone_cursor
+            )),
+            "a peer whose request started at the add is handed the removal, got {:?}",
+            at_add.events
         );
         Ok(())
     }
 
     /// Object-lane replay boundary, on the local/unfiltered lane (see the remote-denial
-    /// note on `sqlite_subscribe_local_exact_object_receives_changed`).
+    /// note on `sqlite_object_reader_delivers_a_partless_object_content`).
     #[tokio::test(flavor = "multi_thread")]
-    async fn sqlite_subscribe_local_replays_once_then_reads_after_boundary() -> Res<()> {
+    async fn sqlite_reader_replays_once_then_reads_after_the_boundary() -> Res<()> {
         let store = test_store("big-sync-sqlite-test://subscribe-boundary").await?;
         let obj_id = test_obj_id(223);
         put_frontier_event(
@@ -3159,9 +3232,11 @@ mod tests {
         };
         assert!(page.events.is_empty(), "no events to send");
         assert!(page.drained, "an exhausted replay is the caught-up answer");
-        assert_eq!(
-            page.resume, 0,
-            "and it resumes from the caller's own cursor"
+        assert!(
+            page.resume > 0,
+            "a drained page's claim carries the boundary its read scanned in full, so the next \
+             request starts past the range it already covered instead of re-scanning it (got {})",
+            page.resume
         );
         Ok(())
     }

@@ -6,9 +6,10 @@ use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::rpc::{
     BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, ReplayPageOutcome, SubEvent, SubPartsRequest, SubscriptionTarget,
+    PartSummary, ReplayPage, ReplayPageRequest, SubEvent, SubPartsRequest,
+    SubscriptionTarget, TargetVerdict,
 };
-use big_sync_core::{BuckId, ObjKey, PartKey, PeerKey, mpsc};
+use big_sync_core::{BuckId, ObjKey, PartKey, PeerKey};
 // Only the test-support contract module uses this, so gate it the same way that
 // module is gated; otherwise a plain lib build reports it as unused.
 #[cfg(any(test, feature = "test-support"))]
@@ -33,6 +34,21 @@ pub mod sqlite;
 pub mod sqlite_core;
 
 /// Local, already-authorized revision stream for part-store consumers.
+/// The single-target answer shape the part-store contract tests assert.
+///
+/// The responder answers a round with a page over a set and a verdict per target. A test that
+/// asks for one target and asserts one answer reads through this adapter, which keeps the
+/// existing contract suite exercising the same behaviour after the round shape changed. New
+/// coverage for sets and per-target verdicts is written against
+/// [`HostPartStore::replay_page_round`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayPageOutcome {
+    Events(PartPage),
+    UnknownPart,
+    Unauthorized,
+}
+
 #[async_trait]
 pub trait LocalPartRevisionReader: Send {
     async fn next(
@@ -236,6 +252,25 @@ pub struct HostPartStoreConfig {
     pub debounce_max_latency: std::time::Duration,
 }
 
+/// Assemble a page's per-target verdicts in the order the request named its targets.
+///
+/// Every requested target is answered: a target this responder could not serve is answered
+/// with why, so the caller never has to infer a denial from an empty list of events.
+fn assemble_page(
+    ordered: Vec<SubscriptionTarget>,
+    verdicts: &mut HashMap<SubscriptionTarget, TargetVerdict>,
+) -> Vec<(SubscriptionTarget, TargetVerdict)> {
+    ordered
+        .into_iter()
+        .map(|target| {
+            let verdict = verdicts
+                .remove(&target)
+                .expect("every requested target has a verdict");
+            (target, verdict)
+        })
+        .collect()
+}
+
 impl Default for HostPartStoreConfig {
     fn default() -> Self {
         Self {
@@ -352,6 +387,22 @@ pub trait HostPartStore: Send + Sync {
         self.list_events(parts, cursor, limit).await
     }
 
+    /// The revision at which `obj_id` was added to `part_id`, or `None` when the store
+    /// keeps no such record.
+    ///
+    /// The peer-facing tombstone rule asks this: a `Removed` is only useful to a reader
+    /// whose request started at or after the add (`added_at <= cursor`), because a
+    /// tombstone for a member the reader never saw costs a round trip and carries no
+    /// information. `None` means "no information, deliver it" — a store that keeps no
+    /// record of the add must not silently drop a removal on that account.
+    async fn obj_part_added_at(
+        &self,
+        _obj_id: ObjKey,
+        _part_id: PartKey,
+    ) -> Res<Option<CursorIndex>> {
+        Ok(None)
+    }
+
     /// Whether a peer-facing read of `target` must be refused to `subscriber`.
     ///
     /// The one authorization answer for the whole peer-facing read surface: a page,
@@ -397,18 +448,313 @@ pub trait HostPartStore: Send + Sync {
             .is_some_and(|readable| readable.is_empty()))
     }
 
-    /// One bounded, filtered page of a single target's events, held while there
-    /// is nothing to send.
+    /// One bounded, filtered page over a set of targets, held while there is nothing to send.
     ///
-    /// This is the responder half of client-driven delivery. The page is drained
-    /// from the same filtered subscription the push path used, bounded by
-    /// `limit`, and the caller re-issues from the cursor it gets back. Paging is
-    /// the flow control, so a caller's processing rate is what decides how fast
-    /// events arrive.
+    /// This is the responder half of client-driven delivery, and it reads durable state
+    /// directly: no subscription, no channel, no registration, so a cancelled request leaves
+    /// nothing behind and a re-issue re-derives everything from the caller's own per-target
+    /// bounds. Paging is the flow control, so the caller's processing rate is what decides
+    /// how fast events arrive.
     ///
-    /// The authorization answers are decided here rather than inferred from an
-    /// empty page: the event filter drops unreadable parts silently, which would
-    /// collapse "nothing to send" and "you may not read this" into one answer.
+    /// Three properties are load-bearing:
+    ///
+    /// * **Verdicts are per target and never suppress each other.** An unknown or
+    ///   unauthorized target is answered as such alongside the targets that are served: the
+    ///   event filter drops unreadable parts silently, which would otherwise collapse
+    ///   "nothing to send" and "you may not read this" into one answer for the whole page.
+    /// * **The page's limit is sliced across the targets.** One read ordered by revision lets
+    ///   a target with a large backlog starve a target with a small one — the small target's
+    ///   newest row sits behind the whole backlog and is never reached — so each target is
+    ///   read from its own bound with its own share of the page. The live/bulk lane split is
+    ///   what makes that affordable: the request carrying a live doc's few targets is small,
+    ///   while the request carrying a large set is latency-insensitive catch-up.
+    /// * **Cancellation is cooperative and row-aware.** The read stays outside the select, so
+    ///   a cancel never interrupts a page in flight, and a page that already holds rows ships
+    ///   them anyway. A cancel therefore only ever ends a wait, and it is checked at exactly
+    ///   two points: the top of the page loop before any query, and inside the wait.
+    async fn replay_page_round(
+        &self,
+        req: ReplayPageRequest,
+        subscriber: PeerKey,
+        hold: Duration,
+        cancel: CancellationToken,
+    ) -> Res<ReplayPage> {
+        let ReplayPageRequest {
+            request_id: _,
+            supersede: _,
+            targets: requested,
+            limit,
+            hold_ms: _,
+        } = req;
+        // Existence and authorization first, per target: a target that cannot be served is
+        // answered as such and the rest of the page is still served.
+        let mut verdicts: HashMap<SubscriptionTarget, TargetVerdict> = HashMap::new();
+        let mut live: Vec<(SubscriptionTarget, CursorIndex)> = Vec::new();
+        for target in requested {
+            // A target is either denied (with why) or live (with the position to read from):
+            // the match borrows the target, so the decision is carried out of it rather than
+            // made by moving the target inside an arm.
+            let mut denial: Option<TargetVerdict> = None;
+            let mut bound: Option<CursorIndex> = None;
+            match &target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    if let Err(ListPartsError::UnkownParts { .. }) = self
+                        .summarize_parts(HashSet::from([part_id.clone()]))
+                        .await?
+                    {
+                        denial = Some(TargetVerdict::UnknownPart);
+                    } else if self
+                        .read_denied(ReadTarget::from(&target), subscriber.clone())
+                        .await?
+                    {
+                        denial = Some(TargetVerdict::Unauthorized);
+                    } else {
+                        bound = Some(*cursor);
+                    }
+                }
+                // An object target carries no part cursor of its own: the client sends the
+                // position its replay has reached, and the store materializes the object's
+                // derived part while reading. Replaying from the start on every page would
+                // re-read the object's first page forever.
+                SubscriptionTarget::Object { cursor, .. } => {
+                    if self
+                        .read_denied(ReadTarget::from(&target), subscriber.clone())
+                        .await?
+                    {
+                        denial = Some(TargetVerdict::Unauthorized);
+                    } else {
+                        bound = Some(*cursor);
+                    }
+                }
+            }
+            match (denial, bound) {
+                (Some(verdict), _) => {
+                    verdicts.insert(target, verdict);
+                }
+                (None, Some(cursor)) => live.push((target, cursor)),
+                (None, None) => unreachable!("a requested target is either denied or live"),
+            }
+        }
+        let order: Vec<SubscriptionTarget> = verdicts
+            .keys()
+            .cloned()
+            .chain(live.iter().map(|(target, _)| target.clone()))
+            .collect();
+        // `limit` bounds the events the whole page may carry, so a zero limit carries none.
+        // Answering before anything is read is what makes the bound deterministic, and every
+        // position stays the caller's own because nothing was read.
+        if limit == 0 {
+            for (target, cursor) in live {
+                verdicts.insert(
+                    target,
+                    TargetVerdict::Events {
+                        resume: cursor,
+                        drained: false,
+                    },
+                );
+            }
+            return Ok(ReplayPage {
+                events: Vec::new(),
+                targets: assemble_page(order, &mut verdicts),
+            });
+        }
+        let limit = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
+        // The hold is pacing, not a deadline: when it expires the caller gets a normal empty
+        // answer and re-issues immediately, so there is nothing for a timeout multiplier to
+        // buy here. Scaling it multiplies live-delivery latency for every round
+        // (`UTILS_RS_TIMEOUT_MULTIPLIER=3` in CI made each round cost 45s while the callers'
+        // own budgets and nextest's process timeouts stayed unscaled).
+        let hold_is_zero = hold.is_zero();
+        let hold = tokio::time::sleep(hold);
+        tokio::pin!(hold);
+        let mut events: Vec<PartEvent> = Vec::new();
+        loop {
+            // Cancellation, first of the two places it is checked: the top of the page loop,
+            // before any query. A page that already holds rows is shipped either way.
+            if cancel.is_cancelled() {
+                break;
+            }
+            // Fair drain: one read per target from that target's own bound, each bounded by
+            // its share of the page.
+            let quota = (limit / live.len().max(1)).max(1);
+            let mut all_drained = true;
+            let mut positions = Vec::with_capacity(live.len());
+            for (target, bound) in &live {
+                let requested_cursor = *bound;
+                let mut remaining = quota;
+                let mut resume = requested_cursor;
+                let mut delivered = requested_cursor;
+                let mut drained = false;
+                let mut filled = false;
+                let mut reader = match self
+                    .open_revision_reader(SubPartsRequest {
+                        lower_bound: requested_cursor,
+                        targets: HashSet::from([target.clone()]),
+                    })
+                    .await?
+                {
+                    Ok(reader) => reader,
+                    Err(ListPartsError::UnkownParts { .. }) => {
+                        verdicts.insert(target.clone(), TargetVerdict::UnknownPart);
+                        all_drained = false;
+                        positions.push((target.clone(), requested_cursor));
+                        continue;
+                    }
+                };
+                loop {
+                    let read = reader
+                        .next(RevisionReadLimits {
+                            max_entries: std::num::NonZeroUsize::new(remaining)
+                                .expect("a per-target page share is at least one event"),
+                        })
+                        .await?;
+                    match read {
+                        // The reader's own replay boundary: this target is caught up, and
+                        // because its range was covered in full the position may move onto
+                        // the boundary. That is what keeps the claim falsifiable by the
+                        // caller and stops the next request re-scanning the range it already
+                        // covered. The invariant this rests on: a page that dropped rows it
+                        // should have delivered — its share filled — must never take this
+                        // arm. Such a page is not drained.
+                        RevisionRead::ReplayComplete { through } => {
+                            drained = true;
+                            resume = resume.max(through);
+                            break;
+                        }
+                        RevisionRead::Entries { revision, entries } => {
+                            for entry in entries {
+                                let event = match entry {
+                                    SubEvent::Changed(inner) => PartEvent::Changed(inner),
+                                    SubEvent::Removed(inner) => PartEvent::Removed(inner),
+                                    SubEvent::ReplayComplete => continue,
+                                };
+                                // The peer-facing tombstone rule, applied here rather than in
+                                // the reader: a `Removed` is only useful to a peer whose
+                                // request started at or after the add. The rule is
+                                // request-scoped — it uses this target's requested cursor,
+                                // not the reader's advancing position — and the seam stays
+                                // faithful so the rev-store adapters keep their tombstones.
+                                // The row is still scanned, so the position advances past it
+                                // and the want row recorded for the drop covers a later
+                                // grant.
+                                if let PartEvent::Removed(removed) = &event
+                                    && let Some(added_at) = self
+                                        .obj_part_added_at(
+                                            removed.obj_id.clone(),
+                                            removed.part_id.clone(),
+                                        )
+                                        .await?
+                                    && added_at > requested_cursor
+                                {
+                                    continue;
+                                }
+                                if !self
+                                    .page_event_is_readable(&event, subscriber.clone())
+                                    .await?
+                                {
+                                    continue;
+                                }
+                                delivered = event.cursor();
+                                events.push(event);
+                                remaining -= 1;
+                                if remaining == 0 {
+                                    filled = true;
+                                    break;
+                                }
+                            }
+                            if filled {
+                                break;
+                            }
+                            // A batch whose rows were all dropped advances nothing, so a
+                            // position only moves onto a batch that was handed over.
+                            resume = resume.max(revision);
+                        }
+                    }
+                }
+                // A target whose share filled has rows still waiting: it is not drained, and
+                // its position stays at the last row it delivered, so the next request
+                // re-reads what was left rather than stepping over it.
+                if filled {
+                    all_drained = false;
+                    drained = false;
+                    resume = delivered;
+                }
+                positions.push((target.clone(), resume));
+                verdicts.insert(
+                    target.clone(),
+                    TargetVerdict::Events { resume, drained },
+                );
+            }
+            live = positions;
+            // The page answers as soon as it carries anything, or as soon as a target still
+            // has rows waiting, or when the caller asked not to wait at all.
+            if !events.is_empty() || !all_drained || hold_is_zero || live.is_empty() {
+                break;
+            }
+            // Every live target is caught up and the page carried nothing: this is the second
+            // place cancellation is checked, and the only place a request waits. One reader
+            // over the whole live set is used as the wake — any target's row wakes it — and
+            // the hold is the pacing bound, not a deadline.
+            let mut wake = match self
+                .open_revision_reader(SubPartsRequest {
+                    lower_bound: live.iter().map(|(_, cursor)| *cursor).min().unwrap_or_default(),
+                    targets: live.iter().map(|(target, _)| target.clone()).collect(),
+                })
+                .await?
+            {
+                Ok(reader) => reader,
+                Err(ListPartsError::UnkownParts { .. }) => break,
+            };
+            let mut probed = false;
+            let woke = loop {
+                let read = tokio::select! {
+                    biased;
+                    read = wake.next(RevisionReadLimits {
+                        max_entries: std::num::NonZeroUsize::new(1)
+                            .expect("a wake read asks for one event"),
+                    }) => read?,
+                    () = &mut hold => {
+                        break false;
+                    }
+                    () = cancel.cancelled() => {
+                        break false;
+                    }
+                };
+                match read {
+                    // Rows exist again: go back to the fair drain so every target keeps its
+                    // share rather than the woken one taking the page.
+                    RevisionRead::Entries { entries, .. } if !entries.is_empty() => {
+                        break true;
+                    }
+                    // No rows (an empty page) or the reader's boundary: neither is a wake. A
+                    // reader that answers with no rows every time must not turn this wait into a
+                    // spin, so after one probe the pacing is the hold, which the caller re-issues
+                    // from. This is also the arm that parks a blocking reader's live phase.
+                    _ => {
+                        if probed {
+                            tokio::select! {
+                                () = &mut hold => break false,
+                                () = cancel.cancelled() => break false,
+                            }
+                        }
+                        probed = true;
+                    }
+                }
+            };
+            if !woke {
+                break;
+            }
+        }
+        Ok(ReplayPage {
+            events,
+            targets: assemble_page(order, &mut verdicts),
+        })
+    }
+    /// Answer one page for a single target, in the single-target shape.
+    ///
+    /// Test support: see [`ReplayPageOutcome`]. The call underneath is the responder's own, so
+    /// a test that uses this still exercises the production path.
+    #[cfg(any(test, feature = "test-support"))]
     async fn replay_page(
         &self,
         target: SubscriptionTarget,
@@ -416,155 +762,35 @@ pub trait HostPartStore: Send + Sync {
         subscriber: PeerKey,
         hold: Duration,
     ) -> Res<ReplayPageOutcome> {
-        let cursor = match &target {
-            SubscriptionTarget::Part { part_id, cursor } => {
-                if let Err(ListPartsError::UnkownParts { .. }) = self
-                    .summarize_parts(HashSet::from([part_id.clone()]))
-                    .await?
-                {
-                    return Ok(ReplayPageOutcome::UnknownPart);
-                }
-                *cursor
-            }
-            // An object target carries no part cursor of its own: the client sends
-            // the position its replay has reached, and the store materializes the
-            // object's derived part while subscribing. Replaying from the start on
-            // every page would re-read the object's first page forever.
-            SubscriptionTarget::Object { cursor, .. } => *cursor,
-        };
-        if self
-            .read_denied(ReadTarget::from(&target), subscriber.clone())
-            .await?
-        {
-            return Ok(ReplayPageOutcome::Unauthorized);
-        }
-
-        // The page is read straight from durable state: no subscription, no
-        // channel and no registration, so a cancelled request leaves nothing
-        // behind and a re-issue re-derives everything from the caller's own
-        // per-target bounds. Both lanes come from the same reader — part targets
-        // and object targets alike — so "live" is only this read re-run once the
-        // reader's commit signal fires.
-        let mut reader = match self
-            .open_revision_reader(SubPartsRequest {
-                lower_bound: cursor,
-                targets: HashSet::from([target]),
-            })
-            .await?
-        {
-            Ok(reader) => reader,
-            Err(ListPartsError::UnkownParts { .. }) => {
-                return Ok(ReplayPageOutcome::UnknownPart);
-            }
-        };
-
-        // `limit` is documented as an upper bound on the events this page may
-        // carry, so a zero limit carries none. Answering here, before anything is
-        // drained, is what makes the bound deterministic: comparing after a push
-        // would hand back one event whenever one happened to be waiting. The
-        // resume point stays the caller's own position, because nothing was
-        // drained and an empty page may not claim caught-up.
-        if limit == 0 {
-            return Ok(ReplayPageOutcome::Events(PartPage {
-                events: Vec::new(),
-                resume: cursor,
-                drained: false,
-            }));
-        }
-        let limit = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
-        let mut events = Vec::new();
-        // The resume point is the last revision the read scanned, dropped rows
-        // included: see the loop below.
-        let mut resume = cursor;
-        let hold_is_zero = hold.is_zero();
-        // Whether the replay half of the read was exhausted, which is the
-        // difference between "nothing further is waiting" and "this page is full".
-        let mut drained = false;
-        // The hold is pacing, not a deadline: when it expires the caller gets a normal
-        // empty answer and re-issues immediately, so there is nothing for a timeout
-        // multiplier to buy here. Scaling it multiplies live-delivery latency for every
-        // round (`UTILS_RS_TIMEOUT_MULTIPLIER=3` in CI made each round cost 45s while the
-        // callers' own budgets and nextest's process timeouts stayed unscaled).
-        let hold = tokio::time::sleep(hold);
-        tokio::pin!(hold);
-        let max_entries =
-            std::num::NonZeroUsize::new(limit).expect("a non-zero page limit is non-zero");
-        loop {
-            // Cancellation is the caller dropping this future, and this select is
-            // the await it lands on, so a superseded request dies here rather than
-            // finishing the hold. The read itself stays outside the select: a
-            // cancel never interrupts a page that is already in flight.
-            let read = tokio::select! {
-                biased;
-                read = reader.next(RevisionReadLimits { max_entries }) => read?,
-                () = &mut hold => break,
-            };
-            match read {
-                // The fixed frontier captured when this reader opened has been
-                // replayed in full: this caller is caught up. An empty page may
-                // only ever claim "caught up" because the replay said so, never
-                // because nothing arrived in time. The revision `through` is
-                // deliberately not consumed: it is the snapshot the reader's claim
-                // is good up to, and moving `resume` onto it would step over rows
-                // this page never delivered — the caller advances past what it is
-                // handed, not past what the reader observed.
-                RevisionRead::ReplayComplete { .. } => {
-                    drained = true;
-                    // The backlog is exhausted. With a hold, keep holding for a
-                    // live event when this page delivered nothing yet; a
-                    // drain-only request (`hold_ms == 0`) answers now and never
-                    // waits.
-                    if events.is_empty() && !hold_is_zero {
-                        continue;
-                    }
-                    break;
-                }
-                RevisionRead::Entries { revision, entries } => {
-                    // A dropped row still advances the caller's position: the
-                    // resume point is the last revision the read scanned, never
-                    // the last event it returned. Holding the position on a row
-                    // whose parts this subscriber may not read would re-scan it
-                    // forever, and the want row recorded for that drop is what
-                    // re-delivers the change if access appears later. A batch
-                    // that scanned no rows at all advances nothing, so an empty
-                    // page still answers from the caller's own position.
-                    if !entries.is_empty() {
-                        resume = resume.max(revision);
-                    }
-                    for entry in entries {
-                        let event = match entry {
-                            SubEvent::Changed(inner) => PartEvent::Changed(inner),
-                            SubEvent::Removed(inner) => PartEvent::Removed(inner),
-                            SubEvent::ReplayComplete => continue,
-                        };
-                        if !self
-                            .page_event_is_readable(&event, subscriber.clone())
-                            .await?
-                        {
-                            continue;
-                        }
-                        events.push(event);
-                        if events.len() >= limit {
-                            break;
-                        }
-                    }
-                    if events.len() >= limit {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(ReplayPageOutcome::Events(PartPage {
-            events,
-            // The caller's own position when this page carried nothing, otherwise
-            // past the last revision it scanned.
-            resume,
-            // Only the replay half reporting `ReplayComplete` means caught up. A
-            // page that merely ran out of its hold keeps asking; the hold is what
-            // paces it.
-            drained,
-        }))
+        let page = self
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![target.clone()],
+                    limit,
+                    hold_ms: u32::try_from(hold.as_millis()).unwrap_or(u32::MAX),
+                },
+                subscriber,
+                hold,
+                CancellationToken::new(),
+            )
+            .await?;
+        let verdict = page
+            .verdict(&target)
+            .cloned()
+            .expect("a round answers every target it was asked about");
+        Ok(match verdict {
+            TargetVerdict::Events { resume, drained } => ReplayPageOutcome::Events(PartPage {
+                events: page.events,
+                resume,
+                drained,
+            }),
+            TargetVerdict::UnknownPart => ReplayPageOutcome::UnknownPart,
+            TargetVerdict::Unauthorized => ReplayPageOutcome::Unauthorized,
+        })
     }
+
     /// Open a durable revision reader over a set of targets, each carrying its
     /// own bound. This is the read seam for the whole part store: the responder
     /// drives it to answer one page (bounded by the caller's limit, held while
@@ -1081,7 +1307,7 @@ pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{
         BUCKET_LIVE_FP_SEED, BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest,
-        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, ReplayPageOutcome, SubEvent,
+        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, SubEvent,
         SubPartsRequest, SubscriptionTarget,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
@@ -1645,6 +1871,9 @@ pub mod host_contract {
             "the tombstone cursor is newer than the add it removes"
         );
 
+        // The seam is faithful: a reader replays the log, tombstones included, so it is
+        // handed this removal even though its own cursor never saw the add. Peer policy is
+        // the responder's, asserted below.
         let before = store
             .page_events(
                 SubPartsRequest {
@@ -1654,38 +1883,61 @@ pub mod host_contract {
                         cursor: 0,
                     }]),
                 },
-                reader_before,
+                reader_before.clone(),
             )
             .await??;
-        assert_eq!(
-            collect_sub_events(&before).await?,
-            vec![SubEvent::ReplayComplete],
-            "a tombstone for a member this reader never saw is not delivered"
+        let before_events = collect_sub_events(&before).await?;
+        assert!(
+            before_events.iter().any(|event| matches!(
+                event,
+                SubEvent::Removed(removed) if removed.cursor == removed_at
+            )),
+            "a faithful reader is handed the tombstone even when it never saw the add; got {before_events:?}"
         );
 
-        let after = store
-            .page_events(
-                SubPartsRequest {
-                    lower_bound: added_at,
-                    targets: HashSet::from([SubscriptionTarget::Part {
-                        part_id: part.clone(),
-                        cursor: added_at,
-                    }]),
+        // The peer-facing rule: a `Removed` reaches a peer only when the request started at
+        // or after the add, and the rule uses the request's own cursor rather than the
+        // reader's advancing position.
+        let before_add = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
                 },
-                reader_after,
+                8,
+                reader_before,
+                Duration::from_millis(50),
             )
-            .await??;
-        assert_eq!(
-            collect_sub_events(&after).await?,
-            vec![
-                SubEvent::Removed(ObjRemovedFromPart {
-                    cursor: removed_at,
-                    part_id: part,
-                    obj_id,
-                }),
-                SubEvent::ReplayComplete,
-            ],
-            "a reader that saw the add is handed the removal"
+            .await?;
+        let ReplayPageOutcome::Events(before_add) = before_add else {
+            panic!("a readable part must be answered a page, got {before_add:?}");
+        };
+        assert!(
+            before_add.events.is_empty(),
+            "a peer whose request started before the add is not told about the removal; got {:?}",
+            before_add.events
+        );
+        let at_add = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: added_at,
+                },
+                8,
+                reader_after,
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(at_add) = at_add else {
+            panic!("a readable part must be answered a page, got {at_add:?}");
+        };
+        assert!(
+            at_add.events.iter().any(|event| matches!(
+                event,
+                PartEvent::Removed(removed) if removed.cursor == removed_at
+            )),
+            "a peer whose request started at the add is handed the removal; got {:?}",
+            at_add.events
         );
         Ok(())
     }
@@ -2202,11 +2454,11 @@ pub mod host_contract {
         let empty = store
             .replay_page(
                 SubscriptionTarget::Part {
-                    part_id: granted_empty,
+                    part_id: granted_empty.clone(),
                     cursor: 0,
                 },
                 8,
-                member,
+                member.clone(),
                 // The hold bounds how long the responder waits for something to arrive, so the
                 // claim "nothing to send" is only meaningful after it has waited.
                 Duration::from_millis(50),
@@ -2217,9 +2469,35 @@ pub mod host_contract {
         };
         assert!(page.events.is_empty(), "this part has nothing to send");
         assert!(page.drained, "an exhausted replay is the caught-up answer");
-        assert_eq!(
-            page.resume, 0,
-            "and it resumes from the caller's own cursor"
+        assert!(
+            page.resume > 0,
+            "a drained page's claim carries the boundary its read scanned in full, so the next \
+             request starts past the range it already covered instead of re-scanning it (got {})",
+            page.resume
+        );
+        // Asking again from the returned boundary has nothing to add: the claim was about the
+        // range up to it, and re-asking re-derives from durable state rather than trusting it.
+        let again = store
+            .replay_page(
+                SubscriptionTarget::Part {
+                    part_id: granted_empty,
+                    cursor: page.resume,
+                },
+                8,
+                member.clone(),
+                Duration::from_millis(50),
+            )
+            .await?;
+        let ReplayPageOutcome::Events(again) = again else {
+            panic!("a granted part stays a page, got {again:?}");
+        };
+        assert!(
+            again.events.is_empty() && again.drained,
+            "nothing new past the boundary a drained page reported"
+        );
+        assert!(
+            again.resume >= page.resume,
+            "a position the caller can ask from again never moves backwards"
         );
         Ok(())
     }
@@ -3816,7 +4094,7 @@ pub mod host_contract {
         assert!(
             matches!(
                 denied_outcome,
-                big_sync_core::rpc::ReplayPageOutcome::Unauthorized
+                crate::part_store::ReplayPageOutcome::Unauthorized
             ),
             "a peer with no access must be refused the target; got {denied_outcome:?}"
         );

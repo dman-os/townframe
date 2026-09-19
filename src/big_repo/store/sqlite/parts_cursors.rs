@@ -186,6 +186,33 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
+    async fn obj_part_added_at(
+        &self,
+        obj_id: ObjKey,
+        part_id: PartKey,
+    ) -> Res<Option<CursorIndex>> {
+        // The member row is the record of the add. A row that is gone, or one that
+        // predates the column, reports `None` — which delivers the tombstone rather than
+        // dropping a removal on the strength of a record we do not have.
+        let added_at: Option<i64> = sqlx::query_scalar(
+            "SELECT m.added_at
+               FROM big_sync_members m
+              WHERE m.scope_id = ?1
+                AND m.obj_ref = (
+                    SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+                )
+                AND m.maybe_part_ref = (
+                    SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3
+                )",
+        )
+        .bind(self.scope().id())
+        .bind(Self::obj_blob(obj_id))
+        .bind(Self::part_blob(part_id))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(added_at.map(|value| u64::try_from(value).expect(ERROR_IMPOSSIBLE)))
+    }
+
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
         let rows = sqlx::query!(
             "SELECT p.part_id
