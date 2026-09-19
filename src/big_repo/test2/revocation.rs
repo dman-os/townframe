@@ -27,16 +27,17 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let revoke_frontier: BTreeSet<Vec<u8>> = pair
         .left()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .iter()
@@ -45,10 +46,10 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
 
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent)
+        .revoke_doc_access(doc_id.clone(), reader_agent)
         .await?;
 
-    let bytes = doc_id.into_bytes();
+    let bytes: [u8; 32] = doc_id.to_bytes32();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|_| crate::ferr!("doc id is not a valid verifying key"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
@@ -82,7 +83,7 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
             .keyhive()
             .agent_access_on(
                 &keyhive_core::principal::identifier::Identifier::from(
-                    ed25519_dalek::VerifyingKey::from_bytes(pair.right().peer_id().as_bytes())
+                    ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
                         .expect("peer id must be a verifying key"),
                 ),
                 keyhive_core::principal::identifier::Identifier::from(vk),
@@ -101,8 +102,8 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .await??;
 
     // Sync doc between nodes.
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
-    match pair.right_conn().sync_doc_with_peer(doc_id).await {
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    match pair.right_conn().sync_doc_with_peer(doc_id.clone()).await {
         Ok(())
         | Err(
             crate::SyncDocError::Unauthorized
@@ -157,12 +158,13 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Pre-revoke: the editor can write.
     reader_doc
@@ -175,7 +177,7 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
     // Revoke the reader outright (no regrant) and let both sides process it.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent)
+        .revoke_doc_access(doc_id.clone(), reader_agent)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -187,11 +189,11 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(pair.right().peer_id().as_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
                     .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("doc id must be a verifying key"),
             ),
         )
@@ -314,12 +316,13 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
     drop(owner_doc);
 
@@ -328,10 +331,10 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
     // serving policy is deterministically the side that rejects.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent)
+        .revoke_doc_access(doc_id.clone(), reader_agent)
         .await?;
 
-    match pair.right_conn().sync_doc_with_peer(doc_id).await {
+    match pair.right_conn().sync_doc_with_peer(doc_id.clone()).await {
         Err(crate::SyncDocError::Unauthorized) => {}
         other => {
             return Err(crate::ferr!(
@@ -349,11 +352,11 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(pair.right().peer_id().as_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
                     .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                     .expect("doc id must be a verifying key"),
             ),
         )
@@ -374,6 +377,13 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot_without_keyhive_notifs(240, 241, "Owner", "StaleReader").await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    // The worker's replay task can settle this doc's object sync without any explicit
+    // sync from this test, and stats is a broadcast: a subscriber that arrives late
+    // misses the event and then waits for one that never recurs. The replay path only
+    // needs the keyhive membership to land, which the grant and syncs below arrange, so
+    // the subscription has to predate every path that can settle the doc — not just the
+    // sync this test triggers.
+    let mut settle_stats = pair.right().worker.subscribe_stats();
 
     let mut initial = automerge::Automerge::new();
     initial
@@ -384,16 +394,13 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    // Subscribe before the direct sync so the worker's replay task for this
-    // doc cannot complete unnoticed (stats is a broadcast: late subscribers
-    // miss earlier events).
-    let mut settle_stats = pair.right().worker.subscribe_stats();
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
     // The worker's peer replay may schedule the doc task before the keyhive
     // membership lands; that task fails with Policy(DocumentNotFound) and
@@ -429,7 +436,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let old_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     let mut sync_stats = pair.right().worker.subscribe_stats();
 
@@ -437,7 +444,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     // rejects the same object at the wire boundary with Unauthorized.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent)
+        .revoke_doc_access(doc_id.clone(), reader_agent)
         .await?;
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -466,7 +473,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let revoked_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     assert!(
         revoked_cursor > old_cursor,
@@ -482,8 +489,8 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let outcome = big_sync::SyncBackend::sync_obj(
         &backend,
         pair.left().peer_id(),
-        doc_id,
-        vec![crate::GLOBAL_PART_ID],
+        doc_id.clone(),
+        vec![crate::global_part_id()],
         None,
     )
     .await?;
@@ -502,7 +509,11 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            reader_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -531,7 +542,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let fresh_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::GLOBAL_PART_ID)
+        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
         .await?;
     assert!(
         fresh_cursor > revoked_cursor,

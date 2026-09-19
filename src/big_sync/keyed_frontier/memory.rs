@@ -14,6 +14,16 @@ pub trait MemoryKeyedFrontierSelector<K>: Send + Sync + 'static {
     /// initial replay only when its latest revision is newer than this bound.
     fn lower_bound(&self, key: &K) -> Option<FrontierRevision>;
 
+    /// The revision the initial replay may start scanning from.
+    ///
+    /// Every selected key's [`Self::lower_bound`] is at least this, so revisions at
+    /// or below it can only hold entries the replay would filter out. A fresh
+    /// subscription otherwise scans the whole revision history to conclude nothing
+    /// is waiting, which is O(all revisions) per page.
+    fn initial_after(&self) -> FrontierRevision {
+        0
+    }
+
     /// Whether a live reader should report source progress when every entry
     /// in the advanced range is filtered out.
     fn emit_empty_progress(&self) -> bool {
@@ -35,6 +45,13 @@ where
         match self {
             Self::All { after } => Some(*after),
             Self::Keys(keys) => keys.get(key).copied(),
+        }
+    }
+
+    fn initial_after(&self) -> FrontierRevision {
+        match self {
+            Self::All { after } => *after,
+            Self::Keys(keys) => keys.values().copied().min().unwrap_or(0),
         }
     }
 }
@@ -419,12 +436,17 @@ where
     S: MemoryKeyedFrontierSelector<K>,
 {
     let view = source.view().await?;
+    // Starting the scan at the selector's own bound keeps a caught-up subscription
+    // from walking every revision in the scope before it can report completion. The
+    // bound is clamped to the view's revision so a cursor ahead of the frontier (the
+    // peer's cursor domain is not necessarily ours) cannot seek past the end.
+    let after = selector.initial_after().min(view.through);
     Ok(Box::new(MemoryKeyedFrontierReader {
         source,
         selector,
         initial_root: Some(view.root),
         initial_through: view.through,
-        after: 0,
+        after,
         replay_complete_pending: false,
         wakeups: view.wakeups,
     }))

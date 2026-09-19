@@ -9,7 +9,12 @@ use big_sync::backend::contract::{
 };
 use big_sync::stress_support;
 use big_sync::{HostPartStore, SyncBackend};
-use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
+use big_sync_core::{ByteKey, PartKey, PeerKey, SyncCompletionDeets};
+
+/// The band these harnesses run: the one the embedder ships, so big_repo's tests exercise
+/// bucket-diff. The offline-reopen stall this used to opt out for is covered by
+/// `bucket_band_reconciles_after_offline_reopen`.
+const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::Bucket);
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
 use std::collections::HashMap;
@@ -37,10 +42,12 @@ pub async fn boot_repo() -> Res<(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-repo",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
@@ -82,10 +89,12 @@ pub async fn _boot_disk_repo(
     })
     .await?;
     let shared_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&shared_store),
         HashMap::new(),
         "big-repo-boot-disk",
+        None,
+        HARNESS_SYNC_MODE,
         Arc::from("big-repo-test"),
     )?;
     let big_sync_host = Arc::new(big_sync::Ctx {
@@ -165,15 +174,15 @@ async fn recv_head_batch(
         .expect("head listener closed unexpectedly")
 }
 
-async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
-    let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
+    let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32());
     repo.keyhive().get_agent_by_peer_id(&kh_peer_id).await
 }
 
 fn keyhive_document_id_for_big_repo_doc(
     doc_id: DocumentId,
 ) -> keyhive_core::principal::document::id::DocumentId {
-    let doc_id_bytes = doc_id.into_bytes();
+    let doc_id_bytes = doc_id.to_bytes32();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
         .expect("doc id should be a valid keyhive document id");
     keyhive_core::principal::document::id::DocumentId::from(
@@ -184,7 +193,7 @@ fn keyhive_document_id_for_big_repo_doc(
 async fn wait_for_document_access_notification(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<crate::changes::BigRepoDomainNotification>>,
     doc_id: DocumentId,
-    member_id: PeerId,
+    member_id: PeerKey,
     expected_access: crate::changes::BigRepoAccess,
 ) -> Res<()> {
     timeout(utils_rs::scale_timeout(Duration::from_secs(10)), async {
@@ -220,7 +229,7 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
 
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let fetched = repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let fetched = repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
     assert_eq!(fetched.document_id(), doc_id);
     assert_eq!(
         fetched
@@ -228,7 +237,7 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
             .await,
         "seed"
     );
-    let handle = repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let handle = repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
     assert!(!handle.export().await.is_empty());
 
     let stored_blobs = repo.inspect_stored_doc_blobs(doc_id).await?;
@@ -256,16 +265,16 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
         .expect("failed seeding doc");
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let initial_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+    let initial_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
 
-    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+    assert!(repo.runtime.ensure_causal_coverage(doc_id.clone()).await?);
     assert_eq!(
-        repo.inspect_stored_doc_blobs(doc_id).await?.len(),
+        repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len(),
         initial_count,
         "the initial ordinary write already covers its current epoch"
     );
 
-    let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
+    let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id.clone());
     let keyhive = repo.keyhive().clone_keyhive();
     let kh_doc = keyhive
         .get_document(kh_doc_id)
@@ -280,15 +289,15 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
     )
     .await?;
 
-    assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
-    let rotated_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+    assert!(repo.runtime.ensure_causal_coverage(doc_id.clone()).await?);
+    let rotated_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
     assert_eq!(
         rotated_count,
         initial_count + 1,
         "a new epoch at the same Automerge frontier needs one checkpoint"
     );
     for _ in 0..3 {
-        assert!(repo.runtime.ensure_causal_coverage(doc_id).await?);
+        assert!(repo.runtime.ensure_causal_coverage(doc_id.clone()).await?);
     }
     assert_eq!(
         repo.inspect_stored_doc_blobs(doc_id).await?.len(),
@@ -311,7 +320,7 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
     let kh_doc = repo
         .keyhive()
         .clone_keyhive()
-        .get_document(keyhive_document_id_for_big_repo_doc(doc_id))
+        .get_document(keyhive_document_id_for_big_repo_doc(doc_id.clone()))
         .await
         .expect("created document must be present in Keyhive");
     let (update, local_secret) = repo
@@ -335,7 +344,7 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let repaired = reopened
-                .inspect_stored_doc_blobs(doc_id)
+                .inspect_stored_doc_blobs(doc_id.clone())
                 .await?
                 .into_iter()
                 .filter_map(|raw| decode_encrypted_blob(&raw).ok())
@@ -363,7 +372,7 @@ async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history(
 
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let mut stored_blob_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+    let mut stored_blob_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
 
     for attempt in 0..2_000_u32 {
         let heads = handle
@@ -375,12 +384,12 @@ async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history(
             .await?;
         assert_eq!(heads.len(), 1, "boundary probe commits should stay linear");
         let head = heads[0];
-        let next_stored_blob_count = repo.inspect_stored_doc_blobs(doc_id).await?.len();
+        let next_stored_blob_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
 
         if head.0[0] == 0 {
             repo.wait_for_quiescence(None).await?;
 
-            let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+            let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
             let head_id = sedimentree_core::loose_commit::id::CommitId::new(head.0);
             let fragments = <SqliteBigRepoStore as subduction_core::storage::traits::Storage<
                 future_form::Sendable,
@@ -425,7 +434,7 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
 
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let doc_id_bytes = doc_id.into_bytes();
+    let doc_id_bytes = doc_id.to_bytes32();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
         .expect("doc id should be a valid keyhive document id");
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
@@ -487,7 +496,7 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
         "real write should advance the automerge head"
     );
 
-    let doc_id_bytes = doc_id.into_bytes();
+    let doc_id_bytes = doc_id.to_bytes32();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
         .expect("doc id should be a valid keyhive document id");
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
@@ -536,7 +545,7 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -566,13 +575,133 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
     owner_conn.sync_keyhive_with_peer().await?;
     client_conn.sync_keyhive_with_peer().await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
     let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
     assert_eq!(title, "seed");
 
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+/// ADR 012 decision 6: big_repo's harnesses run the band its embedder ships, and the reason
+/// this embedder was opted out was the offline-reopen path — the machine starts
+/// post-reopen and did not complete, blocking `wait_for_full_sync`. Nothing covered it, so
+/// this is the coverage: a pair reconciles on the bucket band, the client goes offline, the
+/// owner writes while it is gone, and the reopened client must reconcile again.
+#[tokio::test]
+async fn bucket_band_reconciles_after_offline_reopen() -> Res<()> {
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 211, true).await?;
+    let client = SyncRepoNode::boot(client_path.clone(), 212, false).await?;
+
+    let group = owner.repo.create_group_with_parents(vec![]).await?;
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.take_latest_accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+    owner_conn.sync_keyhive_with_peer().await?;
+
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+    owner
+        .repo
+        .add_member_to_group(client_agent, &group, keyhive_core::access::Access::Read)
+        .await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "before-reopen"))
+        .expect("failed seeding doc");
+    let handle = owner
+        .repo
+        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .await?;
+    let first_doc = handle.document_id();
+    // The doc's content lives in the group part it was created in; `o:{doc}` is only the
+    // subscription view of it, materialized lazily by whoever subscribes (decision 3). The
+    // full-sync barrier can only name a part the worker registers, and the harness registers the
+    // synthetic one on both nodes -- a real part is advertised by its holder alone, which the
+    // puller is about to receive -- so the doc is given that membership too, as the other
+    // big_repo sync tests do. That makes the band fence below real work rather than an empty
+    // part, and the explicit doc sync is what a doc's payload travels by; a completed part sync
+    // does not imply its members' payloads were fetched (see the payload-can-trail-membership
+    // contract).
+    owner
+        .big_sync_store
+        .add_obj_to_parts(first_doc.clone(), stress_support::test_parts())
+        .await?;
+    drop(handle);
+
+    owner_conn.sync_keyhive_with_peer().await?;
+    client_conn.sync_keyhive_with_peer().await?;
+    // The delegations reach each node's local Keyhive asynchronously through its hub, and the
+    // group part is registered from that membership view, so fence the reconciliation before
+    // asking the worker which parts the peer advertises (the fence the access-matrix tests use).
+    owner.repo.wait_for_keyhive_reconciliation().await?;
+    client.repo.wait_for_keyhive_reconciliation().await?;
+    wait_for_pair_full_sync(&owner, &client).await?;
+    client_conn.sync_doc_with_peer(first_doc.clone()).await?;
+    let client_doc = wait_for_doc_handle(&client.repo, first_doc).await;
+    let title = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(
+        title, "before-reopen",
+        "the bucket band must move data, not merely complete"
+    );
+
+    // Take the client offline and let the owner write while it is gone.
+    drop(owner_conn);
+    drop(client_conn);
+    client.shutdown().await?;
+
+    let mut second = automerge::Automerge::new();
+    second
+        .transact(|tx| tx.put(automerge::ROOT, "title", "created-offline"))
+        .expect("failed seeding doc");
+    let handle = owner
+        .repo
+        .create_doc_with_parents(second, vec![group.clone().into()])
+        .await?;
+    let second_doc = handle.document_id();
+    owner
+        .big_sync_store
+        .add_obj_to_parts(second_doc.clone(), stress_support::test_parts())
+        .await?;
+    drop(handle);
+
+    // Reopen the client and reconcile again: this is the path that used to stall.
+    let client = SyncRepoNode::boot(client_path, 212, false).await?;
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.take_latest_accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+    owner_conn.sync_keyhive_with_peer().await?;
+    // A reopened node starts with an empty membership view, so it must pull and reconcile
+    // before the pair can complete a full sync.
+    owner.repo.wait_for_keyhive_reconciliation().await?;
+    client.repo.wait_for_keyhive_reconciliation().await?;
+    wait_for_pair_full_sync(&owner, &client).await?;
+
+    client_conn.sync_doc_with_peer(second_doc.clone()).await?;
+    let reopened_doc = wait_for_doc_handle(&client.repo, second_doc).await;
+    let title = reopened_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "created-offline");
+
+    drop(owner_conn);
+    drop(client_conn);
     owner.shutdown().await?;
     client.shutdown().await?;
     Ok(())
@@ -589,8 +718,14 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
         .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
         .await?;
 
-    assert!(!owner.repo.contains_sedimentree_id(doc_id).await?);
-    assert!(!owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(!owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
+    assert!(
+        !owner
+            .repo
+            .keyhive()
+            .document_has_content(doc_id.clone())
+            .await?
+    );
     // A reservation is not yet a Keyhive authority: no group contains it.
     assert!(
         !owner
@@ -616,16 +751,22 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
     let retry_initial = initial.clone();
     owner
         .repo
-        .finalize_allocated_doc(doc_id, initial, pending.clone())
+        .finalize_allocated_doc(doc_id.clone(), initial, pending.clone())
         .await?;
 
     owner
         .repo
-        .finalize_allocated_doc(doc_id, retry_initial, pending.clone())
+        .finalize_allocated_doc(doc_id.clone(), retry_initial, pending.clone())
         .await?;
 
-    assert!(owner.repo.contains_sedimentree_id(doc_id).await?);
-    assert!(owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .document_has_content(doc_id.clone())
+            .await?
+    );
     assert!(
         !owner
             .repo
@@ -678,7 +819,12 @@ async fn staged_document_reservation_recovers_after_repository_reopen() -> Res<(
         .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
         .expect("failed creating staged initial document");
     repo.keyhive
-        .stage_reserved_doc(doc_id, initial.save(), Vec::new(), &repo.keyhive_storage)
+        .stage_reserved_doc(
+            doc_id.clone(),
+            initial.save(),
+            Vec::new(),
+            &repo.keyhive_storage,
+        )
         .await?;
     stop().await?;
     drop(repo);
@@ -694,11 +840,16 @@ async fn staged_document_reservation_recovers_after_repository_reopen() -> Res<(
         .expect("intended group must survive restart");
     assert!(
         reopened
-            .recover_allocated_doc(doc_id, reopened_pending.clone())
+            .recover_allocated_doc(doc_id.clone(), reopened_pending.clone())
             .await?
     );
-    assert!(reopened.contains_sedimentree_id(doc_id).await?);
-    assert!(reopened.keyhive().document_has_content(doc_id).await?);
+    assert!(reopened.contains_sedimentree_id(doc_id.clone()).await?);
+    assert!(
+        reopened
+            .keyhive()
+            .document_has_content(doc_id.clone())
+            .await?
+    );
     assert!(!reopened.reserved_doc_ids().await?.contains(&doc_id));
     assert!(
         !reopened
@@ -734,8 +885,14 @@ async fn reserved_document_crash_windows_are_recoverable() -> Res<()> {
         owner.repo.reserved_doc_ids().await?.contains(&doc_id),
         "reservation must be durable immediately after allocation"
     );
-    assert!(!owner.repo.contains_sedimentree_id(doc_id).await?);
-    assert!(!owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(!owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
+    assert!(
+        !owner
+            .repo
+            .keyhive()
+            .document_has_content(doc_id.clone())
+            .await?
+    );
 
     // Finalizing an id that was never allocated must fail: no reservation and
     // no matching document.
@@ -763,16 +920,22 @@ async fn reserved_document_crash_windows_are_recoverable() -> Res<()> {
     let retry_initial = initial.clone();
     owner
         .repo
-        .finalize_allocated_doc(doc_id, initial, pending.clone())
+        .finalize_allocated_doc(doc_id.clone(), initial, pending.clone())
         .await?;
     owner
         .repo
-        .finalize_allocated_doc(doc_id, retry_initial, pending.clone())
+        .finalize_allocated_doc(doc_id.clone(), retry_initial, pending.clone())
         .await?;
 
     // Crash window 3: everything durable, reservation cleaned up.
-    assert!(owner.repo.contains_sedimentree_id(doc_id).await?);
-    assert!(owner.repo.keyhive().document_has_content(doc_id).await?);
+    assert!(owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .document_has_content(doc_id.clone())
+            .await?
+    );
     assert!(
         !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
         "reservation must be deleted after finalization"
@@ -807,7 +970,7 @@ async fn ephemeral_roundtrip_between_two_nodes() -> Res<()> {
     let client = SyncRepoNode::boot(client_path, 96, false).await?;
 
     let topic = BigEphemeralTopic::new([0xAB; 32]);
-    let owner_eph_peer_id = subduction_core::peer::id::PeerId::new(*owner.peer_id().as_bytes());
+    let owner_eph_peer_id = subduction_core::peer::id::PeerId::new(owner.peer_id().to_bytes32());
     let mut subscription = client
         .repo
         .ephemeral()
@@ -934,26 +1097,34 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
         .await?;
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     wait_for_document_access_notification(
         &mut access_events,
-        doc_id,
+        doc_id.clone(),
         client.peer_id(),
         BigRepoAccess::Read,
     )
     .await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
-    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id.clone()).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
     assert_eq!(title, "seed");
     assert!(
-        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        client
+            .repo
+            .doc_payload_heads(doc_id.clone())
+            .await?
+            .is_some(),
         "authorized client should have payload heads after RPC-triggered keyhive sync and doc sync"
     );
 
@@ -991,11 +1162,15 @@ async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<
     let pregrant_head = handle
         .with_document_read(|doc| initial_content_heads(doc).map(|heads| heads.head.to_vec()))
         .await?;
-    let pregrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
+    let pregrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
 
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     let postgrant_automerge_head = handle
@@ -1006,7 +1181,7 @@ async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<
         "a key-only checkpoint must not alter the Automerge frontier"
     );
 
-    let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
+    let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
     assert!(
         postgrant_blobs.len() > pregrant_blobs.len(),
         "reader grant should add a stored checkpoint blob"
@@ -1075,7 +1250,11 @@ async fn client_keyhive_decrypts_postwrite_blob_after_edit_grant_sync() -> Res<(
 
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Edit,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
@@ -1100,7 +1279,7 @@ async fn client_keyhive_decrypts_postwrite_blob_after_edit_grant_sync() -> Res<(
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let stored_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
+    let stored_blobs = owner.repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
     let postwrite_blob = stored_blobs
         .iter()
         .find_map(|raw| {
@@ -1156,16 +1335,20 @@ async fn client_keyhive_decrypts_postgrant_checkpoint_after_explicit_keyhive_syn
 
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id).await?;
+    let postgrant_blobs = owner.repo.inspect_stored_doc_blobs(doc_id.clone()).await?;
     let mut checkpoint_blob = None;
     for raw in postgrant_blobs {
         let encrypted = decode_encrypted_blob(&raw)?;
-        let owner_kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id);
+        let owner_kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id.clone());
         let owner_kh_doc = owner
             .repo
             .keyhive()
@@ -1230,7 +1413,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
     let export_before = repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?
+        .into_ready(doc_id.clone())?
         .export()
         .await;
     let heads_before = handle.with_document_read(|doc| doc.get_heads()).await;
@@ -1242,7 +1425,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
     stop().await?;
 
     let (repo, _part_store, stop) = _boot_disk_repo(repo_path).await?;
-    let fetched = repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let fetched = repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
     let title_after = fetched
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
@@ -1305,7 +1488,7 @@ async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
     .await
     .expect("timed out waiting for keyhive sync on fresh peer pair")?;
 
-    let second_client_kh_peer_id = KeyhivePeerId::from_bytes(*second_client.peer_id().as_bytes());
+    let second_client_kh_peer_id = KeyhivePeerId::from_bytes(second_client.peer_id().to_bytes32());
     assert!(
         second_owner
             .repo
@@ -1339,7 +1522,7 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -1358,20 +1541,28 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
     let doc_id = handle.document_id();
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
-    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id.clone()).await;
     let value = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "_"))
         .await;
     assert_eq!(value, "");
     assert!(
-        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        client
+            .repo
+            .doc_payload_heads(doc_id.clone())
+            .await?
+            .is_some(),
         "client should have payload heads after minimal doc sync"
     );
     assert!(
@@ -1407,7 +1598,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
     owner_member_conn.sync_keyhive_with_peer().await?;
     owner_outsider_conn.sync_keyhive_with_peer().await?;
 
-    let member_kh_peer_id = KeyhivePeerId::from_bytes(*member.peer_id().as_bytes());
+    let member_kh_peer_id = KeyhivePeerId::from_bytes(member.peer_id().to_bytes32());
     let member_agent = owner
         .repo
         .keyhive()
@@ -1441,8 +1632,8 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
     owner_member_conn.sync_keyhive_with_peer().await?;
     member_conn.sync_keyhive_with_peer().await?;
 
-    member_conn.sync_doc_with_peer(doc_id).await?;
-    let member_doc = wait_for_doc_handle(&member.repo, doc_id).await;
+    member_conn.sync_doc_with_peer(doc_id.clone()).await?;
+    let member_doc = wait_for_doc_handle(&member.repo, doc_id.clone()).await;
     assert_eq!(
         member_doc
             .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -1454,7 +1645,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         "group member should export plaintext after sync"
     );
 
-    let outsider_sync = outsider_conn.sync_doc_with_peer(doc_id).await;
+    let outsider_sync = outsider_conn.sync_doc_with_peer(doc_id.clone()).await;
     match outsider_sync {
         Ok(()) => match outsider.repo.get_doc(&doc_id).await? {
             DocLookup::PendingMaterialization | DocLookup::Missing => {}
@@ -1490,7 +1681,7 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -1509,15 +1700,27 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
     let doc_id = handle.document_id();
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Edit,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
-    let owner_doc = owner.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
-    let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let owner_doc = owner
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     set_doc_actor(&owner_doc, automerge::ActorId::from([108_u8; 16])).await?;
     set_doc_actor(&client_doc, automerge::ActorId::from([109_u8; 16])).await?;
 
@@ -1545,13 +1748,17 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
     owner_conn.sync_keyhive_with_peer().await?;
 
     let (owner_sync, client_sync) = tokio::join!(
-        owner_conn.sync_doc_with_peer(doc_id),
-        client_conn.sync_doc_with_peer(doc_id),
+        owner_conn.sync_doc_with_peer(doc_id.clone()),
+        client_conn.sync_doc_with_peer(doc_id.clone()),
     );
     owner_sync.expect("owner doc sync failed");
     client_sync.expect("client doc sync failed");
 
-    let owner_doc = owner.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let owner_doc = owner
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     assert_eq!(
         owner_doc
@@ -1617,11 +1824,15 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
     let handle = owner.repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
 
-    let sync_result = client_conn.sync_doc_with_peer(doc_id).await;
+    let sync_result = client_conn.sync_doc_with_peer(doc_id.clone()).await;
     match sync_result {
         Ok(()) => {
             assert!(
-                client.repo.doc_payload_heads(doc_id).await?.is_some(),
+                client
+                    .repo
+                    .doc_payload_heads(doc_id.clone())
+                    .await?
+                    .is_some(),
                 "client should at least have doc payload heads if sync completed"
             );
             match client.repo.get_doc(&doc_id).await? {
@@ -1664,7 +1875,7 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -1685,12 +1896,16 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
         .await?;
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     wait_for_document_access_notification(
         &mut access_events,
-        doc_id,
+        doc_id.clone(),
         client.peer_id(),
         BigRepoAccess::Read,
     )
@@ -1698,7 +1913,11 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
 
     // The grant is observable independently of payload discovery.
     assert!(
-        client.repo.doc_payload_heads(doc_id).await?.is_none(),
+        client
+            .repo
+            .doc_payload_heads(doc_id.clone())
+            .await?
+            .is_none(),
         "doc should NOT have payload heads yet — no auto-sync has occurred"
     );
 
@@ -1711,7 +1930,7 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
         }
     }
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     assert!(
         matches!(
@@ -1773,28 +1992,36 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
         .await?;
     owner
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     wait_for_document_access_notification(
         &mut access_events,
-        doc_id,
+        doc_id.clone(),
         client.peer_id(),
         BigRepoAccess::Read,
     )
     .await?;
 
     // Initial pull.
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
-    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id.clone()).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
     assert_eq!(title, "first", "initial content should match");
 
     // Owner edits the doc.
-    let owner_doc = owner.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let owner_doc = owner
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     owner_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "title", "second"))
@@ -1804,7 +2031,7 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
 
     // Sync keyhive (gossip delivers the edit's CGKA ops) then re-pull.
     client_conn.sync_keyhive_with_peer().await?;
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     let updated_title = loop {
         match client.repo.get_doc(&doc_id).await? {
@@ -1876,13 +2103,13 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
         .await?;
     tracing::info!("THREE_NODE: granting B read access");
     a.repo
-        .grant_doc_access(doc_id, b_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(doc_id.clone(), b_agent, keyhive_core::access::Access::Read)
         .await?;
 
     tracing::info!("THREE_NODE: waiting for B's Keyhive access");
     wait_for_document_access_notification(
         &mut access_events,
-        doc_id,
+        doc_id.clone(),
         b.peer_id(),
         BigRepoAccess::Read,
     )
@@ -1890,9 +2117,9 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     tracing::info!("THREE_NODE: B received Keyhive access, syncing doc");
 
     // B pulls the doc.
-    b_a_conn.sync_doc_with_peer(doc_id).await?;
+    b_a_conn.sync_doc_with_peer(doc_id.clone()).await?;
     tracing::info!("THREE_NODE: sync_doc_with_peer done, waiting for handle");
-    let b_doc = wait_for_doc_handle(&b.repo, doc_id).await;
+    let b_doc = wait_for_doc_handle(&b.repo, doc_id.clone()).await;
     tracing::info!("THREE_NODE: B got doc handle, reading title");
     let b_title = b_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -1903,7 +2130,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     // Now A grants C edit access — this rotates keys (CGKA op) and allows
     // C's later write to pass the storage access policy.
     a.repo
-        .grant_doc_access(doc_id, c_agent, keyhive_core::access::Access::Edit)
+        .grant_doc_access(doc_id.clone(), c_agent, keyhive_core::access::Access::Edit)
         .await?;
 
     // Sync keyhive so C learns about the grant and B learns about the key
@@ -1912,7 +2139,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     a_b_conn.sync_keyhive_with_peer().await?;
 
     // C pulls the doc.
-    c_a_conn.sync_doc_with_peer(doc_id).await?;
+    c_a_conn.sync_doc_with_peer(doc_id.clone()).await?;
     let c_title = loop {
         match c.repo.get_doc(&doc_id).await? {
             DocLookup::Ready(handle) => {
@@ -1930,7 +2157,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     assert_eq!(c_title, "alpha");
 
     // A makes an edit.
-    let a_handle = a.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let a_handle = a.repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
     a_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "title", "beta"))
@@ -1939,7 +2166,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
         .await?;
 
     // C makes an edit.
-    let c_handle = c.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let c_handle = c.repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
     c_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "author", "carol"))
@@ -1949,7 +2176,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
 
     // A must pull C's local edit before B can obtain it from A.
     a_c_conn.sync_keyhive_with_peer().await?;
-    a_c_conn.sync_doc_with_peer(doc_id).await?;
+    a_c_conn.sync_doc_with_peer(doc_id.clone()).await?;
     loop {
         match a.repo.get_doc(&doc_id).await? {
             DocLookup::Ready(handle) => {
@@ -1969,7 +2196,7 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     // B needs the new CGKA ops to decrypt A and C's edits. This proves the
     // gossip (ephemeral notification → keyhive sync) delivered the keys.
     b_a_conn.sync_keyhive_with_peer().await?;
-    b_a_conn.sync_doc_with_peer(doc_id).await?;
+    b_a_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     // B can now decrypt both edits.
     timeout(Duration::from_secs(10), async {
@@ -2016,7 +2243,7 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -2042,17 +2269,21 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
 
     owner
         .repo
-        .grant_doc_access(doc_id, group.clone(), keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            group.clone(),
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     let client_kh_before_shutdown = client.repo.keyhive().clone_keyhive();
     let client_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(
-            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
                 .expect("doc id should be keyhive verifying key"),
         ),
     );
@@ -2102,7 +2333,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = owner
         .repo
         .keyhive()
@@ -2129,13 +2360,17 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
     owner
         .repo
-        .grant_doc_access(doc_id, group.clone(), keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            group.clone(),
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    client_conn.sync_doc_with_peer(doc_id).await?;
-    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id.clone()).await;
     let title = client_doc
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
@@ -2190,11 +2425,11 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
     owner.wait_for_accepts(2).await;
     let owner_conn = owner.take_latest_accepted_connection().await;
     let client_conn = client.connection_to(&owner).await;
-    let owner_kh_peer_id = KeyhivePeerId::from_bytes(*owner.peer_id().as_bytes());
-    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let owner_kh_peer_id = KeyhivePeerId::from_bytes(owner.peer_id().to_bytes32());
+    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     owner_conn.sync_keyhive_with_peer().await?;
     let reopened_kh = client.repo.keyhive().clone_keyhive();
-    let doc_id_bytes = doc_id.into_bytes();
+    let doc_id_bytes = doc_id.to_bytes32();
     let reopened_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(
             ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
@@ -2231,15 +2466,23 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
     // that state is not persisted with the doc body itself.
     client
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
     assert!(
-        !client.big_sync_store.obj_parts(doc_id).await?.is_empty(),
+        !client
+            .big_sync_store
+            .obj_parts(doc_id.clone())
+            .await?
+            .is_empty(),
         "reopened client should retain big_sync part registration for the doc"
     );
     assert!(
-        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        client
+            .repo
+            .doc_payload_heads(doc_id.clone())
+            .await?
+            .is_some(),
         "sync_doc_with_peer should populate doc payload heads before materialization"
     );
     assert!(
@@ -2332,7 +2575,7 @@ async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
 
     let (_registration, mut rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(first_doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(first_doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -2406,7 +2649,7 @@ async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
 
     let (_registration, mut rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
             origin: None,
             path: vec![Prop::Key("profile".into())],
         })
@@ -2504,7 +2747,7 @@ async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
 
     let (_change_registration, mut change_rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
             origin: Some(BigRepoOriginFilter::Local),
             path: Vec::new(),
         })
@@ -2545,11 +2788,11 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
     drop(handle);
-    let handle = repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let handle = repo.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
 
     let (_change_registration, mut change_rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
             origin: Some(BigRepoOriginFilter::Remote),
             path: Vec::new(),
         })
@@ -2557,7 +2800,7 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
     let (_head_registration, mut head_rx) = repo
         .change_manager
         .subscribe_head_listener(super::changes::HeadFilter {
-            doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
         })
         .await?;
 
@@ -2568,7 +2811,7 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
                     .expect("failed mutating remote doc");
             },
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([9_u8; 32]),
+                peer_id: PeerKey::new([9_u8; 32]),
             },
         )
         .await?;
@@ -2631,6 +2874,7 @@ async fn with_document_handles_concurrent_writers() -> Res<()> {
     let mut joins = Vec::new();
     for _ in 0..writer_count {
         let repo = Arc::clone(&repo);
+        let doc_id = doc_id.clone();
         joins.push(tokio::spawn(async move {
             let handle = match repo.get_doc(&doc_id).await {
                 Ok(DocLookup::Ready(handle)) => handle,
@@ -2841,19 +3085,19 @@ fn new_sync_doc(actor: automerge::ActorId, value: &serde_json::Value) -> automer
     doc
 }
 
-fn sync_test_part() -> PartId {
-    PartId(Byte32Id::new([
+fn sync_test_part() -> PartKey {
+    PartKey(ByteKey::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
     ]))
 }
 
-fn sync_test_parts() -> Vec<PartId> {
+fn sync_test_parts() -> Vec<PartKey> {
     vec![sync_test_part()]
 }
 
-fn sync_test_parts_multi() -> Vec<PartId> {
-    vec![sync_test_part(), PartId(Byte32Id::new([7; 32]))]
+fn sync_test_parts_multi() -> Vec<PartKey> {
+    vec![sync_test_part(), PartKey(ByteKey::new([7; 32]))]
 }
 
 struct BigRepoSyncBackendContractHarness {
@@ -2926,7 +3170,7 @@ async fn wait_for_doc_handle(repo: &Arc<BigRepo>, doc_id: DocumentId) -> BigDocH
         Ok(result) => result.expect("doc lookup failed"),
         Err(err) => {
             let export_doc = repo.get_doc(&doc_id).await.unwrap_or(DocLookup::Missing);
-            let payload_heads = repo.doc_payload_heads(doc_id).await.unwrap_or(None);
+            let payload_heads = repo.doc_payload_heads(doc_id.clone()).await.unwrap_or(None);
             let parts = repo
                 .big_sync_store
                 .obj_parts(doc_id)
@@ -2953,7 +3197,7 @@ async fn create_shared_sync_doc(
     owner_conn.sync_keyhive_with_peer().await?;
 
     let doc = new_sync_doc(owner_actor, value);
-    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(*grantee.peer_id().as_bytes());
+    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(grantee.peer_id().to_bytes32());
     let grantee_agent = owner
         .repo
         .keyhive()
@@ -2972,7 +3216,7 @@ async fn create_shared_sync_doc(
     // (has_doc_worker || contains_sedimentree) passes for
     // subsequent sync scenarios.
     let doc_id = handle.document_id();
-    // The runtime listener registers the doc in GLOBAL_PART_ID on the
+    // The runtime listener registers the doc in global_part_id() on the
     // grantee when the delegation arrives via ephemeral notification.
     // If the grantee restarted and the listener isn't active, the caller
     // is responsible for restoring partition membership.
@@ -2984,17 +3228,17 @@ async fn create_shared_sync_doc(
     // reconciliation before doing either.
     owner.repo.wait_for_keyhive_reconciliation().await?;
     grantee.repo.wait_for_keyhive_reconciliation().await?;
-    grantee_conn.sync_doc_with_peer(doc_id).await?;
+    grantee_conn.sync_doc_with_peer(doc_id.clone()).await?;
     // The grant is announced to the grantee over an ephemeral Keyhive
     // notification, which is not admitted work: the reconciliation fence above
     // cannot see it. Wait until the grantee actually observes access, so
     // callers get a document they can both sync and write.
     let grantee_local = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(grantee.peer_id().as_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&grantee.peer_id().to_bytes32())
             .map_err(|_| crate::ferr!("grantee peer id is not a verifying key"))?,
     );
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
             .map_err(|_| crate::ferr!("doc id is not a verifying key"))?,
     );
     // Bounded only for a fast, attributed failure: the grant is normally
@@ -3015,10 +3259,10 @@ async fn create_shared_sync_doc(
             // the interesting split (document absent vs. delegation not
             // applied) is lost.
             let known_docs = grantee.repo.keyhive().document_ids().await;
-            let doc_known = known_docs.contains(&big_sync_core::ObjId::new(doc_id.into_bytes()));
+            let doc_known = known_docs.contains(&big_sync_core::ObjKey::new(doc_id.as_bytes()));
             let grantee_docs = grantee.repo.keyhive().docs_for_agent(&grantee_local).await;
             let owner_local = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(owner.peer_id().as_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&owner.peer_id().to_bytes32())
                     .map_err(|_| crate::ferr!("owner peer id is not a verifying key"))?,
             );
             let owner_access = owner
@@ -3083,7 +3327,7 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
 
 pub(crate) struct StressBigSyncRpcClient {
     pub(crate) target_part_store: SharedPartStore,
-    pub(crate) subscriber: PeerId,
+    pub(crate) subscriber: PeerKey,
 }
 
 #[async_trait::async_trait]
@@ -3100,30 +3344,47 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             .target_part_store
             .summarize_parts(req.inner.parts)
             .await?;
-        Ok(Ok(summarized.map(|parts| {
-            big_sync_core::rpc::PeerSummaryResult {
-                parts: parts
-                    .into_iter()
-                    .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
-                    .collect(),
-            }
+        // A part-level failure is a response error, not a transport one.
+        let summarized = match summarized {
+            Ok(parts) => parts,
+            Err(err) => return Ok(Ok(Err(err))),
+        };
+        let asker = Some(self.subscriber.clone());
+        let mut summaries = HashMap::new();
+        for (part_id, summary) in summarized {
+            let since = req
+                .inner
+                .asker_part_cursors
+                .get(&part_id)
+                .copied()
+                .unwrap_or(0);
+            let dirty = self
+                .target_part_store
+                .part_dirty_count(part_id.clone(), asker.clone(), since)
+                .await?;
+            summaries.insert(part_id, summary.into_strat_summaries(dirty));
+        }
+        Ok(Ok(Ok(big_sync_core::rpc::PeerSummaryResult {
+            parts: summaries,
         })))
     }
 
-    async fn sub_parts(
+    async fn replay_page(
         &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::SubPartsRequest>,
-    ) -> Res<
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<
-                big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
-                big_sync_core::rpc::ListPartsError,
-            >,
-        >,
-    > {
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
+    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplayPageOutcome>> {
+        // The double caps the caller's hold so a caught-up page answers promptly
+        // rather than parking on the long production poll.
+        let hold =
+            Duration::from_millis(u64::from(req.inner.hold_ms)).min(Duration::from_millis(50));
         Ok(Ok(self
             .target_part_store
-            .subscribe(req.inner, self.subscriber)
+            .replay_page(
+                req.inner.target,
+                req.inner.limit,
+                self.subscriber.clone(),
+                hold,
+            )
             .await?))
     }
 
@@ -3137,7 +3398,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
     > {
         Ok(Ok(self
             .target_part_store
-            .get_changed_buckets(req.inner)
+            .get_changed_buckets(req.inner, self.subscriber.clone())
             .await?))
     }
 
@@ -3149,7 +3410,10 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             Result<big_sync_core::rpc::LeafBucketResult, big_sync_core::rpc::LeafBucketsError>,
         >,
     > {
-        Ok(Ok(self.target_part_store.leaf_buckets(req.inner).await?))
+        Ok(Ok(self
+            .target_part_store
+            .leaf_buckets(req.inner, self.subscriber.clone())
+            .await?))
     }
 }
 
@@ -3159,7 +3423,7 @@ struct SyncRepoNode {
     repo: Arc<BigRepo>,
     big_sync_store: SharedPartStore,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
-    connections: Arc<tokio::sync::Mutex<HashMap<PeerId, BigRepoConnection>>>,
+    connections: Arc<tokio::sync::Mutex<HashMap<PeerKey, BigRepoConnection>>>,
     stop_token: BigRepoStopToken,
     endpoint: iroh::Endpoint,
     router: iroh::protocol::Router,
@@ -3191,10 +3455,12 @@ impl SyncRepoNode {
         })
         .await?;
         let shared_store = repo.shared_part_store();
-        let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&shared_store),
             HashMap::new(),
             "big-repo-sync-test",
+            None,
+            HARNESS_SYNC_MODE,
             Arc::from("big-repo-test"),
         )?;
         let big_sync_host = Arc::new(big_sync::Ctx {
@@ -3226,10 +3492,12 @@ impl SyncRepoNode {
         );
         let mut sync_backends = HashMap::new();
         sync_backends.insert(BigRepo::BACKEND_ID.into(), Arc::clone(&sync_backend) as _);
-        let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&big_sync_host.store),
             sync_backends,
             "big-repo-sync-test-main",
+            None,
+            HARNESS_SYNC_MODE,
             Arc::from("big-repo-test"),
         )?;
 
@@ -3278,7 +3546,7 @@ impl SyncRepoNode {
         })
     }
 
-    fn peer_id(&self) -> PeerId {
+    fn peer_id(&self) -> PeerKey {
         self.repo.local_peer_id()
     }
 
@@ -3296,12 +3564,28 @@ impl SyncRepoNode {
         .expect("timed out waiting for iroh accept loop");
     }
 
+    /// Wait for an accepted connection on this node and take it.
+    ///
+    /// The peer's accept callback stores the connection asynchronously, so a
+    /// caller that dials and then reads the slot immediately races it: the
+    /// connection is not recorded yet and an `expect` here would panic. Wait
+    /// for the callback instead of assuming the slot is already filled.
     async fn take_latest_accepted_connection(&self) -> BigRepoConnection {
-        self.accepted_connection
-            .lock()
-            .await
-            .take()
-            .expect("expected accepted connection to be available")
+        timeout(SYNC_PROPAGATION_TIMEOUT, async {
+            loop {
+                let notified = self.accept_notify.notified();
+                tokio::pin!(notified);
+                // Register interest before checking the slot, so a store
+                // landing between the check and the wait cannot be lost.
+                notified.as_mut().enable();
+                if let Some(connection) = self.accepted_connection.lock().await.take() {
+                    return connection;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("timed out waiting for the iroh accept loop to record a connection")
     }
 
     async fn connect_to(&self, remote: &SyncRepoNode) -> Res<()> {
@@ -3456,7 +3740,7 @@ async fn run_sync_case(
     // Keyhive setup: contact cards + grant access
     let server_conn = server.take_latest_accepted_connection().await;
     client_conn.sync_keyhive_with_peer().await?;
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
     let client_agent = server
         .repo
         .keyhive()
@@ -3465,7 +3749,11 @@ async fn run_sync_case(
         .expect("client agent should be known after keyhive sync");
     server
         .repo
-        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
+        .grant_doc_access(
+            doc_id.clone(),
+            client_agent,
+            keyhive_core::access::Access::Edit,
+        )
         .await?;
 
     // Write actual content AFTER grant so the grant path only needs to
@@ -3493,8 +3781,12 @@ async fn run_sync_case(
 
     // Client syncs doc from server (from empty tree)
     tracing::info!("client pulling doc from server");
-    client_conn.sync_doc_with_peer(doc_id).await?;
-    let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     set_doc_actor(&client_doc, automerge::ActorId::from([61_u8; 16])).await?;
 
     if let Some(mutation) = local_mutation {
@@ -3515,8 +3807,8 @@ async fn run_sync_case(
             "running concurrent sync_doc_with_peer"
         );
         let (client_result, server_result) = tokio::join!(
-            client_conn.sync_doc_with_peer(doc_id),
-            server_conn.sync_doc_with_peer(doc_id),
+            client_conn.sync_doc_with_peer(doc_id.clone()),
+            server_conn.sync_doc_with_peer(doc_id.clone()),
         );
         let () = client_result?;
         let () = server_result?;
@@ -3524,7 +3816,11 @@ async fn run_sync_case(
         drop(client_doc);
         drop(server_doc);
 
-        let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         let server_doc = server.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
         let client_state = read_json_doc(&client_doc).await;
         let server_state = read_json_doc(&server_doc).await;
@@ -3599,14 +3895,18 @@ async fn run_restart_reconnect_case(
     // Pre-sync so client has the doc under the same ID
     server
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     client
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     wait_for_pair_full_sync(&server, &client).await?;
-    let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     set_doc_actor(&client_doc, automerge::ActorId::from([81_u8; 16])).await?;
     client.disconnect_from(&server).await?;
 
@@ -3633,7 +3933,7 @@ async fn run_restart_reconnect_case(
     server.wait_for_accepts(1).await;
 
     tracing::info!("running initial sync before server shutdown");
-    client_conn.sync_doc_with_peer(doc_id).await?;
+    client_conn.sync_doc_with_peer(doc_id.clone()).await?;
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
@@ -3643,7 +3943,11 @@ async fn run_restart_reconnect_case(
 
     tracing::info!("rebooting server from the same disk path");
     let server = SyncRepoNode::boot(server_path, 71, true).await?;
-    let server_doc = server.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let server_doc = server
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
     if let Some(mutation) = second_local_mutation {
@@ -3712,21 +4016,25 @@ async fn run_remote_change_listener_without_live_handle_case(
     // Pre-sync so client has the doc under the same ID
     server
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     client
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     wait_for_pair_full_sync(&server, &client).await?;
-    let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     set_doc_actor(&client_doc, automerge::ActorId::from([92_u8; 16])).await?;
     client.disconnect_from(&server).await?;
 
     let (_change_registration, mut change_rx) = server
         .repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
             origin: Some(BigRepoOriginFilter::Remote),
             path: Vec::new(),
         })
@@ -3735,7 +4043,7 @@ async fn run_remote_change_listener_without_live_handle_case(
         .repo
         .change_manager
         .subscribe_head_listener(super::changes::HeadFilter {
-            doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
         })
         .await?;
 
@@ -3754,7 +4062,7 @@ async fn run_remote_change_listener_without_live_handle_case(
     let server_conn = server.take_latest_accepted_connection().await;
 
     server_conn.sync_keyhive_with_peer().await?;
-    server_conn.sync_doc_with_peer(doc_id).await?;
+    server_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     assert!(
         timeout(Duration::from_millis(250), change_rx.recv())
@@ -3802,7 +4110,7 @@ async fn apply_local_sync_mutation_and_assert_notifications(
 ) -> Res<()> {
     let (_change_registration, mut change_rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
-            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
             origin: Some(BigRepoOriginFilter::Local),
             path: Vec::new(),
         })
@@ -3810,7 +4118,7 @@ async fn apply_local_sync_mutation_and_assert_notifications(
     let (_head_registration, mut head_rx) = repo
         .change_manager
         .subscribe_head_listener(super::changes::HeadFilter {
-            doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
         })
         .await?;
 
@@ -3876,7 +4184,7 @@ async fn run_sync_backend_case(
     remote_mutation: Option<SyncMutation>,
     expected_deets: SyncCompletionDeets,
     expect_client_doc: bool,
-    sync_part_hints: Vec<PartId>,
+    sync_part_hints: Vec<PartKey>,
     remote_payload_missing: bool,
 ) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -3921,7 +4229,7 @@ async fn run_sync_backend_case(
     // CGKA tree state. Any content written after this will use a
     // PCS key that includes the client's leaf.
     {
-        let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+        let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
         let client_agent = server
             .repo
             .keyhive()
@@ -3930,7 +4238,11 @@ async fn run_sync_backend_case(
             .expect("client agent should be known after keyhive sync");
         server
             .repo
-            .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
+            .grant_doc_access(
+                doc_id.clone(),
+                client_agent,
+                keyhive_core::access::Access::Edit,
+            )
             .await?;
     }
     client_conn.sync_keyhive_with_peer().await?;
@@ -3959,7 +4271,7 @@ async fn run_sync_backend_case(
     // Register for sync
     server
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
 
     let client_doc = if expect_client_doc {
@@ -3967,10 +4279,14 @@ async fn run_sync_backend_case(
         // The added-member case intentionally leaves the document absent.
         client
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
-        client_conn.sync_doc_with_peer(doc_id).await?;
-        let doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        client_conn.sync_doc_with_peer(doc_id.clone()).await?;
+        let doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         set_doc_actor(&doc, automerge::ActorId::from([132_u8; 16])).await?;
         Some(doc)
     } else {
@@ -4002,8 +4318,8 @@ async fn run_sync_backend_case(
     client_conn.sync_keyhive_with_peer().await?;
 
     let backend = Arc::clone(&client.sync_backend);
-    let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
-    let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    let local_payload = client.big_sync_store.obj_payload(doc_id.clone()).await?;
+    let remote_payload = server.big_sync_store.obj_payload(doc_id.clone()).await?;
     // A prior subscription may deliver the remote mutation — or the whole
     // object — before this backend invocation: a subscribed part plus eager
     // replication means the client can fetch the document on its own. The
@@ -4035,22 +4351,22 @@ async fn run_sync_backend_case(
         };
     let expected_parts = {
         let base = if sync_part_hints.is_empty() {
-            client.big_sync_store.obj_parts(doc_id).await?
+            client.big_sync_store.obj_parts(doc_id.clone()).await?
         } else {
             sync_part_hints.clone()
         };
         // The runtime auto-adds docs to the global partition on read access
         // (marker model). Include it in expectations.
         let mut parts = base;
-        if !parts.contains(&crate::GLOBAL_PART_ID) {
-            parts.push(crate::GLOBAL_PART_ID);
+        if !parts.contains(&crate::global_part_id()) {
+            parts.push(crate::global_part_id());
         }
         parts
     };
     let scenario = SyncBackendScenario {
         name: "big_repo_sync_backend_case",
         peer_id: server.peer_id(),
-        obj_id: doc_id,
+        obj_id: doc_id.clone(),
         initial_payload: local_payload.clone(),
         initial_parts: sync_part_hints.clone(),
         remote_payload: if remote_payload_missing {
@@ -4133,7 +4449,7 @@ async fn run_sync_backend_missing_local_and_remote_payload_case() -> Res<()> {
 }
 
 async fn run_sync_backend_remote_payload_missing_changed_case(
-    sync_part_hints: Vec<PartId>,
+    sync_part_hints: Vec<PartKey>,
 ) -> Res<()> {
     run_sync_backend_case(
         None,
@@ -4178,14 +4494,18 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
     // Pre-sync so client has the doc under the same ID
     server
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     client
         .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
     wait_for_pair_full_sync(&server, &client).await?;
-    let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     set_doc_actor(&client_doc, automerge::ActorId::from([132_u8; 16])).await?;
     // Isolate the backend call under test before publishing the remote mutation.
     // Otherwise BigSync can legitimately win the race and make the explicit call a no-op.
@@ -4207,15 +4527,15 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
 
     client
         .big_sync_store
-        .remove_obj_from_part(doc_id, sync_test_part())
+        .remove_obj_from_part(doc_id.clone(), sync_test_part())
         .await?;
 
-    let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    let remote_payload = server.big_sync_store.obj_payload(doc_id.clone()).await?;
     let outcome = client
         .sync_backend
         .sync_obj(
             client_conn.peer_id(),
-            doc_id,
+            doc_id.clone(),
             Vec::new(),
             remote_payload.clone(),
         )
@@ -4269,10 +4589,10 @@ async fn wait_for_pair_full_sync(left: &SyncRepoNode, right: &SyncRepoNode) -> R
 async fn assert_pair_sync_alignment(
     left: &SyncRepoNode,
     right: &SyncRepoNode,
-    doc_id: ObjId,
+    doc_id: ObjKey,
 ) -> Res<()> {
-    let left_heads = left.repo.doc_payload_heads(doc_id).await?;
-    let right_heads = right.repo.doc_payload_heads(doc_id).await?;
+    let left_heads = left.repo.doc_payload_heads(doc_id.clone()).await?;
+    let right_heads = right.repo.doc_payload_heads(doc_id.clone()).await?;
     assert_eq!(
         left_heads, right_heads,
         "payload heads diverged for doc {doc_id:?}"
@@ -4446,26 +4766,34 @@ async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> 
         .await?;
         let doc_id = left_doc.document_id();
         left.big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         right
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
 
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let right_doc = right
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id).await?;
+        assert_pair_sync_alignment(&left, &right, doc_id.clone()).await?;
 
         right.disconnect_from(&left).await?;
         right.connect_to(&left).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let right_doc = right
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
@@ -4505,26 +4833,34 @@ async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> 
         .await?;
         let doc_id = left_doc.document_id();
         left.big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         right
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
 
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let right_doc = right
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id).await?;
+        assert_pair_sync_alignment(&left, &right, doc_id.clone()).await?;
 
         right.disconnect_from(&left).await?;
         right.connect_to(&left).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let right_doc = right
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
@@ -4679,14 +5015,18 @@ async fn sync_with_peer_local_write_emits_notifications_while_connected() -> Res
         // Pre-sync so client has the doc under the same ID
         server
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         client
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
 
         apply_local_sync_mutation_and_assert_notifications(
@@ -4772,20 +5112,24 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
         // Pre-sync so client has the doc under the same ID
         server
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         client
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
 
         let (_change_registration, mut change_rx) = server
             .repo
             .subscribe_change_listener(BigRepoChangeFilter {
-                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
                 origin: Some(BigRepoOriginFilter::Remote),
                 path: Vec::new(),
             })
@@ -4794,7 +5138,7 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
             .repo
             .change_manager
             .subscribe_head_listener(super::changes::HeadFilter {
-                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
             })
             .await?;
 
@@ -4822,7 +5166,7 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
         );
 
         server_conn.sync_keyhive_with_peer().await?;
-        server_conn.sync_doc_with_peer(doc_id).await?;
+        server_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
         let change_batch = recv_change_batch(&mut change_rx).await;
         assert!(matches!(
@@ -4886,28 +5230,32 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
         // Pre-sync so client has the doc under the same ID
         server
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         client
             .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
             .await?;
         wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id.clone())?;
         set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
 
         let (_head_registration, mut head_rx) = client
             .repo
             .change_manager
             .subscribe_head_listener(super::changes::HeadFilter {
-                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
             })
             .await?;
         assert!(
             !client
                 .repo
                 .change_manager
-                .has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local),
+                .has_change_listener_interest(doc_id.clone(), &BigRepoChangeOrigin::Local),
             "no change listeners should be interested before mutation"
         );
 

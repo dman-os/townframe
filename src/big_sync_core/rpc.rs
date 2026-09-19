@@ -5,8 +5,7 @@ use serde::{Deserializer, Serializer};
 use crate::interlude::*;
 
 use crate::fingerprint::{Fingerprint, FingerprintSeed};
-use crate::mpsc::Receiver;
-use crate::part_store::{CursorIndex, ObjPayload};
+use crate::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 
 pub trait BigSyncRpcClient<K: FutureForm> {
     fn peer_summary<'a>(
@@ -14,10 +13,15 @@ pub trait BigSyncRpcClient<K: FutureForm> {
         req: PeerSummaryRequest,
     ) -> K::Future<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
-    fn sub_parts<'a>(
+    /// One bounded, filtered replay page for a single target.
+    ///
+    /// Delivery is client-driven: the client names a target and a cursor, asks
+    /// for a bounded number of events, and re-issues. The responder holds the
+    /// request while there is nothing to send, so paging is the flow control.
+    fn replay_page<'a>(
         &'a self,
-        req: SubPartsRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<Result<Receiver<SubEvent>, ListPartsError>>>;
+        req: ReplayPageRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<ReplayPageOutcome>>;
 
     /// Smart get_changed_buckets. It will dynamically adjust the levels to include
     /// according to change counts [`GetChangedBucketsRequest::since`].
@@ -65,7 +69,7 @@ impl BucketSummaryState {
     pub fn apply_transition(
         &mut self,
         buck_id: BuckId,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: BucketMemberKind<'_>,
         new: BucketMemberKind<'_>,
@@ -73,8 +77,8 @@ impl BucketSummaryState {
         self.changed_at = cursor;
         match old {
             BucketMemberKind::Absent => {}
-            BucketMemberKind::Live(payload) => self.remove_live(buck_id, obj_id, payload),
-            BucketMemberKind::Dead => self.remove_dead(buck_id, obj_id),
+            BucketMemberKind::Live(payload) => self.remove_live(buck_id, obj_id.clone(), payload),
+            BucketMemberKind::Dead => self.remove_dead(buck_id, obj_id.clone()),
         }
         match new {
             BucketMemberKind::Absent => {}
@@ -97,7 +101,7 @@ impl BucketSummaryState {
         self.changed_at
     }
 
-    fn add_live(&mut self, buck_id: BuckId, obj_id: ObjId, payload: &ObjPayload) {
+    fn add_live(&mut self, buck_id: BuckId, obj_id: ObjKey, payload: &ObjPayload) {
         self.live_count = self.live_count.checked_add(1).expect(ERROR_IMPOSSIBLE);
         self.live_fp.add(
             &BUCKET_LIVE_FP_SEED,
@@ -105,7 +109,7 @@ impl BucketSummaryState {
         );
     }
 
-    fn remove_live(&mut self, buck_id: BuckId, obj_id: ObjId, payload: &ObjPayload) {
+    fn remove_live(&mut self, buck_id: BuckId, obj_id: ObjKey, payload: &ObjPayload) {
         assert!(self.live_count > 0, "fishy");
         self.live_count -= 1;
         self.live_fp.remove(
@@ -114,7 +118,7 @@ impl BucketSummaryState {
         );
     }
 
-    fn add_dead(&mut self, buck_id: BuckId, obj_id: ObjId) {
+    fn add_dead(&mut self, buck_id: BuckId, obj_id: ObjKey) {
         self.dead_count = self.dead_count.checked_add(1).expect(ERROR_IMPOSSIBLE);
         self.dead_fp.add(
             &BUCKET_DEAD_FP_SEED,
@@ -122,7 +126,7 @@ impl BucketSummaryState {
         );
     }
 
-    fn remove_dead(&mut self, buck_id: BuckId, obj_id: ObjId) {
+    fn remove_dead(&mut self, buck_id: BuckId, obj_id: ObjKey) {
         assert!(self.dead_count > 0, "fishy");
         self.dead_count -= 1;
         self.dead_fp.remove(
@@ -151,8 +155,16 @@ impl BucketFingerprint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetChangedBucketsRequest {
-    pub part_id: PartId,
+    pub part_id: PartKey,
+    /// Resume cursor in bucket order. The response contains buckets with an id at or past
+    /// it, at any level up to [`Self::to_level`].
     pub offset: BuckId,
+    /// The deepest level the response may contain. Changed buckets are returned for every
+    /// level from `offset.level()` through this one, in bucket order, so a walk that needs
+    /// level N is a single scan instead of one exchange per level (ADR 012 decision 4,
+    /// correction 3). Because a change stamps every ancestor's `changed_at`, filtering on
+    /// the peer's cursor already narrows this to the buckets whose ranges differ.
+    pub to_level: BuckLevel,
     pub since: CursorIndex,
     /// RPC impls should return all changed
     /// sibling buckets of the last bucket before the limit
@@ -174,11 +186,16 @@ pub struct PartSummary {
 
 impl PartSummary {
     /// Expand the raw store summary into the per-strat wire summaries the
-    /// decision side consumes: cursor strat (latest cursor) + bucket strat
-    /// (that part's deepest bucket level and member count).
-    pub fn into_strat_summaries(self) -> Vec<PartStratSummary> {
+    /// decision side consumes: cursor strat (latest cursor + the relevance the
+    /// asker is behind on) + bucket strat (that part's deepest bucket level and
+    /// member count).
+    ///
+    /// `dirty_count` comes from the responder, not from the store: it is a fact
+    /// about the *asker*, counted against the cursor that asker advertised.
+    pub fn into_strat_summaries(self, dirty_count: PartDirtyCount) -> Vec<PartStratSummary> {
         let mut summaries = vec![PartStratSummary::Cursor(CursorPartSummary {
             latest_cursor: self.latest_cursor,
+            dirty_count,
         })];
         if self.deepest_bucket_level > 0 {
             summaries.push(PartStratSummary::Bucket(BucketPartSummary {
@@ -203,17 +220,24 @@ structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LeafBucketRequest {
         pub buck_id: BuckId,
-        pub after: Option<ObjId>,
+        pub after: Option<ObjKey>,
     }
 }
 
 structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LeafBucketsRequest {
-        pub part_id: PartId,
+        pub part_id: PartKey,
         pub since: CursorIndex,
         pub buckets: Vec<LeafBucketRequest>,
         pub seed: FingerprintSeed,
+        /// RPC impls should return at most this many entries per requested bucket.
+        ///
+        /// A hint rather than a bound: zero means no preference, and the impl returns
+        /// the smallest useful page of one entry, because a page with no entries reads
+        /// as `done` while entries remain. The responder caps it (as it caps
+        /// [`ReplayPageRequest::limit`]), so asking above the cap gets the cap rather
+        /// than an error.
         pub limit_hint: u32,
     }
 }
@@ -236,11 +260,11 @@ structstruck::strike! {
             BuckId,
             pub struct LeafBucketPage {
                 pub entries: Vec<pub struct BucketObjPageEntry {
-                    pub obj_id: ObjId,
+                    pub obj_id: ObjKey,
                     pub dead: bool,
-                    pub fp: Fingerprint<(&'static str, ObjId, ObjPayload)>,
+                    pub fp: Fingerprint<(&'static str, ObjKey, ObjPayload)>,
                 }>,
-                pub next_after: Option<ObjId>,
+                pub next_after: Option<ObjKey>,
                 pub done: bool,
             }
         >
@@ -250,7 +274,16 @@ structstruck::strike! {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PeerSummaryRequest {
-        pub parts: Set<PartId>,
+        pub parts: Set<PartKey>,
+        /// Per part, the cursor the ASKER holds for the peer it is asking: its
+        /// position in that peer's stream. The responder counts relevance against
+        /// this, because only the owner of the rows can evaluate them on its own
+        /// cursor scale.
+        ///
+        /// A part the asker omits is read as `0`, which over-counts rather than
+        /// under-counts: the bucket band is the heavier but safe direction, and the
+        /// count is a hint either way.
+        pub asker_part_cursors: Map<PartKey, CursorIndex>,
     }
 }
 
@@ -258,9 +291,14 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum PartStratSummary {
         /// The peer can serve this part with the cursor strat; reports the
-        /// latest cursor of the part.
+        /// latest cursor of the part and the relevance the ASKER is behind on.
         Cursor(pub struct CursorPartSummary {
             pub latest_cursor: CursorIndex,
+            /// Counted by the responder against
+            /// [`PeerSummaryRequest::asker_part_cursors`]. A band-selection hint,
+            /// not a correctness input: a wrong value can only mis-select the band,
+            /// and both bands converge.
+            pub dirty_count: PartDirtyCount,
         }),
         /// The peer can serve this part with the bucket strat; reports that
         /// part's deepest materialized bucket level and member count.
@@ -278,18 +316,24 @@ structstruck::strike! {
         /// Each part reports the sync strats it supports; the decision side
         /// picks a strat per part (cursor diff or bucket working level), so
         /// different parts can be served by different strats.
-        pub parts: Map<PartId, Vec<PartStratSummary>>,
+        pub parts: Map<PartKey, Vec<PartStratSummary>>,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SubscriptionTarget {
     Part {
-        part_id: PartId,
+        part_id: PartKey,
         cursor: CursorIndex,
     },
     Object {
-        obj_id: ObjId,
+        obj_id: ObjKey,
+        /// Where to resume this object's replay. An object route has no part of
+        /// its own whose cursor could carry the position, and the store is the
+        /// side that materializes the object's derived part, so the position
+        /// travels with the route. Without it every page asks for the object's
+        /// events from the start again.
+        cursor: CursorIndex,
     },
 }
 
@@ -309,8 +353,8 @@ structstruck::strike! {
         pub events: Vec<pub enum PartEvent {
             Changed(pub struct ObjChanged {
                 pub cursor: CursorIndex,
-                pub part_ids: Vec<PartId>,
-                pub obj_id: ObjId,
+                pub part_ids: Vec<PartKey>,
+                pub obj_id: ObjKey,
                 // NOTE: IRPC uses postcard encoding
                 // which doesn't support serde_json::Value
                 // types
@@ -320,23 +364,24 @@ structstruck::strike! {
                 )]
                 pub payload: ObjPayload,
             }),
-            Added(pub struct ObjAddedToPart {
-                pub cursor: CursorIndex,
-                pub part_id: PartId,
-                pub obj_id: ObjId,
-                #[serde(
-                    serialize_with = "value_as_string",
-                    deserialize_with = "value_from_string"
-                )]
-                pub payload: ObjPayload,
-            }),
             Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
-                pub part_id: PartId,
-                pub obj_id: ObjId,
+                pub part_id: PartKey,
+                pub obj_id: ObjKey,
             }),
         }>,
-        pub next_cursor: Option<CursorIndex>,
+        /// Always a position the caller can ask from again: the caller's own cursor when
+        /// this page carried nothing, otherwise advanced past the last event in the page.
+        ///
+        /// This is the request's next `target` cursor, never a verdict — an exhausted
+        /// replay and a page that only ran out of its hold both hand back a position to
+        /// ask from again.
+        pub resume: CursorIndex,
+        /// The responder's replay of this target is exhausted as of the last event in
+        /// this page (its replay half reported `ReplayComplete`). Only this means caught
+        /// up; a page that ran out of its hold is `drained: false` with `resume` = the
+        /// caller's own cursor, so the caller keeps asking and the hold paces it.
+        pub drained: bool,
     }
 }
 fn value_as_string<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
@@ -358,10 +403,64 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {
         Changed(ObjChanged),
-        Added(ObjAddedToPart),
         Removed(ObjRemovedFromPart),
         ReplayComplete,
     }
+}
+
+impl From<PartEvent> for SubEvent {
+    fn from(evt: PartEvent) -> Self {
+        match evt {
+            PartEvent::Changed(inner) => Self::Changed(inner),
+            PartEvent::Removed(inner) => Self::Removed(inner),
+        }
+    }
+}
+
+/// A request for one bounded page of a single target's events.
+///
+/// The page lane is deliberately transport-agnostic: the same request can be
+/// carried by a stream (WebSocket/NATS) or by an HTTP long-poll. The caller's
+/// own pacing therefore travels in the request (`hold_ms`) instead of being a
+/// server-side timeout, and a hold that expires is a normal answer
+/// ([`ReplayPageOutcome::Events`] with `drained: false`), never an error — an
+/// HTTP responder answering 5xx for it would make clients retry the whole
+/// request. On a push transport `hold_ms = 0` degenerates cleanly to plain
+/// polling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayPageRequest {
+    /// The one target being paged. A `Part` target carries the cursor to resume
+    /// from; an `Object` target replays that object's derived part.
+    pub target: SubscriptionTarget,
+    /// Upper bound on how many events this page may carry.
+    pub limit: u32,
+    /// How long the responder may hold the request while the target has nothing
+    /// to send. This is the caller's pacing choice, so a caller that has other
+    /// work can ask for a short hold; the responder caps it. Zero means do not
+    /// hold at all.
+    pub hold_ms: u32,
+}
+
+/// What a page request answered.
+///
+/// An empty page and a denied part are deliberately different answers: an
+/// empty page that is `drained` means caught up, the second means the peer may
+/// no longer read the part, which a caller must not have to infer from an empty
+/// page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplayPageOutcome {
+    /// Events after the target's cursor, filtered for the asking principal.
+    ///
+    /// The verdict is explicit and never encoded in the position: `drained`
+    /// says the responder's replay is complete as of the page's last event, and
+    /// `resume` is always a cursor the caller can ask from again (its own when
+    /// the page carried nothing). A page that only ran out of its hold is
+    /// `drained: false`, so the caller keeps asking.
+    Events(PartPage),
+    /// The target names a part this scope does not know.
+    UnknownPart,
+    /// The asking principal may not read the target's part.
+    Unauthorized,
 }
 
 #[derive(
@@ -377,7 +476,7 @@ pub enum RpcError {
 )]
 pub enum ListPartsError {
     /// UnkownParts {unkown_parts:?}
-    UnkownParts { unkown_parts: Vec<PartId> },
+    UnkownParts { unkown_parts: Vec<PartKey> },
 }
 
 pub type BigSyncRpcResult<T> = Result<T, RpcError>;

@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::app::*;
-use crate::sync::PeerKey;
+use crate::sync::PeerId;
 
 use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
@@ -116,7 +116,7 @@ pub struct RepoCtx {
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
 
-    pub local_peer_key: PeerKey,
+    pub local_peer_key: PeerId,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -145,7 +145,7 @@ pub(crate) struct RepoCtxParts {
     pub derived_part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
-    pub local_peer_key: PeerKey,
+    pub local_peer_key: PeerId,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -434,8 +434,8 @@ impl RepoCtx {
                         doc_app.document_id(),
                         doc_drawer.document_id(),
                         doc_config.document_id(),
-                        core_id,
-                        docs_id,
+                        core_id.clone(),
+                        docs_id.clone(),
                     ],
                 )
                 .await?;
@@ -672,18 +672,26 @@ impl RepoCtx {
                 .branches
                 .get("main")
                 .ok_or_eyre("missing main branch for core inventory doc")?
-                .branch_doc_id;
+                .branch_doc_id
+                .clone();
             let docs_inventory_doc_id = docs_entry
                 .branches
                 .get("main")
                 .ok_or_eyre("missing main branch for docs inventory doc")?
-                .branch_doc_id;
+                .branch_doc_id
+                .clone();
 
             big_repo
-                .add_admin_member_to_doc(core_inventory_doc_id, authority.blob_inventories.clone())
+                .add_admin_member_to_doc(
+                    core_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
                 .await?;
             big_repo
-                .add_admin_member_to_doc(docs_inventory_doc_id, authority.blob_inventories.clone())
+                .add_admin_member_to_doc(
+                    docs_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
                 .await?;
 
             crate::authority::grant_docs_admin(
@@ -693,16 +701,16 @@ impl RepoCtx {
                     doc_app.document_id(),
                     doc_drawer.document_id(),
                     doc_config.document_id(),
-                    core_inventory_doc_id,
-                    docs_inventory_doc_id,
+                    core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id.clone(),
                 ],
             )
             .await?;
 
             config_repo
                 .set_blob_inventories(crate::config::AppBlobInventories {
-                    core_inventory_doc_id,
-                    docs_inventory_doc_id,
+                    core_inventory_doc_id: core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id: docs_inventory_doc_id.clone(),
                 })
                 .await?;
 
@@ -712,8 +720,8 @@ impl RepoCtx {
                     doc_id_app: doc_app.document_id(),
                     doc_id_drawer: doc_drawer.document_id(),
                     doc_id_config: Some(doc_config.document_id()),
-                    core_inventory_doc_id: Some(core_inventory_doc_id),
-                    docs_inventory_doc_id: Some(docs_inventory_doc_id),
+                    core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+                    docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
                 },
             )
             .await?;
@@ -804,7 +812,7 @@ impl RepoCtx {
 }
 
 struct UserInfo {
-    local_peer_key: PeerKey,
+    local_peer_key: PeerId,
     local_user_path: UserPathBuf,
     local_actor_id: automerge::ActorId,
 }
@@ -885,17 +893,17 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
         .big_repo
         .get_doc(&doc_id_app)
         .await?
-        .into_ready(doc_id_app)?;
+        .into_ready(doc_id_app.clone())?;
     let doc_drawer = parts
         .big_repo
         .get_doc(&doc_id_drawer)
         .await?
-        .into_ready(doc_id_drawer)?;
+        .into_ready(doc_id_drawer.clone())?;
     let doc_config = parts
         .big_repo
         .get_doc(&doc_id_config)
         .await?
-        .into_ready(doc_id_config)?;
+        .into_ready(doc_id_config.clone())?;
 
     if core_inv.is_none() || docs_inv.is_none() {
         let (config_store, _) = doc_app
@@ -922,8 +930,8 @@ pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> 
             doc_id_app,
             doc_id_drawer,
             doc_id_config: Some(doc_id_config),
-            core_inventory_doc_id: Some(core_inventory_doc_id),
-            docs_inventory_doc_id: Some(docs_inventory_doc_id),
+            core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+            docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
         },
     )
     .await?;
@@ -1252,7 +1260,7 @@ pub mod globals {
     pub struct SyncDeviceEntry {
         pub endpoint_id: iroh::EndpointId,
         #[serde(default)]
-        pub agent_peer_id: Option<big_sync_core::PeerId>,
+        pub agent_peer_id: Option<big_sync_core::PeerKey>,
         pub name: String,
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,

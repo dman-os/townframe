@@ -134,7 +134,7 @@ impl DrawerRepo {
                 }
                 let part_id = self.replicated_partition_id();
                 self.partition_store
-                    .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                    .add_obj_to_parts(branch_ref.branch_doc_id.clone(), vec![part_id])
                     .await?;
             }
         }
@@ -178,7 +178,7 @@ impl DrawerRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
         live_origin: Option<&BigRepoChangeOrigin>,
-        _exclude_peer_id: Option<&PeerId>,
+        _exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Prefix: docs.map
         if !big_repo::big_repo_path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
@@ -257,7 +257,7 @@ impl DrawerRepo {
                     if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
                         let part_id = self.replicated_partition_id();
                         self.partition_store
-                            .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                            .add_obj_to_parts(branch_ref.branch_doc_id.clone(), vec![part_id])
                             .await?;
                     }
                 }

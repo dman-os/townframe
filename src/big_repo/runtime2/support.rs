@@ -603,7 +603,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
                     .ok_or_else(|| {
                         eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
                             source: ferr!("missing causal encryption key for parent {parent}"),
-                            document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                            document_id: crate::DocumentId::new(sedimentree_id.as_bytes()),
                             owner_secret_count,
                             cgka_operation_count,
                             has_pcs_key,
@@ -632,7 +632,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
                 keyhive_core::principal::document::EncryptError::FailedToMakeAppSecret(source),
             ) => eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
                 source: eyre::Report::new(source),
-                document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                document_id: crate::DocumentId::new(sedimentree_id.as_bytes()),
                 owner_secret_count,
                 cgka_operation_count,
                 has_pcs_key,

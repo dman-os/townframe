@@ -21,6 +21,7 @@ mod trap;
 mod worker;
 
 pub use backend::SyncBackend;
+pub use big_sync_core::SyncMode;
 pub use big_sync_core::delta_walker_sparse_state::{
     DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
 };
@@ -39,7 +40,10 @@ pub use part_store::sqlite::{
     SqlitePartStore, open_sqlite_local_revision_reader, open_sqlite_local_revision_reader_all,
 };
 pub use part_store::sqlite_core;
-pub use part_store::{HostPartStore, HostPartStoreConfig, LocalPartRevisionReader};
+pub use part_store::{
+    HostPartStore, HostPartStoreConfig, LocalPartRevisionReader, PartScope, PartStoreStats,
+    ReadTarget, bucket_index_bounds,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{

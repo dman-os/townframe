@@ -12,8 +12,8 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct ListBucketsTask {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub offset: BuckId,
     pub since: CursorIndex,
     pub working_level: BuckLevel,
@@ -21,16 +21,16 @@ pub struct ListBucketsTask {
 
 #[derive(Debug)]
 pub struct ListBucketsResult {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub filtered_buckets: Vec<BucketSummary>,
 }
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub struct ListBucketsTaskError {
-        pub peer_id: PeerId,
-        pub part_id: PartId,
+        pub peer_id: PeerKey,
+        pub part_id: PartKey,
         pub _deets:
             pub enum ListBucketsTaskErrorDeets {
                 #![derive(thiserror::Error, displaydoc::Display)]
@@ -55,8 +55,8 @@ impl ListBucketsTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_id = self.peer_id;
-        let part_id = self.part_id;
+        let peer_id = self.peer_id.clone();
+        let part_id = self.part_id.clone();
         self.run_run(cx)
             .await
             .map_err(|deets| ListBucketsTaskError {
@@ -81,14 +81,15 @@ impl ListBucketsTask {
         loop {
             let buckets = peer_rpc
                 .get_changed_buckets(GetChangedBucketsRequest {
-                    part_id: self.part_id,
+                    part_id: self.part_id.clone(),
                     offset,
+                    to_level: self.working_level,
                     limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
                     since: self.since,
                 })
                 .await??;
             let filtered = crate::bucket::filter_buckets(
-                self.part_id,
+                self.part_id.clone(),
                 self.working_level,
                 buckets,
                 &cx.part_store,

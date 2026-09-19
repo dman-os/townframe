@@ -16,7 +16,7 @@ use crate::interlude::*;
 use super::log_nickname;
 use crate::test::StressBigSyncRpcClient;
 use crate::{
-    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
+    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerKey, SqliteBigRepoStore,
     StorageConfig, WorkerGroupScope,
 };
 use big_sync::{HostPartStore, stress_support};
@@ -39,7 +39,7 @@ pub(crate) struct Node {
     repo_rpc_stop: crate::rpc::BigRepoRpcStopToken,
     accepted: Arc<Mutex<Option<BigRepoConnection>>>,
     accepts: Arc<Notify>,
-    connections: Arc<Mutex<HashMap<PeerId, BigRepoConnection>>>,
+    connections: Arc<Mutex<HashMap<PeerKey, BigRepoConnection>>>,
     /// Human label for diagnostics ("Alice"). Registered in [`log_nickname`].
     pub label: &'static str,
     pub(crate) identity_seed: [u8; 32],
@@ -47,7 +47,7 @@ pub(crate) struct Node {
     /// restarts so a restarted node keeps its hidden-parts config — a
     /// restart that drops it silently re-advertises GLOBAL to peers that
     /// still hide it, and those routes never establish.
-    hidden_parts: HashSet<big_sync_core::PartId>,
+    hidden_parts: HashSet<big_sync_core::PartKey>,
     /// Frontier-worker group scope. Disabled by default (see boot_with_store);
     /// persisted across restarts like hidden_parts.
     pub(crate) frontier_scope: WorkerGroupScope,
@@ -115,7 +115,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
     ) -> crate::Res<Self> {
         Self::boot_with_scopes(
             seed,
@@ -134,7 +134,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
     ) -> crate::Res<Self> {
         Self::boot_with_scopes_impl(seed, label, storage, hidden_parts, frontier_scope, true).await
@@ -144,7 +144,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
@@ -174,7 +174,7 @@ impl Node {
         // document scope has to be a document, which the frontier worker asserts
         // in test builds.
         store.ensure_part(stress_support::test_part()).await?;
-        store.ensure_part(crate::GLOBAL_PART_ID).await?;
+        store.ensure_part(crate::global_part_id()).await?;
         Self::boot_with_store(
             seed,
             label,
@@ -192,7 +192,7 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
         store: Arc<SqliteBigRepoStore>,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
@@ -249,6 +249,10 @@ impl Node {
             backends,
             label,
             Some(Duration::from_secs(5)),
+            // Bucket-diff, explicitly: this harness runs the band the embedder ships, so big_repo's
+            // tests exercise it; `bucket_band_reconciles_after_offline_reopen` covers the
+            // offline-reopen path that used to be the reason to stay on cursor replay.
+            Some(big_sync::SyncMode::Bucket),
             Arc::from("big-repo-test"),
         )?;
         log_nickname::register(repo.local_peer_id(), label);
@@ -304,14 +308,14 @@ impl Node {
         Ok(restarted)
     }
 
-    pub fn peer_id(&self) -> PeerId {
+    pub fn peer_id(&self) -> PeerKey {
         self.repo.local_peer_id()
     }
 
     pub(crate) async fn obj_parts_contains(
         &self,
         doc_id: DocumentId,
-        part_id: big_sync_core::PartId,
+        part_id: big_sync_core::PartKey,
     ) -> crate::Res<bool> {
         Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
     }
@@ -321,7 +325,7 @@ impl Node {
     pub(crate) async fn set_peer_parts(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
     ) -> crate::Res<()> {
         let parts = subscribed_parts
             .into_iter()
@@ -339,12 +343,37 @@ impl Node {
             )
             .await
     }
+
+    /// Authorize this node to pull `parts` from `remote`.
+    ///
+    /// Part access is explicit: nothing derives it from a document-level grant, and
+    /// `/seds` in particular is a mirror-grade grant that a document grant must never
+    /// imply. A topology whose peers are `/seds` readers therefore has to say so — and
+    /// must say so *before* the routes are registered, because a page denied at
+    /// registration backs off rather than retrying once the grant lands.
+    pub(crate) async fn allow_part_pull(
+        &self,
+        remote: &Self,
+        parts: &[big_sync_core::PartKey],
+    ) -> crate::Res<()> {
+        for part in parts {
+            remote
+                .store
+                .add_part_member(
+                    part.clone(),
+                    self.peer_id(),
+                    keyhive_core::access::Access::Read,
+                )
+                .await?;
+        }
+        Ok(())
+    }
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
     async fn connect_with_keyhive_notifications(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
             .repo
@@ -361,13 +390,13 @@ impl Node {
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_parts(remote, vec![crate::GLOBAL_PART_ID])
+        self.connect_with_parts(remote, vec![crate::global_part_id()])
             .await
     }
     pub(crate) async fn connect_with_parts(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
             .connect_with_keyhive_notifications(remote, subscribed_parts)
@@ -378,11 +407,11 @@ impl Node {
             .insert(remote.peer_id(), connection.clone());
         Ok(connection)
     }
-    pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerId> {
-        self.connections.lock().await.keys().copied().collect()
+    pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerKey> {
+        self.connections.lock().await.keys().cloned().collect()
     }
-    pub(crate) async fn disconnect_peer(&self, peer_id: PeerId) -> crate::Res<()> {
-        self.worker.remove_peer(peer_id).await?;
+    pub(crate) async fn disconnect_peer(&self, peer_id: PeerKey) -> crate::Res<()> {
+        self.worker.remove_peer(peer_id.clone()).await?;
         if let Some(connection) = self.connections.lock().await.remove(&peer_id) {
             connection.stop().await?;
         }
@@ -573,6 +602,15 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // These peers read `/seds`, the store-wide enumeration part. Part access is
+        // explicit and a page denied at registration backs off for the whole
+        // unauthorized window, so the grant has to precede the routes.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .await?;
         pair.connect().await?;
         // The contact-card exchange rides the first keyhive protocol round;
         // with the notification subscription unwired nothing starts one
@@ -732,6 +770,14 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // The frontier peers read `/seds` (store-wide enumeration): grant it before
+        // the routes are registered, or the reader's first page is denied and backs off.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
         Ok(pair)

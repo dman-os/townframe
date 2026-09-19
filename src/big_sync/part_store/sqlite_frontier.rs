@@ -8,7 +8,7 @@ use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
     KeyedFrontierResult,
 };
-use big_sync_core::rpc::{ObjAddedToPart, ObjChanged, PartEvent};
+use big_sync_core::rpc::{ObjChanged, PartEvent};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::{async_trait, serde_json};
 
-const EVENT_ADDED: i64 = 0;
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
 
@@ -127,33 +126,25 @@ impl SqliteReadSource for SqlitePartFrontier {
             }
             _ => Some(
                 row.part_id
+                    .clone()
                     .ok_or_else(|| invariant("part frontier row has no part id"))?,
             ),
         };
-        let key = match part_id {
+        let key = match &part_id {
             Some(part_id) => PartFrontierKey::Part {
-                obj_id: row.obj_id,
-                part_id,
+                obj_id: row.obj_id.clone(),
+                part_id: part_id.clone(),
             },
-            None => PartFrontierKey::Object(row.obj_id),
+            None => PartFrontierKey::Object(row.obj_id.clone()),
         };
         let value = match row.event_type {
             EVENT_REMOVED => None,
-            EVENT_ADDED => {
-                let part_id = part_id.ok_or_else(|| invariant("object key cannot be added"))?;
-                Some(PartEvent::Added(ObjAddedToPart {
-                    cursor: row.revision,
-                    part_id,
-                    obj_id: row.obj_id,
-                    payload: payload(&row)?,
-                }))
-            }
             EVENT_CHANGED => {
                 let part_ids = part_id.into_iter().collect();
                 Some(PartEvent::Changed(ObjChanged {
                     cursor: row.revision,
                     part_ids,
-                    obj_id: row.obj_id,
+                    obj_id: row.obj_id.clone(),
                     payload: payload(&row)?,
                 }))
             }
@@ -219,7 +210,7 @@ mod tests {
     use crate::keyed_frontier::contract;
     use big_sync_core::keyed_frontier::FrontierRevision;
     use big_sync_core::rpc::{ObjChanged, PartEvent};
-    use big_sync_core::{BuckId, ObjId, PartId};
+    use big_sync_core::{BuckId, ObjKey, PartKey};
     use sqlx_utils_rs::SqlCtx;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -268,11 +259,11 @@ mod tests {
         }
 
         fn key(&self, index: u64) -> PartFrontierKey {
-            let obj_id = ObjId::new([index as u8; 32]);
+            let obj_id = ObjKey::new([index as u8; 32]);
             if index == 2 {
                 PartFrontierKey::Part {
                     obj_id,
-                    part_id: PartId::new([index as u8; 32]),
+                    part_id: PartKey::new([index as u8; 32]),
                 }
             } else {
                 PartFrontierKey::Object(obj_id)
@@ -284,11 +275,11 @@ mod tests {
             PartEvent::Changed(ObjChanged {
                 cursor: 0,
                 part_ids: if object_index == 2 {
-                    vec![PartId::new([object_index; 32])]
+                    vec![PartKey::new([object_index; 32])]
                 } else {
                     Vec::new()
                 },
-                obj_id: ObjId::new([object_index; 32]),
+                obj_id: ObjKey::new([object_index; 32]),
                 payload: serde_json::json!({ "value": index }),
             })
         }

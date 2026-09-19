@@ -31,7 +31,7 @@ pub struct TokioTaskCompletion<C, O> {
 /// only the walker knows which source revisions the command covers.
 pub struct TokioKeyedScheduler<K, C, O>
 where
-    K: Eq + Hash + Copy + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
     O: Send + 'static,
 {
@@ -54,7 +54,7 @@ where
 
 impl<K, C, O> TokioKeyedScheduler<K, C, O>
 where
-    K: Eq + Hash + Copy + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
     O: Send + 'static,
 {
@@ -90,7 +90,7 @@ where
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
-        let old_task = self.scheduler.active_task(key);
+        let old_task = self.scheduler.active_task(key.clone());
         let task_id = self.scheduler.replace(Instant::now(), key, command);
         if let Some(old_task) = old_task {
             self.ready_futures.remove(&old_task);
@@ -106,7 +106,7 @@ where
 
     /// Cancel the current task for `key`, including a delayed retry.
     pub fn cancel(&mut self, key: K) {
-        let old_task = self.scheduler.active_task(key);
+        let old_task = self.scheduler.active_task(key.clone());
         if self.scheduler.cancel(key).is_some() {
             if let Some(old_task) = old_task {
                 self.ready_futures.remove(&old_task);
@@ -137,7 +137,7 @@ where
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
-        if !self.scheduler.wake(Instant::now(), key) {
+        if !self.scheduler.wake(Instant::now(), key.clone()) {
             return Ok(false);
         }
         let task_id = self

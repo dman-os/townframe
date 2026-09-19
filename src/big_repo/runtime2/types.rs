@@ -76,6 +76,10 @@ pub enum SyncDocError {
     TransportError,
     /// IO error: {0}
     IoError(#[source] eyre::Report),
+    /// The local document worker was stopping, so the received session could
+    /// not be applied to the live document. Retryable: the next round spawns a
+    /// fresh worker.
+    WorkerUnavailable,
     /// Unexpected {0}
     Other(#[from] eyre::Report),
 }
@@ -352,13 +356,23 @@ pub enum WorkerGroupScope {
     /// assignment — so eligibility never races the group-part worker, and a
     /// document that joins an eligible group later is picked up by its next
     /// admitted event (the delegating event itself).
-    Groups(std::collections::HashSet<PartId>),
+    Groups(std::collections::HashSet<PartKey>),
 }
 
 impl WorkerGroupScope {
     /// A scope that admits nothing — disables the worker.
     pub fn disabled() -> Self {
         Self::Groups(std::collections::HashSet::new())
+    }
+
+    /// Whether this scope is `Groups(∅)`, which admits no document at all.
+    ///
+    /// Callers that decide eligibility against a *live* Keyhive membership set can
+    /// use this to skip that traversal: with no groups in the scope the answer is
+    /// `false` for every document, whatever Keyhive says. The traversal is a
+    /// shared-lock walk, so skipping it matters for the disabled configuration.
+    pub fn admits_nothing(&self) -> bool {
+        matches!(self, Self::Groups(groups) if groups.is_empty())
     }
 
     /// Is a document whose containing-group ids are `doc_groups` eligible for
@@ -386,7 +400,7 @@ impl WorkerGroupScope {
     /// (`None` — no group lookups at all) or filter events by these groups
     /// (`Some(set)` — the set is the group list, never derived from a keyhive
     /// enumeration).
-    pub fn groups(&self) -> Option<&std::collections::HashSet<PartId>> {
+    pub fn groups(&self) -> Option<&std::collections::HashSet<PartKey>> {
         match self {
             Self::All => None,
             Self::Groups(groups) => Some(groups),
@@ -491,6 +505,21 @@ mod worker_scope_tests {
     }
 
     #[test]
+    fn disabled_scope_admits_no_document_and_says_so() {
+        let disabled = WorkerGroupScope::disabled();
+        assert!(disabled.admits_nothing());
+        assert!(!disabled.admits_doc_groups(&BTreeSet::from([[7; 32]])));
+        // The predicate is about the scope, not an accident of one document: a
+        // selective scope holding any group must not report itself as admitting
+        // nothing, and `All` never does.
+        assert!(!WorkerGroupScope::All.admits_nothing());
+        assert!(
+            !WorkerGroupScope::Groups(HashSet::from([super::group_part_id([7; 32])]))
+                .admits_nothing()
+        );
+    }
+
+    #[test]
     fn groups_accessor_makes_the_site_decision_explicit() {
         let eligible = [7; 32];
         let other = [9; 32];
@@ -528,12 +557,12 @@ mod tests {
         let doc_id = DocumentId::new([23; 32]);
 
         let err = DocLookup::<()>::Missing
-            .into_ready(doc_id)
+            .into_ready(doc_id.clone())
             .expect_err("missing doc should fail");
         assert!(matches!(err, GetDocError::NotFound(id) if id == doc_id));
 
         let err = DocLookup::<()>::PendingMaterialization
-            .into_ready(doc_id)
+            .into_ready(doc_id.clone())
             .expect_err("pending doc should fail");
         assert!(matches!(err, GetDocError::PendingMaterialization(id) if id == doc_id));
 

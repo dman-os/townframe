@@ -10,29 +10,29 @@ use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
 };
 use big_sync_core::rpc::{
-    ObjAddedToPart, ObjChanged, ObjRemovedFromPart, SubEvent, SubPartsRequest, SubscriptionTarget,
+    ObjChanged, ObjRemovedFromPart, SubEvent, SubPartsRequest, SubscriptionTarget,
 };
 use serde_json::Value;
 
+/// A document revision observed on the physical frontier.
+///
+/// Two kinds, matching the subscription layer's vocabulary (ADR 012 decision 9):
+/// `Changed` is a touch and `Removed` is gone. There is no `Added`: the physical
+/// frontier is latest-row-per-key, so an event cannot say whether an object is new
+/// to a given replica, and every consumer of this enum is asking "what is the
+/// document's current revision, and along which routes".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomergeFrontierEvent {
-    Added {
-        doc_id: crate::DocumentId,
-        heads: Arc<[automerge::ChangeHash]>,
-        causal_epoch: Option<[u8; 32]>,
-        route: PartId,
-        revision: u64,
-    },
     Changed {
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
         causal_epoch: Option<[u8; 32]>,
-        routes: Vec<PartId>,
+        routes: Vec<PartKey>,
         revision: u64,
     },
     Removed {
         doc_id: crate::DocumentId,
-        route: PartId,
+        route: PartKey,
         revision: u64,
     },
 }
@@ -43,10 +43,10 @@ pub enum AutomergeFrontierTarget {
     /// Read every part and object in the local store, including newly-created parts.
     All,
     Part {
-        part_id: PartId,
+        part_id: PartKey,
     },
     Object {
-        obj_id: ObjId,
+        obj_id: ObjKey,
     },
 }
 
@@ -55,7 +55,7 @@ pub enum AutomergeFrontierTarget {
 /// objects reader. The replay cursor is supplied separately to `open`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutomergeFrontierSelector {
-    // The dedicated frontier scope makes ObjId -> DocumentId bijective;
+    // The dedicated frontier scope makes ObjKey -> DocumentId bijective;
     // object/part targets additionally restrict reads for per-document users.
     pub targets: Vec<AutomergeFrontierTarget>,
 }
@@ -120,9 +120,10 @@ impl RevisionedStore for AutomergeFrontierRevisionStore {
                             part_id,
                             cursor: after,
                         },
-                        AutomergeFrontierTarget::Object { obj_id } => {
-                            SubscriptionTarget::Object { obj_id }
-                        }
+                        AutomergeFrontierTarget::Object { obj_id } => SubscriptionTarget::Object {
+                            obj_id,
+                            cursor: after,
+                        },
                     })
                     .collect(),
             };
@@ -145,7 +146,7 @@ type FrontierDocState = (
     Option<[u8; 32]>,
 );
 
-fn doc_and_heads(obj_id: ObjId, payload: &ObjPayload, revision: u64) -> Res<FrontierDocState> {
+fn doc_and_heads(obj_id: ObjKey, payload: &ObjPayload, revision: u64) -> Res<FrontierDocState> {
     let heads = payload
         .get("heads")
         .and_then(Value::as_array)
@@ -201,23 +202,6 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                 let mut out = Vec::new();
                 for event in entries {
                     match event {
-                        SubEvent::Added(ObjAddedToPart {
-                            cursor,
-                            part_id,
-                            obj_id,
-                            payload,
-                        }) => {
-                            let (doc_id, heads, causal_epoch) =
-                                doc_and_heads(obj_id, &payload, revision)
-                                    .wrap_err("invalid physical document revision")?;
-                            out.push(AutomergeFrontierEvent::Added {
-                                doc_id,
-                                heads,
-                                causal_epoch,
-                                route: part_id,
-                                revision: cursor,
-                            });
-                        }
                         SubEvent::Changed(ObjChanged {
                             cursor,
                             part_ids,
@@ -253,7 +237,7 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                             // object has no remaining frontier routes.
                             if !self
                                 .store
-                                .obj_parts(obj_id)
+                                .obj_parts(obj_id.clone())
                                 .await
                                 .wrap_err("reading remaining frontier routes")?
                                 .is_empty()
@@ -304,23 +288,23 @@ mod tests {
 
     #[tokio::test]
     async fn reader_maps_atomic_events_and_replay_boundary() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
-        let p1 = PartId::new([1; 32]);
-        let p2 = PartId::new([2; 32]);
+        let obj = ObjKey::new([9; 32]);
+        let p1 = PartKey::new([1; 32]);
+        let p2 = PartKey::new([2; 32]);
         let reads = VecDeque::from([
             RevisionRead::Entries {
                 revision: 3,
                 entries: vec![
-                    SubEvent::Added(ObjAddedToPart {
+                    SubEvent::Changed(ObjChanged {
                         cursor: 3,
-                        part_id: p1,
-                        obj_id: obj,
+                        part_ids: vec![p1.clone()],
+                        obj_id: obj.clone(),
                         payload: payload(1),
                     }),
                     SubEvent::Changed(ObjChanged {
                         cursor: 3,
-                        part_ids: vec![p1, p2],
-                        obj_id: obj,
+                        part_ids: vec![p1.clone(), p2],
+                        obj_id: obj.clone(),
                         payload: payload(2),
                     }),
                     SubEvent::Removed(ObjRemovedFromPart {
@@ -367,12 +351,14 @@ mod tests {
 
     #[tokio::test]
     async fn reader_skips_route_removal_with_remaining_frontier_route() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
-        let p1 = PartId::new([1; 32]);
-        let p2 = PartId::new([2; 32]);
+        let obj = ObjKey::new([9; 32]);
+        let p1 = PartKey::new([1; 32]);
+        let p2 = PartKey::new([2; 32]);
         let store = Arc::new(big_sync::MemoryPartStore::default());
-        store.add_obj_to_parts(obj, vec![p1, p2]).await?;
-        store.remove_obj_from_part(obj, p1).await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![p1.clone(), p2])
+            .await?;
+        store.remove_obj_from_part(obj.clone(), p1.clone()).await?;
 
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
@@ -397,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_ignores_object_subscription_route_removal_churn() -> Res<()> {
-        let obj = ObjId::new([9; 32]);
+        let obj = ObjKey::new([9; 32]);
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
             entries: vec![SubEvent::Changed(ObjChanged {
@@ -427,7 +413,7 @@ mod tests {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let epoch = [7; 32];
         let (_, parsed_heads, parsed_epoch) = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": epoch }),
             1,
         )
@@ -440,7 +426,7 @@ mod tests {
     fn frontier_payload_accepts_null_causal_epoch() {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let (_, _, parsed_epoch) = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": null }),
             1,
         )
@@ -450,9 +436,9 @@ mod tests {
 
     #[test]
     fn malformed_heads_are_errors() {
-        let err = doc_and_heads(ObjId::new([7; 32]), &serde_json::json!({"heads": [3]}), 1);
+        let err = doc_and_heads(ObjKey::new([7; 32]), &serde_json::json!({"heads": [3]}), 1);
         assert!(err.is_err());
-        let err = doc_and_heads(ObjId::new([7; 32]), &serde_json::json!({}), 1);
+        let err = doc_and_heads(ObjKey::new([7; 32]), &serde_json::json!({}), 1);
         assert!(err.is_err());
     }
 
@@ -460,7 +446,7 @@ mod tests {
     fn malformed_causal_epoch_is_error() {
         let heads = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1; 32])]);
         let err = doc_and_heads(
-            ObjId::new([7; 32]),
+            ObjKey::new([7; 32]),
             &serde_json::json!({ "heads": heads, "causal_epoch": [1, 2] }),
             1,
         );
@@ -500,20 +486,20 @@ mod tests {
             entry: <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry,
         ) -> Result<u64, <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Error>
         {
-            let AutomergeFrontierEvent::Added {
+            let AutomergeFrontierEvent::Changed {
                 doc_id,
                 heads,
-                route,
+                routes,
                 ..
             } = entry
             else {
-                panic!("harness commits Added events only");
+                panic!("harness commits Changed events only");
             };
             let obj_id = crate::runtime2::automerge_doc_obj_id(doc_id);
-            // Add the part first (no event while the payload is absent), then
+            // Add the parts first (no event while the payload is absent), then
             // set the payload — one frontier event per commit.
             self.part_store
-                .add_obj_to_parts(obj_id, vec![route])
+                .add_obj_to_parts(obj_id.clone(), routes)
                 .await
                 .expect("add object to part");
             self.part_store
@@ -531,11 +517,11 @@ mod tests {
             &self,
             index: u64,
         ) -> <Self::Store as big_sync_core::revisioned_store::RevisionedStore>::Entry {
-            AutomergeFrontierEvent::Added {
+            AutomergeFrontierEvent::Changed {
                 doc_id: crate::DocumentId::new([index as u8; 32]),
                 heads: Arc::from([automerge::ChangeHash([index as u8; 32])]),
                 causal_epoch: None,
-                route: PartId::new([index as u8; 32]),
+                routes: vec![PartKey::new([index as u8; 32])],
                 revision: 0,
             }
         }
@@ -549,12 +535,12 @@ mod tests {
             // harness's expected events carry a placeholder revision.
             match (expected, actual) {
                 (
-                    AutomergeFrontierEvent::Added {
+                    AutomergeFrontierEvent::Changed {
                         doc_id: expected_doc,
                         heads: expected_heads,
                         ..
                     },
-                    AutomergeFrontierEvent::Added {
+                    AutomergeFrontierEvent::Changed {
                         doc_id: actual_doc,
                         heads: actual_heads,
                         ..

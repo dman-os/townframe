@@ -1,30 +1,35 @@
-// FIXME: consdier using u64 or u128 for ObjIds since they'll
+// FIXME: consdier using u64 or u128 for ObjKeys since they'll
 // be repo scoped
 
 use crate::interlude::*;
 use crate::rpc::BuckLevel;
 
-macro_rules! alias_byte32id {
+macro_rules! alias_byte_key {
     ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
-        #[repr(transparent)]
-        pub struct $name(pub Byte32Id);
+        pub struct $name(pub ByteKey);
         impl std::ops::Deref for $name {
-            type Target = Byte32Id;
+            type Target = ByteKey;
 
             fn deref(&self) -> &Self::Target {
                 &self.0
             }
         }
         impl $name {
+            /// Construct from the key's byte string.
+            ///
+            /// ADR 012 decision 1: identity *is* the byte string, so any length is a
+            /// valid key. The 32-byte width this replaced was an artifact of deriving
+            /// keys as random digests, and an ordering requirement is a property of the
+            /// byte string rather than of the width.
             #[must_use]
-            pub const fn new(bytes: [u8; 32]) -> Self {
-                Self(Byte32Id::new(bytes))
+            pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+                Self(ByteKey::new(bytes))
             }
 
             pub fn random() -> Self {
-                Self(Byte32Id::random())
+                Self(ByteKey::random())
             }
         }
         impl std::fmt::Display for $name {
@@ -41,7 +46,7 @@ macro_rules! alias_byte32id {
             type Err = DecodeError;
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Ok(Self(Byte32Id::from_str(value)?))
+                Ok(Self(ByteKey::from_str(value)?))
             }
         }
 
@@ -53,158 +58,203 @@ macro_rules! alias_byte32id {
                 &self,
                 mut reconciler: R,
             ) -> Result<(), R::Error> {
-                reconciler.bytes(self.0.0)
+                reconciler.bytes(self.as_bytes())
             }
         }
 
         #[cfg(feature = "automerge")]
         impl autosurgeon::Hydrate for $name {
             fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
-                if bytes.len() != 32 {
-                    return Err(autosurgeon::HydrateError::unexpected(
-                        "version tag in 32 length byte array",
-                        format!("version tags has byte length of {}", bytes.len()),
-                    ));
-                }
-                let mut buf = [0_u8; 32];
-                buf.copy_from_slice(&bytes[0..32]);
-                Ok(Self(Byte32Id(buf)))
+                Ok(Self(ByteKey::new(bytes)))
             }
         }
     };
 }
 
-alias_byte32id!(PartId);
-alias_byte32id!(ObjId);
-alias_byte32id!(PeerId);
+alias_byte_key!(PartKey);
+alias_byte_key!(ObjKey);
+alias_byte_key!(PeerKey);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Byte32Id([u8; 32]);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteKey(std::sync::Arc<[u8]>);
 
-impl Byte32Id {
+impl ByteKey {
     #[must_use]
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(std::sync::Arc::from(bytes.into()))
     }
 
     pub fn random() -> Self {
-        Self(rand::random())
+        Self(std::sync::Arc::from(rand::random::<[u8; 32]>().to_vec()))
     }
 
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     #[must_use]
-    pub const fn into_bytes(self) -> [u8; 32] {
-        self.0
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    /// The key's bytes as a fixed-width 32-byte array.
+    ///
+    /// ADR 012 decision 1 makes keys variable-length, but the fixed-width consumers at
+    /// the workspace edges — ed25519 verifying keys, `KeyhivePeerId`, keyhive archive
+    /// reservations, automerge change hashes — still take a `[u8; 32]`. A key this
+    /// process minted is a 32-byte digest by construction, so a different length there is
+    /// an invariant break rather than something to handle. A key a peer delivered is not:
+    /// the sync edges convert that one through a fallible path of their own instead of
+    /// reaching for this assertion.
+    #[must_use]
+    pub fn to_bytes32(&self) -> [u8; 32] {
+        self.as_bytes()
+            .try_into()
+            .expect("key that must be 32 bytes is not")
     }
 }
 
-impl std::fmt::Display for Byte32Id {
+/// The reserved key spaces of ADR 012 decision 1, which read as the text they are:
+/// `/…` collection keys such as `/seds`, and `o:/…` object-part keys over a
+/// path-shaped object key.
+///
+/// Everything else — a group part, an object part over a digest, an object, a peer — is
+/// binary or non-textual, and renders as multibase base58btc instead.
+fn reserved_text(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    let reserved = match text.strip_prefix("o:") {
+        Some(payload) => payload.starts_with('/'),
+        None => text.starts_with('/'),
+    };
+    reserved.then_some(text)
+}
+
+impl std::fmt::Display for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // FIXME: use fixed size stack buffer to write string onto and then write that onto the
-        // formatter
-        write!(formatter, "{}", bs58::encode(&self.0).into_string())
+        // ADR 012 decision 1: the reserved key spaces read as the text they are, so
+        // `"/seds"` and `"o:/object/path"` are their own names and the `o:` scheme stays
+        // readable on a key whose payload is itself a path. An object part over a digest
+        // keeps the scheme and renders its payload as multibase base58btc (`o:z…`), and
+        // every other key renders as multibase outright. `FromStr` is the exact inverse:
+        // only a path-shaped payload is read back as literal text, which is what keeps
+        // the two total on every key rather than ambiguous on keys that begin with `z`.
+        match reserved_text(&self.0) {
+            Some(text) => formatter.write_str(text),
+            None => match self.0.strip_prefix(b"o:") {
+                Some(payload) => write!(
+                    formatter,
+                    "o:{}",
+                    utils_rs::hash::encode_base58_multibase(payload)
+                ),
+                None => write!(
+                    formatter,
+                    "{}",
+                    utils_rs::hash::encode_base58_multibase(&self.0)
+                ),
+            },
+        }
     }
 }
 
-impl std::fmt::Debug for Byte32Id {
+impl std::fmt::Debug for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, formatter)
     }
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
-/// Error decoding bs58 string
+/// Key text is neither a reserved key space nor a multibase base58btc string
 pub struct DecodeError;
 
-impl std::str::FromStr for Byte32Id {
+impl std::str::FromStr for ByteKey {
     type Err = DecodeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let bytes: [u8; 32] = bs58::decode(value.as_bytes())
-            .into_array_const()
-            .map_err(|_| DecodeError)?;
-        Ok(Self(bytes))
+        // The inverse of `Display`, and deliberately not total: this parse is an
+        // external boundary — a blob hash out of a URL or blob metadata, a uniffi
+        // caller, an id read back from storage — where text that is not a key has to
+        // be an error rather than a fresh identity. A key is the reserved text it reads
+        // as (`/seds`, `o:/object/path`), or `o:` followed by a multibase payload, or
+        // multibase.
+        if reserved_text(value.as_bytes()).is_some() {
+            return Ok(Self::new(value.as_bytes()));
+        }
+        if let Some(payload) = value.strip_prefix("o:") {
+            let encoded = payload.strip_prefix('z').ok_or(DecodeError)?;
+            let mut bytes = b"o:".to_vec();
+            bytes.extend_from_slice(&bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?);
+            return Ok(Self::new(bytes));
+        }
+        let encoded = value.strip_prefix('z').ok_or(DecodeError)?;
+        Ok(Self::new(
+            bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?,
+        ))
     }
 }
 
-impl Serialize for Byte32Id {
+impl Serialize for ByteKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         if serializer.is_human_readable() {
-            utils_rs::hash::encode_base58_multibase(self.0).serialize(serializer)
+            utils_rs::hash::encode_base58_multibase(&self.0).serialize(serializer)
         } else {
             serializer.serialize_bytes(&self.0)
         }
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Byte32Id {
+impl<'de> serde::Deserialize<'de> for ByteKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         if deserializer.is_human_readable() {
             let str = String::deserialize(deserializer)?;
-            let mut buf = [0u8; 32];
-            utils_rs::hash::decode_base58_multibase_onto(&str, &mut buf)
-                .map_err(serde::de::Error::custom)?;
-            Ok(Self(buf))
+            // One codec: the human-readable form is `Display`, so a reserved key reads
+            // back as the text it is alongside multibase keys. (`FromStr` rather than
+            // `decode_base58_multibase`, which indexes the first byte and so panics on
+            // the empty string instead of erroring.)
+            std::str::FromStr::from_str(&str).map_err(serde::de::Error::custom)
         } else {
             struct MyVisitor;
             impl<'de> serde::de::Visitor<'de> for MyVisitor {
-                type Value = [u8; 32];
+                type Value = Vec<u8>;
 
                 fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    fmt.write_str("a 32 length byte string")
+                    fmt.write_str("a byte string")
                 }
 
                 fn visit_bytes<E>(self, val: &[u8]) -> Result<Self::Value, E>
                 where
                     E: serde::de::Error,
                 {
-                    if val.len() != 32 {
-                        return Err(serde::de::Error::invalid_length(
-                            val.len(),
-                            &"32 length byte array",
-                        ));
-                    }
-                    let mut buf = [0u8; 32];
-                    buf.copy_from_slice(val);
-                    Ok(buf)
+                    Ok(val.to_vec())
                 }
             }
-            deserializer.deserialize_bytes(MyVisitor).map(Self)
+            deserializer.deserialize_bytes(MyVisitor).map(Self::new)
         }
     }
 }
 
 #[cfg(feature = "automerge")]
-impl autosurgeon::Reconcile for Byte32Id {
+impl autosurgeon::Reconcile for ByteKey {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
-        reconciler.bytes(self.0)
+        reconciler.bytes(self.as_bytes())
     }
 }
 
 #[cfg(feature = "automerge")]
-impl autosurgeon::Hydrate for Byte32Id {
+impl autosurgeon::Hydrate for ByteKey {
     fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
-        if bytes.len() != 32 {
-            return Err(autosurgeon::HydrateError::unexpected(
-                "byte id in 32 length byte array",
-                format!("byte string has byte length of {}", bytes.len()),
-            ));
-        }
-        let mut buf = [0_u8; 32];
-        buf.copy_from_slice(&bytes[0..32]);
-        Ok(Self(buf))
+        Ok(Self::new(bytes))
     }
 }
 
@@ -276,13 +326,47 @@ impl BuckId {
         }
     }
 
+    /// The deepest bucket an object key falls into: the full hash-derived index.
+    ///
+    /// ADR 012 decision 1: distribution is an explicitly chosen hash of the key at the
+    /// point of use, never an index inherited from the key's own leading bytes. Keys are
+    /// arbitrary byte strings whose prefixes now *mean* something — every object part key
+    /// begins `o:`, and a textual key's leading bytes are its path — so an inherited index
+    /// would pile unrelated objects into one bucket and degenerate the tree at its top
+    /// level (every `o:`-prefixed key would land in the single level-4 bucket `0x6f3a`).
+    ///
+    /// Hashing first keeps the level/truncation hierarchy intact, because a parent is
+    /// still a prefix of its children in *hash* space. It severs only the correspondence
+    /// between bucket order and key order, and nothing in the protocol relies on that:
+    /// requests, pages and relists are all ordered and compared in bucket order, and the
+    /// per-part authorization boundary means a bucket is never a disclosure unit.
     #[inline]
-    pub fn from_obj_id(level: BuckLevel, obj_id: &ObjId) -> Self {
-        debug_assert!(level <= Self::MAX_LEVEL);
-        let l4_index = u16::from_be_bytes([obj_id.0.0[0], obj_id.0.0[1]]);
-        Self::new(4, l4_index).to_level(level)
+    #[must_use]
+    pub fn deepest_from_obj_key(obj_key: &ObjKey) -> Self {
+        let hash = blake3::hash(obj_key.as_bytes());
+        let bytes = hash.as_bytes();
+        Self::new(Self::MAX_LEVEL, u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
+    /// The bucket an object key falls into at `level`.
+    #[inline]
+    #[must_use]
+    pub fn from_obj_key(level: BuckLevel, obj_key: &ObjKey) -> Self {
+        debug_assert!(level <= Self::MAX_LEVEL);
+        Self::deepest_from_obj_key(obj_key).to_level(level)
+    }
+
+    /// The next page cursor within this level.
+    ///
+    /// ADR 012 decision 1 audit: this counts pages *at one level*, it does not walk the
+    /// tree, and an increment past this level's last index deliberately leaves the level
+    /// field alone. Requests are level-scoped (`get_changed_buckets` matches on
+    /// `offset.level()`), so the overflowed index is only ever an exclusive lower bound in
+    /// bucket order: the store answers an empty page, `filter_buckets` reads that as
+    /// `Done`, and that *is* what "nothing more at this level" looks like. Offsets that do
+    /// change level come from a dive (`Relist(dirty.to_level(level + 1))`), which the
+    /// machine's `next_page_offset.level() > working_level` check catches. None of this
+    /// depends on key order, which is why the hash-derived index needed no change here.
     #[inline]
     pub fn increment(&self) -> Self {
         if *self == Self::new(Self::MAX_LEVEL, u16::MAX) {
@@ -290,5 +374,92 @@ impl BuckId {
         } else {
             Self(self.0 + 1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    /// ADR 012 decision 1: a reserved key space is its own name, and the `o:` scheme stays
+    /// readable over both a path-shaped and a digest payload.
+    #[test]
+    fn reserved_key_spaces_read_as_their_text() {
+        assert_eq!(PartKey::new("/seds").to_string(), "/seds");
+        assert_eq!(PartKey::new("/drawer/plans").to_string(), "/drawer/plans");
+
+        let path = ObjKey::new(b"/object/path");
+        assert_eq!(path.to_string(), "/object/path");
+        assert_eq!(
+            PartKey::new(b"o:/object/path").to_string(),
+            "o:/object/path"
+        );
+
+        // A digest renders as multibase, and an `o:`-prefixed key keeps the scheme in
+        // front of it, so it reads as an object part name rather than as an unrelated
+        // digest.
+        let digest = ObjKey::new([7; 32]);
+        assert!(digest.to_string().starts_with('z'), "{digest}");
+        let mut part_bytes = b"o:".to_vec();
+        part_bytes.extend_from_slice(digest.as_bytes());
+        let part = PartKey::new(part_bytes).to_string();
+        assert!(part.starts_with("o:z"), "{part}");
+        assert_eq!(
+            part.strip_prefix("o:")
+                .and_then(|payload| payload.parse::<ObjKey>().ok()),
+            Some(digest)
+        );
+    }
+
+    /// `Display` and `FromStr` are inverses on every key the crate constructs. The `o:`
+    /// payload is only read back as text when it is path-shaped, which is what keeps the
+    /// pair total instead of ambiguous on a payload that itself begins with `z`.
+    #[test]
+    fn keys_round_trip_through_their_text_form() {
+        for key in [
+            PartKey::new("/seds"),
+            PartKey::new(b"/binary\xff\x00"),
+            PartKey::new(b"o:zero"),
+            PartKey::new(b"o:\x00\x01"),
+        ] {
+            assert_eq!(key.to_string().parse::<PartKey>().unwrap(), key, "{key}");
+        }
+        for key in [
+            ObjKey::new(b"/object/path"),
+            ObjKey::new(b"zero"),
+            ObjKey::new([9; 32]),
+        ] {
+            assert_eq!(key.to_string().parse::<ObjKey>().unwrap(), key, "{key}");
+        }
+        let peer = PeerKey::new([3; 32]);
+        assert_eq!(peer.to_string().parse::<PeerKey>().unwrap(), peer);
+    }
+
+    /// Text that is not a key is an error. This parse is an external boundary — a blob
+    /// hash out of a URL or blob metadata, a uniffi caller, an id read back from storage —
+    /// so a typo has to fail rather than become an identity of its own.
+    #[test]
+    fn text_that_is_not_a_key_is_rejected() {
+        assert!("not_base58_hash".parse::<ObjKey>().is_err());
+        assert!("".parse::<PartKey>().is_err());
+        assert!("0OIl".parse::<PartKey>().is_err());
+        assert!("o:".parse::<PartKey>().is_err());
+        assert!("o:notbase58".parse::<PartKey>().is_err());
+        assert!("z0OIl!".parse::<PartKey>().is_err());
+    }
+
+    /// The human-readable serde form is the same codec, so a stored id reads as itself and
+    /// an empty string is a decode error rather than an index panic.
+    #[test]
+    fn human_readable_serde_reads_the_display_form() {
+        let read = |text: &str| {
+            PartKey::deserialize(
+                serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text),
+            )
+        };
+        assert_eq!(read("/seds").unwrap(), PartKey::new("/seds"));
+        assert!(read("").is_err());
+        assert!(read("not_base58_hash").is_err());
     }
 }

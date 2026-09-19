@@ -9,7 +9,7 @@ use big_sync_core::keyed_frontier::{
     TransactionIsolation,
 };
 use big_sync_core::rpc::PartEvent;
-use big_sync_core::{ObjId, PartId};
+use big_sync_core::{ObjKey, PartKey};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use utils_rs::prelude::{async_trait, serde_json};
 
 use super::PartFrontierKey;
 
-const EVENT_ADDED: i64 = 0;
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
 
@@ -83,31 +82,35 @@ impl<'a> SqliteFrontierWrite<'a> {
         u64::try_from(value).map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
-    async fn obj_ref(&mut self, obj_id: ObjId) -> KeyedFrontierResult<i64> {
-        sqlx::query("INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id) VALUES (?, ?)")
-            .bind(self.scope_id)
-            .bind(obj_id.0.into_bytes().to_vec())
-            .execute(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+    async fn obj_ref(&mut self, obj_id: ObjKey) -> KeyedFrontierResult<i64> {
+        let buck_index = i64::from(big_sync_core::BuckId::deepest_from_obj_key(&obj_id).index());
+        sqlx::query(
+            "INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id, buck_index) VALUES (?, ?, ?)",
+        )
+        .bind(self.scope_id)
+        .bind(obj_id.as_bytes().to_vec())
+        .bind(buck_index)
+        .execute(&mut **self.transaction_mut())
+        .await
+        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         sqlx::query_scalar("SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?")
             .bind(self.scope_id)
-            .bind(obj_id.0.into_bytes().to_vec())
+            .bind(obj_id.as_bytes().to_vec())
             .fetch_one(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
-    async fn part_ref(&mut self, part_id: PartId) -> KeyedFrontierResult<i64> {
+    async fn part_ref(&mut self, part_id: PartKey) -> KeyedFrontierResult<i64> {
         sqlx::query("INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id) VALUES (?, ?)")
             .bind(self.scope_id)
-            .bind(part_id.0.into_bytes().to_vec())
+            .bind(part_id.as_bytes().to_vec())
             .execute(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         sqlx::query_scalar("SELECT part_ref FROM big_sync_parts WHERE scope_id = ? AND part_id = ?")
             .bind(self.scope_id)
-            .bind(part_id.0.into_bytes().to_vec())
+            .bind(part_id.as_bytes().to_vec())
             .fetch_one(&mut **self.transaction_mut())
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
@@ -118,7 +121,7 @@ impl<'a> SqliteFrontierWrite<'a> {
         key: &PartFrontierKey,
     ) -> KeyedFrontierResult<Option<PartEvent>> {
         let (obj_id, maybe_part_ref) = match key {
-            PartFrontierKey::Object(obj_id) => (*obj_id, 0),
+            PartFrontierKey::Object(obj_id) => (obj_id.clone(), 0),
             PartFrontierKey::Part { obj_id, part_id } => {
                 let part_ref = sqlx::query_scalar(
                     "SELECT part_ref
@@ -127,14 +130,14 @@ impl<'a> SqliteFrontierWrite<'a> {
                         AND part_id = ?",
                 )
                 .bind(self.scope_id)
-                .bind(part_id.0.into_bytes().to_vec())
+                .bind(part_id.as_bytes().to_vec())
                 .fetch_optional(&mut **self.transaction_mut())
                 .await
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
                 let Some(part_ref) = part_ref else {
                     return Ok(None);
                 };
-                (*obj_id, part_ref)
+                (obj_id.clone(), part_ref)
             }
         };
         let row = sqlx::query(
@@ -149,7 +152,7 @@ impl<'a> SqliteFrontierWrite<'a> {
         )
         .bind(self.scope_id)
         .bind(self.scope_id)
-        .bind(obj_id.0.into_bytes().to_vec())
+        .bind(obj_id.as_bytes().to_vec())
         .bind(maybe_part_ref)
         .fetch_optional(&mut **self.transaction_mut())
         .await
@@ -188,18 +191,10 @@ impl<'a> SqliteFrontierWrite<'a> {
                     payload,
                 })
             }
-            PartFrontierKey::Part { part_id, .. } if event_type == EVENT_ADDED => {
-                PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor,
-                    part_id: *part_id,
-                    obj_id,
-                    payload,
-                })
-            }
             PartFrontierKey::Part { part_id, .. } if event_type == EVENT_CHANGED => {
                 PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                     cursor,
-                    part_ids: vec![*part_id],
+                    part_ids: vec![part_id.clone()],
                     obj_id,
                     payload,
                 })
@@ -216,9 +211,9 @@ impl<'a> SqliteFrontierWrite<'a> {
         key: PartFrontierKey,
         mutation: Option<PartEvent>,
     ) -> KeyedFrontierResult<()> {
-        let (obj_id, part_id) = match key {
-            PartFrontierKey::Object(obj_id) => (obj_id, None),
-            PartFrontierKey::Part { obj_id, part_id } => (obj_id, Some(part_id)),
+        let (obj_id, part_id) = match &key {
+            PartFrontierKey::Object(obj_id) => (obj_id.clone(), None),
+            PartFrontierKey::Part { obj_id, part_id } => (obj_id.clone(), Some(part_id.clone())),
         };
         let obj_ref = self.obj_ref(obj_id).await?;
         let (event_type, payload) = match (key, mutation) {
@@ -226,11 +221,6 @@ impl<'a> SqliteFrontierWrite<'a> {
                 if changed.obj_id == obj_id && changed.part_ids.is_empty() =>
             {
                 (EVENT_CHANGED, Some(changed.payload))
-            }
-            (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Added(added)))
-                if added.obj_id == obj_id && added.part_id == part_id =>
-            {
-                (EVENT_ADDED, Some(added.payload))
             }
             (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Changed(changed)))
                 if changed.obj_id == obj_id
@@ -259,16 +249,28 @@ impl<'a> SqliteFrontierWrite<'a> {
             Some(part_id) => self.part_ref(part_id).await?,
             None => 0,
         };
+        // `added_at` is the cursor at which this row most recently became present: set on
+        // insert and on the tombstone-to-present transition (a re-add), and preserved by a
+        // present-to-present touch. A row that stays a tombstone keeps whatever stamp it had,
+        // because the stamp is what tells a reader the removal is its business.
         sqlx::query(
-            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET event_type = excluded.event_type, txid = excluded.txid",
+            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                 event_type = excluded.event_type,
+                 txid = excluded.txid,
+                 added_at = CASE
+                     WHEN big_sync_members.event_type = ? THEN excluded.txid
+                     ELSE big_sync_members.added_at
+                 END",
         )
         .bind(self.scope_id)
         .bind(obj_ref)
         .bind(maybe_part_ref)
         .bind(event_type)
         .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
+        .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
+        .bind(EVENT_REMOVED)
         .execute(&mut **self.transaction_mut())
         .await
         .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;

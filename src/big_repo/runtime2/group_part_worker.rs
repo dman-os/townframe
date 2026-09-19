@@ -6,7 +6,7 @@
 //! derived work has completed successfully.
 
 use crate::interlude::*;
-use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::{BigKeyhiveHandle, EventSubject};
 use crate::runtime2::{WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::{GroupPartReconciliation, SqliteBigRepoStore};
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
@@ -43,7 +43,7 @@ pub struct SpawnedGroupPartWorker<F: FutureForm> {
 pub fn spawn_group_part_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
@@ -60,22 +60,25 @@ pub fn spawn_group_part_worker(
                 .await?;
 
             if cursor == 0 {
-                let initial_group_parts: HashSet<PartId> = match scope.groups() {
+                let initial_group_parts: HashSet<PartKey> = match scope.groups() {
                     None => store.list_parts().await?,
-                    Some(groups) => groups.iter().copied().collect(),
+                    Some(groups) => groups.iter().cloned().collect(),
                 };
                 for part_id in &initial_group_parts {
-                    store.ensure_part(*part_id).await?;
+                    store.ensure_part(part_id.clone()).await?;
                 }
                 let initial_group_parts = Arc::new(initial_group_parts);
+                let group_agents = Arc::new(GroupAgentsMemo::default());
                 let docs = keyhive.document_ids().await;
                 let futs = docs.into_iter().map(|doc| {
+                    let local_peer_id = local_peer_id.clone();
                     let store = store.clone();
                     let keyhive = keyhive.clone();
                     let initial_group_parts = Arc::clone(&initial_group_parts);
+                    let group_agents = Arc::clone(&group_agents);
                     let scope = scope.clone();
                     async move {
-                        let doc_id = crate::DocumentId::new(doc.into_bytes());
+                        let doc_id = crate::DocumentId::new(doc.as_bytes());
                         if let Some(_) = scope.groups()
                             && !scope.admits_doc_groups(
                                 &keyhive.group_ids_containing_document(doc_id).await?,
@@ -89,6 +92,7 @@ pub fn spawn_group_part_worker(
                             &initial_group_parts,
                             &scope,
                             local_peer_id,
+                            &group_agents,
                         )
                         .await?;
                         store
@@ -141,6 +145,7 @@ pub fn spawn_group_part_worker(
                 pending_sources: HashMap::new(),
                 pending_documents: HashMap::new(),
                 pending_group_parts: HashMap::new(),
+                parked_decodes: HashMap::new(),
                 outbox: Outbox::default(),
             };
             worker.machine_loop().await
@@ -164,11 +169,11 @@ enum Cmd {
     AnnounceSettled(u64),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum GroupPartKey {
     Decode(u64),
-    Document(ObjId),
-    Group(PartId),
+    Document(ObjKey),
+    Group(PartKey),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,12 +189,12 @@ enum Task {
         source: SourceCursor,
     },
     ReconcileDocument {
-        doc: ObjId,
-        affected_group_parts: HashSet<PartId>,
+        doc: ObjKey,
+        affected_group_parts: HashSet<PartKey>,
         sources: Vec<SourceCursor>,
     },
     EnsurePart {
-        part: PartId,
+        part: PartKey,
         sources: Vec<SourceCursor>,
     },
 }
@@ -197,6 +202,9 @@ enum Task {
 #[derive(Debug)]
 enum TaskOutput {
     Decoded(AffectedEvent),
+    /// The event's proof chain is not resolvable here yet: the decode is early,
+    /// not wrong, and the completion handler parks it.
+    Unresolved,
     Reconciled,
     Ensured,
 }
@@ -210,7 +218,7 @@ struct PendingSource {
 #[derive(Debug, Default)]
 struct PendingDocument {
     sources: Vec<SourceCursor>,
-    affected_group_parts: HashSet<PartId>,
+    affected_group_parts: HashSet<PartKey>,
     scheduled: bool,
 }
 
@@ -223,15 +231,18 @@ struct PendingGroupPart {
 struct Worker<'a> {
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
     admission: ConcurrentDeltaWalker<'a, keyhive_admission::Store, SqliteDeltaWalkerStateRepo, u64>,
     tasks:
         big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<GroupPartKey, Task, TaskOutput>,
     pending_sources: HashMap<u64, PendingSource>,
-    pending_documents: HashMap<ObjId, PendingDocument>,
-    pending_group_parts: HashMap<PartId, PendingGroupPart>,
+    pending_documents: HashMap<ObjKey, PendingDocument>,
+    pending_group_parts: HashMap<PartKey, PendingGroupPart>,
+    /// Decodes keyed by admission row, parked on a delegate this hive has not
+    /// ingested yet. Their source rows stay unsettled while parked.
+    parked_decodes: HashMap<u64, Task>,
     outbox: Outbox<Cmd, ()>,
 }
 
@@ -284,6 +295,9 @@ impl<'a> Worker<'a> {
                                     },
                                 )?;
                             }
+                            // A batch is the only thing that can clear a parked
+                            // decode, so wake them here rather than on a timer.
+                            self.retry_parked_decodes()?;
                         }
                     }
                 }
@@ -293,14 +307,77 @@ impl<'a> Worker<'a> {
     }
 
     fn start_task(&mut self, key: GroupPartKey, task: Task) -> Res<()> {
-        let future = run_task(
-            task.clone(),
+        let future = task_future(
             self.store.clone(),
             self.keyhive.clone(),
-            self.local_peer_id,
+            self.local_peer_id.clone(),
             self.scope.clone(),
+            task.clone(),
         );
         self.tasks.replace(key, task, future)?;
+        Ok(())
+    }
+
+    /// Park a decode whose event named a delegate this hive has not ingested.
+    ///
+    /// The source stays unsettled, so the admission cursor never advances over
+    /// work that could not be applied, and the key is woken by the next
+    /// admission row ([`Self::retry_parked_decodes`]) rather than by a timer.
+    fn park_decode(&mut self, source: SourceCursor, task: Task) {
+        self.tasks
+            .park(GroupPartKey::Decode(source.key), task.clone());
+        let old = self.parked_decodes.insert(source.key, task);
+        assert!(old.is_none(), "a decode key was parked twice");
+        tracing::debug!(
+            source_key = source.key,
+            source_cursor = source.cursor,
+            local_peer_id = %self.local_peer_id,
+            parked_decodes = self.parked_decodes.len(),
+            "group-part decode parked: the event's proof chain is not resolvable yet"
+        );
+    }
+
+    /// Wake every decode parked on an unknown delegate.
+    ///
+    /// Only an event this worker has not read yet can clear one, and a batch is
+    /// exactly that: the admission log is appended *after* Keyhive incorporated
+    /// the event (`SqliteBigRepoStore::append`), so the delegate's own ingest
+    /// always brings a later row than the row it stranded.
+    fn retry_parked_decodes(&mut self) -> Res<()> {
+        if self.parked_decodes.is_empty() {
+            return Ok(());
+        }
+        let parked: Vec<u64> = self.parked_decodes.keys().copied().collect();
+        for source_key in parked {
+            let task = self
+                .parked_decodes
+                .remove(&source_key)
+                .expect("parked decode disappeared while retrying");
+            let future = task_future(
+                self.store.clone(),
+                self.keyhive.clone(),
+                self.local_peer_id.clone(),
+                self.scope.clone(),
+                task,
+            );
+            tracing::debug!(
+                source_key,
+                local_peer_id = %self.local_peer_id,
+                parked_decodes = self.parked_decodes.len(),
+                "waking a parked group-part decode"
+            );
+            if !self.tasks.wake(GroupPartKey::Decode(source_key), future)? {
+                // A duplicate delivery of the same row replaced the parked key
+                // with live work: that task's own completion owns the next
+                // attempt, so dropping the local entry is enough.
+                tracing::debug!(
+                    source_key,
+                    local_peer_id = %self.local_peer_id,
+                    parked_decodes = self.parked_decodes.len(),
+                    "parked group-part decode superseded by live work"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -312,6 +389,9 @@ impl<'a> Worker<'a> {
             (Task::Decode { source, .. }, Ok(TaskOutput::Decoded(affected))) => {
                 self.on_decoded(source, affected).await?;
             }
+            (task @ Task::Decode { source, .. }, Ok(TaskOutput::Unresolved)) => {
+                self.park_decode(source, task);
+            }
             (Task::ReconcileDocument { doc, sources, .. }, Ok(TaskOutput::Reconciled)) => {
                 self.finish_document_task(doc, sources).await?;
             }
@@ -321,6 +401,8 @@ impl<'a> Worker<'a> {
             (Task::Decode { .. }, Ok(TaskOutput::Reconciled | TaskOutput::Ensured))
             | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Decoded(_)))
             | (Task::EnsurePart { .. }, Ok(TaskOutput::Decoded(_)))
+            | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Unresolved))
+            | (Task::EnsurePart { .. }, Ok(TaskOutput::Unresolved))
             | (Task::ReconcileDocument { .. }, Ok(TaskOutput::Ensured))
             | (Task::EnsurePart { .. }, Ok(TaskOutput::Reconciled)) => {
                 unreachable!("group-part task produced an incompatible output")
@@ -336,7 +418,7 @@ impl<'a> Worker<'a> {
     /// unscheduled so `pump_tasks` schedules the follow-up. Dropping the
     /// entry wholesale would strand those arrivals: their walker keys would
     /// never settle and the contiguous admission cursor would freeze.
-    async fn finish_document_task(&mut self, doc: ObjId, snapshot: Vec<SourceCursor>) -> Res<()> {
+    async fn finish_document_task(&mut self, doc: ObjKey, snapshot: Vec<SourceCursor>) -> Res<()> {
         let pending = self
             .pending_documents
             .get_mut(&doc)
@@ -352,7 +434,7 @@ impl<'a> Worker<'a> {
 
     async fn finish_group_part_task(
         &mut self,
-        part: PartId,
+        part: PartKey,
         snapshot: Vec<SourceCursor>,
     ) -> Res<()> {
         let pending = self
@@ -382,7 +464,7 @@ impl<'a> Worker<'a> {
             return self.acknowledge_source(source).await;
         }
 
-        for doc in docs.iter().copied() {
+        for doc in docs.iter().cloned() {
             let pending = self.pending_documents.entry(doc).or_default();
             if !pending.sources.iter().any(|old| old.key == source.key) {
                 // Only a genuinely new source invalidates the running task;
@@ -399,7 +481,7 @@ impl<'a> Worker<'a> {
             }
             pending
                 .affected_group_parts
-                .extend(affected.group_parts.iter().copied());
+                .extend(affected.group_parts.iter().cloned());
         }
         if docs.is_empty() {
             for part in affected.group_parts {
@@ -424,7 +506,7 @@ impl<'a> Worker<'a> {
         let documents: Vec<_> = self
             .pending_documents
             .iter()
-            .filter_map(|(doc, pending)| (!pending.scheduled).then_some(*doc))
+            .filter_map(|(doc, pending)| (!pending.scheduled).then_some(doc.clone()))
             .collect();
         for doc in documents {
             if self.tasks.active_count() == CONCURRENT_TASK_BUDGET {
@@ -435,7 +517,7 @@ impl<'a> Worker<'a> {
         let parts: Vec<_> = self
             .pending_group_parts
             .iter()
-            .filter_map(|(part, pending)| (!pending.scheduled).then_some(*part))
+            .filter_map(|(part, pending)| (!pending.scheduled).then_some(part.clone()))
             .collect();
         for part in parts {
             if self.tasks.active_count() == CONCURRENT_TASK_BUDGET {
@@ -446,16 +528,16 @@ impl<'a> Worker<'a> {
         Ok(())
     }
 
-    fn schedule_document(&mut self, doc: ObjId) -> Res<()> {
-        let key = GroupPartKey::Document(doc);
+    fn schedule_document(&mut self, doc: ObjKey) -> Res<()> {
+        let key = GroupPartKey::Document(doc.clone());
         let Some(pending) = self.pending_documents.get(&doc) else {
             return Ok(());
         };
-        if pending.scheduled || !self.tasks.has_capacity_for(key) {
+        if pending.scheduled || !self.tasks.has_capacity_for(key.clone()) {
             return Ok(());
         }
         let task = Task::ReconcileDocument {
-            doc,
+            doc: doc.clone(),
             affected_group_parts: pending.affected_group_parts.clone(),
             sources: pending.sources.clone(),
         };
@@ -467,18 +549,18 @@ impl<'a> Worker<'a> {
         Ok(())
     }
 
-    fn schedule_group_part(&mut self, part: PartId) -> Res<()> {
-        let key = GroupPartKey::Group(part);
+    fn schedule_group_part(&mut self, part: PartKey) -> Res<()> {
+        let key = GroupPartKey::Group(part.clone());
         let Some(pending) = self.pending_group_parts.get(&part) else {
             return Ok(());
         };
-        if pending.scheduled || !self.tasks.has_capacity_for(key) {
+        if pending.scheduled || !self.tasks.has_capacity_for(key.clone()) {
             return Ok(());
         }
         self.start_task(
             key,
             Task::EnsurePart {
-                part,
+                part: part.clone(),
                 sources: pending.sources.clone(),
             },
         )?;
@@ -562,27 +644,49 @@ impl<'a> Worker<'a> {
     }
 }
 
+/// Build the future for one keyed task.
+///
+/// The parameters are owned so the returned future borrows nothing from the
+/// worker: a parked decode is woken while the worker is mutably borrowed.
+fn task_future(
+    store: SqliteBigRepoStore,
+    keyhive: BigKeyhiveHandle,
+    local_peer_id: PeerKey,
+    scope: WorkerGroupScope,
+    task: Task,
+) -> impl Future<Output = Res<TaskOutput>> + Send + 'static {
+    run_task(task, store, keyhive, local_peer_id, scope)
+}
+
 async fn run_task(
     task: Task,
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     scope: WorkerGroupScope,
 ) -> Res<TaskOutput> {
     match task {
-        Task::Decode { bytes, .. } => Ok(TaskOutput::Decoded(
-            affected_event(&keyhive, &bytes, &scope).await?,
-        )),
+        Task::Decode { bytes, .. } => match affected_event(&keyhive, &bytes, &scope).await? {
+            EventDecode::Affected(affected) => Ok(TaskOutput::Decoded(affected)),
+            EventDecode::Unresolved => Ok(TaskOutput::Unresolved),
+        },
         Task::ReconcileDocument {
             doc,
             affected_group_parts,
             ..
         } => {
             for part in &affected_group_parts {
-                store.ensure_part(*part).await?;
+                store.ensure_part(part.clone()).await?;
             }
-            let reconciliation =
-                reconcile_doc(&keyhive, doc, &affected_group_parts, &scope, local_peer_id).await?;
+            let reconciliation = reconcile_doc(
+                &keyhive,
+                doc,
+                &affected_group_parts,
+                &scope,
+                local_peer_id,
+                &GroupAgentsMemo::default(),
+            )
+            .await?;
             store
                 .reconcile_group_part_batch(&[reconciliation], 0, false)
                 .await?;
@@ -609,115 +713,212 @@ async fn drive_buffered<T: Send, F: Future<Output = Res<T>> + Send>(
 
 async fn reconcile_doc(
     keyhive: &BigKeyhiveHandle,
-    doc: ObjId,
-    affected_group_parts: &HashSet<PartId>,
+    doc: ObjKey,
+    affected_group_parts: &HashSet<PartKey>,
     scope: &WorkerGroupScope,
-    local_principal: PeerId,
+    local_principal: PeerKey,
+    group_agents: &GroupAgentsMemo,
 ) -> Res<GroupPartReconciliation> {
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.into_bytes())
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.try_to_bytes32()?)
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
-        .document_has_content(crate::DocumentId::new(doc.into_bytes()))
+        .document_has_content(crate::DocumentId::new(doc.as_bytes()))
         .await?;
-    let (agents, candidate_group_parts) = if has_content {
+    let (agents, part_agents, candidate_group_parts) = if has_content {
         let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);
         let agents = keyhive
             .agents_for_membered(identifier)
             .await
             .into_iter()
-            .map(|(principal, access)| (PeerId::new(principal), access))
+            .map(|(principal, access)| (PeerKey::new(principal.to_bytes()), access))
             .collect::<HashMap<_, _>>();
-        let candidate_group_parts = keyhive
-            .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+        // Access is granted per part, and a part is a one-way digest of a group id, so
+        // the group id has to be retained here to ask Keyhive which principals may read
+        // that part. Writing this doc-level union onto every containing part instead
+        // would hand a principal of one group pull access to every other group holding
+        // the doc.
+        let mut part_agents = HashMap::new();
+        let mut candidate_group_parts = HashSet::new();
+        for group_id in keyhive
+            .group_ids_containing_document(crate::DocumentId::new(doc.as_bytes()))
             .await?
-            .into_iter()
-            .map(group_part_id)
-            .filter(|part| match scope.groups() {
-                None => true,
-                Some(groups) => groups.contains(part),
-            })
-            .collect();
-        (agents, candidate_group_parts)
+        {
+            let part = group_part_id(group_id);
+            if let Some(groups) = scope.groups()
+                && !groups.contains(&part)
+            {
+                continue;
+            }
+            candidate_group_parts.insert(part.clone());
+            part_agents.insert(part, group_agents.agents_for(keyhive, group_id).await?);
+        }
+        (agents, part_agents, candidate_group_parts)
     } else {
-        (HashMap::new(), HashSet::new())
+        (HashMap::new(), HashMap::new(), HashSet::new())
     };
-    let desired_group_parts = candidate_group_parts;
-    let desired_global = agents
+    let mut desired_group_parts = candidate_group_parts;
+    // ADR 012 decision 9: `/seds` is a real part, so its membership is ordinary
+    // membership. A doc the local principal can read belongs in it, and naming it in the
+    // managed set in every case is what lets the store's stale/desired logic take it out
+    // again once the doc stops being readable — no flag, no special branch.
+    if agents
         .get(&local_principal)
-        .is_some_and(|access| access.is_reader());
+        .is_some_and(|access| access.is_reader())
+    {
+        desired_group_parts.insert(crate::global_part_id());
+    }
     let mut reconciled_group_parts = affected_group_parts.clone();
-    reconciled_group_parts.extend(desired_group_parts.iter().copied());
+    reconciled_group_parts.insert(crate::global_part_id());
+    reconciled_group_parts.extend(desired_group_parts.iter().cloned());
     Ok(GroupPartReconciliation {
         doc,
         agents,
+        part_agents,
         managed_group_parts: reconciled_group_parts,
         desired_group_parts,
-        desired_global,
     })
 }
 
-pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
+/// Lazily-filled, shared cache of Keyhive agents per group id.
+///
+/// Per-part agent sets are derived per *containing group*, and docs are reconciled
+/// concurrently through `buffered_unordered`: without sharing this would cost
+/// O(containing groups) Keyhive calls per doc, where sharing makes it one call per
+/// distinct group for the whole batch.
+/// Agents of one group, shared across every document that memo hits it.
+type GroupAgents = Arc<HashMap<PeerKey, keyhive_core::access::Access>>;
+
+#[derive(Default)]
+struct GroupAgentsMemo {
+    agents: tokio::sync::Mutex<HashMap<[u8; 32], GroupAgents>>,
+}
+
+impl GroupAgentsMemo {
+    async fn agents_for(
+        &self,
+        keyhive: &BigKeyhiveHandle,
+        group_id: [u8; 32],
+    ) -> Res<Arc<HashMap<PeerKey, keyhive_core::access::Access>>> {
+        let mut cached = self.agents.lock().await;
+        if let Some(agents) = cached.get(&group_id) {
+            return Ok(Arc::clone(agents));
+        }
+        // The lock is held across the query so each group resolves exactly once even
+        // when docs race. `agents_for_membered` does not re-enter this memo.
+        let agents = Arc::new(
+            keyhive
+                .agents_for_membered(group_identifier(group_id)?)
+                .await
+                .into_iter()
+                .map(|(principal, access)| (PeerKey::new(principal.to_bytes()), access))
+                .collect::<HashMap<_, _>>(),
+        );
+        cached.insert(group_id, Arc::clone(&agents));
+        Ok(agents)
+    }
+}
+
+fn group_identifier(group_id: [u8; 32]) -> Res<keyhive_core::principal::identifier::Identifier> {
+    ed25519_dalek::VerifyingKey::from_bytes(&group_id)
+        .map(keyhive_core::principal::identifier::Identifier::from)
+        .map_err(|_| ferr!("group id is not a valid Ed25519 point"))
+}
+
+pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartKey {
     let mut bytes = b"townframe/big-repo/group-part/sedimentree/v1".to_vec();
     bytes.extend_from_slice(&group_id);
     let raw = keyhive_crypto::digest::Digest::<Vec<u8>>::hash(&bytes).raw;
-    PartId::new(raw.into())
+    PartKey::new(*raw.as_bytes())
 }
 
 #[derive(Debug, Clone)]
 struct AffectedEvent {
-    docs: Vec<ObjId>,
-    group_parts: HashSet<PartId>,
+    docs: Vec<ObjKey>,
+    group_parts: HashSet<PartKey>,
+}
+
+/// One admitted event, decoded as far as this hive can currently take it.
+#[derive(Debug, Clone)]
+enum EventDecode {
+    Affected(AffectedEvent),
+    /// The event's proof chain is not resolvable here yet. The caller parks the
+    /// decode instead of failing it: Keyhive calls this a missing dependency, and
+    /// the missing link's own admission row is what clears it.
+    Unresolved,
 }
 
 async fn affected_event(
     keyhive: &BigKeyhiveHandle,
     bytes: &[u8],
     scope: &WorkerGroupScope,
-) -> Res<AffectedEvent> {
+) -> Res<EventDecode> {
     let event: StaticEvent<Vec<u8>> = bincode::deserialize(bytes)
         .map_err(|err| ferr!("persisted Keyhive event decode failed: {err}"))?;
     let mut documents = Vec::new();
     let mut group_parts = HashSet::new();
     match event {
         StaticEvent::CgkaOperation(operation) => {
-            documents.push(ObjId::new(*operation.payload().doc_id().as_bytes()));
+            documents.push(crate::DocumentId::new(
+                operation.payload().doc_id().as_bytes(),
+            ));
         }
         StaticEvent::Delegated(delegation) => {
-            group_parts.insert(group_part_id(delegation.issuer.to_bytes()));
             documents.extend(
                 delegation
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjId::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.to_bytes())),
             );
+            // A part and a containing-group query both name a *group*, and the group
+            // this operation was dispatched to is the proof chain's root, not the
+            // immediate signer — the two differ whenever a non-root member
+            // re-delegates. The wire form carries proof *digests*, so the subject is
+            // resolved through this hive's graph rather than off the payload.
+            let subject = match keyhive
+                .event_subject_id(StaticEvent::Delegated(delegation))
+                .await?
+            {
+                EventSubject::Named(subject) => subject,
+                EventSubject::Unnamed => {
+                    unreachable!("a delegated event names a membered subject")
+                }
+                EventSubject::Unresolved => return Ok(EventDecode::Unresolved),
+            };
+            group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(
-                        keyhive_core::principal::identifier::Identifier::from(delegation.issuer),
-                    )
+                    .document_ids_containing_group(subject)
                     .await
                     .into_iter()
-                    .map(|id| ObjId::new(id.into_bytes())),
+                    .map(|id| ObjKey::new(id.as_bytes())),
             );
         }
         StaticEvent::Revoked(revocation) => {
-            group_parts.insert(group_part_id(revocation.issuer.to_bytes()));
             documents.extend(
                 revocation
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjId::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.to_bytes())),
             );
+            // Same as the delegation arm: the group is the proof chain's root, not
+            // the immediate signer.
+            let subject = match keyhive
+                .event_subject_id(StaticEvent::Revoked(revocation))
+                .await?
+            {
+                EventSubject::Named(subject) => subject,
+                EventSubject::Unnamed => unreachable!("a revoked event names a membered subject"),
+                EventSubject::Unresolved => return Ok(EventDecode::Unresolved),
+            };
+            group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(
-                        keyhive_core::principal::identifier::Identifier::from(revocation.issuer),
-                    )
+                    .document_ids_containing_group(subject)
                     .await
                     .into_iter()
-                    .map(|id| ObjId::new(id.into_bytes())),
+                    .map(|id| ObjKey::new(id.as_bytes())),
             );
         }
         StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {}
@@ -728,7 +929,7 @@ async fn affected_event(
             None => true,
             Some(_) => scope.admits_doc_groups(
                 &keyhive
-                    .group_ids_containing_document(crate::DocumentId::new(doc.into_bytes()))
+                    .group_ids_containing_document(crate::DocumentId::new(doc.as_bytes()))
                     .await?,
             ),
         };
@@ -736,7 +937,7 @@ async fn affected_event(
             docs.push(doc);
         }
     }
-    Ok(AffectedEvent {
+    Ok(EventDecode::Affected(AffectedEvent {
         docs,
         group_parts: group_parts
             .into_iter()
@@ -745,18 +946,94 @@ async fn affected_event(
                 WorkerGroupScope::Groups(groups) => groups.contains(part),
             })
             .collect(),
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyhive::BigKeyhiveAgent;
+    use crate::keyhive_listener::BigRepoKeyhiveListener;
+    use crate::keyhive_storage::BigRepoKeyhiveStorage;
+    use keyhive_core::access::Access;
+    use keyhive_core::event::Event;
+    use keyhive_core::principal::group::id::GroupId as KhGroupId;
+    use keyhive_core::principal::identifier::Identifier;
+    use keyhive_core::principal::membered::Membered;
+    use std::collections::BTreeMap;
 
     #[test]
     fn group_part_id_uses_sedimentree_namespace() {
+        // Multibase base58btc of the derived key's bytes: the key space is a byte prefix, not
+        // text, so decision 1's readable-form display falls back to multibase here.
         assert_eq!(
             group_part_id([0; 32]).to_string(),
-            "B1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
+            "zB1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
+        );
+    }
+
+    /// A re-delegation whose signer is a member of the subject group rather than
+    /// the subject itself: the immediate signer and the graph the operation was
+    /// dispatched to are two different identifiers, so only naming the subject
+    /// derives the group's part. Same fixture shape as the delta-stream reading of
+    /// [`crate::keyhive::BigKeyhiveHandle::event_subject_id`].
+    #[tokio::test]
+    async fn delegation_group_part_names_the_proof_chain_root_not_the_signer() {
+        let (evt_tx, _evt_rx) = async_channel::unbounded();
+        let keyhive = BigKeyhiveHandle::new(
+            [23; 32],
+            BigRepoKeyhiveListener {
+                evt_tx,
+                storage: BigRepoKeyhiveStorage::memory(),
+            },
+        )
+        .await
+        .expect("boot keyhive handle");
+
+        let hive = keyhive.clone_keyhive();
+        let group = hive.generate_group(vec![]).await.expect("generate group");
+        let subject: Identifier = group.lock().await.group_id().into();
+        let member: BigKeyhiveAgent = hive
+            .get_agent(subject)
+            .await
+            .expect("a group is its own agent");
+        let update = hive
+            .add_member_with_manual_content(
+                member,
+                &Membered::Group(KhGroupId::from(subject), Arc::clone(&group)),
+                Access::Read,
+                BTreeMap::new(),
+            )
+            .await
+            .expect("add member");
+        let event: StaticEvent<Vec<u8>> = Event::Delegated(update.delegation).into();
+        let StaticEvent::Delegated(delegation) = &event else {
+            unreachable!("the fixture builds a delegation")
+        };
+        let signer: Identifier = delegation.issuer.into();
+        assert_ne!(
+            signer, subject,
+            "the fixture has to re-delegate from a non-root member"
+        );
+        let bytes = bincode::serialize(&event).expect("serialize delegation event");
+
+        let affected = match affected_event(&keyhive, &bytes, &WorkerGroupScope::All)
+            .await
+            .expect("decode the admission")
+        {
+            EventDecode::Affected(affected) => affected,
+            EventDecode::Unresolved => {
+                panic!("the fixture's delegation chain is unresolvable")
+            }
+        };
+        assert_eq!(
+            affected.group_parts,
+            HashSet::from([group_part_id(subject.to_bytes())]),
+            "the part belongs to the proof chain's root, not to the signer"
+        );
+        assert!(
+            affected.docs.is_empty(),
+            "the group holds no documents, so no document is affected"
         );
     }
 }

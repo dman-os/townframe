@@ -12,7 +12,7 @@ impl SqliteBigRepoStore {
     /// Used by the `All` worker-scope path to watch every part without
     /// enumerating keyhive groups (a keyhive enumeration would miss parts
     /// for groups not yet in the hive and pays a graph walk).
-    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartId>> {
+    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartKey>> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
             "SELECT part_id AS 'part_id: Vec<u8>'
              FROM big_sync_parts WHERE scope_id = ?",
@@ -226,9 +226,22 @@ impl SqliteBigRepoStore {
             next_seq += i64::try_from(chunk.len()).expect(ERROR_IMPOSSIBLE);
         }
         tx.commit().await?;
-        Ok(Self::u64_from_db(
-            head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE),
-        ))
+        let seq = Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE));
+        // Record the committed head at the durable choke point. Read back
+        // synchronously by the keyhive sync-done observer to stamp a completion
+        // with how far admission has actually progressed. `fetch_max` keeps the
+        // watermark monotonic under concurrent appends racing their commits
+        // (a lower committed seq never regresses it).
+        self.admission_watermark
+            .fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
+        Ok(seq)
+    }
+
+    /// Cheap synchronous read of the last committed admission seq (see the
+    /// `admission_watermark` field docs). No DB round-trip.
+    pub(crate) fn admission_watermark(&self) -> u64 {
+        self.admission_watermark
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) async fn admission_head(&self) -> Res<u64> {
@@ -240,7 +253,13 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(head))
     }
 
-    #[cfg(test)]
+    /// The sequence through which the admission log has been pruned, i.e. the
+    /// floor below which this scope's tombstoned wake-ups are gone.
+    ///
+    /// A consumer whose durable cursor sits below this floor can never be woken
+    /// for the gap (ADR 013 §9): it must rebuild its sinks from live Keyhive
+    /// state and resume here instead of replaying a history it cannot be told
+    /// about. Set by `prune_admitted_events`, which runs during maintenance.
     pub(crate) async fn archived_through(&self) -> Res<u64> {
         let seq: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"seq!: i64\" FROM big_repo_keyhive_archived_through WHERE scope_id = ?",
             self.scope().id()

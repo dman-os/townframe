@@ -38,7 +38,7 @@ pub trait Repo {
 /// (for example `diff_events`) should pass `live_origin = None` and must not be skipped.
 pub fn should_skip_live_patch(
     live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-    exclude_peer_id: Option<&PeerId>,
+    exclude_peer_id: Option<&PeerKey>,
 ) -> bool {
     match live_origin {
         Some(big_repo::BigRepoChangeOrigin::Local) => true,
@@ -723,7 +723,7 @@ mod origin_tests {
         let exclude_peer = crate::peer_id_from_label("peer-a");
         assert!(should_skip_live_patch(
             Some(&BigRepoChangeOrigin::Remote {
-                peer_id: exclude_peer
+                peer_id: exclude_peer.clone()
             }),
             Some(&exclude_peer)
         ));
@@ -770,7 +770,7 @@ mod origin_tests {
             &local_actor,
             &vtag_actor,
             Some(&BigRepoChangeOrigin::Remote {
-                peer_id: remote_peer_id,
+                peer_id: remote_peer_id.clone(),
             }),
         );
         assert!(matches!(

@@ -13,7 +13,7 @@ use crate::interlude::*;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime2::Timer;
 use crate::runtime2::messages::{Runtime2Cmd, fresh_waiter_id};
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use future_form::FutureForm;
 use std::sync::Arc;
 
@@ -275,10 +275,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// callers can tell which connection ended when ids are reused.
     pub async fn open_connection(
         &self,
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(
-        PeerId,
+        PeerKey,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(
             std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -307,7 +307,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         incoming: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(
-        PeerId,
+        PeerKey,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(
             std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -327,7 +327,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// down; closing a superseded connection leaves the replacement intact.
     pub async fn close_connection(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
@@ -343,22 +343,66 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     // ── sync ───────────────────────────────────────────────────────────────
+    //
+    // Synchronous-wait contract for the sync APIs — what "returns" means.
+    //
+    // One rule decides all of it: a fact is only ordered across the hub if
+    // both of its halves are enqueued by the same task (the hub polls
+    // commands before events), so each API below names exactly which facts it
+    // waits for.
+    //
+    // - `sync_doc_with_peer*` waits for ONE document's round with ONE peer:
+    //   the exchange, plus that round's received content being routed into the
+    //   document's worker — the receipt resolves from a worker reconsider that
+    //   is FIFO-ordered after that round's own content apply. It does NOT wait
+    //   for other documents, for this document's (re)materialization, for
+    //   membership-change emission, or for Keyhive projection.
+    // - `sync_keyhive_with_peer` waits for the peer's Keyhive round — the
+    //   exchange plus the durable incorporation of that round's admissions —
+    //   and then for `wait_for_keyhive_reconciliation` below. It does NOT wait
+    //   for membership-change emission (delegations and revocations notify
+    //   asynchronously) nor for document rematerialization (only documents
+    //   already pending are retried).
+    // - `wait_for_keyhive_reconciliation` waits for the projection watermark
+    //   that admission updates.
+    //
+    // Work deliberately outside these waits is still tracked, so
+    // `wait_for_quiescence` (tests) and shutdown drain it anyway.
 
-    /// Sync a document's sedimentree with a peer.
+    /// Sync one document's sedimentree with one peer, and wait for its result.
+    ///
+    /// Synchronously waits for this document's sync round with `peer_id`: the
+    /// exchange, and the routing of the round's received content into the
+    /// document's worker. The receipt resolves from a worker reconsider that
+    /// the hub routes after that round's own content apply, so a returned `Ok`
+    /// means the round's content reached the live document (or was already
+    /// stored).
+    ///
+    /// Deliberately NOT waited for: other documents, this document's
+    /// (re)materialization, membership-change emission, and Keyhive projection
+    /// — use [`Runtime2Handle::sync_keyhive_with_peer`] for the latter. See the
+    /// section contract above for the full table.
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<(), crate::runtime2::types::SyncDocError> {
         self.sync_doc_with_peer_receipt(doc_id, peer_id)
             .await
             .map(|_| ())
     }
 
+    /// [`Runtime2Handle::sync_doc_with_peer`] with the receipt kept.
+    ///
+    /// Same synchronous wait as [`Runtime2Handle::sync_doc_with_peer`]; the
+    /// receipt distinguishes an applied round from one whose content was
+    /// already stored (`Stored`) and errors when the round failed or its
+    /// content apply could not be routed to a live worker
+    /// (`SyncDocError::WorkerUnavailable`).
     pub async fn sync_doc_with_peer_receipt(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
         debug!(
@@ -369,8 +413,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
         );
         let mut guard = DocSyncWaiterGuard {
             cmd_tx: self.cmd_tx.clone(),
-            doc_id,
-            peer_id,
+            doc_id: doc_id.clone(),
+            peer_id: peer_id.clone(),
             waiter_id,
             completed: false,
         };
@@ -399,12 +443,29 @@ impl<F: FutureForm> Runtime2Handle<F> {
         res
     }
 
-    /// Sync keyhive state with a peer.
-    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> eyre::Result<()> {
+    /// Sync Keyhive state with a peer and wait for it to be applied AND projected.
+    ///
+    /// Two synchronous waits, in order:
+    ///
+    /// 1. The peer's Keyhive round: the exchange, plus the durable
+    ///    incorporation of that round's admissions. The durable incorporation
+    ///    hook is awaited before the protocol acknowledges the exchange, so
+    ///    the resulting admission update is enqueued ahead of the round's
+    ///    completion and the hub's admission watermark already reflects it
+    ///    when the round resolves.
+    /// 2. [`Runtime2Handle::wait_for_keyhive_reconciliation`], i.e. the
+    ///    group-part projection watermark reaching the admission watermark
+    ///    captured at that moment.
+    ///
+    /// Deliberately NOT waited for: membership-change emission (delegations
+    /// and revocations are emitted asynchronously as tracked work) and
+    /// document rematerialization (only documents already pending are
+    /// retried). Both are drained by `wait_for_quiescence` and shutdown.
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerKey) -> eyre::Result<()> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
         let mut guard = KeyhiveSyncWaiterGuard {
             cmd_tx: self.cmd_tx.clone(),
-            peer_id,
+            peer_id: peer_id.clone(),
             waiter_id,
             completed: false,
         };
@@ -431,11 +492,17 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .wrap_err("keyhive post-sync reconciliation failed")
     }
 
-    /// Wait until currently admitted Keyhive events reach durable projection settlement.
+    /// Wait until every Keyhive admission already incorporated locally reaches
+    /// durable projection settlement.
     ///
-    /// This may block for a long time while Keyhive synchronization and durable I/O
-    /// complete. Applications that require a deadline should apply their timeout at
-    /// the application boundary.
+    /// Captures the current admission watermark (`admitted_head`) and returns
+    /// once the group-part projection watermark (`group_part_settled_seq`) has
+    /// reached it, so a returned `Ok` means the admitted Keyhive state is
+    /// reflected in the parts peers are served.
+    ///
+    /// This may block for a long time while Keyhive synchronization and durable
+    /// I/O complete. Applications that require a deadline should apply their
+    /// timeout at the application boundary.
     pub async fn wait_for_keyhive_reconciliation(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -489,6 +556,54 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))
     }
 
+    /// Test-only seam: queue events instead of handling them.
+    ///
+    /// The hub polls commands before events (`select_biased!`), so a command
+    /// whose own spawned work already emitted its events can be handled first —
+    /// an inversion a test cannot otherwise reach without loading the machine.
+    /// While held, events accumulate in the hub (and the in-flight counter they
+    /// carry stays unreleased, so no quiescence probe can resolve).
+    /// `resume_events_for_test` reopens processing and replays them in channel
+    /// order.
+    #[cfg(test)]
+    pub(crate) async fn hold_events_for_test(&self) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::HoldEvents { resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))
+    }
+
+    /// Test-only seam: reopen event processing and handle the events queued
+    /// since [`Runtime2Handle::hold_events_for_test`], in channel order.
+    #[cfg(test)]
+    pub(crate) async fn resume_events_for_test(&self) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::ResumeEvents { resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))
+    }
+
+    /// Test-only panic-safety net for [`Runtime2Handle::hold_events_for_test`]:
+    /// reopen event processing from a `Drop`, so a failed assertion cannot
+    /// leave the hub holding every later event (including the in-flight
+    /// counter's release) for the rest of the test process.
+    #[cfg(test)]
+    pub(crate) fn resume_events_for_test_on_drop(&self) {
+        let resume = self.cmd_tx.try_send(Runtime2Cmd::ResumeEvents {
+            resp: futures::channel::oneshot::channel().0,
+        });
+        if let Err(err) = resume {
+            tracing::debug!(
+                ?err,
+                "resuming hub event processing on drop failed (runtime draining)"
+            );
+        }
+    }
+
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -500,7 +615,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     pub async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> eyre::Result<Vec<Vec<u8>>> {
         let (resp, rx) = futures::channel::oneshot::channel();
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
         self.cmd_tx
             .send(Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp })
             .await
@@ -525,6 +640,80 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Test-only: whether `peer_id` currently has a registered connection in
+    /// the hub. Lets a connection-lifecycle test assert the deregistration
+    /// invariant directly instead of inferring it from a sync failure.
+    #[cfg(test)]
+    pub(crate) async fn has_connected_peer_for_test(&self, peer_id: PeerKey) -> eyre::Result<bool> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::HasConnectedPeer { peer_id, resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
+    /// active round, stamped one seq ahead of the hub's admitted head. Returns
+    /// the seq so the test can inject the matching admission event.
+    #[cfg(test)]
+    pub(crate) async fn inject_keyhive_completion_for_test(
+        &self,
+        peer_id: PeerKey,
+    ) -> eyre::Result<u64> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::InjectKeyhiveCompletionForTest { peer_id, resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Test-only: hand an event directly to the hub's event handler, bypassing
+    /// the event channel so a test can drive event ordering deterministically.
+    #[cfg(test)]
+    pub(crate) async fn inject_runtime2_evt_for_test(
+        &self,
+        evt: crate::runtime2::Runtime2Evt,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::InjectRuntime2EvtForTest {
+                evt: Box::new(evt),
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
+    #[cfg(test)]
+    pub(crate) async fn quiescence_probe_barrier_for_test(&self) -> eyre::Result<Option<u64>> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::QuiescenceProbeBarrierForTest { resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))
+    }
+
+    /// Test-only seam: close the doc worker's mailbox for `doc_id` on the next
+    /// content-carrying sync-session apply, so the route fails the way the
+    /// worker-stopping race would.
+    #[cfg(test)]
+    pub(crate) async fn fail_next_content_apply_route_for_test(
+        &self,
+        doc_id: DocumentId,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::FailNextContentApplyRoute { doc_id, resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))
     }
 
     // ── private helpers ──────────────────────────────────────────────────────
@@ -555,7 +744,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 struct DocSyncWaiterGuard {
     cmd_tx: async_channel::Sender<Runtime2Cmd>,
     doc_id: DocumentId,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     waiter_id: u64,
     completed: bool,
 }
@@ -564,8 +753,8 @@ impl Drop for DocSyncWaiterGuard {
     fn drop(&mut self) {
         if !self.completed {
             drop(self.cmd_tx.try_send(Runtime2Cmd::CancelDocSyncWaiter {
-                doc_id: self.doc_id,
-                peer_id: self.peer_id,
+                doc_id: self.doc_id.clone(),
+                peer_id: self.peer_id.clone(),
                 waiter_id: self.waiter_id,
             }));
         }
@@ -574,7 +763,7 @@ impl Drop for DocSyncWaiterGuard {
 
 struct KeyhiveSyncWaiterGuard {
     cmd_tx: async_channel::Sender<Runtime2Cmd>,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     waiter_id: u64,
     completed: bool,
 }
@@ -583,7 +772,7 @@ impl Drop for KeyhiveSyncWaiterGuard {
     fn drop(&mut self) {
         if !self.completed {
             drop(self.cmd_tx.try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
-                peer_id: self.peer_id,
+                peer_id: self.peer_id.clone(),
                 waiter_id: self.waiter_id,
             }));
         }

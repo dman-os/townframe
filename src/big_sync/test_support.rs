@@ -2,9 +2,9 @@ use crate::interlude::*;
 use crate::part_store::HostPartStore;
 
 #[cfg(test)]
-use big_sync_core::ObjId;
+use big_sync_core::ObjKey;
 use big_sync_core::part_store::CursorIndex;
-use big_sync_core::{PartId, PeerId};
+use big_sync_core::{PartKey, PeerKey};
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -16,14 +16,16 @@ use std::future::Future;
 pub struct NetworkRestTarget {
     pub worker: crate::BigSyncWorkerHandle,
     pub store: Arc<dyn HostPartStore>,
-    pub peer_ids: Vec<PeerId>,
-    pub part_ids: Vec<PartId>,
+    pub peer_ids: Vec<PeerKey>,
+    pub part_ids: Vec<PartKey>,
 }
 
-async fn cursor_snapshot(targets: &[NetworkRestTarget]) -> Res<Vec<BTreeMap<PartId, CursorIndex>>> {
+async fn cursor_snapshot(
+    targets: &[NetworkRestTarget],
+) -> Res<Vec<BTreeMap<PartKey, CursorIndex>>> {
     let mut snapshots = Vec::with_capacity(targets.len());
     for target in targets {
-        let requested: HashSet<_> = target.part_ids.iter().copied().collect();
+        let requested: HashSet<_> = target.part_ids.iter().cloned().collect();
         let summaries = target
             .store
             .summarize_parts(requested)
@@ -64,8 +66,8 @@ where
                 target
                     .worker
                     .wait_for_full_sync(
-                        target.peer_ids.iter().copied(),
-                        target.part_ids.iter().copied(),
+                        target.peer_ids.iter().cloned(),
+                        target.part_ids.iter().cloned(),
                     )
                     .await?;
                 tracing::info!(
@@ -100,14 +102,14 @@ where
 #[cfg(test)]
 pub(crate) struct ObservedObjSnapshot {
     pub payload: Option<serde_json::Value>,
-    pub parts: BTreeSet<PartId>,
+    pub parts: BTreeSet<PartKey>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg(test)]
 pub(crate) struct ObservedStoreSnapshot {
-    pub objs: BTreeMap<ObjId, ObservedObjSnapshot>,
-    pub peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
+    pub objs: BTreeMap<ObjKey, ObservedObjSnapshot>,
+    pub peer_part_cursors: BTreeMap<(PeerKey, PartKey), CursorIndex>,
 }
 
 #[cfg(test)]

@@ -319,7 +319,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         })
         .await?;
 
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     let main_heads = repo
         .get_doc_branches(&doc_id)
@@ -344,7 +350,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         .expect("local branch ref missing after creation");
     // Local branches are checkout-local work and must not enter the
     // replicated drawer partition.
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
     let local_branch_doc = repo
         .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("/tmp/job-1"), None)
         .await?
@@ -426,7 +438,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads.clone()),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     repo.create_branch_at_heads_from_branch(
         &doc_id,
@@ -509,13 +527,25 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 2);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        2
+    );
 
     assert!(
         repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
             .await?
     );
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     assert!(repo.del(&doc_id).await?);
     assert_eq!(big_sync_host.store.member_count(partition_id).await?, 0);
@@ -560,12 +590,12 @@ async fn register_existing_doc_initializes_branch_system_facets() -> Res<()> {
     let branch_doc_id = branch_handle.document_id();
     let doc_id = DocId::from(branch_doc_id.to_string());
 
-    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+    repo.register_existing_doc(&doc_id, branch_doc_id.clone(), BranchPath::new("main"))
         .await?;
     let change_count_after_register = branch_handle
         .with_document_read(|doc| doc.get_changes(&[]).len())
         .await;
-    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+    repo.register_existing_doc(&doc_id, branch_doc_id.clone(), BranchPath::new("main"))
         .await?;
     assert_eq!(
         branch_handle
@@ -1604,7 +1634,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     assert!(
         dmeta_after_add.actors.contains_key(
             &repo
-                .content_actor_id(Some(&user_path), main_branch_doc_id)
+                .content_actor_id(Some(&user_path), main_branch_doc_id.clone())
                 .to_string()
         ),
         "user should be recorded on add dmeta"
@@ -3013,7 +3043,7 @@ async fn perf_big_repo_disk_add_like_drawer_baseline() -> Res<()> {
                     branches: [(
                         "main".to_string(),
                         StoredBranchRef {
-                            branch_doc_id: content_doc_id,
+                            branch_doc_id: content_doc_id.clone(),
                         },
                     )]
                     .into(),

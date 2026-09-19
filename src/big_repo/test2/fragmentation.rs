@@ -96,7 +96,7 @@ async fn load_fragment_metas(
     store: &crate::SqliteBigRepoStore,
     doc_id: crate::DocumentId,
 ) -> crate::Res<Vec<sedimentree_core::fragment::Fragment>> {
-    let sed_id = SedimentreeId::new(doc_id.into_bytes());
+    let sed_id = SedimentreeId::new(doc_id.to_bytes32());
     <crate::SqliteBigRepoStore as Storage<Sendable>>::load_fragment_metas(store, sed_id)
         .await
         .map_err(|e| crate::ferr!("failed loading fragment metas: {e}"))
@@ -142,13 +142,13 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
     // ── 3. Verify fragment storage ─────────────────────────────────────────
     // The owner's store contains the document's sedimentree; load fragment
     // metadata to prove at least one fragment was persisted.
-    let fragments = load_fragment_metas(&pair.left().store, doc_id).await?;
+    let fragments = load_fragment_metas(&pair.left().store, doc_id.clone()).await?;
     assert!(
         !fragments.is_empty(),
         "at least one fragment must exist after a boundary commit, \
          got {} fragments for sedimentree {:?}",
         fragments.len(),
-        SedimentreeId::new(doc_id.into_bytes()),
+        SedimentreeId::new(doc_id.to_bytes32()),
     );
     tracing::info!(
         "stored {} fragment(s); first fragment head={:?}",
@@ -158,12 +158,13 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
 
     // ── 4. Grant access and sync to peer ────────────────────────────────────
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(&pair, doc_id, &agent, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &agent, Access::Read).await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // ── 5. Tier-0 invariants (sedimentree parity + materialized-heads parity) ─
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
 
     // Content assertions: both sides see the same data.
     assert_eq!(
@@ -191,7 +192,7 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
 
     // Full content verification after reload.
     assert_eq!(

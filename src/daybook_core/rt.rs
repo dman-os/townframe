@@ -101,6 +101,7 @@ pub struct RtStopToken {
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: crate::repos::RepoStopToken,
     blob_pins_part_worker_stop: crate::repos::RepoStopToken,
+    blob_inventory_permission_stop: crate::repos::RepoStopToken,
     doc_facet_set_index_stop: crate::repos::RepoStopToken,
     plugs_config_consumer_stop: crate::repos::RepoStopToken,
     plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
@@ -129,6 +130,12 @@ impl RtStopToken {
             warn!(
                 ?err,
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
+            );
+        }
+        if let Err(err) = self.blob_inventory_permission_stop.stop().await {
+            warn!(
+                ?err,
+                "error stopping blob_inventory_permission_writer during shutdown - continuing"
             );
         }
         if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
@@ -305,10 +312,24 @@ impl Rt {
         let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
             Arc::clone(&drawer),
             rcx.sql.clone(),
-            rcx.core_inventory_doc_id,
-            rcx.docs_inventory_doc_id,
+            rcx.core_inventory_doc_id.clone(),
+            rcx.docs_inventory_doc_id.clone(),
             doc_facet_set_index_repo.revision_store(),
             Arc::clone(&plugs_repo),
+            cancel_token.clone(),
+        )
+        .await?;
+        // The blob-inventory permission writer borrows the blob part store and the
+        // repository, so it is constructed after the pin machines and stopped before
+        // them (shutdown order is the reverse of construction).
+        let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
+            Arc::clone(&rcx.blob_part_store),
+            Arc::clone(&sqlite_local_state_repo),
+            Arc::clone(&rcx.big_repo),
+            vec![
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
+            ],
             cancel_token.clone(),
         )
         .await?;
@@ -532,6 +553,7 @@ impl Rt {
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
+                blob_inventory_permission_stop,
                 doc_facet_set_index_stop,
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,
@@ -540,10 +562,10 @@ impl Rt {
             },
         ))
     }
-    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjId {
+    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjKey {
         let bytes = format!("v1|doc:{doc_id}|proc:{processor_full_id}");
         let digest = blake3::hash(bytes.as_bytes());
-        ObjId::new(*digest.as_bytes())
+        ObjKey::new(*digest.as_bytes())
     }
 
     pub async fn get_processor_runlog_done(
@@ -2487,7 +2509,9 @@ async fn upsert_processor_runlog_item(
         "done_token": done_token,
         "done_at": jiff::Timestamp::now().to_string(),
     });
-    partition_store.set_obj_payload(item_id, payload).await?;
+    partition_store
+        .set_obj_payload(item_id.clone(), payload)
+        .await?;
     partition_store
         .add_obj_to_parts(
             item_id,
@@ -2830,7 +2854,7 @@ mod tests {
     use big_sync::HostPartStore;
 
     async fn make_partition_store()
-    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartKey)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =
@@ -2867,7 +2891,7 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(store.obj_parts(item_id).await?, vec![part_id]);
+        assert_eq!(store.obj_parts(item_id.clone()).await?, vec![part_id]);
 
         let payload = store
             .obj_payload(item_id)
@@ -2898,7 +2922,7 @@ mod tests {
         // Open ensures the partition in the derived scope.
         assert!(
             rtx.derived_part_store
-                .summarize_parts(std::collections::HashSet::from([part_id]))
+                .summarize_parts(std::collections::HashSet::from([part_id.clone()]))
                 .await??
                 .contains_key(&part_id),
             "open should ensure the processor-runlog partition in the derived scope"
@@ -2916,11 +2940,11 @@ mod tests {
         // The document scope must not learn about the item at all: the automerge
         // frontier worker reads that scope's match-all part stream as documents.
         assert!(
-            rtx.part_store.obj_payload(item_id).await?.is_none(),
+            rtx.part_store.obj_payload(item_id.clone()).await?.is_none(),
             "processor-runlog items must not be written to the document scope"
         );
         assert!(
-            rtx.part_store.obj_parts(item_id).await?.is_empty(),
+            rtx.part_store.obj_parts(item_id.clone()).await?.is_empty(),
             "processor-runlog items must not join a document-scope partition"
         );
         assert_eq!(

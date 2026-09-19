@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Convert a BigRepo `DocumentId` into a keyhive `DocumentId` for direct
 /// keyhive API calls (decryption, etc.).
 fn kh_doc_id(doc_id: crate::DocumentId) -> keyhive_core::principal::document::id::DocumentId {
-    let bytes = doc_id.into_bytes();
+    let bytes: [u8; 32] = doc_id.to_bytes32();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .expect("doc id must be a valid Ed25519 point");
     keyhive_core::principal::document::id::DocumentId::from(
@@ -144,12 +144,16 @@ async fn tier8_can_t_decrypt_before_joining() -> crate::Res<()> {
     let doc_id = owner_doc.document_id();
 
     // Blobs are stored and encrypted.
-    assert_blobs_encrypted(&guard.node(0).repo, doc_id).await;
+    assert_blobs_encrypted(&guard.node(0).repo, doc_id.clone()).await;
 
     // The intruder (no grant) must NOT be able to decrypt any blob.
-    let blobs = guard.node(0).repo.inspect_stored_doc_blobs(doc_id).await?;
+    let blobs = guard
+        .node(0)
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     for raw in &blobs {
-        let result = try_decrypt(&guard.node(1).repo, doc_id, raw).await;
+        let result = try_decrypt(&guard.node(1).repo, doc_id.clone(), raw).await;
         assert!(
             result.is_err(),
             "intruder without access must not decrypt stored blob"
@@ -182,7 +186,7 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
     // Grant Edit, sync keyhive.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -196,17 +200,24 @@ async fn tier8_postwrite_blob_decrypts_after_edit_grant() -> crate::Res<()> {
         .await??;
 
     // Sync the post-grant content so the editor can learn about it.
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
 
     // Blobs are encrypted.
-    assert_blobs_encrypted(&pair.left().repo, doc_id).await;
+    assert_blobs_encrypted(&pair.left().repo, doc_id.clone()).await;
 
     // Editor must be able to decrypt the post-grant blob.
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let mut found_decryptable = false;
     for raw in &blobs {
-        if try_decrypt(&pair.right().repo, doc_id, raw).await.is_ok() {
+        if try_decrypt(&pair.right().repo, doc_id.clone(), raw)
+            .await
+            .is_ok()
+        {
             found_decryptable = true;
             break;
         }
@@ -249,7 +260,7 @@ async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
@@ -257,11 +268,15 @@ async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
         .add_member_to_group(reader_agent, &group, Access::Read)
         .await?;
 
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let mut found = None;
     for raw in blobs {
         let encrypted = decode_encrypted_blob(&raw)?;
-        let plaintext = try_decrypt(&pair.left().repo, doc_id, &raw)
+        let plaintext = try_decrypt(&pair.left().repo, doc_id.clone(), &raw)
             .await
             .map_err(|e| crate::ferr!("stored blob decrypt failed: {e}"))?;
         let envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
@@ -321,7 +336,7 @@ async fn tier8_stored_blobs_encrypted() -> crate::Res<()> {
     let doc_id = doc.document_id();
 
     // Blobs from create_doc.
-    assert_blobs_encrypted(&guard.node(0).repo, doc_id).await;
+    assert_blobs_encrypted(&guard.node(0).repo, doc_id.clone()).await;
 
     // Additional writes.
     doc.with_document(|d| {
@@ -358,13 +373,14 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     // Grant Edit, sync keyhive, editor writes pre-revoke content.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     editor_doc
         .with_document(|d| {
             d.transact(|tx| tx.put(automerge::ROOT, "phase", "prerevoke"))
@@ -376,14 +392,15 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     let _owner_sync =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(_owner_sync);
     drop(editor_doc);
 
     // --- Revoke the editor.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent)
+        .revoke_doc_access(doc_id.clone(), editor_agent)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -397,7 +414,11 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
         .await??;
 
     // Collect blobs after the post-revoke write.
-    let blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
 
     // Pre-revoke blobs should still be decryptable by the owner (and the
     // revoked peer's local cache, but we only verify owner).
@@ -411,10 +432,10 @@ async fn tier8_forward_secrecy_after_revoke() -> crate::Res<()> {
             .map_err(|e| crate::ferr!("blob decode failed: {e}"))?;
 
         // Try to decrypt with the revoked (right) node's keyhive.
-        let revoked_result = try_decrypt(&pair.right().repo, doc_id, raw).await;
+        let revoked_result = try_decrypt(&pair.right().repo, doc_id.clone(), raw).await;
 
         // Try to decrypt with the owner (left) node's keyhive.
-        let owner_result = try_decrypt(&pair.left().repo, doc_id, raw).await;
+        let owner_result = try_decrypt(&pair.left().repo, doc_id.clone(), raw).await;
 
         if let Ok(plaintext) = owner_result {
             // The plaintext may contain the phase value.
@@ -474,13 +495,14 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // --- Disconnect and fork.
     fixtures::go_offline(&mut pair).await?;
@@ -504,9 +526,9 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Sync bidirectionally: editor pulls owner's fork, owner pulls editor's fork.
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
 
     // Both sides must see both forks.
@@ -515,13 +537,13 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     let editor_recheck = pair
         .right()
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
 
     assert_eq!(
         read_text(&owner_recheck, "owner_fork").await.as_deref(),
@@ -541,14 +563,14 @@ async fn tier8_decrypt_after_fork_and_merge() -> crate::Res<()> {
     );
 
     // All stored blobs are encrypted.
-    assert_blobs_encrypted(&pair.left().repo, doc_id).await;
-    assert_blobs_encrypted(&pair.right().repo, doc_id).await;
+    assert_blobs_encrypted(&pair.left().repo, doc_id.clone()).await;
+    assert_blobs_encrypted(&pair.right().repo, doc_id.clone()).await;
 
     // Both sides can decrypt through the materialized handle (the standard
     // automerge sync path). Direct keyhole decryption of individual blobs
     // is not guaranteed cross-node because the CGKA key for a remote commit
     // may not be independently addressable in the receiver's tree.
-    assert_blobs_encrypted(&pair.left().repo, doc_id).await;
+    assert_blobs_encrypted(&pair.left().repo, doc_id.clone()).await;
     assert_blobs_encrypted(&pair.right().repo, doc_id).await;
 
     // Both sides can read the converged content through their handles.
@@ -595,13 +617,14 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
     // Grant Read, propagate, sync doc.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
         Some("archive-roundtrip")
@@ -609,7 +632,7 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
     drop(reader_doc);
 
     // Verify blobs are encrypted before restart.
-    assert_blobs_encrypted(&pair.right().repo, doc_id).await;
+    assert_blobs_encrypted(&pair.right().repo, doc_id.clone()).await;
 
     // --- Full close and restart right node (keyhive archive roundtrip).
     let old_left = pair.left_conn.take().expect("left connection should exist");
@@ -629,11 +652,12 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
     // After archive roundtrip, the right node must be able to materialise
     // the document through the standard sync path (which exercises the full
     // CGKA + ingest flow). Blobs are encrypted on both sides.
-    assert_blobs_encrypted(&pair.left().repo, doc_id).await;
+    assert_blobs_encrypted(&pair.left().repo, doc_id.clone()).await;
 
     // Verify the right node can still sync and materialise new content.
     let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc2, "title").await.as_deref(),
         Some("archive-roundtrip")

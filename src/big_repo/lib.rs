@@ -1,6 +1,7 @@
 mod interlude {
-    pub use big_sync_core::{ObjId, PartId, PeerId};
+    pub use big_sync_core::{ObjKey, PartKey, PeerKey};
 
+    pub(crate) use crate::TryKeyBytes32;
     pub use future_form::{FutureForm, Local, Sendable};
     pub use utils_rs::prelude::*;
 }
@@ -33,6 +34,10 @@ mod runtime2;
 pub use runtime2::doc_revision_store::{
     AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
     AutomergeFrontierTarget,
+};
+pub use runtime2::keyhive_access_stream::{
+    AccessSubject, AccessSubjectSet, KeyhiveAccessDelta, KeyhiveAccessMemory,
+    KeyhiveAccessRevisionStore, KeyhiveAccessSelector,
 };
 pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, GroupScopeController, GroupScopeHandle,
@@ -77,6 +82,30 @@ pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyh
 pub use keyhive_core;
 
 pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
+
+/// Test-only guard for [`BigRepo::hold_hub_events`]: drops reopen hub event
+/// processing, so a failed assertion cannot leave the hub holding events (and
+/// with them the in-flight counter's release) for the rest of the process. A
+/// test that needs the replay to have happened calls [`Self::resume`].
+#[cfg(test)]
+pub(crate) struct HubEventsHold {
+    runtime: runtime2::Runtime2Handle<future_form::Sendable>,
+}
+
+#[cfg(test)]
+impl HubEventsHold {
+    pub(crate) async fn resume(&self) -> Res<()> {
+        self.runtime.resume_events_for_test().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for HubEventsHold {
+    fn drop(&mut self) {
+        self.runtime.resume_events_for_test_on_drop();
+    }
+}
 pub use changes::{
     BigRepoChangeNotification, BigRepoChangeOrigin, BigRepoLocalNotification,
     ChangeFilter as BigRepoChangeFilter,
@@ -88,18 +117,61 @@ pub use changes::{
     OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
 
-pub type DocumentId = big_sync_core::ObjId;
+pub type DocumentId = big_sync_core::ObjKey;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
-/// The global partition: every doc we can read appears here as a marker.
-/// Embedders pass this PartId to big_sync's `set_peer`.
-pub const GLOBAL_PART_ID: big_sync_core::PartId = big_sync_core::PartId::new([
-    0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-]);
+/// The reserved partition listing every sedimentree we have saved locally: every doc we
+/// can read appears here as a member, which is what makes it the store-wide enumeration
+/// surface. ADR 012 decision 12 keeps this a *real part* rather than a synthetic marker,
+/// and names it with the reserved key `/seds`. Embedders pass this part key to big_sync's
+/// `set_peer`.
+pub fn global_part_id() -> big_sync_core::PartKey {
+    big_sync_core::PartKey::new("/seds")
+}
 /// Return the deterministic BigSync partition derived from a Keyhive group.
-pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartId {
+pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartKey {
     runtime2::group_part_id(group_id)
+}
+
+/// Fallible counterpart of [`big_sync_core::ByteKey::to_bytes32`], for the keys a peer
+/// delivered.
+///
+/// ADR 012 decision 1 makes a key an arbitrary byte string, so the width of a key that
+/// arrived from the sync edge is external input: a length other than the 32 bytes the
+/// fixed-width consumers at the workspace edges require is something to report, not an
+/// invariant break, and must not panic the process. `to_bytes32` stays the assertion for
+/// keys this process minted — a local id is a 32-byte digest by construction, and a
+/// different length there is a programming error.
+///
+/// Implemented on `ByteKey` and reached on `ObjKey`, `PartKey` and `PeerKey` through
+/// their `Deref`, so the sync edge names the same conversion the infallible path does.
+pub(crate) trait TryKeyBytes32 {
+    /// The key's bytes, or an error naming the key's width if it is not 32 bytes.
+    fn try_to_bytes32(&self) -> Res<[u8; 32]>;
+}
+
+impl TryKeyBytes32 for big_sync_core::ByteKey {
+    fn try_to_bytes32(&self) -> Res<[u8; 32]> {
+        let bytes = self.as_bytes();
+        bytes
+            .try_into()
+            .map_err(|_| eyre::eyre!("key is {} bytes wide, expected 32", bytes.len()))
+    }
+}
+
+#[cfg(test)]
+mod key_bytes32_tests {
+    use super::*;
+
+    /// A 32-byte key converts on every key type through `Deref`; a key any other width is
+    /// an error, not the panic the infallible conversion would raise.
+    #[test]
+    fn fallible_key_conversion_reports_a_wrong_width() {
+        assert_eq!(ObjKey::new([3; 32]).try_to_bytes32().unwrap(), [3; 32]);
+
+        let error = ObjKey::new(b"/object/path").try_to_bytes32().unwrap_err();
+        assert!(error.to_string().contains("expected 32"), "{error}");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +182,7 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
-    pub hidden_parts: HashSet<PartId>,
+    pub hidden_parts: HashSet<PartKey>,
     /// Keyhive groups whose documents the Automerge frontier worker processes.
     pub automerge_frontier_group_scope: WorkerGroupScope,
     /// Keyhive groups whose documents the causal checkpoint worker processes.
@@ -135,7 +207,7 @@ pub enum StorageConfig {
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct BigRepo {
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
@@ -380,7 +452,7 @@ impl BigRepo {
         ));
         let signer =
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
-        let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
+        let peer_id = PeerKey::new(signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
         // The embedder-facing scope controller: workers read the live scope
@@ -446,8 +518,8 @@ impl BigRepo {
         ))
     }
 
-    pub fn local_peer_id(&self) -> PeerId {
-        self.local_peer_id
+    pub fn local_peer_id(&self) -> PeerKey {
+        self.local_peer_id.clone()
     }
 
     /// Update the Automerge frontier worker's group scope at runtime.
@@ -481,7 +553,8 @@ impl BigRepo {
     }
     /// Resolve this repository's local Keyhive agent.
     pub async fn local_keyhive_agent(&self) -> Res<BigKeyhiveAgent> {
-        let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(*self.local_peer_id.as_bytes());
+        let peer_id =
+            subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.to_bytes32());
         self.keyhive
             .get_agent_by_peer_id(&peer_id)
             .await?
@@ -502,8 +575,8 @@ impl BigRepo {
         self.keyhive.receive_contact_card(contact_card).await
     }
     /// Resolve a connected peer's Keyhive agent.
-    pub async fn keyhive_agent_for_peer(&self, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
-        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+    pub async fn keyhive_agent_for_peer(&self, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
+        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32());
         self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
     }
     /// Grant administrative membership without exposing the Keyhive access type.
@@ -539,19 +612,19 @@ impl BigRepo {
     /// classified by the dispatcher.
     pub(crate) async fn subscribe_keyhive_changes(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         tx: irpc::channel::mpsc::Sender<crate::rpc::KeyhiveChangedRpcEvent>,
     ) -> Uuid {
         self.keyhive_dispatcher.subscribe(peer_id, tx).await
     }
 
     /// Unregister a peer's notification stream for the given subscription ID.
-    pub(crate) async fn unsubscribe_keyhive_changes(&self, peer_id: &PeerId, sub_id: Uuid) {
+    pub(crate) async fn unsubscribe_keyhive_changes(&self, peer_id: &PeerKey, sub_id: Uuid) {
         self.keyhive_dispatcher.unsubscribe(peer_id, sub_id).await;
     }
 
     /// Synchronize local Keyhive state with a directly connected peer.
-    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerId) -> Res<()> {
+    pub async fn sync_keyhive_with_peer(&self, peer_id: PeerKey) -> Res<()> {
         self.runtime.sync_keyhive_with_peer(peer_id).await
     }
 
@@ -559,7 +632,7 @@ impl BigRepo {
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> Result<SyncDocReceipt, SyncDocError> {
         self.runtime
             .sync_doc_with_peer_receipt(doc_id, peer_id)
@@ -581,7 +654,7 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
-        let out = self.runtime.get_doc_handle(*document_id).await?;
+        let out = self.runtime.get_doc_handle(document_id.clone()).await?;
         Ok(out.map_ready(|handle| BigDocHandle {
             repo: Arc::clone(self),
             handle,
@@ -597,10 +670,13 @@ impl BigRepo {
         &self,
         document_id: DocumentId,
     ) -> Res<DocumentSyncSnapshot> {
-        let head_state = self.runtime.inspect_doc_head_state(document_id).await?;
+        let head_state = self
+            .runtime
+            .inspect_doc_head_state(document_id.clone())
+            .await?;
         let store = &self.big_sync_store;
-        let indexed_parts = store.obj_parts(document_id).await?.len();
-        let payload_present = store.obj_payload(document_id).await?.is_some();
+        let indexed_parts = store.obj_parts(document_id.clone()).await?.len();
+        let payload_present = store.obj_payload(document_id.clone()).await?.is_some();
         let stage = match head_state.as_ref().map(|state| state.state) {
             Some(
                 MaterializationState::Materialized | MaterializationState::PartiallyMaterialized,
@@ -690,6 +766,60 @@ impl BigRepo {
         self.runtime.unfreeze().await
     }
 
+    /// Test-only seam: queue hub events instead of handling them (see
+    /// [`Runtime2Handle::hold_events_for_test`]). Returns a guard that reopens
+    /// event processing when dropped, so an assertion failure cannot leave the
+    /// hub holding events for the rest of the test process.
+    #[cfg(test)]
+    pub(crate) async fn hold_hub_events(&self) -> Res<HubEventsHold> {
+        self.runtime.hold_events_for_test().await?;
+        Ok(HubEventsHold {
+            runtime: self.runtime.clone(),
+        })
+    }
+
+    /// Test-only seam: close the local doc-worker mailbox for `doc_id` on the
+    /// next content-carrying sync-session apply, so that apply route fails
+    /// while a later empty reconsider can still spawn a fresh worker. See
+    /// [`Runtime2Handle::fail_next_content_apply_route_for_test`].
+    #[cfg(test)]
+    pub(crate) async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
+        self.runtime
+            .fail_next_content_apply_route_for_test(doc_id)
+            .await?;
+        Ok(())
+    }
+
+    /// Test-only: whether `peer_id` currently has a registered connection in
+    /// this repo's hub. Connection-lifecycle tests assert the deregistration
+    /// invariant with this instead of inferring it from a sync failure.
+    #[cfg(test)]
+    pub(crate) async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
+        self.runtime.has_connected_peer_for_test(peer_id).await
+    }
+
+    /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
+    /// active round, stamped one seq ahead of the hub's admitted head. Returns
+    /// the seq so the test can inject the matching admission event.
+    #[cfg(test)]
+    pub(crate) async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
+        self.runtime
+            .inject_keyhive_completion_for_test(peer_id)
+            .await
+    }
+
+    /// Test-only: hand an event directly to the hub's event handler.
+    #[cfg(test)]
+    pub(crate) async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
+        self.runtime.inject_runtime2_evt_for_test(evt).await
+    }
+
+    /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
+    #[cfg(test)]
+    pub(crate) async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
+        self.runtime.quiescence_probe_barrier_for_test().await
+    }
+
     /// Whether the repository currently stores a sedimentree with `doc_id`.
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> Res<bool> {
         self.runtime.contains_sedimentree_id(doc_id).await
@@ -722,7 +852,7 @@ impl BigRepo {
     ) -> Result<bool, CreateDocError> {
         let Some((bytes, initial_keys)) = self
             .keyhive_storage
-            .staged_doc_content(doc_id.into_bytes())
+            .staged_doc_content(doc_id.to_bytes32())
             .await
             .map_err(|err| {
                 CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
@@ -820,13 +950,13 @@ impl BigRepo {
     ) -> Res<()> {
         let mut docs = BTreeMap::new();
         for doc_id in self.keyhive.group_document_ids(group).await {
-            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
             docs.insert(doc_id, doc);
         }
 
         let mut after_content = BTreeMap::new();
-        for doc_id in docs.keys().copied() {
-            let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        for doc_id in docs.keys().cloned() {
+            let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
             after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
         }
 
@@ -842,7 +972,7 @@ impl BigRepo {
                 let _doc = docs
                     .get(doc_id)
                     .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
-                if !self.runtime.ensure_causal_coverage(*doc_id).await? {
+                if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
                     tracing::debug!(%doc_id, "group grant causal checkpoint deferred to durable event reconciliation");
                 }
             }
@@ -863,7 +993,7 @@ impl BigRepo {
         principal: impl Into<BigKeyhiveAuthority>,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        let heads = match self.doc_head_state(doc_id).await {
+        let heads = match self.doc_head_state(doc_id.clone()).await {
             Ok(state) => state.sedimentree_heads,
             Err(err) => {
                 tracing::debug!(%doc_id, %err, "doc_head_state unavailable for grant_doc_access boundary; using empty heads");
@@ -876,14 +1006,14 @@ impl BigRepo {
             .keyhive
             .grant_doc_access(
                 principal,
-                doc_id,
+                doc_id.clone(),
                 access,
                 after_content,
                 &self.keyhive_protocol,
             )
             .await?;
 
-        if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id).await? {
+        if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
 
@@ -897,20 +1027,20 @@ impl BigRepo {
         doc_id: DocumentId,
         principal: impl Into<BigKeyhiveAuthority>,
     ) -> Res<()> {
-        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
-        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
+        let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
         let _hashes = self
             .keyhive
             .revoke_doc_access(
                 principal,
-                doc_id,
+                doc_id.clone(),
                 true,
                 after_content,
                 &self.keyhive_protocol,
             )
             .await?;
-        if !self.runtime.ensure_causal_coverage(doc_id).await? {
+        if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document revocation causal checkpoint deferred to durable event reconciliation");
         }
         self.wait_for_keyhive_reconciliation().await?;
@@ -928,7 +1058,7 @@ impl BigRepo {
         self: &Arc<Self>,
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
         let (peer_id, closed, end_rx) = self
@@ -936,7 +1066,7 @@ impl BigRepo {
             .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
         watch_connection_end(
-            peer_id,
+            peer_id.clone(),
             Arc::clone(&closed),
             end_rx,
             end_signal_tx,
@@ -964,7 +1094,7 @@ impl BigRepo {
             .accept_connection(Box::new((conn, Some(endpoint))))
             .await?;
         watch_connection_end(
-            peer_id,
+            peer_id.clone(),
             Arc::clone(&closed),
             end_rx,
             end_signal_tx,
@@ -982,7 +1112,7 @@ impl BigRepo {
 /// channel (used by the sync layer to release per-peer state when a
 /// connection drops, whether outbound or inbound).
 pub(crate) fn watch_connection_end(
-    peer_id: PeerId,
+    peer_id: PeerKey,
     closed_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     end_rx: futures::channel::oneshot::Receiver<(
         std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1018,13 +1148,13 @@ pub(crate) fn watch_connection_end(
 pub struct BigRepoConnection {
     #[educe(Debug(ignore))]
     repo: Arc<BigRepo>,
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     #[educe(Debug(ignore))]
     closed: Arc<AtomicBool>,
 }
 
 pub struct ConnFinishSignal {
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     /// The ended connection's end flag (shared with the runtime's watcher).
     /// Lets consumers distinguish WHICH connection ended when a peer id is
     /// reused across connections (e.g. re-establishment after a replace).
@@ -1033,8 +1163,8 @@ pub struct ConnFinishSignal {
 }
 
 impl BigRepoConnection {
-    pub fn peer_id(&self) -> PeerId {
-        self.peer_id
+    pub fn peer_id(&self) -> PeerKey {
+        self.peer_id.clone()
     }
 
     /// The connection's end flag, shared with the runtime's watcher; use for
@@ -1052,7 +1182,10 @@ impl BigRepoConnection {
         if self.is_closed() {
             return Err(ferr!("connection is closed"));
         }
-        self.repo.runtime.sync_keyhive_with_peer(self.peer_id).await
+        self.repo
+            .runtime
+            .sync_keyhive_with_peer(self.peer_id.clone())
+            .await
     }
 
     /// NOTE: a succesful outcome doesn't correspond to doc
@@ -1063,7 +1196,7 @@ impl BigRepoConnection {
         }
         self.repo
             .runtime
-            .sync_doc_with_peer(doc_id, self.peer_id)
+            .sync_doc_with_peer(doc_id, self.peer_id.clone())
             .await
     }
 
@@ -1076,7 +1209,7 @@ impl BigRepoConnection {
         }
         self.repo
             .runtime
-            .sync_doc_with_peer_receipt(doc_id, self.peer_id)
+            .sync_doc_with_peer_receipt(doc_id, self.peer_id.clone())
             .await
     }
 
@@ -1197,7 +1330,7 @@ impl BigRepo {
 
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
-        self.handle.bundle.doc_id
+        self.handle.bundle.doc_id.clone()
     }
 
     pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
