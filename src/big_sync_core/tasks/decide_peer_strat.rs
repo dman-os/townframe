@@ -135,22 +135,6 @@ impl DecidePeerStrategyTask {
                 PartStratSummary::Cursor(_) => None,
             });
             let last_peer_cursor = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-            // FIXME: the real issue with bucket is not a deadlock,
-            // it just doens't deal with filtered sets well enough
-            // ─────────────────────────────────────────────────────────────
-            // ⚠️ BUCKET-STRAT DISABLED FOR UNCONFIGURED EMBEDDERS ⚠️
-            //
-            // The bucket-diff strategy DEADLOCKS in the big_repo/daybook
-            // offline-reopen scenario: with a >256-event cursor diff the
-            // picker chose Bucket, the bucket machine started post-reopen and
-            // never completed (multi_strat never cleared), permanently
-            // blocking `wait_for_full_sync` — the four-node stress hang.
-            //
-            // Until the bucket machine's stall is fixed, embedders that do
-            // not explicitly opt in via `sync_modes` always get CursorOnly.
-            // big_sync's own suite opts in explicitly where it tests the
-            // bucket path.
-            // ─────────────────────────────────────────────────────────────
             let sync_mode = self
                 .sync_modes
                 .get(&part_id)
@@ -402,6 +386,13 @@ mod tests {
             &'a self,
             _req: crate::rpc::ReplayPageRequest,
         ) -> LocalBoxFuture<'a, BigSyncRpcResult<crate::rpc::ReplayPage>> {
+            unreachable!("the decision task does not page events")
+        }
+
+        fn replay_subscription<'a>(
+            &'a self,
+            _req: crate::rpc::ReplaySubscriptionRequest,
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<crate::rpc::ReplaySubscriptionResponse>> {
             unreachable!("the decision task does not page events")
         }
 

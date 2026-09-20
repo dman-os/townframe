@@ -36,6 +36,9 @@ pub struct ReplayPageTask {
     /// them and superseding never discards delivered work.
     pub supersede: Option<rpc::ReplayRequestId>,
     pub limit: u32,
+    /// Long-poll duration for this page. Catch-up requests are drain-only; only an
+    /// established live lane waits.
+    pub hold_ms: u32,
     /// Optional stateful target-set operation to perform before fetching this page.
     pub subscription: Option<ReplaySubscriptionTaskState>,
 }
@@ -158,14 +161,14 @@ impl ReplayPageTask {
                     })
                     .collect(),
                 limit: self.limit,
-                hold_ms: Self::HOLD_MS,
+                hold_ms: self.hold_ms,
             };
             tracing::debug!(
                 peer_id = %self.peer_id,
                 ?self.request_id,
                 supersede = ?self.supersede,
                 target_count = self.targets.len(),
-                hold_ms = Self::HOLD_MS,
+                hold_ms = self.hold_ms,
                 "replay subscription next request",
             );
             let response = match peer_rpc.replay_subscription(next.clone()).await {
@@ -226,7 +229,7 @@ impl ReplayPageTask {
                     supersede: self.supersede,
                     targets: self.targets.clone(),
                     limit: self.limit,
-                    hold_ms: Self::HOLD_MS,
+                    hold_ms: self.hold_ms,
                 })
                 .await?
         };

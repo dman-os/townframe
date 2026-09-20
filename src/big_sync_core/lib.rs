@@ -1650,6 +1650,25 @@ impl BigSyncMachine {
                 .max()
         });
         let lane = self.replay_lane(&peer_id, &targets[0]);
+        // A lane that has not yet established a caught-up verdict is drain-only. This
+        // includes a forced refresh: it must check current backlog without making the
+        // full-sync waiter pay for a live hold. Once every route is caught up, the
+        // next live request may long-poll for future events.
+        let all_targets_caught_up = matches!(lane, ReplayLane::Live)
+            && self.peers.get(&peer_id).is_some_and(|peer_state| {
+                routes.iter().all(|route| {
+                    peer_state
+                        .replay_pages
+                        .get(route)
+                        .map(|state| state.caught_up)
+                        .unwrap_or(caught_up)
+                })
+            });
+        let hold_ms = if all_targets_caught_up {
+            ReplayPageTask::HOLD_MS
+        } else {
+            0
+        };
         let subscription = self.peers.get_mut(&peer_id).map(|peer_state| {
             let state = peer_state
                 .replay_subscriptions
@@ -1744,6 +1763,7 @@ impl BigSyncMachine {
             targets,
             supersede,
             limit: ReplayPageTask::LIMIT,
+            hold_ms,
             subscription,
         }));
         let task_id = match delayed {
@@ -3340,6 +3360,71 @@ mod tests {
             ),
             ReplayLane::Live,
         );
+    }
+
+    #[test]
+    fn replay_catch_up_pages_do_not_long_poll_until_caught_up() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: Set::new(),
+        }));
+        machine
+            .peers
+            .get_mut(&peer)
+            .expect("peer was inserted")
+            .parts
+            .insert(
+                part.clone(),
+                PeerPartState {
+                    strat: PeerPartStrategy::Cursor(CursorState { replay_cursor: 0 }),
+                },
+            );
+        machine.refresh_peer_replay_worker(peer.clone(), true);
+        let first = machine
+            .drain_machine_spawn_queue()
+            .next()
+            .expect("forced refresh spawned a replay page");
+        let MachineTask {
+            deets: MachineTaskDeets::ReplayPage(first),
+            ..
+        } = first
+        else {
+            panic!("forced refresh spawned a non-replay task");
+        };
+        assert_eq!(first.hold_ms, 0);
+        machine
+            .peers
+            .get_mut(&peer)
+            .expect("peer was inserted")
+            .replay_pages
+            .values_mut()
+            .next()
+            .expect("replay route was inserted")
+            .caught_up = true;
+        machine.spawn_replay_pages(
+            peer,
+            vec![SubscriptionTarget::Part {
+                part_id: part,
+                cursor: 0,
+            }],
+            false,
+        );
+        let next = machine
+            .drain_machine_spawn_queue()
+            .next()
+            .expect("caught-up refresh spawned a replay page");
+        let MachineTask {
+            deets: MachineTaskDeets::ReplayPage(next),
+            ..
+        } = next
+        else {
+            panic!("caught-up refresh spawned a non-replay task");
+        };
+        assert_eq!(next.hold_ms, ReplayPageTask::HOLD_MS);
     }
 
     /// A waiter registered for a peer+part must NOT remain stranded after that
