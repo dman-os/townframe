@@ -1180,7 +1180,12 @@ impl BigSyncMachine {
                 }
             }
             for (_, state) in old.replay_pages {
-                let _state = self.tasks.cancel(state.task_id).expect(ERROR_UNRECONIZED);
+                if self.tasks.cancel(state.task_id).is_none() {
+                    tracing::debug!(
+                        task_id = state.task_id,
+                        "replay task was already retired during peer cleanup",
+                    );
+                }
             }
             self.stat_machine.remove_peer(peer_id);
         }
@@ -1807,7 +1812,12 @@ impl BigSyncMachine {
         };
         if targets.is_empty() {
             for (_, state) in peer_state.replay_pages.drain() {
-                let _state = self.tasks.cancel(state.task_id).expect(ERROR_UNRECONIZED);
+                if self.tasks.cancel(state.task_id).is_none() {
+                    tracing::debug!(
+                        task_id = state.task_id,
+                        "replay task was already retired during peer cleanup",
+                    );
+                }
             }
             self.update_peer_replay_done(peer_id);
             return;
@@ -1822,7 +1832,12 @@ impl BigSyncMachine {
             .collect();
         for route in stale {
             if let Some(mut state) = peer_state.replay_pages.remove(&route) {
-                let _state = self.tasks.cancel(state.task_id).expect(ERROR_UNRECONIZED);
+                if self.tasks.cancel(state.task_id).is_none() {
+                    tracing::debug!(
+                        task_id = state.task_id,
+                        "replay task was already retired during peer cleanup",
+                    );
+                }
                 if force {
                     // Keep the advisory lane across a forced restart for routes that are still
                     // wanted, but invalidate the prior caught-up verdict: the new request must
