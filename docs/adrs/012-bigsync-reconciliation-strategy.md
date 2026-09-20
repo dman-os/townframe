@@ -703,21 +703,65 @@ What this fixes: no unbounded response, no shared-buffer-as-backpressure, no
 per-peer replay task that cannot resume, resumption by cursor after any
 interruption, and revocation for free (decision 2).
 
-**As built.** `ReplayPageRequest { target, limit, hold_ms }` answers with a
-`ReplayPageOutcome` over a single oneshot — no stream and no connection-lifetime task. The
-hold is server-side in the store: the responder drains the same filtered subscription the
-push path used, bounded by `limit`, and waits until an event arrives or the hold expires,
-capping whatever hold the caller asked for. `next_cursor: None` is how a client learns
-replay is complete without a `ReplayComplete` event on the wire. A denial is its own
-outcome rather than an inferred empty page — an empty page is no events and no resume point
-— and `page_denied` is a store hook so that a store which cannot know access cannot pretend
-to deny. Deleted: `PeerReplayTask`, its messages and error type, the `SubParts` streaming
-RPC variant, the streaming bridge, the summary pre-check that fed it, the server's
-per-subscription forwarding loop, and the RPC worker's subscription tasks and cancel token.
-What was kept is kept for reuse, not compatibility: `SubPartsRequest`, `SubscriptionTarget`,
-`SubEvent` and the store-level `subscribe`/`subscribe_local`, because the page drains
-`subscribe` and so inherits step 1's recipient filter instead of reimplementing it.
+**As built.** `ReplayPageRequest { request_id, supersede, targets, limit, hold_ms }` answers with a
+`ReplayPage { events, targets }` over a single oneshot — no stream and no connection-lifetime
+replay task. A request batches a set of part and object targets, and each target carries its own
+resume cursor. The responder applies authorization and event filtering, merges overlapping target
+hits into one page, bounds the page by event count and encoded bytes, and holds the request while
+all targets have no event until the hold expires. A hold expiry is a normal page answer, not an
+error. Each target receives an explicit resume/drained verdict, so an empty page is not inferred
+to be complete. The page request ID and optional supersede ID are server-side lifetime metadata:
+a supersede cancels only a request still waiting, while a page whose read has produced rows is
+allowed to finish. The page remains pull-driven and re-issued by the client; the server does not
+retain replay rows or cursors between requests.
 
+**Decision refinement: persist target metadata, not delivery state.** The dominant cost in a stable live
+subscription is not target churn or the choice of shards: every empty long-poll page currently
+repeats the complete target set. A peer with a thousand stable object targets pays those keys again
+on every hold expiry even when no payload is delivered. Sharding is therefore an optional optimization
+and a trade-off, not the primary answer. Splitting overlapping part and object targets loses the
+page-level merge that turns one shared object event into one wire event; any sharding must keep
+overlapping targets together or accept at-least-once duplicates as its explicit cost.
+
+The next protocol shape should keep the replay task discrete and pull-based while making the target
+set stateful. This is stateful control-plane metadata, not a push stream, server-owned cursor, or
+retained event queue:
+
+1. An `OpenReplaySubscription` request sends the initial target set once and returns a bounded
+   subscription handle plus a generation.
+2. `UpdateReplaySubscription` sends coalesced additions and removals. The client debounces rapid
+   target changes, and the server applies only the newest generation.
+3. `NextReplayPage` names the handle and asks for one bounded page. It retains the existing
+   `limit`, `hold_ms`, page `request_id`, supersede behavior, and per-target resume verdicts.
+4. `CloseReplaySubscription` releases the handle. Handles are scoped to the authenticated peer
+   and connection, expire when abandoned, and must be recreated from a full target set after
+   reconnect.
+
+The target set is updated between pages. If an update arrives while a page is waiting, it may wake
+that wait and re-evaluate the latest set. If a read has already produced rows, that page finishes;
+the update affects the next page. A server must not discard a row-bearing page merely because its
+target set changed. Before serialization, however, events that are no longer covered by any active
+target must be filtered. An event still covered by another target is retained once. This requires
+the page builder to retain target provenance, or to re-evaluate coverage from the event and current
+target set; target verdicts alone are not enough after the page has merged overlapping hits.
+
+The handle maintains a compact target dictionary. Targets receive bounded integer IDs, so page
+verdicts and target references do not repeat variable-length `PartKey` and `ObjKey` values. The
+current page-level event dictionaries already establish this encoding direction; the subscription
+dictionary extends it across pages. An object-target response arm may omit the object key when the
+target ID uniquely identifies that object. A merged event whose source is a part target, or whose
+object is covered by several target kinds, must retain an object reference or explicit target
+provenance; the optimization must not make the generic event shape ambiguous.
+
+All peer-controlled state is bounded by bytes rather than target count alone: maximum active
+subscription sets per peer, maximum target count, maximum key length, and maximum encoded target-set
+and update sizes. Count limits remain useful for work admission, but byte limits are the actual wire
+and memory guard. The live set should normally remain one overlap-preserving subscription; bulk replay
+may continue to use separate stateless pages and advisory lane scheduling.
+
+This refinement preserves the reason for decision 9 — bounded, client-driven pages — while removing
+the repeated metadata cost. It does not turn replay into a connection-lifetime task and does not
+make the server authoritative for cursor progress.
 The event vocabulary is two kinds, not three, and that was settled here rather than
 inherited: a membership write is a *touch* (`Changed`, carrying the parts it names) and a
 deletion is `Removed`. There is no `Added`. A keyed frontier stores the latest transition
@@ -1225,9 +1269,10 @@ The store and the protocol need to expose, for a view:
 5. **A symmetric decision function** over exchanged descriptors, computed
    identically on both sides, with a deterministic tie-break when the two sides'
    descriptors disagree.
-6. **A paged event read** that returns *filtered* events: `(part, from_cursor,
-   limit) → (events with recipient-filtered part keys, next_cursor)`, with empty
-   pages, long-poll holds, and explicit unknown/unauthorized outcomes.
+6. **A paged event read** over a bounded target set: `(subscription, limit, hold_ms) →
+   (merged filtered events, per-target resume/drained verdicts)`, with empty pages, long-poll holds,
+   explicit unknown/unauthorized outcomes, and a bounded target-set handle so stable target keys are
+   not repeated on every page.
 7. **Derived part key names** for object parts, `o:{object_key}`, computable by any
    holder of the object key without a lookup. A name only: after decision 3's revision nothing
    stores, derives or interprets it.
