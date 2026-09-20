@@ -411,7 +411,9 @@ impl SyncStatMachine {
 
     /// TEMP-DIAGNOSTIC: per (peer, part) full-sync blocking flags.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn debug_peer_part_sync_flags(&self) -> Vec<(PeerKey, PartKey, bool, bool, bool, bool)> {
+    pub fn debug_peer_part_sync_flags(
+        &self,
+    ) -> Vec<(PeerKey, PartKey, bool, bool, bool, bool, bool)> {
         let mut out = Vec::new();
         for (peer_id, peer_state) in &self.peers {
             for part_id in peer_state.parts.keys().cloned() {
@@ -424,6 +426,7 @@ impl SyncStatMachine {
                     part_state.multi_strat,
                     peer_state.replay_phase_done,
                     part_state.cursor_active,
+                    part_state.unanswered,
                 ));
             }
         }
@@ -737,6 +740,10 @@ structstruck::strike! {
         /// [`SyncMode::Bucket`].
         default_sync_mode: SyncMode,
 
+        /// The client-owned namespace for replay subscriptions and request identifiers.
+        /// It is initialized lazily so `Default` remains useful for deterministic tests.
+        replay_session_id: Option<crate::rpc::ReplaySessionId>,
+
         /// Every page request this machine issues carries a fresh id, so the round that
         /// replaces one still in flight can name it and the responder can drop the older one
         /// if it is only waiting. Monotone, and only ever compared for equality.
@@ -749,6 +756,12 @@ structstruck::strike! {
 
 // public surface
 impl BigSyncMachine {
+    fn replay_session_id(&mut self) -> crate::rpc::ReplaySessionId {
+        *self
+            .replay_session_id
+            .get_or_insert_with(|| crate::rpc::ReplaySessionId(rand::random::<u64>()))
+    }
+
     pub fn set_max_task_backoff(&mut self, max_backoff: Duration) {
         self.tasks.set_max_backoff(max_backoff);
     }
@@ -777,8 +790,29 @@ impl BigSyncMachine {
 
     /// TEMP-DIAGNOSTIC: per (peer, part) full-sync blocking flags.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn debug_peer_part_sync_flags(&self) -> Vec<(PeerKey, PartKey, bool, bool, bool, bool)> {
+    pub fn debug_peer_part_sync_flags(
+        &self,
+    ) -> Vec<(PeerKey, PartKey, bool, bool, bool, bool, bool)> {
         self.stat_machine.debug_peer_part_sync_flags()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_replay_pages(&self) -> Vec<String> {
+        self.peers
+            .iter()
+            .flat_map(|(peer_id, peer_state)| {
+                peer_state.replay_pages.iter().map(move |(route, state)| {
+                    format!(
+                        "peer={peer_id} route={route:?} task_id={:?} request_id={:?} lane={:?} caught_up={} waiting_for_credit={}",
+                        state.task_id,
+                        state.request_id,
+                        state.lane,
+                        state.caught_up,
+                        state.waiting_for_credit,
+                    )
+                })
+            })
+            .collect()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1600,6 +1634,7 @@ impl BigSyncMachine {
         if targets.is_empty() {
             return;
         }
+        let session_id = self.replay_session_id();
         self.replay_request_seq = self.replay_request_seq.wrapping_add(1);
         let request_id = crate::rpc::ReplayRequestId(self.replay_request_seq);
         let routes: Vec<ReplayRoute> = targets.iter().map(ReplayRoute::of).collect();
@@ -1669,6 +1704,7 @@ impl BigSyncMachine {
             let request = if !state.opened {
                 state.opened = true;
                 Some(crate::rpc::ReplaySubscriptionRequest::Open {
+                    session_id,
                     subscription_id: state.subscription_id,
                     generation: state.generation,
                     targets: entries.clone(),
@@ -1676,6 +1712,7 @@ impl BigSyncMachine {
             } else if !additions.is_empty() || !removals.is_empty() {
                 state.generation = state.generation.checked_add(1).expect(ERROR_IMPOSSIBLE);
                 Some(crate::rpc::ReplaySubscriptionRequest::Update {
+                    session_id,
                     subscription_id: state.subscription_id,
                     generation: state.generation,
                     additions,
@@ -1685,6 +1722,7 @@ impl BigSyncMachine {
                 None
             };
             ReplaySubscriptionTaskState {
+                session_id,
                 subscription_id: state.subscription_id,
                 generation: state.generation,
                 targets: entries,
@@ -1701,6 +1739,7 @@ impl BigSyncMachine {
         );
         let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
             peer_id: peer_id.clone(),
+            session_id,
             request_id,
             targets,
             supersede,

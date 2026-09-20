@@ -63,13 +63,45 @@ where
                     stable_rounds,
                     "network-rest target sync begin"
                 );
-                target
-                    .worker
-                    .wait_for_full_sync(
-                        target.peer_ids.iter().cloned(),
-                        target.part_ids.iter().cloned(),
-                    )
-                    .await?;
+                let wait = target.worker.wait_for_full_sync(
+                    target.peer_ids.iter().cloned(),
+                    target.part_ids.iter().cloned(),
+                );
+                tokio::pin!(wait);
+                let mut next_snapshot = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    tokio::select! {
+                        result = &mut wait => {
+                            result?;
+                            break;
+                        }
+                        _ = tokio::time::sleep_until(next_snapshot) => {
+                            match target.worker.snapshot().await {
+                                Ok(snapshot) => tracing::warn!(
+                                    target_index,
+                                    worker = snapshot.label,
+                                    stable_rounds,
+                                    ?snapshot.peer_parts,
+                                    ?snapshot.full_sync_waiters,
+                                    ?snapshot.peer_part_sync_flags,
+                                    ?snapshot.replay_pages,
+                                    task_counts = ?snapshot.task_counts,
+                                    active_machine_tasks = snapshot.active_machine_tasks,
+                                    active_sync_tasks = snapshot.active_sync_tasks,
+                                    zombie_tasks = snapshot.zombie_tasks,
+                                    "network-rest target sync still waiting",
+                                ),
+                                Err(error) => tracing::warn!(
+                                    target_index,
+                                    stable_rounds,
+                                    ?error,
+                                    "network-rest target sync snapshot failed",
+                                ),
+                            }
+                            next_snapshot += Duration::from_secs(5);
+                        }
+                    }
+                }
                 tracing::info!(
                     target_index,
                     stable_rounds,

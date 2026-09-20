@@ -344,8 +344,13 @@ pub enum SubscriptionTarget {
     },
 }
 
-/// Stable identity of a logical replay subscription. It is scoped to the authenticated peer and
-/// storage scope; it is not a cursor and carries no delivery state.
+/// Stable identity for one client-owned replay session. It namespaces subscription and
+/// in-flight request identifiers, which are only unique within a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplaySessionId(pub u64);
+
+/// Stable identity of a logical replay subscription. It is scoped to the authenticated peer,
+/// storage scope, and replay session; it is not a cursor and carries no delivery state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplaySubscriptionId(pub u64);
 
@@ -399,17 +404,20 @@ pub struct ReplaySubscriptionTargetEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplaySubscriptionRequest {
     Open {
+        session_id: ReplaySessionId,
         subscription_id: ReplaySubscriptionId,
         generation: u64,
         targets: Vec<ReplaySubscriptionTargetEntry>,
     },
     Update {
+        session_id: ReplaySessionId,
         subscription_id: ReplaySubscriptionId,
         generation: u64,
         additions: Vec<ReplaySubscriptionTargetEntry>,
         removals: Vec<ReplayTargetId>,
     },
     Next {
+        session_id: ReplaySessionId,
         subscription_id: ReplaySubscriptionId,
         request_id: ReplayRequestId,
         supersede: Option<ReplayRequestId>,
@@ -418,6 +426,7 @@ pub enum ReplaySubscriptionRequest {
         hold_ms: u32,
     },
     Close {
+        session_id: ReplaySessionId,
         subscription_id: ReplaySubscriptionId,
     },
 }
@@ -761,6 +770,8 @@ pub struct ReplayRequestId(pub u64);
 /// still travels with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayPageRequest {
+    /// Names the client-owned replay session that owns this request id.
+    pub session_id: ReplaySessionId,
     /// Identifies this request, so a later request can supersede it.
     pub request_id: ReplayRequestId,
     /// The in-flight request this one supersedes, if any.

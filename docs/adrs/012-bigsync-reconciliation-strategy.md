@@ -703,17 +703,18 @@ What this fixes: no unbounded response, no shared-buffer-as-backpressure, no
 per-peer replay task that cannot resume, resumption by cursor after any
 interruption, and revocation for free (decision 2).
 
-**As built.** `ReplayPageRequest { request_id, supersede, targets, limit, hold_ms }` answers with a
+**As built.** `ReplayPageRequest { session_id, request_id, supersede, targets, limit, hold_ms }` answers with a
 `ReplayPage { events, targets }` over a single oneshot — no stream and no connection-lifetime
 replay task. A request batches a set of part and object targets, and each target carries its own
 resume cursor. The responder applies authorization and event filtering, merges overlapping target
 hits into one page, bounds the page by event count and encoded bytes, and holds the request while
 all targets have no event until the hold expires. A hold expiry is a normal page answer, not an
 error. Each target receives an explicit resume/drained verdict, so an empty page is not inferred
-to be complete. The page request ID and optional supersede ID are server-side lifetime metadata:
-a supersede cancels only a request still waiting, while a page whose read has produced rows is
-allowed to finish. The page remains pull-driven and re-issued by the client; the server does not
-retain replay rows or cursors between requests.
+to be complete. The client supplies one random session ID for each machine lifetime; the session
+namespaces its subscription and request IDs. The page request ID and optional supersede ID are
+server-side lifetime metadata: a supersede cancels only a request still waiting, while a page whose
+read has produced rows is allowed to finish. The page remains pull-driven and re-issued by the
+client; the server does not retain replay rows or cursors between requests.
 
 **Decision refinement: persist target metadata, not delivery state.** The dominant cost in a stable live
 subscription is not target churn or the choice of shards: every empty 15-second long-poll page currently
@@ -727,15 +728,15 @@ The primary protocol should keep the replay task discrete and pull-based while m
 set stateful. This is stateful control-plane metadata, not a push stream, server-owned cursor, or
 retained event queue:
 
-1. An `OpenReplaySubscription` request sends the initial target set once and returns a bounded
-   subscription handle plus a generation.
+1. An `OpenReplaySubscription` request sends the client session ID and initial target set once and
+   returns a bounded subscription handle plus a generation.
 2. `UpdateReplaySubscription` sends coalesced additions and removals. The client debounces rapid
    target changes, and the server applies only the newest generation.
-3. `NextReplayPage` names the handle and asks for one bounded page. It retains the existing
+3. `NextReplayPage` names the session, handle, and asks for one bounded page. It retains the existing
    `limit`, `hold_ms`, page `request_id`, supersede behavior, and per-target resume verdicts.
-4. `CloseReplaySubscription` releases the handle. Handles are scoped to the authenticated peer
-   and connection, expire when abandoned, and must be recreated from a full target set after
-   reconnect.
+4. `CloseReplaySubscription` releases the handle. Handles are scoped to the authenticated peer,
+   storage scope, and client session; they expire when abandoned and must be recreated from a full
+   target set after reconnect.
 
 The existing full-target page request is the migration implementation and must be improved while this
 lands, but it is not a second long-term protocol surface. `NextReplayPage` can invoke the same
@@ -745,10 +746,10 @@ and its result has the same bounded page and cursor semantics.
 This does not require a stateful transport. HTTP remains ordinary request/response transport: the
 subscription handle is carried in each `Update` and `Next` request, while `Next` is the one long-poll
 request. An update may arrive on another HTTP request and wake a waiting `Next`; the registry is
-scoped to the authenticated peer, and deployments without process affinity must place it in shared
-state or route the handle consistently. A lost or expired handle is recovered by reopening with the
-full target set. WebSockets are therefore an optimization for transport latency, not a protocol
-requirement.
+scoped to the authenticated peer, storage scope, and client session, and deployments without process
+affinity must place it in shared state or route the session consistently. A lost or expired handle is
+recovered by reopening with the full target set. WebSockets are therefore an optimization for transport
+latency, not a protocol requirement.
 
 The target set is updated between pages. If an update arrives while a page is waiting, it may wake
 that wait and re-evaluate the latest set. If a read has already produced rows, that page finishes;

@@ -1111,14 +1111,13 @@ async fn dump_sync_state(node: &SyncTestNode, label: &str) {
         let unsettled = snapshot
             .peer_part_sync_flags
             .iter()
-            .filter(|(_, _, pending, multi_strat, replay_done, cursor_active)| {
-                *pending || *multi_strat || !*replay_done || *cursor_active
+            .filter(|(_, _, pending, multi_strat, replay_done, cursor_active, unanswered)| {
+                *pending || *multi_strat || !*replay_done || *cursor_active || *unanswered
             })
             .map(
-                |(peer, part, pending, multi_strat, replay_done, cursor_active)| {
+                |(peer, part, pending, multi_strat, replay_done, cursor_active, unanswered)| {
                     format!(
-                        "peer={peer} part={part} pending={pending} multi_strat={multi_strat} \
-                         replay_done={replay_done} cursor_active={cursor_active}"
+                        "peer={peer} part={part} pending={pending} multi_strat={multi_strat} replay_done={replay_done} cursor_active={cursor_active} unanswered={unanswered}"
                     )
                 },
             )

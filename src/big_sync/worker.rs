@@ -101,6 +101,7 @@ pub struct StopToken {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSnapshot {
+    pub label: &'static str,
     pub peer_parts: HashMap<PeerKey, HashMap<PartKey, BackendId>>,
     pub full_sync_waiters: HashMap<u64, Vec<(PeerKey, PartKey)>>,
     pub last_object_syncs: Vec<(PeerKey, PartKey, big_sync_core::ObjKey, std::time::Instant)>,
@@ -108,7 +109,8 @@ pub struct WorkerSnapshot {
     pub active_machine_tasks: usize,
     pub active_sync_tasks: usize,
     pub zombie_tasks: usize,
-    pub peer_part_sync_flags: Vec<(PeerKey, PartKey, bool, bool, bool, bool)>,
+    pub peer_part_sync_flags: Vec<(PeerKey, PartKey, bool, bool, bool, bool, bool)>,
+    pub replay_pages: Vec<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -121,12 +123,27 @@ impl WorkerSnapshot {
             && self.zombie_tasks == 0
     }
 
+    /// Compares worker state for convergence waits without treating a continuously re-issued
+    /// long-poll's request/task identifiers as progress. The replay target verdicts and cursors
+    /// are reflected in the store snapshot; `replay_pages` is retained for diagnostics only.
+    pub fn convergence_eq(&self, other: &Self) -> bool {
+        self.label == other.label
+            && self.peer_parts == other.peer_parts
+            && self.full_sync_waiters == other.full_sync_waiters
+            && self.last_object_syncs == other.last_object_syncs
+            && self.task_counts == other.task_counts
+            && self.active_machine_tasks == other.active_machine_tasks
+            && self.active_sync_tasks == other.active_sync_tasks
+            && self.zombie_tasks == other.zombie_tasks
+            && self.peer_part_sync_flags == other.peer_part_sync_flags
+    }
+
     /// Every term of [`Self::is_idle`] spelled out, for diagnosing a stalled idle
     /// wait. `is_idle` collapses six counters into one bool, so a wait that times
     /// out could only say "not idle" and never which term refused to clear.
     pub fn idle_breakdown(&self) -> String {
         format!(
-            "{{live={} delayed={} spawn_q={} stop_q={} | active_machine={} active_sync={} zombies={} | sync_flags={:?} | waiters={:?} | last_object_syncs={:?}}}",
+            "{{live={} delayed={} spawn_q={} stop_q={} | active_machine={} active_sync={} zombies={} | sync_flags={:?} | replay_pages={:?} | waiters={:?} | last_object_syncs={:?}}}",
             self.task_counts.live,
             self.task_counts.delayed,
             self.task_counts.spawn_queue,
@@ -135,6 +152,7 @@ impl WorkerSnapshot {
             self.active_sync_tasks,
             self.zombie_tasks,
             self.peer_part_sync_flags,
+            self.replay_pages,
             self.full_sync_waiters,
             self.last_object_syncs,
         )
@@ -264,11 +282,14 @@ impl BigSyncWorkerHandle {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_idle(&self, timeout: Duration) -> Res<()> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut last_snapshot = None;
+        let mut last_snapshot: Option<WorkerSnapshot> = None;
         loop {
             let snapshot = self.snapshot().await?;
             if snapshot.is_idle() {
-                if last_snapshot.as_ref().is_some_and(|prev| prev == &snapshot) {
+                if last_snapshot
+                    .as_ref()
+                    .is_some_and(|previous| previous.convergence_eq(&snapshot))
+                {
                     return Ok(());
                 }
                 last_snapshot = Some(snapshot);
@@ -784,6 +805,7 @@ impl BigSyncWorker {
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
                 let snapshot = WorkerSnapshot {
+                    label: self.label,
                     peer_parts: self
                         .peers
                         .iter()
@@ -796,6 +818,7 @@ impl BigSyncWorker {
                     active_sync_tasks: self.sync_tasks.len(),
                     zombie_tasks: self.zombie_tasks.len(),
                     peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
+                    replay_pages: self.machine.debug_replay_pages(),
                 };
                 resp.send(snapshot)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))

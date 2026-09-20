@@ -6,7 +6,7 @@ use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPage,
-    ReplayPageRequest, ReplaySubscriptionPage, ReplaySubscriptionRequest,
+    ReplayPageRequest, ReplaySessionId, ReplaySubscriptionPage, ReplaySubscriptionRequest,
     ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError, TargetVerdict,
 };
 use irpc::{WithChannels, channel, rpc_requests};
@@ -491,20 +491,21 @@ struct ReplaySubscriptionState {
     last_touched: std::time::Instant,
 }
 
+type ReplaySessionKey = (PeerKey, Arc<str>, ReplaySessionId);
 type ReplaySubscriptionRegistry = HashMap<
-    (PeerKey, Arc<str>),
+    ReplaySessionKey,
     HashMap<big_sync_core::rpc::ReplaySubscriptionId, ReplaySubscriptionState>,
 >;
+type ReplayCancellationRegistry =
+    HashMap<ReplaySessionKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>;
 
 struct BigSyncRpcWorker {
     stores: HashMap<Arc<str>, Arc<dyn HostPartStore>>,
-    /// The in-flight page requests of each peer, so a request that supersedes one can drop the
+    /// The in-flight page requests of each peer and storage scope, so a request that supersedes one can drop the
     /// older one if it is still waiting. An entry lives only as long as the request it names —
     /// inserted when the request starts, removed when it answers — so a peer can only ever name
-    /// its own in-flight requests, and nothing outlives the request it belongs to.
-    replay_cancels: std::sync::Mutex<
-        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>,
-    >,
+    /// its own in-flight requests within that scope, and nothing outlives the request it belongs to.
+    replay_cancels: std::sync::Mutex<ReplayCancellationRegistry>,
     replay_subscriptions: std::sync::Mutex<ReplaySubscriptionRegistry>,
 }
 
@@ -514,12 +515,7 @@ impl BigSyncRpcWorker {
     /// A request id arrives from a remote peer, so nothing this registry does may take down the
     /// dispatch loop: a panic raised elsewhere while the lock was held would otherwise turn one
     /// bad request into every later request failing.
-    fn replay_cancels(
-        &self,
-    ) -> std::sync::MutexGuard<
-        '_,
-        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>,
-    > {
+    fn replay_cancels(&self) -> std::sync::MutexGuard<'_, ReplayCancellationRegistry> {
         self.replay_cancels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -543,6 +539,7 @@ impl BigSyncRpcWorker {
         &self,
         peer: &PeerKey,
         scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
         generation: u64,
         targets: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
@@ -566,14 +563,14 @@ impl BigSyncRpcWorker {
                 ));
             }
         }
-        let key = (peer.clone(), Arc::clone(scope_key));
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
         let mut registry = self
             .replay_subscriptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let peer_subscription_count = registry
             .iter()
-            .filter(|((registered_peer, _), _)| registered_peer == peer)
+            .filter(|((registered_peer, _, _), _)| registered_peer == peer)
             .map(|(_, subscriptions)| subscriptions.len())
             .sum::<usize>();
         let subscriptions = registry.entry(key).or_default();
@@ -602,8 +599,7 @@ impl BigSyncRpcWorker {
 
     fn update_replay_subscription(
         &self,
-        peer: &PeerKey,
-        scope_key: &Arc<str>,
+        key: ReplaySessionKey,
         subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
         generation: u64,
         additions: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
@@ -620,7 +616,6 @@ impl BigSyncRpcWorker {
         if encoded > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES {
             return Err(RpcError::SubscriptionLimit);
         }
-        let key = (peer.clone(), Arc::clone(scope_key));
         let mut registry = self
             .replay_subscriptions
             .lock()
@@ -703,10 +698,11 @@ impl BigSyncRpcWorker {
         &self,
         peer: &PeerKey,
         scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
     ) -> Result<ReplaySubscriptionResponse, RpcError> {
         self.sweep_replay_subscriptions();
-        let key = (peer.clone(), Arc::clone(scope_key));
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
         let mut registry = self
             .replay_subscriptions
             .lock()
@@ -728,10 +724,11 @@ impl BigSyncRpcWorker {
         &self,
         peer: &PeerKey,
         scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
     ) -> Result<ReplaySubscriptionState, RpcError> {
         self.sweep_replay_subscriptions();
-        let key = (peer.clone(), Arc::clone(scope_key));
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
         let mut registry = self
             .replay_subscriptions
             .lock()
@@ -753,33 +750,39 @@ impl BigSyncRpcWorker {
     ) -> Result<ReplaySubscriptionResponse, RpcError> {
         match request {
             ReplaySubscriptionRequest::Open {
+                session_id,
                 subscription_id,
                 generation,
                 targets,
             } => self.open_replay_subscription(
                 &subscriber,
                 &scope_key,
+                session_id,
                 subscription_id,
                 generation,
                 targets,
             ),
             ReplaySubscriptionRequest::Update {
+                session_id,
                 subscription_id,
                 generation,
                 additions,
                 removals,
             } => self.update_replay_subscription(
-                &subscriber,
-                &scope_key,
+                (subscriber, scope_key, session_id),
                 subscription_id,
                 generation,
                 additions,
                 removals,
             ),
-            ReplaySubscriptionRequest::Close { subscription_id } => {
-                self.close_replay_subscription(&subscriber, &scope_key, subscription_id)
+            ReplaySubscriptionRequest::Close {
+                session_id,
+                subscription_id,
+            } => {
+                self.close_replay_subscription(&subscriber, &scope_key, session_id, subscription_id)
             }
             ReplaySubscriptionRequest::Next {
+                session_id,
                 subscription_id,
                 request_id,
                 supersede,
@@ -790,8 +793,12 @@ impl BigSyncRpcWorker {
                 let Some(store) = self.stores.get(&scope_key) else {
                     return Err(RpcError::InvalidRequest("unknown storage scope".into()));
                 };
-                let snapshot =
-                    self.replay_subscription_snapshot(&subscriber, &scope_key, subscription_id)?;
+                let snapshot = self.replay_subscription_snapshot(
+                    &subscriber,
+                    &scope_key,
+                    session_id,
+                    subscription_id,
+                )?;
                 let requested_ids: std::collections::HashSet<_> =
                     targets.iter().map(|(id, _)| *id).collect();
                 if requested_ids.len() != targets.len() {
@@ -811,14 +818,28 @@ impl BigSyncRpcWorker {
                     .collect::<Result<Vec<_>, _>>()?;
                 validate_replay_targets(&requested)
                     .map_err(|error| RpcError::InvalidRequest(error.to_string()))?;
-                let cancel =
-                    self.register_replay_request(&subscriber, request_id, CancellationToken::new());
+                let cancel = self.register_replay_request(
+                    &subscriber,
+                    &scope_key,
+                    session_id,
+                    request_id,
+                    CancellationToken::new(),
+                );
                 if let Some(superseded) = supersede {
-                    self.cancel_replay_request(&subscriber, superseded);
+                    self.cancel_replay_request(&subscriber, &scope_key, session_id, superseded);
                 }
+                let replay_started = std::time::Instant::now();
+                tracing::debug!(
+                    peer = %subscriber,
+                    ?request_id,
+                    target_count = requested.len(),
+                    hold_ms,
+                    "replay subscription page begin",
+                );
                 let result = store
                     .replay_page_round_with_update(
                         ReplayPageRequest {
+                            session_id,
                             request_id,
                             supersede,
                             targets: requested,
@@ -831,13 +852,50 @@ impl BigSyncRpcWorker {
                         Some(snapshot.changed),
                     )
                     .await;
-                self.forget_replay_request(&subscriber, request_id, &cancel);
+                match &result {
+                    Ok(page) => {
+                        let drained_count = page
+                            .targets
+                            .iter()
+                            .filter(|(_, verdict)| {
+                                matches!(verdict, TargetVerdict::Events { drained: true, .. })
+                            })
+                            .count();
+                        tracing::debug!(
+                            peer = %subscriber,
+                            ?request_id,
+                            elapsed_ms = replay_started.elapsed().as_millis(),
+                            event_count = page.events.len(),
+                            target_count = page.targets.len(),
+                            drained_count,
+                            "replay subscription page store response",
+                        );
+                    }
+                    Err(error) => tracing::debug!(
+                        peer = %subscriber,
+                        ?request_id,
+                        elapsed_ms = replay_started.elapsed().as_millis(),
+                        ?error,
+                        "replay subscription page store error",
+                    ),
+                }
+                self.forget_replay_request(
+                    &subscriber,
+                    &scope_key,
+                    session_id,
+                    request_id,
+                    &cancel,
+                );
                 let page = result.map_err(|error| {
                     tracing::error!(error = ?error, "replay subscription page failed");
                     RpcError::Internal
                 })?;
-                let latest =
-                    self.replay_subscription_snapshot(&subscriber, &scope_key, subscription_id)?;
+                let latest = self.replay_subscription_snapshot(
+                    &subscriber,
+                    &scope_key,
+                    session_id,
+                    subscription_id,
+                )?;
                 let reverse: HashMap<_, _> = latest
                     .targets
                     .iter()
@@ -880,13 +938,16 @@ impl BigSyncRpcWorker {
     fn register_replay_request(
         &self,
         peer: &PeerKey,
+        scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         request_id: big_sync_core::rpc::ReplayRequestId,
         cancel: CancellationToken,
     ) -> Arc<CancellationToken> {
         let cancel = Arc::new(cancel);
         let mut cancels = self.replay_cancels();
-        let per_peer = cancels.entry(peer.clone()).or_default();
-        if let Some(previous) = per_peer.insert(request_id, Arc::clone(&cancel)) {
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
+        let per_scope = cancels.entry(key).or_default();
+        if let Some(previous) = per_scope.insert(request_id, Arc::clone(&cancel)) {
             previous.cancel();
         }
         cancel
@@ -896,18 +957,21 @@ impl BigSyncRpcWorker {
     fn forget_replay_request(
         &self,
         peer: &PeerKey,
+        scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         request_id: big_sync_core::rpc::ReplayRequestId,
         registration: &Arc<CancellationToken>,
     ) {
         let mut cancels = self.replay_cancels();
-        if let Some(per_peer) = cancels.get_mut(peer) {
-            let owned = per_peer
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
+        if let Some(per_scope) = cancels.get_mut(&key) {
+            let owned = per_scope
                 .get(&request_id)
                 .is_some_and(|current| Arc::ptr_eq(current, registration));
             if owned {
-                per_peer.remove(&request_id);
-                if per_peer.is_empty() {
-                    cancels.remove(peer);
+                per_scope.remove(&request_id);
+                if per_scope.is_empty() {
+                    cancels.remove(&key);
                 }
             }
         }
@@ -921,13 +985,16 @@ impl BigSyncRpcWorker {
     fn cancel_replay_request(
         &self,
         peer: &PeerKey,
+        scope_key: &Arc<str>,
+        session_id: ReplaySessionId,
         request_id: big_sync_core::rpc::ReplayRequestId,
     ) {
+        let key = (peer.clone(), Arc::clone(scope_key), session_id);
         let cancel = {
             let cancels = self.replay_cancels();
             cancels
-                .get(peer)
-                .and_then(|per_peer| per_peer.get(&request_id))
+                .get(&key)
+                .and_then(|per_scope| per_scope.get(&request_id))
                 .cloned()
         };
         if let Some(cancel) = cancel {
@@ -1047,6 +1114,7 @@ impl BigSyncRpcWorker {
             BigSyncRpcMessage::ReplayPage(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let ReplayPageRequest {
+                    session_id,
                     request_id,
                     supersede,
                     targets,
@@ -1096,14 +1164,25 @@ impl BigSyncRpcWorker {
                 // that a request superseding it reaches this request's task. The responder
                 // only ever drops a request that is still waiting: one whose read already
                 // produced rows ships them.
-                let cancel =
-                    self.register_replay_request(&subscriber, request_id, CancellationToken::new());
+                let cancel = self.register_replay_request(
+                    &subscriber,
+                    &inner.scope_key,
+                    session_id,
+                    request_id,
+                    CancellationToken::new(),
+                );
                 if let Some(superseded) = supersede {
-                    self.cancel_replay_request(&subscriber, superseded);
+                    self.cancel_replay_request(
+                        &subscriber,
+                        &inner.scope_key,
+                        session_id,
+                        superseded,
+                    );
                 }
                 let out = match store
                     .replay_page_round(
                         ReplayPageRequest {
+                            session_id,
                             request_id,
                             supersede,
                             targets,
@@ -1122,7 +1201,13 @@ impl BigSyncRpcWorker {
                         Err(RpcError::Internal)
                     }
                 };
-                self.forget_replay_request(&subscriber, request_id, &cancel);
+                self.forget_replay_request(
+                    &subscriber,
+                    &inner.scope_key,
+                    session_id,
+                    request_id,
+                    &cancel,
+                );
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1207,9 +1292,9 @@ mod tests {
     use crate::part_store::HostPartStore;
     use crate::part_store::memory::MemoryPartStore;
     use big_sync_core::rpc::{
-        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, ReplaySubscriptionId,
-        ReplaySubscriptionResponse, ReplaySubscriptionTarget, ReplaySubscriptionTargetEntry,
-        ReplayTargetId, RpcError, SubscriptionTarget,
+        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, ReplaySessionId,
+        ReplaySubscriptionId, ReplaySubscriptionResponse, ReplaySubscriptionTarget,
+        ReplaySubscriptionTargetEntry, ReplayTargetId, RpcError, SubscriptionTarget,
     };
     use big_sync_core::{BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey};
     use iroh::protocol::Router;
@@ -1226,13 +1311,24 @@ mod tests {
             replay_subscriptions: Default::default(),
         };
         let peer = PeerKey::new([7u8; 32]);
+        let scope: Arc<str> = Arc::from("scope");
         let older = CancellationToken::new();
         let newer = CancellationToken::new();
 
-        let older_registration =
-            worker.register_replay_request(&peer, ReplayRequestId(3), older.clone());
-        let newer_registration =
-            worker.register_replay_request(&peer, ReplayRequestId(3), newer.clone());
+        let older_registration = worker.register_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(3),
+            older.clone(),
+        );
+        let newer_registration = worker.register_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(3),
+            newer.clone(),
+        );
 
         assert!(
             older.is_cancelled(),
@@ -1244,16 +1340,63 @@ mod tests {
         );
 
         // The old request can finish after the replacement was installed, but must not erase it.
-        worker.forget_replay_request(&peer, ReplayRequestId(3), &older_registration);
-        worker.cancel_replay_request(&peer, ReplayRequestId(3));
+        worker.forget_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(3),
+            &older_registration,
+        );
+        worker.cancel_replay_request(&peer, &scope, ReplaySessionId(0), ReplayRequestId(3));
         assert!(
             newer.is_cancelled(),
             "the old request cannot erase the newer registration"
         );
 
         // Forgetting the current registration and touching an unknown id are no-ops afterward.
-        worker.forget_replay_request(&peer, ReplayRequestId(3), &newer_registration);
-        worker.forget_replay_request(&peer, ReplayRequestId(9), &older_registration);
+        worker.forget_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(3),
+            &newer_registration,
+        );
+        worker.forget_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(9),
+            &older_registration,
+        );
+        let other_scope: Arc<str> = Arc::from("other-scope");
+        let first_scope_request = CancellationToken::new();
+        let second_scope_request = CancellationToken::new();
+        worker.register_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(0),
+            ReplayRequestId(4),
+            first_scope_request.clone(),
+        );
+        worker.register_replay_request(
+            &peer,
+            &other_scope,
+            ReplaySessionId(0),
+            ReplayRequestId(4),
+            second_scope_request.clone(),
+        );
+        let other_session_request = CancellationToken::new();
+        worker.register_replay_request(
+            &peer,
+            &scope,
+            ReplaySessionId(1),
+            ReplayRequestId(4),
+            other_session_request.clone(),
+        );
+        worker.cancel_replay_request(&peer, &scope, ReplaySessionId(0), ReplayRequestId(4));
+        assert!(first_scope_request.is_cancelled());
+        assert!(!second_scope_request.is_cancelled());
+        assert!(!other_session_request.is_cancelled());
     }
 
     /// A panic taken while the registry was held must not turn one bad request into every later
@@ -1266,6 +1409,7 @@ mod tests {
             replay_subscriptions: Default::default(),
         });
         let poisoner = Arc::clone(&worker);
+        let scope: Arc<str> = Arc::from("scope");
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _held = poisoner.replay_cancels();
             panic!("poison the registry");
@@ -1277,6 +1421,8 @@ mod tests {
 
         let _registration = worker.register_replay_request(
             &PeerKey::new([8u8; 32]),
+            &scope,
+            ReplaySessionId(0),
             ReplayRequestId(1),
             CancellationToken::new(),
         );
@@ -1300,6 +1446,7 @@ mod tests {
             worker.open_replay_subscription(
                 &peer,
                 &scope,
+                ReplaySessionId(0),
                 subscription_id,
                 0,
                 vec![ReplaySubscriptionTargetEntry {
@@ -1309,15 +1456,35 @@ mod tests {
             ),
             Ok(ReplaySubscriptionResponse::Opened { generation: 0 }),
         );
+        let second_target = ReplaySubscriptionTarget::Part {
+            part_id: PartKey::new(b"other-part"),
+        };
+        assert_eq!(
+            worker.open_replay_subscription(
+                &peer,
+                &scope,
+                ReplaySessionId(1),
+                subscription_id,
+                0,
+                vec![ReplaySubscriptionTargetEntry {
+                    id: target_id,
+                    target: second_target,
+                }],
+            ),
+            Ok(ReplaySubscriptionResponse::Opened { generation: 0 }),
+        );
+        let other_session = worker
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(1), subscription_id)
+            .expect("second session is independent");
+        assert_eq!(other_session.targets.len(), 1);
         let snapshot = worker
-            .replay_subscription_snapshot(&peer, &scope, subscription_id)
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
             .expect("opened subscription");
         assert!(snapshot.targets.contains_key(&target_id));
         assert_eq!(snapshot.generation, 0);
         assert_eq!(
             worker.update_replay_subscription(
-                &peer,
-                &scope,
+                (peer.clone(), Arc::clone(&scope), ReplaySessionId(0)),
                 subscription_id,
                 1,
                 Vec::new(),
@@ -1326,9 +1493,13 @@ mod tests {
             Ok(ReplaySubscriptionResponse::Updated { generation: 1 }),
         );
         let snapshot = worker
-            .replay_subscription_snapshot(&peer, &scope, subscription_id)
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
             .expect("subscription remains after target removal");
         assert!(snapshot.targets.is_empty());
+        let other_session = worker
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(1), subscription_id)
+            .expect("changing one session does not remove the other");
+        assert_eq!(other_session.targets.len(), 1);
     }
 
     #[test]
@@ -1702,6 +1873,7 @@ mod tests {
         let page_request = || ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
+                session_id: ReplaySessionId(0),
                 request_id: big_sync_core::rpc::ReplayRequestId(0),
                 supersede: None,
                 targets: vec![page_target.clone()],
@@ -1742,6 +1914,7 @@ mod tests {
         let expected_page = store
             .replay_page_round(
                 ReplayPageRequest {
+                    session_id: ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(0),
                     supersede: None,
                     targets: vec![page_target.clone()],
@@ -1870,6 +2043,7 @@ mod tests {
         let page_request = |request_id: u64, supersede: Option<u64>, hold_ms: u32| ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
+                session_id: ReplaySessionId(0),
                 request_id: big_sync_core::rpc::ReplayRequestId(request_id),
                 supersede: supersede.map(big_sync_core::rpc::ReplayRequestId),
                 targets: vec![target.clone()],
@@ -1933,6 +2107,7 @@ mod tests {
             .replay_page(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: ReplayPageRequest {
+                    session_id: ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(2),
                     supersede: Some(big_sync_core::rpc::ReplayRequestId(2)),
                     targets: vec![SubscriptionTarget::Part {
@@ -2014,6 +2189,7 @@ mod tests {
         let page_request = |hold_ms: u32, limit: u32| ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
+                session_id: ReplaySessionId(0),
                 request_id: big_sync_core::rpc::ReplayRequestId(0),
                 supersede: None,
                 targets: vec![target.clone()],
@@ -2025,6 +2201,7 @@ mod tests {
             .replay_page(ScopedRequest {
                 scope_key: Arc::from("test-scope"),
                 inner: ReplayPageRequest {
+                    session_id: ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(9),
                     supersede: None,
                     targets: vec![

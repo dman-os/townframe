@@ -3326,7 +3326,10 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
 }
 
 pub(crate) type StressReplaySubscriptions = HashMap<
-    big_sync_core::rpc::ReplaySubscriptionId,
+    (
+        big_sync_core::rpc::ReplaySessionId,
+        big_sync_core::rpc::ReplaySubscriptionId,
+    ),
     (
         u64,
         HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>,
@@ -3410,6 +3413,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             |hold_ms| Duration::from_millis(u64::from(hold_ms)).min(Duration::from_millis(50));
         match req.inner {
             ReplaySubscriptionRequest::Open {
+                session_id,
                 subscription_id,
                 generation,
                 targets,
@@ -3425,10 +3429,11 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
                 self.replay_subscriptions
                     .lock()
                     .await
-                    .insert(subscription_id, (generation, target_map));
+                    .insert((session_id, subscription_id), (generation, target_map));
                 Ok(Ok(ReplaySubscriptionResponse::Opened { generation }))
             }
             ReplaySubscriptionRequest::Update {
+                session_id,
                 subscription_id,
                 generation,
                 additions,
@@ -3436,7 +3441,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
             } => {
                 let mut subscriptions = self.replay_subscriptions.lock().await;
                 let Some((current_generation, target_map)) =
-                    subscriptions.get_mut(&subscription_id)
+                    subscriptions.get_mut(&(session_id, subscription_id))
                 else {
                     return Ok(Err(RpcError::UnknownSubscription));
                 };
@@ -3459,18 +3464,22 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
                 *current_generation = generation;
                 Ok(Ok(ReplaySubscriptionResponse::Updated { generation }))
             }
-            ReplaySubscriptionRequest::Close { subscription_id } => {
+            ReplaySubscriptionRequest::Close {
+                session_id,
+                subscription_id,
+            } => {
                 let removed = self
                     .replay_subscriptions
                     .lock()
                     .await
-                    .remove(&subscription_id);
+                    .remove(&(session_id, subscription_id));
                 if removed.is_none() {
                     return Ok(Err(RpcError::UnknownSubscription));
                 }
                 Ok(Ok(ReplaySubscriptionResponse::Closed))
             }
             ReplaySubscriptionRequest::Next {
+                session_id,
                 subscription_id,
                 request_id,
                 supersede,
@@ -3479,7 +3488,8 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
                 hold_ms,
             } => {
                 let subscriptions = self.replay_subscriptions.lock().await;
-                let Some((_, target_map)) = subscriptions.get(&subscription_id) else {
+                let Some((_, target_map)) = subscriptions.get(&(session_id, subscription_id))
+                else {
                     return Ok(Err(RpcError::UnknownSubscription));
                 };
                 let requested = targets
@@ -3513,6 +3523,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
                     .target_part_store
                     .replay_page_round(
                         ReplayPageRequest {
+                            session_id,
                             request_id,
                             supersede,
                             targets: requested,

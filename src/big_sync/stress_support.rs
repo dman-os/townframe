@@ -91,6 +91,12 @@ pub trait StressFixture: Sync {
     ) -> Res<()>;
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
     fn peer_id(&self, node: &Self::Node) -> PeerKey;
+
+    /// Compares successive observations for settlement. Fixtures may ignore diagnostic-only
+    /// churn, such as replay request identities that change during a healthy long-poll.
+    fn observations_equal(&self, left: &[Self::Observation], right: &[Self::Observation]) -> bool {
+        left == right
+    }
     // Fixture-specific application content for a document mutation.
     #[expect(clippy::too_many_arguments)]
     fn make_doc_content(
@@ -527,7 +533,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
 ) -> Res<()> {
     let started_at = std::time::Instant::now();
     let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
-    let mut last_snapshot = None;
+    let mut last_snapshot: Option<Vec<F::Observation>> = None;
     let mut stable_rounds = 0usize;
     let mut last_warn = std::time::Instant::now();
 
@@ -537,7 +543,10 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
             current.push(fixture.observed_state(node).await?);
         }
 
-        if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
+        if last_snapshot
+            .as_ref()
+            .is_some_and(|previous| fixture.observations_equal(previous, &current))
+        {
             stable_rounds += 1;
             if stable_rounds >= STRESS_SETTLE_STABLE_ROUNDS {
                 log_if_slow(label, started_at);

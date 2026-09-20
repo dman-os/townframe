@@ -525,7 +525,8 @@ pub trait HostPartStore: Send + Sync {
         update: Option<Arc<tokio::sync::Notify>>,
     ) -> Res<ReplayPage> {
         let ReplayPageRequest {
-            request_id: _,
+            session_id: _,
+            request_id,
             supersede: _,
             targets: requested,
             limit,
@@ -607,6 +608,7 @@ pub trait HostPartStore: Send + Sync {
         // (`UTILS_RS_TIMEOUT_MULTIPLIER=3` in CI made each round cost 45s while the callers'
         // own budgets and nextest's process timeouts stayed unscaled).
         let hold_is_zero = hold.is_zero();
+        let hold_duration_ms = hold.as_millis();
         let hold = tokio::time::sleep(hold);
         tokio::pin!(hold);
         let mut events: Vec<PartEvent> = Vec::new();
@@ -780,6 +782,13 @@ pub trait HostPartStore: Send + Sync {
             // place cancellation is checked, and the only place a request waits. One reader
             // over the whole live set is used as the wake — any target's row wakes it — and
             // the hold is the pacing bound, not a deadline.
+            tracing::debug!(
+                ?request_id,
+                subscriber = %subscriber,
+                target_count = live.len(),
+                hold_ms = hold_duration_ms,
+                "replay page entering long poll",
+            );
             let mut wake = match self
                 .open_revision_reader(SubPartsRequest {
                     lower_bound: live
@@ -803,9 +812,11 @@ pub trait HostPartStore: Send + Sync {
                             .expect("a wake read asks for one event"),
                     }) => read?,
                     () = &mut hold => {
+                        tracing::debug!(?request_id, "replay page long poll hold expired");
                         break false;
                     }
                     () = cancel.cancelled() => {
+                        tracing::debug!(?request_id, "replay page long poll cancelled");
                         break false;
                     }
                     () = async {
@@ -814,12 +825,16 @@ pub trait HostPartStore: Send + Sync {
                         } else {
                             std::future::pending::<()>().await;
                         }
-                    } => break false,
+                    } => {
+                        tracing::debug!(?request_id, "replay page long poll subscription updated");
+                        break false;
+                    },
                 };
                 match read {
                     // Rows exist again: go back to the fair drain so every target keeps its
                     // share rather than the woken one taking the page.
                     RevisionRead::Entries { entries, .. } if !entries.is_empty() => {
+                        tracing::debug!(?request_id, "replay page long poll woke for new event");
                         break true;
                     }
                     // No rows (an empty page) or the reader's boundary: neither is a wake. A
@@ -829,15 +844,24 @@ pub trait HostPartStore: Send + Sync {
                     _ => {
                         if probed {
                             tokio::select! {
-                                () = &mut hold => break false,
-                                () = cancel.cancelled() => break false,
+                                () = &mut hold => {
+                                    tracing::debug!(?request_id, "replay page long poll hold expired after probe");
+                                    break false;
+                                },
+                                () = cancel.cancelled() => {
+                                    tracing::debug!(?request_id, "replay page long poll cancelled after probe");
+                                    break false;
+                                },
                                 () = async {
                                     if let Some(update) = &update {
                                         update.notified().await;
                                     } else {
                                         std::future::pending::<()>().await;
                                     }
-                                } => break false,
+                                } => {
+                                    tracing::debug!(?request_id, "replay page long poll subscription updated after probe");
+                                    break false;
+                                },
                             }
                         }
                         probed = true;
@@ -848,6 +872,18 @@ pub trait HostPartStore: Send + Sync {
                 break;
             }
         }
+        let drained_count = verdicts
+            .values()
+            .filter(|verdict| matches!(verdict, TargetVerdict::Events { drained: true, .. }))
+            .count();
+        tracing::debug!(
+            ?request_id,
+            subscriber = %subscriber,
+            event_count = events.len(),
+            target_count = verdicts.len(),
+            drained_count,
+            "replay page ready",
+        );
         events.sort_by_key(PartEvent::cursor);
         Ok(ReplayPage {
             events,
@@ -1599,6 +1635,7 @@ pub mod host_contract {
         ) -> Res<ReplayPage> {
             self.replay_page_round(
                 ReplayPageRequest {
+                    session_id: big_sync_core::rpc::ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(0),
                     supersede: None,
                     targets: vec![target],
@@ -1707,6 +1744,7 @@ pub mod host_contract {
         let err = store
             .replay_page_round(
                 ReplayPageRequest {
+                    session_id: big_sync_core::rpc::ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(0),
                     supersede: None,
                     targets: vec![target, same_route],
@@ -1792,6 +1830,7 @@ pub mod host_contract {
         let limited = store
             .replay_page_round(
                 ReplayPageRequest {
+                    session_id: big_sync_core::rpc::ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(0),
                     supersede: None,
                     targets: vec![target_b.clone(), target_a.clone()],
@@ -1812,6 +1851,7 @@ pub mod host_contract {
         let overlapping = store
             .replay_page_round(
                 ReplayPageRequest {
+                    session_id: big_sync_core::rpc::ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(1),
                     supersede: None,
                     targets: vec![
@@ -1893,6 +1933,7 @@ pub mod host_contract {
         let page = store
             .replay_page_round(
                 ReplayPageRequest {
+                    session_id: big_sync_core::rpc::ReplaySessionId(0),
                     request_id: big_sync_core::rpc::ReplayRequestId(0),
                     supersede: None,
                     targets: vec![target.clone()],

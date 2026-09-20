@@ -19,12 +19,18 @@ use serde::{Deserialize, Serialize};
 
 type MemoryReplayTargetMap =
     HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>;
-type MemoryReplaySubscriptions =
-    HashMap<big_sync_core::rpc::ReplaySubscriptionId, (u64, MemoryReplayTargetMap)>;
+type MemoryReplaySubscriptions = HashMap<
+    (
+        big_sync_core::rpc::ReplaySessionId,
+        big_sync_core::rpc::ReplaySubscriptionId,
+    ),
+    (u64, MemoryReplayTargetMap),
+>;
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::HostPartStore;
 use crate::part_store::memory::MemoryPartStore;
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot};
+use crate::worker::WorkerSnapshot;
 use crate::{Ctx, SyncTaskRunOutcome};
 
 const TEST_BACKEND_ID: &str = "MemorySyncBackend";
@@ -287,13 +293,14 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
         let scope_key = req.scope_key;
         match req.inner {
             big_sync_core::rpc::ReplaySubscriptionRequest::Open {
+                session_id,
                 subscription_id,
                 generation,
                 targets,
             } => {
                 let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
                 subscriptions.insert(
-                    subscription_id,
+                    (session_id, subscription_id),
                     (
                         generation,
                         targets
@@ -307,13 +314,15 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
                 }))
             }
             big_sync_core::rpc::ReplaySubscriptionRequest::Update {
+                session_id,
                 subscription_id,
                 generation,
                 additions,
                 removals,
             } => {
                 let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
-                let Some((current_generation, targets)) = subscriptions.get_mut(&subscription_id)
+                let Some((current_generation, targets)) =
+                    subscriptions.get_mut(&(session_id, subscription_id))
                 else {
                     return Ok(Err(big_sync_core::rpc::RpcError::UnknownSubscription));
                 };
@@ -335,14 +344,18 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
                     big_sync_core::rpc::ReplaySubscriptionResponse::Updated { generation },
                 ))
             }
-            big_sync_core::rpc::ReplaySubscriptionRequest::Close { subscription_id } => {
+            big_sync_core::rpc::ReplaySubscriptionRequest::Close {
+                session_id,
+                subscription_id,
+            } => {
                 self.replay_subscriptions
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .remove(&subscription_id);
+                    .remove(&(session_id, subscription_id));
                 Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Closed))
             }
             big_sync_core::rpc::ReplaySubscriptionRequest::Next {
+                session_id,
                 subscription_id,
                 request_id,
                 supersede,
@@ -354,8 +367,8 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
                     .replay_subscriptions
                     .lock()
                     .expect(ERROR_MUTEX)
-                    .get(&subscription_id)
-                    .map(|(_, targets)| targets.clone())
+                    .get(&(session_id, subscription_id))
+                    .map(|(_, target_map)| target_map.clone())
                     .ok_or(big_sync_core::rpc::RpcError::UnknownSubscription);
                 let target_map = match target_map {
                     Ok(target_map) => target_map,
@@ -382,6 +395,7 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
                     .replay_page(crate::rpc::ScopedRequest {
                         scope_key,
                         inner: big_sync_core::rpc::ReplayPageRequest {
+                            session_id,
                             request_id,
                             supersede,
                             targets: page_targets,
@@ -756,8 +770,8 @@ impl NodeHarness {
     }
 
     async fn stop(self) -> Res<()> {
-        self.world.set_online(self.peer_id.clone(), false);
         self.stop.stop().await?;
+        self.world.set_online(self.peer_id.clone(), false);
         self.world.remove_store(self.peer_id.clone());
         Ok(())
     }
@@ -1153,8 +1167,8 @@ async fn wait_for_convergence(nodes: &[&NodeHarness]) -> Res<()> {
     const REPORT_INTERVAL: Duration = Duration::from_secs(5);
     let started = std::time::Instant::now();
     let mut next_report = started + REPORT_INTERVAL;
-    let mut last_snapshot = None;
     let mut stable_rounds = 0usize;
+    let mut last_snapshot: Option<Vec<(WorkerSnapshot, ObservedStoreSnapshot)>> = None;
 
     loop {
         let mut current = Vec::with_capacity(nodes.len());
@@ -1167,7 +1181,15 @@ async fn wait_for_convergence(nodes: &[&NodeHarness]) -> Res<()> {
             .map(|(_, snapshot)| snapshot)
             .all(|snapshot| snapshot == &current[0].1);
 
-        if stores_equal && last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
+        let worker_and_store_stable = last_snapshot.as_ref().is_some_and(|previous| {
+            previous.len() == current.len()
+                && previous.iter().zip(&current).all(
+                    |((previous_worker, previous_store), (worker, store))| {
+                        previous_store == store && previous_worker.convergence_eq(worker)
+                    },
+                )
+        });
+        if stores_equal && worker_and_store_stable {
             stable_rounds += 1;
             if stable_rounds >= 8 {
                 return Ok(());

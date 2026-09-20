@@ -16,6 +16,7 @@ use crate::{
 /// over the same connection.
 #[derive(Debug, Clone)]
 pub struct ReplaySubscriptionTaskState {
+    pub session_id: rpc::ReplaySessionId,
     pub subscription_id: rpc::ReplaySubscriptionId,
     pub generation: u64,
     pub targets: Vec<rpc::ReplaySubscriptionTargetEntry>,
@@ -25,6 +26,8 @@ pub struct ReplaySubscriptionTaskState {
 #[derive(Debug, Clone)]
 pub struct ReplayPageTask {
     pub peer_id: PeerKey,
+    /// Names the client-owned replay session for this page and its request ids.
+    pub session_id: rpc::ReplaySessionId,
     /// This request's id, so the round that replaces it can name it.
     pub request_id: rpc::ReplayRequestId,
     pub targets: Vec<rpc::SubscriptionTarget>,
@@ -103,6 +106,7 @@ impl ReplayPageTask {
             // transport failure rather than an empty page.
             return Err(ReplayPageTaskErrorDeets::Rpc(rpc::RpcError::TransportError));
         };
+        let rpc_started = std::time::Instant::now();
         let page = if let Some(subscription) = self.subscription.clone() {
             if let Some(request) = subscription.request.clone() {
                 match peer_rpc.replay_subscription(request).await {
@@ -113,6 +117,7 @@ impl ReplayPageTask {
                     | Err(rpc::RpcError::InvalidRequest(_)) => {
                         peer_rpc
                             .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
+                                session_id: subscription.session_id,
                                 subscription_id: subscription.subscription_id,
                                 generation: subscription.generation,
                                 targets: subscription.targets.clone(),
@@ -129,6 +134,7 @@ impl ReplayPageTask {
                 }
             }
             let next = rpc::ReplaySubscriptionRequest::Next {
+                session_id: self.session_id,
                 subscription_id: subscription.subscription_id,
                 request_id: self.request_id,
                 supersede: self.supersede,
@@ -154,11 +160,20 @@ impl ReplayPageTask {
                 limit: self.limit,
                 hold_ms: Self::HOLD_MS,
             };
+            tracing::debug!(
+                peer_id = %self.peer_id,
+                ?self.request_id,
+                supersede = ?self.supersede,
+                target_count = self.targets.len(),
+                hold_ms = Self::HOLD_MS,
+                "replay subscription next request",
+            );
             let response = match peer_rpc.replay_subscription(next.clone()).await {
                 Ok(response) => response,
                 Err(rpc::RpcError::UnknownSubscription) | Err(rpc::RpcError::InvalidRequest(_)) => {
                     peer_rpc
                         .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
+                            session_id: self.session_id,
                             subscription_id: subscription.subscription_id,
                             generation: subscription.generation,
                             targets: subscription.targets.clone(),
@@ -168,6 +183,11 @@ impl ReplayPageTask {
                 }
                 Err(error) => return Err(error.into()),
             };
+            tracing::debug!(
+                peer_id = %self.peer_id,
+                ?self.request_id,
+                "replay subscription next response received",
+            );
             let rpc::ReplaySubscriptionResponse::Page(subscription_page) = response else {
                 return Err(rpc::RpcError::InvalidRequest(
                     "replay subscription did not return a page".into(),
@@ -201,6 +221,7 @@ impl ReplayPageTask {
         } else {
             peer_rpc
                 .replay_page(rpc::ReplayPageRequest {
+                    session_id: self.session_id,
                     request_id: self.request_id,
                     supersede: self.supersede,
                     targets: self.targets.clone(),
@@ -209,6 +230,14 @@ impl ReplayPageTask {
                 })
                 .await?
         };
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            ?self.request_id,
+            elapsed_ms = rpc_started.elapsed().as_millis(),
+            event_count = page.events.len(),
+            target_count = page.targets.len(),
+            "replay page rpc completed",
+        );
         Ok(TaskResultDeets::ReplayPage(ReplayPageResult {
             peer_id: self.peer_id,
             page,

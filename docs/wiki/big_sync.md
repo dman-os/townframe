@@ -159,3 +159,12 @@ The sync backends must garbage collect such objects if part removal semantic is 
 - Bucket strat doesn't fetch the remote payload if fingerprint's mismatch which means that sync backends that really care about the payload to use other RPC mechanisms to get it. 
 - The removal gap is just the natural inverse of a backend's right to decide if it should pull the object before acking the event. 
   - This flexebility is what really enables some of the users of big_sync today
+- Cursor replay uses "stateful long polling"
+  - Essentially, we want to read a page of events for N parts
+  - But we want to only transfer on the wire a single event if it concerns multiple parts
+  - Unforutnately, our target part set is always changing
+  - Object parts are mainly used to get fastpath live object replay for currently used objects without fully waiting for full hisotry replay
+  - I.e. our object part interest set if quickly changing
+  - Long polling is used over event streams to make the system pull based which matches the strats
+  - A problem is thus now apparent: we have possibly large number of targets that are quickly changing and long poll means sending these sets for every poll
+  - By having the serving peer incrementally mantain the target set for a session, we eliminate uncessary wire transfer of PartKeys for every poll

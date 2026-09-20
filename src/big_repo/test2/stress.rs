@@ -829,13 +829,15 @@ impl StressFixture for BigRepoStressFixture {
                     let flags = snapshot
                         .peer_part_sync_flags
                         .iter()
-                        .map(|(peer, part, pending, multi, replay_done, cursor_active)| {
-                            format!(
-                                "{}:{}:pending={pending},multi={multi},replay_done={replay_done},cursor_active={cursor_active}",
-                                key_prefix(peer, 8),
-                                key_prefix(part, 10),
-                            )
-                        })
+                        .map(
+                            |(peer, part, pending, multi, replay_done, cursor_active, unanswered)| {
+                                format!(
+                                    "{}:{}:pending={pending},multi={multi},replay_done={replay_done},cursor_active={cursor_active},unanswered={unanswered}",
+                                    key_prefix(peer, 8),
+                                    key_prefix(part, 10),
+                                )
+                            },
+                        )
                         .collect::<Vec<_>>()
                         .join(",");
                     let last_synced = snapshot

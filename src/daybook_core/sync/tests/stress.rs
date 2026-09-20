@@ -451,27 +451,45 @@ async fn collect_diagnostic_report(
     let mut known_good_sources = BTreeMap::new();
 
     for (node_index, node) in active.iter().enumerate() {
-        let worker = node.sync_repo.big_sync_worker.snapshot().await?;
-        let recent_objects = worker
-            .last_object_syncs
-            .iter()
-            .rev()
-            .take(8)
-            .map(|(peer, part, object, _)| format!("peer={peer} part={part} object={object}"))
-            .collect::<Vec<_>>();
-        warn!(
-            phase,
-            node = node_index,
-            ?worker.task_counts,
-            active_machine_tasks = worker.active_machine_tasks,
-            active_sync_tasks = worker.active_sync_tasks,
-            zombie_tasks = worker.zombie_tasks,
-            full_sync_waiters = worker.full_sync_waiters.len(),
-            peer_part_flags = ?worker.peer_part_sync_flags,
-            ?recent_objects,
-            "diagnostic BigSync worker snapshot"
-        );
-
+        for (worker_name, worker_handle) in [
+            ("docs", &node.sync_repo.big_sync_worker),
+            ("blobs", &node.sync_repo.blob_sync_worker),
+        ] {
+            let worker = worker_handle.snapshot().await?;
+            let unsettled = worker
+                .peer_part_sync_flags
+                .iter()
+                .filter(
+                    |(_, _, pending, multi_strat, replay_done, cursor_active, unanswered)| {
+                        *pending || *multi_strat || !*replay_done || *cursor_active || *unanswered
+                    },
+                )
+                .collect::<Vec<_>>();
+            let recent_objects = worker
+                .last_object_syncs
+                .iter()
+                .rev()
+                .take(8)
+                .map(|(peer, part, object, _)| format!("peer={peer} part={part} object={object}"))
+                .collect::<Vec<_>>();
+            warn!(
+                phase,
+                node = node_index,
+                worker = worker_name,
+                local_peer_id = %node.sync_repo.router.endpoint().id(),
+                ?worker.peer_parts,
+                ?worker.task_counts,
+                active_machine_tasks = worker.active_machine_tasks,
+                active_sync_tasks = worker.active_sync_tasks,
+                zombie_tasks = worker.zombie_tasks,
+                full_sync_waiters = ?worker.full_sync_waiters,
+                peer_part_flags = ?worker.peer_part_sync_flags,
+                replay_pages = ?worker.replay_pages,
+                ?unsettled,
+                ?recent_objects,
+                "diagnostic BigSync worker snapshot",
+            );
+        }
         let store = node
             .sync_repo
             .rcx

@@ -104,6 +104,14 @@ impl StressFixture for LwwStressFixture {
         tokio::try_join!(node.handle.snapshot(), node.snapshot())
     }
 
+    fn observations_equal(&self, left: &[Self::Observation], right: &[Self::Observation]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| left.0.convergence_eq(&right.0) && left.1 == right.1)
+    }
+
     fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id.clone()
     }
@@ -387,6 +395,14 @@ impl StressFixture for PolicyMembershipFixture {
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
         tokio::try_join!(node.handle.snapshot(), node.snapshot())
+    }
+
+    fn observations_equal(&self, left: &[Self::Observation], right: &[Self::Observation]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| left.0.convergence_eq(&right.0) && left.1 == right.1)
     }
 
     fn peer_id(&self, node: &Self::Node) -> PeerKey {
