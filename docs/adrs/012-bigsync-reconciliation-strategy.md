@@ -716,14 +716,14 @@ allowed to finish. The page remains pull-driven and re-issued by the client; the
 retain replay rows or cursors between requests.
 
 **Decision refinement: persist target metadata, not delivery state.** The dominant cost in a stable live
-subscription is not target churn or the choice of shards: every empty long-poll page currently
+subscription is not target churn or the choice of shards: every empty 15-second long-poll page currently
 repeats the complete target set. A peer with a thousand stable object targets pays those keys again
 on every hold expiry even when no payload is delivered. Sharding is therefore an optional optimization
 and a trade-off, not the primary answer. Splitting overlapping part and object targets loses the
 page-level merge that turns one shared object event into one wire event; any sharding must keep
 overlapping targets together or accept at-least-once duplicates as its explicit cost.
 
-The next protocol shape should keep the replay task discrete and pull-based while making the target
+The primary protocol should keep the replay task discrete and pull-based while making the target
 set stateful. This is stateful control-plane metadata, not a push stream, server-owned cursor, or
 retained event queue:
 
@@ -736,6 +736,19 @@ retained event queue:
 4. `CloseReplaySubscription` releases the handle. Handles are scoped to the authenticated peer
    and connection, expire when abandoned, and must be recreated from a full target set after
    reconnect.
+
+The existing full-target page request is the migration implementation and must be improved while this
+lands, but it is not a second long-term protocol surface. `NextReplayPage` can invoke the same
+discrete replay task: the task receives the current target snapshot from the subscription registry,
+and its result has the same bounded page and cursor semantics.
+
+This does not require a stateful transport. HTTP remains ordinary request/response transport: the
+subscription handle is carried in each `Update` and `Next` request, while `Next` is the one long-poll
+request. An update may arrive on another HTTP request and wake a waiting `Next`; the registry is
+scoped to the authenticated peer, and deployments without process affinity must place it in shared
+state or route the handle consistently. A lost or expired handle is recovered by reopening with the
+full target set. WebSockets are therefore an optimization for transport latency, not a protocol
+requirement.
 
 The target set is updated between pages. If an update arrives while a page is waiting, it may wake
 that wait and re-evaluate the latest set. If a read has already produced rows, that page finishes;
@@ -757,11 +770,12 @@ All peer-controlled state is bounded by bytes rather than target count alone: ma
 subscription sets per peer, maximum target count, maximum key length, and maximum encoded target-set
 and update sizes. Count limits remain useful for work admission, but byte limits are the actual wire
 and memory guard. The live set should normally remain one overlap-preserving subscription; bulk replay
-may continue to use separate stateless pages and advisory lane scheduling.
+may continue to use separate page scheduling and advisory lane scheduling.
 
 This refinement preserves the reason for decision 9 — bounded, client-driven pages — while removing
 the repeated metadata cost. It does not turn replay into a connection-lifetime task and does not
 make the server authoritative for cursor progress.
+
 The event vocabulary is two kinds, not three, and that was settled here rather than
 inherited: a membership write is a *touch* (`Changed`, carrying the parts it names) and a
 deletion is `Removed`. There is no `Added`. A keyed frontier stores the latest transition
