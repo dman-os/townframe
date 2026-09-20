@@ -1,65 +1,43 @@
-#!/usr/bin/env -S deno run --allow-env --allow-read --allow-run --allow-write
+#!/usr/bin/env -S deno run --allow-all
 
-import { fromFileUrl, join } from "jsr:@std/path@1.0.8";
+import $ from "jsr:@david/dax@0.45.0";
 
-const root = fromFileUrl(new URL("../", import.meta.url));
-const cargoToml = await Deno.readTextFile(join(root, "Cargo.toml"));
+const root = $.path(new URL("../", import.meta.url));
+const cargoToml = await root.join("Cargo.toml").readText();
 
-const metadata = cargoToml.match(
-  /\[workspace\.metadata\.townframe\.dioxus\]([\s\S]*?)(?=\n\[|$)/,
+const patchSection = cargoToml.match(
+  /\[patch\.crates-io\]([\s\S]*?)(?=\n\[|$)/,
 )?.[1];
-if (!metadata) {
-  throw new Error("Cargo.toml is missing [workspace.metadata.townframe.dioxus]");
+if (!patchSection) {
+  throw new Error("Cargo.toml is missing [patch.crates-io]");
 }
-const dioxusMetadata = metadata;
 
-function metadataString(name: string): string {
-  const value = dioxusMetadata.match(new RegExp(`^${name}\\s*=\\s*"([^"]+)"`, "m"))?.[1];
+const dioxusPatchMatch = patchSection.match(
+  /^dioxus\s*=\s*\{([^}\n]*)\}/m,
+);
+if (!dioxusPatchMatch) {
+  throw new Error("Cargo.toml [patch.crates-io] is missing dioxus");
+}
+const dioxusPatch = dioxusPatchMatch[1];
+
+function patchString(name: string): string {
+  const value = dioxusPatch.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]+)"`))?.[1];
   if (!value) {
-    throw new Error(`Cargo.toml Dioxus metadata is missing ${name}`);
+    throw new Error(`Cargo.toml dioxus patch is missing ${name}`);
   }
   return value;
 }
 
-const repository = metadataString("repository");
-const revision = metadataString("revision");
-const installRoot = Deno.env.get("DIOXUS_CLI_ROOT") ?? join(root, "target", "dioxus-cli");
+const repository = patchString("git");
+const revision = patchString("rev");
+const installRoot = Deno.env.get("DIOXUS_CLI_ROOT")
+  ? $.path(Deno.env.get("DIOXUS_CLI_ROOT")!)
+  : root.join("target", "dioxus-cli");
 const executableName = Deno.build.os === "windows" ? "dx.exe" : "dx";
-const executable = join(installRoot, "bin", executableName);
+const executable = installRoot.join("bin", executableName);
 
-const install = new Deno.Command("cargo", {
-  args: [
-    "install",
-    "--locked",
-    "--git",
-    repository,
-    "--rev",
-    revision,
-    "dioxus-cli",
-    "--features",
-    "no-downloads",
-    "--root",
-    installRoot,
-    "--force",
-  ],
-  cwd: root,
-  stdin: "inherit",
-  stdout: "inherit",
-  stderr: "inherit",
-});
-const installStatus = await install.output();
-if (!installStatus.success) {
-  Deno.exit(installStatus.code);
-}
+await $`cargo install --locked --git ${repository} --rev ${revision} dioxus-cli --features no-downloads --root ${installRoot} --force --debug`.cwd(root);
 
-const versionStatus = await new Deno.Command(executable, {
-  args: ["--version"],
-  stdin: "inherit",
-  stdout: "inherit",
-  stderr: "inherit",
-}).output();
-if (!versionStatus.success) {
-  Deno.exit(versionStatus.code);
-}
+await $`${executable} --version`;
 
-console.error(`Installed Dioxus CLI ${revision} at ${executable}`);
+$.logLight(`Installed Dioxus CLI ${revision} at ${executable}`);

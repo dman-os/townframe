@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@import "./styles/material.css";
+@import "./styles/tokens.css";
+@import "./styles/tiles.css";
+@import "./styles/components.css";
+@import "./styles/tile-grammar.css";
+
+@source "./src/**/*.rs";
+@source "../showcase/src/**/*.rs";

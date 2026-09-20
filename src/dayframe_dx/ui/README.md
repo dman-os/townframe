@@ -1,13 +1,18 @@
 # UI
 
-This crate contains all shared components for the workspace. This is a great place to place any UI you would like to use in multiple platforms like a common `Button` or `Navbar` component.
+This crate contains shared design-system foundations and UI components for the workspace. Platform crates provide composition roots and platform-specific dependencies.
 
 ```
 ui/
 ├─ src/
 │  ├─ lib.rs # The entrypoint for the ui crate
-│  ├─ hero.rs # The Hero component that will be used in every platform
-│  ├─ navbar.rs # The Navbar component that will be used in the layout of every platform's router
+│  ├─ components/ # Shared shadcn-like primitives (tabs, buttons, cards, separators)
+│  ├─ foundation.rs # Shared design-token stylesheet loader
+│  ├─ tiles/ # Tile grammar prototype (not yet shippable)
+├─ styles/ # Source Material, Dayframe, and tile CSS
+├─ tailwind.css # Tailwind entrypoint importing the source styles
+├─ assets/
+│  └─ tailwind.css # Generated Tailwind output only
 ```
 
 ## Dependencies

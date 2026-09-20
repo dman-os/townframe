@@ -31,6 +31,7 @@ members = [
   "./src/dayframe_dx/web",
   "./src/dayframe_dx/desktop",
   "./src/dayframe_dx/mobile",
+  "./src/dayframe_dx/showcase",
 ]
 
 [workspace.package]
@@ -236,10 +237,6 @@ irpc-iroh = "0.17.0"
 dioxus = { version = "0.8.0-alpha.1" }
 ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
-
-[workspace.metadata.townframe.dioxus]
-repository = "https://github.com/DioxusLabs/dioxus"
-revision = "ada3b67c73c1c5484dd2e8408cb21c470b200423"
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }

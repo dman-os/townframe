@@ -1,0 +1,141 @@
+@utility df-card {
+  @apply border-0 bg-transparent shadow-none;
+}
+
+@utility df-card-header {
+  @apply px-5 pt-4 pb-2;
+}
+
+@utility df-card-content {
+  @apply px-5 pt-2 pb-5;
+}
+
+@utility df-separator {
+  @apply my-4 h-px w-full border-0 bg-border;
+}
+
+@utility df-button {
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-transparent font-medium transition-colors duration-150;
+}
+
+@utility df-button-sm {
+  @apply min-h-8 px-3 text-sm;
+}
+
+@utility df-button-md {
+  @apply min-h-10 px-4;
+}
+
+@utility df-button-lg {
+  @apply min-h-12 px-5 text-lg;
+}
+
+@utility df-button-default {
+  @apply bg-primary text-primary-foreground;
+}
+
+@utility df-button-secondary {
+  @apply bg-secondary text-secondary-foreground;
+}
+
+@utility df-button-outline {
+  @apply border-border bg-transparent text-foreground;
+}
+
+@utility df-button-ghost {
+  @apply bg-transparent text-foreground;
+}
+
+@utility df-button-destructive {
+  @apply bg-destructive text-destructive-foreground;
+}
+
+@utility df-tabs {
+  @apply flex w-full flex-col gap-3;
+}
+
+@utility df-tabs-sticky {
+  @apply sticky top-0 z-10 flex flex-row items-center justify-start gap-1 overflow-x-auto border-b border-border bg-background px-6 py-1;
+  margin-inline: calc(var(--spacing) * -6);
+}
+
+@utility df-section-strip {
+  @apply pointer-events-none fixed inset-y-0 right-3 z-20 flex flex-col items-center justify-center gap-2;
+}
+
+@utility arc-index-grab-band {
+  position: fixed;
+  top: 0;
+  right: 16px;
+  bottom: 0;
+  width: 32px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+@media (pointer: coarse) {
+  .arc-index-grab-band {
+    right: 0;
+    width: 150px;
+  }
+}
+
+@utility df-section-dot {
+  @apply pointer-events-auto grid size-5 cursor-pointer place-items-center rounded-full border-0 bg-transparent p-0;
+}
+
+@utility df-section-dot-mark {
+  @apply block size-1.5 rounded-full bg-foreground-muted transition-colors duration-150;
+}
+
+@utility df-tabs-list {
+  @apply flex w-fit max-w-full flex-row gap-1 overflow-x-auto rounded-md bg-surface-sunken p-1;
+}
+
+@utility df-tab-trigger {
+  @apply inline-flex min-h-9 cursor-pointer items-center whitespace-nowrap rounded-sm bg-transparent px-3 font-medium text-foreground-muted;
+}
+
+@utility df-tab-trigger-active {
+  @apply bg-card text-foreground shadow-sm;
+}
+
+@utility df-tab-content {
+  @apply min-w-0;
+}
+
+@layer components {
+  .df-button:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+
+  .df-button:focus-visible,
+  .df-tab-trigger:focus-visible {
+    @apply outline-2 outline-offset-1 outline-ring;
+  }
+
+  .df-button:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .df-tab-trigger:hover {
+    @apply bg-surface-sunken text-foreground;
+  }
+
+  .df-tabs-sticky {
+    @apply flex-row;
+  }
+
+  .df-tabs-sticky .df-tab-trigger {
+    @apply no-underline;
+  }
+
+  .df-section-dot:hover .df-section-dot-mark,
+  .df-section-dot:focus-visible .df-section-dot-mark {
+    @apply bg-primary;
+  }
+
+  .df-section-dot:focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring;
+  }
+}

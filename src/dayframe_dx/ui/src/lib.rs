@@ -1,10 +1,15 @@
 //! This crate contains all shared UI for the workspace.
 
-mod hero;
-pub use hero::Hero;
+mod foundation;
+pub use foundation::{FoundationStyles, ThemeMode, ThemeRoot, ThemeStyles};
 
-mod navbar;
-pub use navbar::Navbar;
+pub mod components;
+pub use components::{
+    sample_column_specs, Button, ButtonSize, ButtonVariant, Card, CardContent, CardHeader, Column,
+    ColumnHeight, ColumnId, ColumnLayout, ColumnRack, ColumnRelation, ColumnSection, ColumnSource,
+    ColumnSpec, ColumnState, SectionLayout, Separator, TabContent, TabList, TabTrigger, Tabs, Tile,
+    TileChildren, TileContent, TileKind, TileListSpec, TileSpec, Widget,
+};
 
 /// Tiles prototype (FDR 005).
 pub mod tiles;

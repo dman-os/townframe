@@ -96,9 +96,8 @@ const MAX_DIFF: f64 = 400.0;
 /// the dent over more breakpoints rather than just deepening it.
 const REACH_BASE: f64 = 90.0;
 const REACH_RATIO: f64 = 0.7;
-/// Width of the band that starts a gesture. Only this strip takes input while
-/// the strip is at rest, so the tiles underneath stay pressable.
-const DRAG_BAND_WIDTH: f64 = 150.0;
+/// Extra spacing applied while the strip is actively engaged.
+const ACTIVE_SPACING_MULTIPLIER: f64 = 1.35;
 /// Settle animation: how long it takes to unbend, and how many frames.
 const SETTLE_MS: u64 = 260;
 const SETTLE_STEPS: u32 = 16;
@@ -106,6 +105,7 @@ const SETTLE_STEPS: u32 = 16;
 const FALLBACK_HEIGHT: f64 = 860.0;
 
 /// Breakpoints. Niagara uses a star for "favourites" then an A–Z index.
+#[cfg(test)]
 fn breakpoints() -> Vec<&'static str> {
     let mut labels = vec!["★"];
     labels.extend([
@@ -264,13 +264,18 @@ async fn settle_tick() {
 /// measure at mount time: the overlay's scroll size reads 0x0 then, and
 /// `get_client_rect` additionally panics (`doc_mut` while borrowed). Handing in
 /// plain numbers keeps this component free of any renderer dependency.
-pub fn ArcIndex(viewport: (f64, f64)) -> Element {
-    let items = use_signal(breakpoints);
+pub fn ArcIndex(
+    viewport: (f64, f64),
+    items: Vec<&'static str>,
+    on_select: EventHandler<usize>,
+) -> Element {
+    assert!(!items.is_empty(), "ArcIndex requires at least one item");
+    let items = use_signal(|| items);
     let count = items.read().len();
 
     // Continuous position in breakpoint space. The fractional part drives the
     // in-between spacing so the strip glides instead of stepping.
-    let mut focus = use_signal(|| 6.0f64);
+    let mut focus = use_signal(|| 0.0f64);
     // 1 while the strip is bent around a thumb, easing to 0 once it lifts.
     let mut settle = use_signal(|| 0.0f64);
     // Where the thumb is horizontally while pressed. Its vertical position needs
@@ -282,8 +287,9 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
     // Bumped on every press so a settle animation in flight can tell that it has
     // been superseded and stop writing.
     let mut generation = use_signal(|| 0u64);
-    let mut announced = use_signal(|| 6usize);
+    let mut announced = use_signal(|| usize::MAX);
     let mut live = use_signal(String::new);
+    let mut hovered = use_signal(|| None::<usize>);
 
     let active = (*focus.read()).round().clamp(0.0, (count - 1) as f64) as usize;
     // A zero-sized window happens before the shell reports a real size; fall
@@ -293,7 +299,13 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
     } else {
         (viewport.0, FALLBACK_HEIGHT)
     };
-    let spacing = spacing(height);
+    let settle_now = *settle.read();
+    let base_spacing = spacing(height);
+    let spacing = if settle_now > 0.0 {
+        base_spacing * ACTIVE_SPACING_MULTIPLIER
+    } else {
+        base_spacing
+    };
     let top = top_inset(spacing, count, height);
 
     // `use_callback` so the same closure can be handed to several handlers.
@@ -304,14 +316,18 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
         let index = clamped.round() as usize;
         if index != *announced.peek() {
             announced.set(index);
-            live.set(items.read()[index].to_string());
+            if let Some(label) = items.read().get(index) {
+                live.set((*label).to_string());
+            }
+            on_select.call(index);
         }
     });
 
     let press_strip = use_callback(move |point: (f64, f64)| {
         // Start from the breakpoint actually under the finger, and leave the list
         // exactly where it is: only a drag past an end moves it.
-        commit.call(focus_at(point.1, top, spacing, count));
+        let next_focus = focus_at(point.1, top, spacing, count);
+        commit.call(next_focus);
 
         let next = *generation.peek() + 1;
         generation.set(next);
@@ -347,7 +363,6 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
         });
     });
 
-    let settle_now = *settle.read();
     // How far the thumb has come in from the resting column, and how much window
     // is left for a label to retreat into.
     let room = (width - REST_INSET - spacing / 2.0).max(0.0);
@@ -368,7 +383,7 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
         limit,
         settle_now,
     );
-    let active_label = items.read()[active];
+    let active_label = items.read().get(active).copied().unwrap_or("");
     let active_dy = (active as f64 - *focus.read()) * spacing;
 
     // Cells tile the spacing exactly, so labels can never overlap however tight
@@ -388,6 +403,20 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
          background:linear-gradient(to left, rgba(9,9,11,0.92), rgba(9,9,11,0)); pointer-events:none;",
         REST_INSET + limit + cell * 2.0 + 90.0
     );
+    let hovered_index = *hovered.read();
+    let show_labels = settle_now > 0.0 || hovered_index.is_some();
+    let label_width = if show_labels {
+        "max-content".to_string()
+    } else {
+        format!("{cell}px")
+    };
+    let label_padding = if show_labels { "0 8px" } else { "0" };
+    let label_background = if show_labels {
+        "rgba(24,24,27,0.94)"
+    } else {
+        "transparent"
+    };
+    let marker_pointer_events = "none";
 
     rsx! {
         div {
@@ -395,18 +424,17 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
             // Inert while at rest so the tiles underneath stay clickable; once a
             // gesture starts it takes the whole window, which is how the strip
             // keeps tracking a finger that has left the grab band.
-            style: "position:absolute; top:0; left:0; right:0; bottom:0; user-select:none; \
+            style: "position:fixed; top:0; left:0; right:0; bottom:0; user-select:none; -webkit-user-select:none; \
                     pointer-events:{pointer_events};",
             onpointermove: move |event| {
                 // No pointerdown yet, so there is no gesture to continue.
                 if thumb_x.peek().is_none() {
                     return;
                 }
-                // Page coordinates, not element ones: the event target switches
-                // between the grab band and the overlay as the pointer crosses the
-                // band's edge, and element coordinates are relative to whichever
-                // one was hit. Page space is one frame for the whole gesture.
-                let point = event.data().page_coordinates();
+                event.prevent_default();
+                // Fixed-position overlays use viewport coordinates. Page coordinates
+                // include document scroll and would move the arc offscreen after scrolling.
+                let point = event.data().client_coordinates();
                 // Both from the same absolute pointer, so the picked breakpoint
                 // stays exactly under the thumb at every point of the drag.
                 commit.call(focus_at(point.y, top, spacing, count));
@@ -427,40 +455,53 @@ pub fn ArcIndex(viewport: (f64, f64)) -> Element {
 
             // Every label carries a fixed-size flex cell because there is no
             // `transform: translate(-50%, -50%)` to centre with.
-            for item in placed.iter() {
+            for (index, item) in placed.iter().enumerate() {
                 span {
                     key: "{item.label}",
                     "aria-hidden": "true",
+                    title: item.label,
                     style: "position:absolute; right:{REST_INSET + item.push - cell / 2.0}px; \
-                            top:{anchor + item.dy - cell / 2.0}px; width:{cell}px; height:{cell}px; \
-                            display:flex; align-items:center; justify-content:center; \
-                            font-size:{font}px; font-weight:600; color:#f3f4f6; \
-                            pointer-events:none; \
+                            top:{anchor + item.dy - cell / 2.0}px; width:{label_width}; min-width:{cell}px; height:{cell}px; \
+                            box-sizing:border-box; padding:{label_padding}; display:flex; align-items:center; justify-content:center; \
+                            white-space:nowrap; overflow:visible; border-radius:8px; background:{label_background}; \
+                            font-size:{font}px; font-weight:600; color:#f3f4f6; pointer-events:{marker_pointer_events}; \
                             text-shadow:0 1px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.95);",
-                    "{item.label}"
+                    if show_labels && (settle_now == 0.0 || index != active) { "{item.label}" } else { "—" }
                 }
             }
 
             // Focus bubble, left of the strip, i.e. furthest from the thumb.
-            div {
-                "aria-hidden": "true",
-                style: "position:absolute; \
-                        right:{REST_INSET + push_at(active_dy.abs(), floor, limit, reach) * settle_now + cell * 0.6}px; \
-                        top:{anchor + active_dy - bubble}px; width:{bubble * 2.0}px; height:{bubble * 2.0}px; \
-                        border-radius:50%; background:rgba(120,120,128,0.45); \
-                        display:flex; align-items:center; justify-content:center; \
-                        font-size:{font * 1.3}px; color:#f3f4f6; pointer-events:none;",
-                "{active_label}"
+            if settle_now > 0.0 {
+                div {
+                    "aria-hidden": "true",
+                    style: "position:absolute; \
+                            right:{REST_INSET + push_at(active_dy.abs(), floor, limit, reach) * settle_now + cell * 0.6}px; \
+                            top:{anchor + active_dy - cell * 0.7}px; width:max-content; min-width:{bubble * 2.0}px; height:{cell * 1.4}px; \
+                            box-sizing:border-box; padding:0 12px; border-radius:8px; background:rgba(24,24,27,0.96); \
+                            display:flex; align-items:center; justify-content:center; white-space:nowrap; \
+                            font-size:{font * 1.1}px; color:#f3f4f6; pointer-events:none;",
+                    "{active_label}"
+                }
             }
 
             // Grab band. Pointer input starts here rather than on the labels:
             // without pointer capture we want one stable target for the whole
             // gesture, and it lets a drag start anywhere along the edge.
             div {
-                style: "position:absolute; top:0; right:0; bottom:0; width:{DRAG_BAND_WIDTH}px; \
-                        pointer-events:auto; touch-action:none;",
+                class: "arc-index-grab-band",
+                onpointermove: move |event| {
+                    if thumb_x.peek().is_none() {
+                        let point = event.data().client_coordinates();
+                        let index = focus_at(point.y, top, spacing, count)
+                            .round()
+                            .clamp(0.0, (count - 1) as f64) as usize;
+                        hovered.set(Some(index));
+                    }
+                },
+                onpointerleave: move |_| hovered.set(None),
                 onpointerdown: move |event| {
-                    let point = event.data().page_coordinates();
+                    event.prevent_default();
+                    let point = event.data().client_coordinates();
                     press_strip.call((point.x, point.y));
                 },
             }

@@ -1,0 +1,139 @@
+@utility tile-line-group {
+  @apply rounded-xl transition-colors duration-150;
+}
+
+@utility tile-line {
+  @apply focus:outline-2 focus:outline-offset-1 focus:outline-ring;
+}
+
+@utility tile-strip {
+  @apply flex w-full max-w-7xl items-start gap-6 mx-auto;
+}
+
+@utility tile-column {
+  @apply flex min-w-0 flex-1 flex-col rounded-xl bg-foreground/[0.02] max-h-[74dvh];
+}
+
+@utility column-nested {
+  @apply -ml-6 rounded-l-none;
+}
+
+@utility column-spawns {
+  @apply rounded-r-none;
+}
+
+@utility surface-1 {
+  @apply bg-primary/10;
+}
+
+@utility surface-2 {
+  @apply bg-secondary/10;
+}
+
+@utility surface-3 {
+  @apply bg-amber-400/10;
+}
+
+@utility strip-header {
+  @apply flex items-center gap-2 px-3.5 pt-2.5 pb-2 text-xs uppercase tracking-wider text-foreground-muted;
+}
+
+@utility strip-title {
+  @apply min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap;
+}
+
+@utility strip-count {
+  @apply flex-none tabular-nums text-foreground-subtle;
+}
+
+@utility strip-scroll {
+  @apply min-h-0 flex-1 overflow-y-auto px-2 pb-3;
+}
+
+@utility path-back {
+  @apply flex-none size-5 cursor-pointer rounded-full border-0 bg-transparent p-0 text-sm leading-none text-foreground-muted;
+}
+
+@utility column-navigation {
+  @apply mx-auto mb-3 flex w-full max-w-7xl flex-nowrap items-center justify-center gap-2;
+}
+
+@utility column-pager {
+  @apply flex items-center gap-0 rounded-full bg-foreground/5 px-1.5 py-1;
+}
+
+@utility column-dot {
+  @apply size-2.5 cursor-pointer rounded-full border-0 bg-foreground-subtle p-0 transition-all duration-150;
+}
+
+@utility column-arrow {
+  @apply flex h-10 min-w-10 flex-1 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent text-lg text-foreground-muted;
+}
+
+@layer components {
+  /* A spawner keeps its surface under the pointer: the highlight is the lineage
+     marker, so losing it on hover breaks the join at exactly the moment someone
+     is following it. */
+  .tile-line-group:hover,
+  .tile-line-group:focus-within {
+    @apply bg-foreground/5;
+  }
+
+  .tile-line-group.surface-1:hover,
+  .tile-widget-group.surface-1:hover {
+    @apply bg-primary/[0.17];
+  }
+
+  .tile-line-group.surface-2:hover,
+  .tile-widget-group.surface-2:hover {
+    @apply bg-secondary/[0.17];
+  }
+
+  .tile-line-group.surface-3:hover,
+  .tile-widget-group.surface-3:hover {
+    @apply bg-amber-400/[0.17];
+  }
+
+  .surface-1,
+  .surface-2,
+  .surface-3 {
+    background-clip: padding-box;
+  }
+
+  .path-back:hover,
+  .path-back:focus-visible,
+  .column-arrow:hover:not(:disabled),
+  .column-arrow:focus-visible {
+    @apply bg-foreground/10 text-foreground;
+  }
+
+  .column-dot[aria-current="true"],
+  .column-dot[data-selected="true"],
+  .column-dot[data-window-position="leading"],
+  .column-dot[data-window-position="middle"],
+  .column-dot[data-window-position="trailing"],
+  .column-dot[data-window-position="single"] {
+    @apply h-2.5 w-4 shadow-sm shadow-primary/50;
+  }
+
+  .column-dot[data-window-position="leading"] {
+    @apply rounded-l-full rounded-r-none;
+  }
+  .column-dot[data-window-position="middle"] {
+    @apply rounded-none;
+  }
+  .column-dot[data-window-position="trailing"] {
+    @apply rounded-r-full rounded-l-none;
+  }
+  .column-dot[data-window-position="single"] {
+    @apply rounded-full;
+  }
+  .column-dot[data-window-position="inactive"] {
+    @apply bg-foreground-subtle;
+  }
+
+  .column-dot[aria-current="true"],
+  .column-dot[data-selected="true"] {
+    background-color: var(--scheme-color-secondary) !important;
+  }
+}
