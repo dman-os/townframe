@@ -15,6 +15,14 @@ use crate::{
 /// each target's own cursor travels with it, so a page per part would be one request per part
 /// over the same connection.
 #[derive(Debug, Clone)]
+pub struct ReplaySubscriptionTaskState {
+    pub subscription_id: rpc::ReplaySubscriptionId,
+    pub generation: u64,
+    pub targets: Vec<rpc::ReplaySubscriptionTargetEntry>,
+    pub request: Option<rpc::ReplaySubscriptionRequest>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReplayPageTask {
     pub peer_id: PeerKey,
     /// This request's id, so the round that replaces it can name it.
@@ -25,6 +33,8 @@ pub struct ReplayPageTask {
     /// them and superseding never discards delivered work.
     pub supersede: Option<rpc::ReplayRequestId>,
     pub limit: u32,
+    /// Optional stateful target-set operation to perform before fetching this page.
+    pub subscription: Option<ReplaySubscriptionTaskState>,
 }
 
 #[derive(Debug)]
@@ -93,15 +103,112 @@ impl ReplayPageTask {
             // transport failure rather than an empty page.
             return Err(ReplayPageTaskErrorDeets::Rpc(rpc::RpcError::TransportError));
         };
-        let page = peer_rpc
-            .replay_page(rpc::ReplayPageRequest {
+        let page = if let Some(subscription) = self.subscription.clone() {
+            if let Some(request) = subscription.request.clone() {
+                match peer_rpc.replay_subscription(request).await {
+                    Ok(rpc::ReplaySubscriptionResponse::Opened { .. })
+                    | Ok(rpc::ReplaySubscriptionResponse::Updated { .. }) => {}
+                    Err(rpc::RpcError::UnknownSubscription)
+                    | Err(rpc::RpcError::StaleSubscriptionGeneration)
+                    | Err(rpc::RpcError::InvalidRequest(_)) => {
+                        peer_rpc
+                            .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
+                                subscription_id: subscription.subscription_id,
+                                generation: subscription.generation,
+                                targets: subscription.targets.clone(),
+                            })
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(response) => {
+                        return Err(rpc::RpcError::InvalidRequest(format!(
+                            "unexpected replay subscription response before page: {response:?}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            let next = rpc::ReplaySubscriptionRequest::Next {
+                subscription_id: subscription.subscription_id,
                 request_id: self.request_id,
                 supersede: self.supersede,
-                targets: self.targets.clone(),
+                targets: self
+                    .targets
+                    .iter()
+                    .map(|target| {
+                        let descriptor = rpc::ReplaySubscriptionTarget::from(target);
+                        let entry = subscription
+                            .targets
+                            .iter()
+                            .find(|entry| entry.target == descriptor)
+                            .expect("every replay page target has a subscription id");
+                        (
+                            entry.id,
+                            match target {
+                                rpc::SubscriptionTarget::Part { cursor, .. }
+                                | rpc::SubscriptionTarget::Object { cursor, .. } => *cursor,
+                            },
+                        )
+                    })
+                    .collect(),
                 limit: self.limit,
                 hold_ms: Self::HOLD_MS,
-            })
-            .await?;
+            };
+            let response = match peer_rpc.replay_subscription(next.clone()).await {
+                Ok(response) => response,
+                Err(rpc::RpcError::UnknownSubscription) | Err(rpc::RpcError::InvalidRequest(_)) => {
+                    peer_rpc
+                        .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
+                            subscription_id: subscription.subscription_id,
+                            generation: subscription.generation,
+                            targets: subscription.targets.clone(),
+                        })
+                        .await?;
+                    peer_rpc.replay_subscription(next).await?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let rpc::ReplaySubscriptionResponse::Page(subscription_page) = response else {
+                return Err(rpc::RpcError::InvalidRequest(
+                    "replay subscription did not return a page".into(),
+                )
+                .into());
+            };
+            let page_targets = subscription_page
+                .targets
+                .into_iter()
+                .filter_map(|(id, verdict)| {
+                    let entry = subscription.targets.iter().find(|entry| entry.id == id)?;
+                    let current = self
+                        .targets
+                        .iter()
+                        .find(|target| rpc::ReplaySubscriptionTarget::from(*target) == entry.target)
+                        .cloned()
+                        .unwrap_or_else(|| entry.target.with_cursor(0));
+                    let target = match verdict {
+                        rpc::TargetVerdict::Events { resume, .. } => {
+                            entry.target.with_cursor(resume)
+                        }
+                        _ => current,
+                    };
+                    Some((target, verdict))
+                })
+                .collect();
+            rpc::ReplayPage {
+                events: subscription_page.page.events,
+                targets: page_targets,
+            }
+        } else {
+            peer_rpc
+                .replay_page(rpc::ReplayPageRequest {
+                    request_id: self.request_id,
+                    supersede: self.supersede,
+                    targets: self.targets.clone(),
+                    limit: self.limit,
+                    hold_ms: Self::HOLD_MS,
+                })
+                .await?
+        };
         Ok(TaskResultDeets::ReplayPage(ReplayPageResult {
             peer_id: self.peer_id,
             page,

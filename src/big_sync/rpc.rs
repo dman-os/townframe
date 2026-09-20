@@ -6,7 +6,8 @@ use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPage,
-    ReplayPageRequest, RpcError, TargetVerdict,
+    ReplayPageRequest, ReplaySubscriptionPage, ReplaySubscriptionRequest,
+    ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError, TargetVerdict,
 };
 use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
@@ -96,6 +97,10 @@ pub trait WireBigSyncRpcClient: Send + Sync {
         &self,
         req: ScopedRequest<ReplayPageRequest>,
     ) -> Res<BigSyncRpcResult<ReplayPage>>;
+    async fn replay_subscription(
+        &self,
+        req: ScopedRequest<ReplaySubscriptionRequest>,
+    ) -> Res<BigSyncRpcResult<ReplaySubscriptionResponse>>;
 
     async fn get_changed_buckets(
         &self,
@@ -138,6 +143,17 @@ impl HostBigRpcClient for ScopedRpcClient {
             })
             .await
     }
+    async fn replay_subscription(
+        &self,
+        req: ReplaySubscriptionRequest,
+    ) -> Res<BigSyncRpcResult<ReplaySubscriptionResponse>> {
+        self.inner
+            .replay_subscription(ScopedRequest {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: req,
+            })
+            .await
+    }
 
     async fn get_changed_buckets(
         &self,
@@ -172,6 +188,10 @@ pub trait HostBigRpcClient: Send + Sync {
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
     async fn replay_page(&self, req: ReplayPageRequest) -> Res<BigSyncRpcResult<ReplayPage>>;
+    async fn replay_subscription(
+        &self,
+        req: ReplaySubscriptionRequest,
+    ) -> Res<BigSyncRpcResult<ReplaySubscriptionResponse>>;
 
     async fn get_changed_buckets(
         &self,
@@ -191,6 +211,8 @@ pub enum BigSyncIrpc {
     PeerSummary(ScopedRequest<PeerSummaryRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<ReplayPage, RpcError>>)]
     ReplayPage(ScopedRequest<ReplayPageRequest>),
+    #[rpc(tx = channel::oneshot::Sender<Result<ReplaySubscriptionResponse, RpcError>>)]
+    ReplaySubscription(ScopedRequest<ReplaySubscriptionRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<Vec<BucketSummary>, ListPartsError>>)]
     GetChangedBuckets(ScopedRequest<GetChangedBucketsRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
@@ -290,6 +312,7 @@ pub async fn spawn_big_sync_rpc(
         let worker = Arc::new(BigSyncRpcWorker {
             stores,
             replay_cancels: default(),
+            replay_subscriptions: default(),
         });
         let permits = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_RPC_HANDLERS));
         async move {
@@ -385,6 +408,19 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
         };
         Ok(response)
     }
+    async fn replay_subscription(
+        &self,
+        req: ScopedRequest<ReplaySubscriptionRequest>,
+    ) -> Res<BigSyncRpcResult<ReplaySubscriptionResponse>> {
+        let response = match self.client.rpc(req).await {
+            Ok(response) => response,
+            Err(err) => {
+                warn!(?err, "big sync replay_subscription rpc transport failed");
+                return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
+            }
+        };
+        Ok(response)
+    }
 
     async fn get_changed_buckets(
         &self,
@@ -414,6 +450,51 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
         Ok(Ok(response))
     }
 }
+const MAX_REPLAY_SUBSCRIPTIONS_PER_PEER: usize = 8;
+const MAX_REPLAY_SUBSCRIPTION_TARGETS: usize = 16_384;
+const MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES: usize = 2 * 1024 * 1024;
+const REPLAY_SUBSCRIPTION_TTL: Duration = Duration::from_secs(10 * 60);
+
+fn replay_event_matches_target(
+    event: &big_sync_core::rpc::PartEvent,
+    target: &big_sync_core::rpc::ReplaySubscriptionTarget,
+) -> bool {
+    match (event, target) {
+        (
+            big_sync_core::rpc::PartEvent::Changed(changed),
+            big_sync_core::rpc::ReplaySubscriptionTarget::Part { part_id },
+        ) => changed
+            .part_ids
+            .iter()
+            .any(|candidate| candidate == part_id),
+        (
+            big_sync_core::rpc::PartEvent::Removed(removed),
+            big_sync_core::rpc::ReplaySubscriptionTarget::Part { part_id },
+        ) => &removed.part_id == part_id,
+        (
+            big_sync_core::rpc::PartEvent::Changed(changed),
+            big_sync_core::rpc::ReplaySubscriptionTarget::Object { obj_id },
+        ) => &changed.obj_id == obj_id,
+        (
+            big_sync_core::rpc::PartEvent::Removed(removed),
+            big_sync_core::rpc::ReplaySubscriptionTarget::Object { obj_id },
+        ) => &removed.obj_id == obj_id,
+    }
+}
+
+#[derive(Clone)]
+struct ReplaySubscriptionState {
+    generation: u64,
+    targets:
+        HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>,
+    changed: Arc<tokio::sync::Notify>,
+    last_touched: std::time::Instant,
+}
+
+type ReplaySubscriptionRegistry = HashMap<
+    (PeerKey, Arc<str>),
+    HashMap<big_sync_core::rpc::ReplaySubscriptionId, ReplaySubscriptionState>,
+>;
 
 struct BigSyncRpcWorker {
     stores: HashMap<Arc<str>, Arc<dyn HostPartStore>>,
@@ -424,6 +505,7 @@ struct BigSyncRpcWorker {
     replay_cancels: std::sync::Mutex<
         HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>,
     >,
+    replay_subscriptions: std::sync::Mutex<ReplaySubscriptionRegistry>,
 }
 
 impl BigSyncRpcWorker {
@@ -441,6 +523,353 @@ impl BigSyncRpcWorker {
         self.replay_cancels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn sweep_replay_subscriptions(&self) {
+        let now = std::time::Instant::now();
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.retain(|_, subscriptions| {
+            subscriptions.retain(|_, subscription| {
+                now.duration_since(subscription.last_touched) < REPLAY_SUBSCRIPTION_TTL
+            });
+            !subscriptions.is_empty()
+        });
+    }
+
+    fn open_replay_subscription(
+        &self,
+        peer: &PeerKey,
+        scope_key: &Arc<str>,
+        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+        generation: u64,
+        targets: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
+    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+        self.sweep_replay_subscriptions();
+        if targets.len() > MAX_REPLAY_SUBSCRIPTION_TARGETS {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let encoded = targets
+            .iter()
+            .map(|entry| replay_target_wire_bytes(&entry.target))
+            .sum::<usize>();
+        if encoded > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let mut ids = std::collections::HashSet::new();
+        for entry in &targets {
+            if !ids.insert(entry.id) {
+                return Err(RpcError::InvalidRequest(
+                    "duplicate replay target id".into(),
+                ));
+            }
+        }
+        let key = (peer.clone(), Arc::clone(scope_key));
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let peer_subscription_count = registry
+            .iter()
+            .filter(|((registered_peer, _), _)| registered_peer == peer)
+            .map(|(_, subscriptions)| subscriptions.len())
+            .sum::<usize>();
+        let subscriptions = registry.entry(key).or_default();
+        if !subscriptions.contains_key(&subscription_id)
+            && peer_subscription_count >= MAX_REPLAY_SUBSCRIPTIONS_PER_PEER
+        {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let previous = subscriptions.insert(
+            subscription_id,
+            ReplaySubscriptionState {
+                generation,
+                targets: targets
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.target))
+                    .collect(),
+                changed: Arc::new(tokio::sync::Notify::new()),
+                last_touched: std::time::Instant::now(),
+            },
+        );
+        if let Some(previous) = previous {
+            previous.changed.notify_waiters();
+        }
+        Ok(ReplaySubscriptionResponse::Opened { generation })
+    }
+
+    fn update_replay_subscription(
+        &self,
+        peer: &PeerKey,
+        scope_key: &Arc<str>,
+        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+        generation: u64,
+        additions: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
+        removals: Vec<big_sync_core::rpc::ReplayTargetId>,
+    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+        self.sweep_replay_subscriptions();
+        if additions.len() + removals.len() > MAX_REPLAY_SUBSCRIPTION_TARGETS {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let encoded = additions
+            .iter()
+            .map(|entry| replay_target_wire_bytes(&entry.target))
+            .sum::<usize>();
+        if encoded > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let key = (peer.clone(), Arc::clone(scope_key));
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let subscriptions = registry
+            .get_mut(&key)
+            .ok_or(RpcError::UnknownSubscription)?;
+        let state = subscriptions
+            .get_mut(&subscription_id)
+            .ok_or(RpcError::UnknownSubscription)?;
+        if generation == state.generation {
+            state.last_touched = std::time::Instant::now();
+            return Ok(ReplaySubscriptionResponse::Updated { generation });
+        }
+        if generation != state.generation.saturating_add(1) {
+            return Err(RpcError::StaleSubscriptionGeneration);
+        }
+        let removal_set: std::collections::HashSet<_> = removals.iter().copied().collect();
+        if removal_set.len() != removals.len() {
+            return Err(RpcError::InvalidRequest(
+                "duplicate replay target removal".into(),
+            ));
+        }
+        if removals.iter().any(|id| !state.targets.contains_key(id)) {
+            return Err(RpcError::InvalidRequest(
+                "unknown replay target removal".into(),
+            ));
+        }
+        let mut addition_ids = std::collections::HashSet::new();
+        for entry in &additions {
+            if !addition_ids.insert(entry.id)
+                || (state.targets.contains_key(&entry.id) && !removal_set.contains(&entry.id))
+            {
+                return Err(RpcError::InvalidRequest(
+                    "duplicate replay target addition".into(),
+                ));
+            }
+        }
+        let current_target_bytes = state
+            .targets
+            .values()
+            .map(replay_target_wire_bytes)
+            .sum::<usize>();
+        let removed_target_bytes = removals
+            .iter()
+            .map(|id| replay_target_wire_bytes(state.targets.get(id).expect(ERROR_IMPOSSIBLE)))
+            .sum::<usize>();
+        let added_target_bytes = additions
+            .iter()
+            .map(|entry| replay_target_wire_bytes(&entry.target))
+            .sum::<usize>();
+        if current_target_bytes
+            .saturating_sub(removed_target_bytes)
+            .saturating_add(added_target_bytes)
+            > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES
+        {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let new_target_count = state
+            .targets
+            .len()
+            .saturating_sub(removals.len())
+            .saturating_add(additions.len());
+        if new_target_count > MAX_REPLAY_SUBSCRIPTION_TARGETS {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        for id in removals {
+            state.targets.remove(&id);
+        }
+        for entry in additions {
+            state.targets.insert(entry.id, entry.target);
+        }
+        state.generation = generation;
+        state.last_touched = std::time::Instant::now();
+        state.changed.notify_waiters();
+        Ok(ReplaySubscriptionResponse::Updated { generation })
+    }
+
+    fn close_replay_subscription(
+        &self,
+        peer: &PeerKey,
+        scope_key: &Arc<str>,
+        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+        self.sweep_replay_subscriptions();
+        let key = (peer.clone(), Arc::clone(scope_key));
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(subscriptions) = registry.get_mut(&key) else {
+            return Err(RpcError::UnknownSubscription);
+        };
+        let Some(subscription) = subscriptions.remove(&subscription_id) else {
+            return Err(RpcError::UnknownSubscription);
+        };
+        subscription.changed.notify_waiters();
+        if subscriptions.is_empty() {
+            registry.remove(&key);
+        }
+        Ok(ReplaySubscriptionResponse::Closed)
+    }
+
+    fn replay_subscription_snapshot(
+        &self,
+        peer: &PeerKey,
+        scope_key: &Arc<str>,
+        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+    ) -> Result<ReplaySubscriptionState, RpcError> {
+        self.sweep_replay_subscriptions();
+        let key = (peer.clone(), Arc::clone(scope_key));
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let subscriptions = registry
+            .get_mut(&key)
+            .ok_or(RpcError::UnknownSubscription)?;
+        let state = subscriptions
+            .get_mut(&subscription_id)
+            .ok_or(RpcError::UnknownSubscription)?;
+        state.last_touched = std::time::Instant::now();
+        Ok(state.clone())
+    }
+    async fn handle_replay_subscription(
+        &self,
+        scope_key: Arc<str>,
+        subscriber: PeerKey,
+        request: ReplaySubscriptionRequest,
+    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+        match request {
+            ReplaySubscriptionRequest::Open {
+                subscription_id,
+                generation,
+                targets,
+            } => self.open_replay_subscription(
+                &subscriber,
+                &scope_key,
+                subscription_id,
+                generation,
+                targets,
+            ),
+            ReplaySubscriptionRequest::Update {
+                subscription_id,
+                generation,
+                additions,
+                removals,
+            } => self.update_replay_subscription(
+                &subscriber,
+                &scope_key,
+                subscription_id,
+                generation,
+                additions,
+                removals,
+            ),
+            ReplaySubscriptionRequest::Close { subscription_id } => {
+                self.close_replay_subscription(&subscriber, &scope_key, subscription_id)
+            }
+            ReplaySubscriptionRequest::Next {
+                subscription_id,
+                request_id,
+                supersede,
+                targets,
+                limit,
+                hold_ms,
+            } => {
+                let Some(store) = self.stores.get(&scope_key) else {
+                    return Err(RpcError::InvalidRequest("unknown storage scope".into()));
+                };
+                let snapshot =
+                    self.replay_subscription_snapshot(&subscriber, &scope_key, subscription_id)?;
+                let requested_ids: std::collections::HashSet<_> =
+                    targets.iter().map(|(id, _)| *id).collect();
+                if requested_ids.len() != targets.len() {
+                    return Err(RpcError::InvalidRequest(
+                        "duplicate replay target id".into(),
+                    ));
+                }
+                let requested = targets
+                    .into_iter()
+                    .map(|(id, cursor)| {
+                        snapshot
+                            .targets
+                            .get(&id)
+                            .map(|target| target.with_cursor(cursor))
+                            .ok_or(RpcError::InvalidRequest("unknown replay target id".into()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                validate_replay_targets(&requested)
+                    .map_err(|error| RpcError::InvalidRequest(error.to_string()))?;
+                let cancel =
+                    self.register_replay_request(&subscriber, request_id, CancellationToken::new());
+                if let Some(superseded) = supersede {
+                    self.cancel_replay_request(&subscriber, superseded);
+                }
+                let result = store
+                    .replay_page_round_with_update(
+                        ReplayPageRequest {
+                            request_id,
+                            supersede,
+                            targets: requested,
+                            limit: page_limit(limit),
+                            hold_ms,
+                        },
+                        subscriber.clone(),
+                        Duration::from_millis(u64::from(hold_ms)).min(MAX_PAGE_HOLD),
+                        cancel.as_ref().clone(),
+                        Some(snapshot.changed),
+                    )
+                    .await;
+                self.forget_replay_request(&subscriber, request_id, &cancel);
+                let page = result.map_err(|error| {
+                    tracing::error!(error = ?error, "replay subscription page failed");
+                    RpcError::Internal
+                })?;
+                let latest =
+                    self.replay_subscription_snapshot(&subscriber, &scope_key, subscription_id)?;
+                let reverse: HashMap<_, _> = latest
+                    .targets
+                    .iter()
+                    .map(|(id, target)| (target.clone(), *id))
+                    .collect();
+                let events = page
+                    .events
+                    .into_iter()
+                    .filter(|event| {
+                        latest
+                            .targets
+                            .values()
+                            .any(|target| replay_event_matches_target(event, target))
+                    })
+                    .collect();
+                let target_verdicts = page
+                    .targets
+                    .into_iter()
+                    .filter_map(|(target, verdict)| {
+                        let id = reverse.get(&ReplaySubscriptionTarget::from(&target))?;
+                        requested_ids.contains(id).then_some((*id, verdict))
+                    })
+                    .collect();
+                Ok(ReplaySubscriptionResponse::Page(ReplaySubscriptionPage {
+                    page: ReplayPage {
+                        events,
+                        targets: Vec::new(),
+                    },
+                    targets: target_verdicts,
+                }))
+            }
+        }
     }
 
     /// Register a request's own cancellation for as long as it is in flight.
@@ -598,6 +1027,23 @@ impl BigSyncRpcWorker {
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
+            BigSyncRpcMessage::ReplaySubscription(req) => {
+                let WithChannels { inner, tx, .. } = req;
+                let Some(subscriber) = authenticated_peer else {
+                    tx.send(Err(RpcError::Unauthorized))
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
+                    return;
+                };
+                let out = self
+                    .handle_replay_subscription(inner.scope_key, subscriber, inner.inner)
+                    .await;
+                tx.send(out)
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
             BigSyncRpcMessage::ReplayPage(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let ReplayPageRequest {
@@ -747,6 +1193,13 @@ impl BigSyncRpcWorker {
     }
 }
 
+fn replay_target_wire_bytes(target: &big_sync_core::rpc::ReplaySubscriptionTarget) -> usize {
+    16 + match target {
+        big_sync_core::rpc::ReplaySubscriptionTarget::Part { part_id } => part_id.as_bytes().len(),
+        big_sync_core::rpc::ReplaySubscriptionTarget::Object { obj_id } => obj_id.as_bytes().len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,8 +1207,9 @@ mod tests {
     use crate::part_store::HostPartStore;
     use crate::part_store::memory::MemoryPartStore;
     use big_sync_core::rpc::{
-        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, RpcError,
-        SubscriptionTarget,
+        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, ReplaySubscriptionId,
+        ReplaySubscriptionResponse, ReplaySubscriptionTarget, ReplaySubscriptionTargetEntry,
+        ReplayTargetId, RpcError, SubscriptionTarget,
     };
     use big_sync_core::{BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey};
     use iroh::protocol::Router;
@@ -769,6 +1223,7 @@ mod tests {
         let worker = BigSyncRpcWorker {
             stores: HashMap::new(),
             replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
         };
         let peer = PeerKey::new([7u8; 32]);
         let older = CancellationToken::new();
@@ -808,6 +1263,7 @@ mod tests {
         let worker = Arc::new(BigSyncRpcWorker {
             stores: HashMap::new(),
             replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
         });
         let poisoner = Arc::clone(&worker);
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -824,6 +1280,55 @@ mod tests {
             ReplayRequestId(1),
             CancellationToken::new(),
         );
+    }
+
+    #[test]
+    fn replay_subscription_updates_remove_targets() {
+        let worker = BigSyncRpcWorker {
+            stores: HashMap::new(),
+            replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
+        };
+        let peer = PeerKey::new([9u8; 32]);
+        let scope: Arc<str> = Arc::from("scope");
+        let subscription_id = ReplaySubscriptionId(11);
+        let target_id = ReplayTargetId(3);
+        let target = ReplaySubscriptionTarget::Part {
+            part_id: PartKey::new(b"part"),
+        };
+        assert_eq!(
+            worker.open_replay_subscription(
+                &peer,
+                &scope,
+                subscription_id,
+                0,
+                vec![ReplaySubscriptionTargetEntry {
+                    id: target_id,
+                    target: target.clone(),
+                }],
+            ),
+            Ok(ReplaySubscriptionResponse::Opened { generation: 0 }),
+        );
+        let snapshot = worker
+            .replay_subscription_snapshot(&peer, &scope, subscription_id)
+            .expect("opened subscription");
+        assert!(snapshot.targets.contains_key(&target_id));
+        assert_eq!(snapshot.generation, 0);
+        assert_eq!(
+            worker.update_replay_subscription(
+                &peer,
+                &scope,
+                subscription_id,
+                1,
+                Vec::new(),
+                vec![target_id],
+            ),
+            Ok(ReplaySubscriptionResponse::Updated { generation: 1 }),
+        );
+        let snapshot = worker
+            .replay_subscription_snapshot(&peer, &scope, subscription_id)
+            .expect("subscription remains after target removal");
+        assert!(snapshot.targets.is_empty());
     }
 
     #[test]

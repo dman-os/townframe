@@ -3325,9 +3325,18 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
+pub(crate) type StressReplaySubscriptions = HashMap<
+    big_sync_core::rpc::ReplaySubscriptionId,
+    (
+        u64,
+        HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>,
+    ),
+>;
+
 pub(crate) struct StressBigSyncRpcClient {
     pub(crate) target_part_store: SharedPartStore,
     pub(crate) subscriber: PeerKey,
+    pub(crate) replay_subscriptions: Arc<Mutex<StressReplaySubscriptions>>,
 }
 
 #[async_trait::async_trait]
@@ -3386,6 +3395,155 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
                 tokio_util::sync::CancellationToken::new(),
             )
             .await?))
+    }
+
+    async fn replay_subscription(
+        &self,
+        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplaySubscriptionRequest>,
+    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplaySubscriptionResponse>>
+    {
+        use big_sync_core::rpc::{
+            ReplayPage, ReplayPageRequest, ReplaySubscriptionPage, ReplaySubscriptionRequest,
+            ReplaySubscriptionResponse, RpcError,
+        };
+        let hold =
+            |hold_ms| Duration::from_millis(u64::from(hold_ms)).min(Duration::from_millis(50));
+        match req.inner {
+            ReplaySubscriptionRequest::Open {
+                subscription_id,
+                generation,
+                targets,
+            } => {
+                let mut target_map = HashMap::new();
+                for entry in targets {
+                    if target_map.insert(entry.id, entry.target).is_some() {
+                        return Ok(Err(RpcError::InvalidRequest(
+                            "duplicate replay target id".into(),
+                        )));
+                    }
+                }
+                self.replay_subscriptions
+                    .lock()
+                    .await
+                    .insert(subscription_id, (generation, target_map));
+                Ok(Ok(ReplaySubscriptionResponse::Opened { generation }))
+            }
+            ReplaySubscriptionRequest::Update {
+                subscription_id,
+                generation,
+                additions,
+                removals,
+            } => {
+                let mut subscriptions = self.replay_subscriptions.lock().await;
+                let Some((current_generation, target_map)) =
+                    subscriptions.get_mut(&subscription_id)
+                else {
+                    return Ok(Err(RpcError::UnknownSubscription));
+                };
+                if generation == *current_generation {
+                    return Ok(Ok(ReplaySubscriptionResponse::Updated { generation }));
+                }
+                if generation != current_generation.saturating_add(1) {
+                    return Ok(Err(RpcError::StaleSubscriptionGeneration));
+                }
+                for target_id in removals {
+                    target_map.remove(&target_id);
+                }
+                for entry in additions {
+                    if target_map.insert(entry.id, entry.target).is_some() {
+                        return Ok(Err(RpcError::InvalidRequest(
+                            "duplicate replay target id".into(),
+                        )));
+                    }
+                }
+                *current_generation = generation;
+                Ok(Ok(ReplaySubscriptionResponse::Updated { generation }))
+            }
+            ReplaySubscriptionRequest::Close { subscription_id } => {
+                let removed = self
+                    .replay_subscriptions
+                    .lock()
+                    .await
+                    .remove(&subscription_id);
+                if removed.is_none() {
+                    return Ok(Err(RpcError::UnknownSubscription));
+                }
+                Ok(Ok(ReplaySubscriptionResponse::Closed))
+            }
+            ReplaySubscriptionRequest::Next {
+                subscription_id,
+                request_id,
+                supersede,
+                targets,
+                limit,
+                hold_ms,
+            } => {
+                let subscriptions = self.replay_subscriptions.lock().await;
+                let Some((_, target_map)) = subscriptions.get(&subscription_id) else {
+                    return Ok(Err(RpcError::UnknownSubscription));
+                };
+                let requested = targets
+                    .iter()
+                    .map(|(target_id, cursor)| {
+                        target_map
+                            .get(target_id)
+                            .cloned()
+                            .map(|target| target.with_cursor(*cursor))
+                            .ok_or(RpcError::InvalidRequest("unknown replay target id".into()))
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let requested = match requested {
+                    Ok(requested) => requested,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let target_ids = targets
+                    .iter()
+                    .map(|(target_id, _)| {
+                        (
+                            target_map
+                                .get(target_id)
+                                .expect("requested target was validated above")
+                                .clone(),
+                            *target_id,
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                drop(subscriptions);
+                let page = self
+                    .target_part_store
+                    .replay_page_round(
+                        ReplayPageRequest {
+                            request_id,
+                            supersede,
+                            targets: requested,
+                            limit,
+                            hold_ms,
+                        },
+                        self.subscriber.clone(),
+                        hold(hold_ms),
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await?;
+                let target_verdicts = page
+                    .targets
+                    .iter()
+                    .filter_map(|(target, verdict)| {
+                        target_ids
+                            .get(&big_sync_core::rpc::ReplaySubscriptionTarget::from(target))
+                            .map(|target_id| (*target_id, verdict.clone()))
+                    })
+                    .collect();
+                Ok(Ok(ReplaySubscriptionResponse::Page(
+                    ReplaySubscriptionPage {
+                        page: ReplayPage {
+                            events: page.events,
+                            targets: Vec::new(),
+                        },
+                        targets: target_verdicts,
+                    },
+                )))
+            }
+        }
     }
 
     async fn get_changed_buckets(
@@ -3618,6 +3776,7 @@ impl SyncRepoNode {
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&remote.big_sync_store),
                     subscriber: self.peer_id(),
+                    replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
                 }),
                 parts,
                 HashMap::new(),
@@ -3634,6 +3793,7 @@ impl SyncRepoNode {
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&self.big_sync_store),
                     subscriber: remote.peer_id(),
+                    replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
                 }),
                 parts,
                 HashMap::new(),

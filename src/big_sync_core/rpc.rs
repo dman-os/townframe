@@ -23,6 +23,13 @@ pub trait BigSyncRpcClient<K: FutureForm> {
         req: ReplayPageRequest,
     ) -> K::Future<'a, BigSyncRpcResult<ReplayPage>>;
 
+    /// Open, update, fetch, or close a bounded logical replay subscription. The operation is
+    /// transport-independent: a request/response transport such as HTTP can carry the handle in
+    /// each request while `Next` remains one discrete pull page.
+    fn replay_subscription<'a>(
+        &'a self,
+        req: ReplaySubscriptionRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<ReplaySubscriptionResponse>>;
     /// Smart get_changed_buckets. It will dynamically adjust the levels to include
     /// according to change counts [`GetChangedBucketsRequest::since`].
     ///
@@ -335,6 +342,100 @@ pub enum SubscriptionTarget {
         /// events from the start again.
         cursor: CursorIndex,
     },
+}
+
+/// Stable identity of a logical replay subscription. It is scoped to the authenticated peer and
+/// storage scope; it is not a cursor and carries no delivery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplaySubscriptionId(pub u64);
+
+/// Compact identity of a target within one replay subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplayTargetId(pub u32);
+
+/// A subscription target without its client-owned cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReplaySubscriptionTarget {
+    Part { part_id: PartKey },
+    Object { obj_id: ObjKey },
+}
+
+impl ReplaySubscriptionTarget {
+    pub fn with_cursor(&self, cursor: CursorIndex) -> SubscriptionTarget {
+        match self {
+            Self::Part { part_id } => SubscriptionTarget::Part {
+                part_id: part_id.clone(),
+                cursor,
+            },
+            Self::Object { obj_id } => SubscriptionTarget::Object {
+                obj_id: obj_id.clone(),
+                cursor,
+            },
+        }
+    }
+}
+
+impl From<&SubscriptionTarget> for ReplaySubscriptionTarget {
+    fn from(target: &SubscriptionTarget) -> Self {
+        match target {
+            SubscriptionTarget::Part { part_id, .. } => Self::Part {
+                part_id: part_id.clone(),
+            },
+            SubscriptionTarget::Object { obj_id, .. } => Self::Object {
+                obj_id: obj_id.clone(),
+            },
+        }
+    }
+}
+
+/// One target definition sent when opening or changing a subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaySubscriptionTargetEntry {
+    pub id: ReplayTargetId,
+    pub target: ReplaySubscriptionTarget,
+}
+
+/// A request against a logical replay subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplaySubscriptionRequest {
+    Open {
+        subscription_id: ReplaySubscriptionId,
+        generation: u64,
+        targets: Vec<ReplaySubscriptionTargetEntry>,
+    },
+    Update {
+        subscription_id: ReplaySubscriptionId,
+        generation: u64,
+        additions: Vec<ReplaySubscriptionTargetEntry>,
+        removals: Vec<ReplayTargetId>,
+    },
+    Next {
+        subscription_id: ReplaySubscriptionId,
+        request_id: ReplayRequestId,
+        supersede: Option<ReplayRequestId>,
+        targets: Vec<(ReplayTargetId, CursorIndex)>,
+        limit: u32,
+        hold_ms: u32,
+    },
+    Close {
+        subscription_id: ReplaySubscriptionId,
+    },
+}
+
+/// A replay page whose target verdicts use subscription-local integer IDs. The nested page keeps
+/// the existing compact object/part dictionaries, while its empty target list is replaced by IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaySubscriptionPage {
+    pub page: ReplayPage,
+    pub targets: Vec<(ReplayTargetId, TargetVerdict)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplaySubscriptionResponse {
+    Opened { generation: u64 },
+    Updated { generation: u64 },
+    Page(ReplaySubscriptionPage),
+    Closed,
 }
 
 /// What the responder answered about one requested target.
@@ -691,6 +792,14 @@ pub enum RpcError {
     TransportError,
     /// InvalidRequest {0}
     InvalidRequest(String),
+    /// Unauthorized
+    Unauthorized,
+    /// UnknownSubscription
+    UnknownSubscription,
+    /// SubscriptionLimit
+    SubscriptionLimit,
+    /// StaleSubscriptionGeneration
+    StaleSubscriptionGeneration,
     /// Internal
     Internal,
 }
@@ -752,5 +861,31 @@ mod tests {
         let encoded = postcard::to_allocvec(&wire).expect("encode invalid replay page");
         let error = postcard::from_bytes::<ReplayPage>(&encoded).expect_err("invalid index");
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn replay_subscription_page_round_trips_integer_target_ids() {
+        let page = ReplaySubscriptionPage {
+            page: ReplayPage {
+                events: vec![PartEvent::Changed(ObjChanged {
+                    cursor: 1,
+                    part_ids: vec![PartKey::new(b"part")],
+                    obj_id: ObjKey::new(b"object"),
+                    payload: serde_json::json!({"value": 1}),
+                })],
+                targets: Vec::new(),
+            },
+            targets: vec![(
+                ReplayTargetId(7),
+                TargetVerdict::Events {
+                    resume: 1,
+                    drained: true,
+                },
+            )],
+        };
+        let encoded = postcard::to_allocvec(&page).expect("encode subscription page");
+        let decoded: ReplaySubscriptionPage =
+            postcard::from_bytes(&encoded).expect("decode subscription page");
+        assert_eq!(decoded, page);
     }
 }

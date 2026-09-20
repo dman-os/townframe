@@ -17,6 +17,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
+type MemoryReplayTargetMap =
+    HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>;
+type MemoryReplaySubscriptions =
+    HashMap<big_sync_core::rpc::ReplaySubscriptionId, (u64, MemoryReplayTargetMap)>;
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::HostPartStore;
 use crate::part_store::memory::MemoryPartStore;
@@ -190,6 +194,7 @@ pub(crate) struct MemoryRpcClient {
     source_peer_id: PeerKey,
     target_peer_id: PeerKey,
     target_part_store: Arc<dyn HostPartStore>,
+    replay_subscriptions: Arc<Mutex<MemoryReplaySubscriptions>>,
 }
 
 impl MemoryRpcClient {
@@ -206,6 +211,7 @@ impl MemoryRpcClient {
             source_peer_id,
             target_peer_id,
             target_part_store,
+            replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -271,6 +277,145 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
         Ok(Ok(outcome))
     }
 
+    async fn replay_subscription(
+        &self,
+        req: crate::rpc::ScopedRequest<big_sync_core::rpc::ReplaySubscriptionRequest>,
+    ) -> Res<BigSyncRpcResult<big_sync_core::rpc::ReplaySubscriptionResponse>> {
+        if !self.world.is_online(self.target_peer_id.clone()) {
+            return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
+        }
+        let scope_key = req.scope_key;
+        match req.inner {
+            big_sync_core::rpc::ReplaySubscriptionRequest::Open {
+                subscription_id,
+                generation,
+                targets,
+            } => {
+                let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
+                subscriptions.insert(
+                    subscription_id,
+                    (
+                        generation,
+                        targets
+                            .into_iter()
+                            .map(|entry| (entry.id, entry.target))
+                            .collect(),
+                    ),
+                );
+                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Opened {
+                    generation,
+                }))
+            }
+            big_sync_core::rpc::ReplaySubscriptionRequest::Update {
+                subscription_id,
+                generation,
+                additions,
+                removals,
+            } => {
+                let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
+                let Some((current_generation, targets)) = subscriptions.get_mut(&subscription_id)
+                else {
+                    return Ok(Err(big_sync_core::rpc::RpcError::UnknownSubscription));
+                };
+                if generation != *current_generation
+                    && generation != current_generation.saturating_add(1)
+                {
+                    return Ok(Err(
+                        big_sync_core::rpc::RpcError::StaleSubscriptionGeneration,
+                    ));
+                }
+                for id in removals {
+                    targets.remove(&id);
+                }
+                for entry in additions {
+                    targets.insert(entry.id, entry.target);
+                }
+                *current_generation = generation;
+                Ok(Ok(
+                    big_sync_core::rpc::ReplaySubscriptionResponse::Updated { generation },
+                ))
+            }
+            big_sync_core::rpc::ReplaySubscriptionRequest::Close { subscription_id } => {
+                self.replay_subscriptions
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .remove(&subscription_id);
+                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Closed))
+            }
+            big_sync_core::rpc::ReplaySubscriptionRequest::Next {
+                subscription_id,
+                request_id,
+                supersede,
+                targets: requested,
+                limit,
+                hold_ms,
+            } => {
+                let target_map = self
+                    .replay_subscriptions
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .get(&subscription_id)
+                    .map(|(_, targets)| targets.clone())
+                    .ok_or(big_sync_core::rpc::RpcError::UnknownSubscription);
+                let target_map = match target_map {
+                    Ok(target_map) => target_map,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let requested_ids: std::collections::HashSet<_> =
+                    requested.iter().map(|(id, _)| *id).collect();
+                let page_targets = requested
+                    .into_iter()
+                    .map(|(id, cursor)| {
+                        target_map
+                            .get(&id)
+                            .map(|target| target.with_cursor(cursor))
+                            .ok_or(big_sync_core::rpc::RpcError::InvalidRequest(
+                                "unknown replay target id".into(),
+                            ))
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let page_targets = match page_targets {
+                    Ok(page_targets) => page_targets,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let page = self
+                    .replay_page(crate::rpc::ScopedRequest {
+                        scope_key,
+                        inner: big_sync_core::rpc::ReplayPageRequest {
+                            request_id,
+                            supersede,
+                            targets: page_targets,
+                            limit,
+                            hold_ms,
+                        },
+                    })
+                    .await?;
+                let page = page?;
+                let reverse: HashMap<_, _> = target_map
+                    .iter()
+                    .map(|(id, target)| (target.clone(), *id))
+                    .collect();
+                let target_verdicts = page
+                    .targets
+                    .iter()
+                    .filter_map(|(target, verdict)| {
+                        let id = reverse
+                            .get(&big_sync_core::rpc::ReplaySubscriptionTarget::from(target))?;
+                        requested_ids.contains(id).then_some((*id, verdict.clone()))
+                    })
+                    .collect();
+                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Page(
+                    big_sync_core::rpc::ReplaySubscriptionPage {
+                        page: big_sync_core::rpc::ReplayPage {
+                            events: page.events,
+                            targets: Vec::new(),
+                        },
+                        targets: target_verdicts,
+                    },
+                )))
+            }
+        }
+    }
     async fn get_changed_buckets(
         &self,
         req: crate::rpc::ScopedRequest<GetChangedBucketsRequest>,

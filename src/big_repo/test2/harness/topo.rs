@@ -337,6 +337,7 @@ impl Node {
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
                     subscriber: self.peer_id(),
+                    replay_subscriptions: Arc::new(futures::lock::Mutex::new(HashMap::new())),
                 }),
                 parts,
                 HashMap::new(),

@@ -285,7 +285,7 @@ impl ReplayRoute {
 /// Replay scheduling is advisory: live targets get latency priority, while a target with
 /// known backlog is isolated in bulk catch-up. Objects are always live; parts change lanes only
 /// after the responder's per-target drained verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ReplayLane {
     Live,
     Bulk,
@@ -322,6 +322,15 @@ structstruck::strike! {
             lane: ReplayLane,
             caught_up: bool,
             waiting_for_credit: bool,
+        }>,
+        /// One logical target registry per replay lane. Cursors remain in the page task and
+        /// cursor machine; this state only avoids repeating stable target metadata on the wire.
+        replay_subscriptions: Map<ReplayLane, struct ReplaySubscriptionState {
+            subscription_id: crate::rpc::ReplaySubscriptionId,
+            generation: u64,
+            next_target_id: u32,
+            opened: bool,
+            targets: Map<ReplayRoute, crate::rpc::ReplayTargetId>,
         }>,
         objects: Set<ObjKey>,
 
@@ -986,6 +995,7 @@ impl BigSyncMachine {
             pending_removals: default(),
             sync_workers: default(),
             replay_pages: default(),
+            replay_subscriptions: default(),
             objects: default(),
             cursor_machine: default(),
             cursors_cmd_buf: default(),
@@ -1600,6 +1610,82 @@ impl BigSyncMachine {
                 .max()
         });
         let lane = self.replay_lane(&peer_id, &targets[0]);
+        let subscription = self.peers.get_mut(&peer_id).map(|peer_state| {
+            let state = peer_state
+                .replay_subscriptions
+                .entry(lane)
+                .or_insert_with(|| {
+                    let subscription_id = crate::rpc::ReplaySubscriptionId(match lane {
+                        ReplayLane::Live => 1,
+                        ReplayLane::Bulk => 2,
+                    });
+                    ReplaySubscriptionState {
+                        subscription_id,
+                        generation: 0,
+                        next_target_id: 1,
+                        opened: false,
+                        targets: Map::new(),
+                    }
+                });
+            let current_routes: Set<_> = routes.iter().cloned().collect();
+            let mut additions = Vec::new();
+            for target in &targets {
+                let route = ReplayRoute::of(target);
+                if !state.targets.contains_key(&route) {
+                    let target_id = crate::rpc::ReplayTargetId(state.next_target_id);
+                    state.next_target_id =
+                        state.next_target_id.checked_add(1).expect(ERROR_IMPOSSIBLE);
+                    state.targets.insert(route, target_id);
+                    additions.push(crate::rpc::ReplaySubscriptionTargetEntry {
+                        id: target_id,
+                        target: crate::rpc::ReplaySubscriptionTarget::from(target),
+                    });
+                }
+            }
+            let removals: Vec<_> = state
+                .targets
+                .iter()
+                .filter(|(route, _)| !current_routes.contains(*route))
+                .map(|(route, target_id)| (route.clone(), *target_id))
+                .collect();
+            for (route, _) in &removals {
+                state.targets.remove(route);
+            }
+            let entries: Vec<_> = targets
+                .iter()
+                .map(|target| {
+                    let route = ReplayRoute::of(target);
+                    crate::rpc::ReplaySubscriptionTargetEntry {
+                        id: state.targets[&route],
+                        target: crate::rpc::ReplaySubscriptionTarget::from(target),
+                    }
+                })
+                .collect();
+            let request = if !state.opened {
+                state.opened = true;
+                Some(crate::rpc::ReplaySubscriptionRequest::Open {
+                    subscription_id: state.subscription_id,
+                    generation: state.generation,
+                    targets: entries.clone(),
+                })
+            } else if !additions.is_empty() || !removals.is_empty() {
+                state.generation = state.generation.checked_add(1).expect(ERROR_IMPOSSIBLE);
+                Some(crate::rpc::ReplaySubscriptionRequest::Update {
+                    subscription_id: state.subscription_id,
+                    generation: state.generation,
+                    additions,
+                    removals: removals.iter().map(|(_, target_id)| *target_id).collect(),
+                })
+            } else {
+                None
+            };
+            ReplaySubscriptionTaskState {
+                subscription_id: state.subscription_id,
+                generation: state.generation,
+                targets: entries,
+                request,
+            }
+        });
         tracing::debug!(
             peer_id = %peer_id,
             target_count = targets.len(),
@@ -1614,6 +1700,7 @@ impl BigSyncMachine {
             targets,
             supersede,
             limit: ReplayPageTask::LIMIT,
+            subscription,
         }));
         let task_id = match delayed {
             Some((retry, delay)) => {

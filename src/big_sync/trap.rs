@@ -6,7 +6,8 @@ use big_sync_core::{
     rpc::{
         BigSyncRpcClient, BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest,
         LeafBucketResult, LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
-        PeerSummaryResult, ReplayPage, ReplayPageRequest,
+        PeerSummaryResult, ReplayPage, ReplayPageRequest, ReplaySubscriptionRequest,
+        ReplaySubscriptionResponse,
     },
 };
 use future_form::{FutureForm, Sendable};
@@ -162,6 +163,14 @@ impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
         req: ReplayPageRequest,
     ) -> BoxFuture<'a, BigSyncRpcResult<ReplayPage>> {
         let fut = self.inner.replay_page(req);
+        Sendable::from_future(self.trap.run_or_trap(fut))
+    }
+
+    fn replay_subscription<'a>(
+        &'a self,
+        req: ReplaySubscriptionRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<ReplaySubscriptionResponse>> {
+        let fut = self.inner.replay_subscription(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 

@@ -516,12 +516,13 @@ pub trait HostPartStore: Send + Sync {
     ///   a cancel never interrupts a page in flight, and a page that already holds rows ships
     ///   them anyway. A cancel therefore only ever ends a wait, and it is checked at exactly
     ///   two points: the top of the page loop before any query, and inside the wait.
-    async fn replay_page_round(
+    async fn replay_page_round_with_update(
         &self,
         req: ReplayPageRequest,
         subscriber: PeerKey,
         hold: Duration,
         cancel: CancellationToken,
+        update: Option<Arc<tokio::sync::Notify>>,
     ) -> Res<ReplayPage> {
         let ReplayPageRequest {
             request_id: _,
@@ -807,6 +808,13 @@ pub trait HostPartStore: Send + Sync {
                     () = cancel.cancelled() => {
                         break false;
                     }
+                    () = async {
+                        if let Some(update) = &update {
+                            update.notified().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => break false,
                 };
                 match read {
                     // Rows exist again: go back to the fair drain so every target keeps its
@@ -823,6 +831,13 @@ pub trait HostPartStore: Send + Sync {
                             tokio::select! {
                                 () = &mut hold => break false,
                                 () = cancel.cancelled() => break false,
+                                () = async {
+                                    if let Some(update) = &update {
+                                        update.notified().await;
+                                    } else {
+                                        std::future::pending::<()>().await;
+                                    }
+                                } => break false,
                             }
                         }
                         probed = true;
@@ -838,6 +853,17 @@ pub trait HostPartStore: Send + Sync {
             events,
             targets: assemble_page(order, &mut verdicts),
         })
+    }
+
+    async fn replay_page_round(
+        &self,
+        req: ReplayPageRequest,
+        subscriber: PeerKey,
+        hold: Duration,
+        cancel: CancellationToken,
+    ) -> Res<ReplayPage> {
+        self.replay_page_round_with_update(req, subscriber, hold, cancel, None)
+            .await
     }
     /// Open a durable revision reader over a set of targets, each carrying its
     /// own bound. This is the read seam for the whole part store: the responder
