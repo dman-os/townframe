@@ -3372,7 +3372,7 @@ impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
     async fn replay_page(
         &self,
         req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
-    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplayPageOutcome>> {
+    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplayPage>> {
         // The double caps the caller's hold so a caught-up page answers promptly
         // rather than parking on the long production poll.
         let hold =

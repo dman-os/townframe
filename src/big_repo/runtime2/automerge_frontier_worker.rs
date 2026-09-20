@@ -36,7 +36,7 @@ use big_sync_core::outbox::Outbox;
 use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
 };
-use big_sync_core::rpc::SubEvent;
+use big_sync_core::rpc::PartEvent;
 use big_sync_core::scheduler::Retry;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
@@ -174,11 +174,8 @@ pub fn spawn_automerge_frontier_worker(
             let part_reader = part_source.open((), part_durable).await?;
             let parts = ConcurrentDeltaWalker::open(part_reader, part_state, |event| {
                 let doc_id = match event {
-                    SubEvent::Changed(event) => event.obj_id.clone(),
-                    SubEvent::Removed(event) => event.obj_id.clone(),
-                    SubEvent::ReplayComplete => {
-                        unreachable!("replay completion has no part event key")
-                    }
+                    PartEvent::Changed(event) => event.obj_id.clone(),
+                    PartEvent::Removed(event) => event.obj_id.clone(),
                 };
                 FrontierKey::Document(automerge_obj_to_doc_id(doc_id))
             })
@@ -427,7 +424,7 @@ struct LocalPartRevisionReaderAdapter {
 #[async_trait::async_trait]
 impl RevisionedStore for LocalPartRevisionStore {
     type Revision = u64;
-    type Entry = SubEvent;
+    type Entry = PartEvent;
     type Selector = ();
     type Error = eyre::Report;
     type Reader<'a> = LocalPartRevisionReaderAdapter;
@@ -454,11 +451,11 @@ impl RevisionedStore for LocalPartRevisionStore {
 }
 
 #[async_trait::async_trait]
-impl RevisionedStoreReader<u64, SubEvent, eyre::Report> for LocalPartRevisionReaderAdapter {
+impl RevisionedStoreReader<u64, PartEvent, eyre::Report> for LocalPartRevisionReaderAdapter {
     async fn next(
         &mut self,
         limits: RevisionReadLimits,
-    ) -> Result<RevisionRead<u64, SubEvent>, eyre::Report> {
+    ) -> Result<RevisionRead<u64, PartEvent>, eyre::Report> {
         self.inner.next(limits).await
     }
 }
@@ -786,7 +783,7 @@ impl<'a> Worker<'a> {
 
     async fn on_part_delta(
         &mut self,
-        delta: big_sync_core::concurrent_delta_walker::ConcurrentDelta<FrontierKey, SubEvent>,
+        delta: big_sync_core::concurrent_delta_walker::ConcurrentDelta<FrontierKey, PartEvent>,
     ) -> Res<()> {
         let source = SourceCursor {
             source: SourceKind::Parts,
@@ -798,7 +795,7 @@ impl<'a> Worker<'a> {
             "AFW consumed part revision delta"
         );
         match delta.entry {
-            SubEvent::Changed(event) => {
+            PartEvent::Changed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
                 self.remember_part_source(doc_id.clone(), source.clone());
                 tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped changed part revision to document");
@@ -808,7 +805,7 @@ impl<'a> Worker<'a> {
                 }
                 self.start_publish(doc_id)?;
             }
-            SubEvent::Removed(event) => {
+            PartEvent::Removed(event) => {
                 let doc_id = automerge_obj_to_doc_id(event.obj_id);
                 tracing::debug!(%doc_id, source_cursor = source.cursor, "AFW mapped removed part revision to document");
                 let empty = self.pending_parts.get_mut(&doc_id).is_some_and(|parts| {
@@ -830,7 +827,6 @@ impl<'a> Worker<'a> {
                     Some(source),
                 );
             }
-            SubEvent::ReplayComplete => unreachable!("part replay marker is not an entry"),
         }
         Ok(())
     }

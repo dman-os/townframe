@@ -10,7 +10,7 @@ use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
 };
 use big_sync_core::rpc::{
-    ObjChanged, ObjRemovedFromPart, SubEvent, SubPartsRequest, SubscriptionTarget,
+    ObjChanged, ObjRemovedFromPart, PartEvent, SubPartsRequest, SubscriptionTarget,
 };
 use serde_json::Value;
 
@@ -77,7 +77,7 @@ impl AutomergeFrontierRevisionStore {
 pub struct Reader {
     inner: Box<dyn LocalPartRevisionReader>,
     store: Arc<dyn HostPartStore>,
-    pending_read: Option<RevisionRead<u64, SubEvent>>,
+    pending_read: Option<RevisionRead<u64, PartEvent>>,
 }
 
 #[async_trait::async_trait]
@@ -202,7 +202,7 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                 let mut out = Vec::new();
                 for event in entries {
                     match event {
-                        SubEvent::Changed(ObjChanged {
+                        PartEvent::Changed(ObjChanged {
                             cursor,
                             part_ids,
                             obj_id,
@@ -227,7 +227,7 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                                 revision: cursor,
                             });
                         }
-                        SubEvent::Removed(ObjRemovedFromPart {
+                        PartEvent::Removed(ObjRemovedFromPart {
                             cursor,
                             part_id,
                             obj_id,
@@ -250,9 +250,6 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
                                 revision: cursor,
                             });
                         }
-                        SubEvent::ReplayComplete => {
-                            unreachable!("part reader emits replay boundary separately")
-                        }
                     }
                 }
                 self.pending_read = None;
@@ -270,13 +267,13 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    struct Scripted(VecDeque<big_sync_core::revisioned_store::RevisionRead<u64, SubEvent>>);
+    struct Scripted(VecDeque<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>>);
     #[async_trait::async_trait]
     impl LocalPartRevisionReader for Scripted {
         async fn next(
             &mut self,
             _limits: big_sync_core::revisioned_store::RevisionReadLimits,
-        ) -> Res<big_sync_core::revisioned_store::RevisionRead<u64, SubEvent>> {
+        ) -> Res<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>> {
             Ok(self.0.pop_front().expect("script exhausted"))
         }
     }
@@ -295,19 +292,19 @@ mod tests {
             RevisionRead::Entries {
                 revision: 3,
                 entries: vec![
-                    SubEvent::Changed(ObjChanged {
+                    PartEvent::Changed(ObjChanged {
                         cursor: 3,
                         part_ids: vec![p1.clone()],
                         obj_id: obj.clone(),
                         payload: payload(1),
                     }),
-                    SubEvent::Changed(ObjChanged {
+                    PartEvent::Changed(ObjChanged {
                         cursor: 3,
                         part_ids: vec![p1.clone(), p2],
                         obj_id: obj.clone(),
                         payload: payload(2),
                     }),
-                    SubEvent::Removed(ObjRemovedFromPart {
+                    PartEvent::Removed(ObjRemovedFromPart {
                         cursor: 3,
                         part_id: p1,
                         obj_id: obj,
@@ -362,7 +359,7 @@ mod tests {
 
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
-            entries: vec![SubEvent::Removed(ObjRemovedFromPart {
+            entries: vec![PartEvent::Removed(ObjRemovedFromPart {
                 cursor: 7,
                 part_id: p1,
                 obj_id: obj,
@@ -386,7 +383,7 @@ mod tests {
         let obj = ObjKey::new([9; 32]);
         let reads = VecDeque::from([RevisionRead::Entries {
             revision: 7,
-            entries: vec![SubEvent::Changed(ObjChanged {
+            entries: vec![PartEvent::Changed(ObjChanged {
                 cursor: 7,
                 part_ids: Vec::new(),
                 obj_id: obj,

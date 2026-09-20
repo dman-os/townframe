@@ -422,7 +422,9 @@ where
                 // Never monopolise a poll: a spin is diagnosable, not a hang.
                 tracing::warn!(
                     selector = std::any::type_name::<S>(),
-                    iters, through, view_through = view.through,
+                    iters,
+                    through,
+                    view_through = view.through,
                     "keyed frontier reader iterated without progress; parking"
                 );
                 tokio::task::yield_now().await;

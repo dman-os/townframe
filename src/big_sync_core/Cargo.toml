@@ -30,6 +30,7 @@ structstruck.workspace = true
 blake3.workspace = true
 bs58.workspace = true
 serde.workspace = true
+postcard.workspace = true
 siphasher = "1.0.3"
 autosurgeon = { workspace = true, optional = true }
 

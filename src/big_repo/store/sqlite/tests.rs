@@ -1,20 +1,38 @@
 use super::*;
 use big_sync::LocalPartRevisionReader;
-use big_sync::{HostPartStoreContractHarness, host_part_store_contract};
-use big_sync_core::rpc::{ObjChanged, ObjRemovedFromPart, SubscriptionTarget};
-
+use big_sync::{HostPartStoreContractHarness, SingleTargetPageStore, host_part_store_contract};
+use big_sync_core::rpc::{
+    ObjChanged, ObjRemovedFromPart, PartEvent, PartPage, ReplayPage, SubscriptionTarget,
+    TargetVerdict,
+};
 
 /// The pull reader in the shape these tests were written against: production has no
-/// subscription, so this walks the batches a reader returns and surfaces the reader's
-/// completion verdict as the `ReplayComplete` event it always was. It is a test
-/// harness, not a store method: nothing outside these tests can subscribe to anything.
+/// subscription, so this walks the batches a reader returns. Replay completion remains
+/// the reader's explicit phase boundary rather than an event. It is a test harness,
+/// not a store method: nothing outside these tests can subscribe to anything.
+fn verdict(page: &ReplayPage) -> &TargetVerdict {
+    assert_eq!(page.targets.len(), 1, "test page names one target");
+    &page.targets[0].1
+}
+
+fn events_page(page: &ReplayPage) -> PartPage {
+    let TargetVerdict::Events { resume, drained } = verdict(page) else {
+        panic!("expected an events verdict, got {:?}", verdict(page));
+    };
+    PartPage {
+        events: page.events.clone(),
+        resume: *resume,
+        drained: *drained,
+    }
+}
+
 struct TestEventStream {
     reader: tokio::sync::Mutex<Box<dyn LocalPartRevisionReader>>,
-    pending: tokio::sync::Mutex<std::collections::VecDeque<SubEvent>>,
+    pending: tokio::sync::Mutex<std::collections::VecDeque<PartEvent>>,
 }
 
 impl TestEventStream {
-    async fn next(&self) -> Res<SubEvent> {
+    async fn next(&self) -> Res<PartEvent> {
         loop {
             if let Some(event) = self.pending.lock().await.pop_front() {
                 return Ok(event);
@@ -29,9 +47,7 @@ impl TestEventStream {
                 big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
                     self.pending.lock().await.extend(entries);
                 }
-                big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => {
-                    return Ok(SubEvent::ReplayComplete);
-                }
+                big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => continue,
             }
         }
     }
@@ -44,14 +60,17 @@ async fn page_events(
     store: &dyn HostPartStore,
     reqs: SubPartsRequest,
 ) -> Res<Result<TestEventStream, ListPartsError>> {
-    Ok(store.open_revision_reader(reqs).await?.map(|reader| TestEventStream {
-        reader: tokio::sync::Mutex::new(reader),
-        pending: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
-    }))
+    Ok(store
+        .open_revision_reader(reqs)
+        .await?
+        .map(|reader| TestEventStream {
+            reader: tokio::sync::Mutex::new(reader),
+            pending: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+        }))
 }
 
 /// The next event a reader hands back, walking the batches it returns.
-async fn next_event(reader: &mut Box<dyn LocalPartRevisionReader>) -> Res<SubEvent> {
+async fn next_event(reader: &mut Box<dyn LocalPartRevisionReader>) -> Res<PartEvent> {
     loop {
         match reader
             .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
@@ -62,13 +81,26 @@ async fn next_event(reader: &mut Box<dyn LocalPartRevisionReader>) -> Res<SubEve
                     return Ok(event);
                 }
             }
-            big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => {
-                return Ok(SubEvent::ReplayComplete);
-            }
+            big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => continue,
         }
     }
 }
 
+async fn assert_replay_complete(reader: &mut Box<dyn LocalPartRevisionReader>) -> Res<()> {
+    loop {
+        match reader
+            .next(big_sync_core::revisioned_store::RevisionReadLimits::default())
+            .await?
+        {
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. }
+                if entries.is_empty() => {}
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. } => {
+                panic!("expected replay completion, got events: {entries:?}");
+            }
+            big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => return Ok(()),
+        }
+    }
+}
 
 use sedimentree_core::blob::BlobMeta;
 use subduction_crypto::signer::memory::MemorySigner;
@@ -127,7 +159,7 @@ async fn sqlite_big_repo_reader_bypasses_remote_policy_and_hidden_parts() -> Res
         .await?
     {
         for event in entries {
-            if let SubEvent::Changed(event) = event
+            if let PartEvent::Changed(event) = event
                 && event.obj_id == obj
                 && event.part_ids[0] == part
             {
@@ -153,7 +185,7 @@ async fn sqlite_big_repo_reader_bypasses_remote_policy_and_hidden_parts() -> Res
             big_sync_core::revisioned_store::RevisionRead::ReplayComplete { .. } => {}
         }
     };
-    assert!(matches!(live, SubEvent::Changed(event) if event.obj_id == obj));
+    assert!(matches!(live, PartEvent::Changed(event) if event.obj_id == obj));
     Ok(())
 }
 
@@ -207,28 +239,21 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
         }]),
     };
 
-
     let mut peer_reader =
         HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
     let add_cursor = match next_event(&mut peer_reader).await? {
-        SubEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
+        PartEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
         other => panic!("unexpected first event for the revocable peer: {other:?}"),
     };
-    assert!(matches!(
-        next_event(&mut peer_reader).await?,
-        SubEvent::ReplayComplete
-    ));
+    assert_replay_complete(&mut peer_reader).await?;
     let mut witness_reader =
         HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
     let witness_cursor = match next_event(&mut witness_reader).await? {
-        SubEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
+        PartEvent::Changed(changed) if changed.obj_id == obj => changed.cursor,
         other => panic!("unexpected first event for the witness: {other:?}"),
     };
     assert_eq!(witness_cursor, add_cursor);
-    assert!(matches!(
-        next_event(&mut witness_reader).await?,
-        SubEvent::ReplayComplete
-    ));
+    assert_replay_complete(&mut witness_reader).await?;
 
     // Revoke `peer` and drop the doc out of `part` in the same reconcile, so a
     // removal for `part` is published for a peer that may no longer read it.
@@ -239,7 +264,7 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
 
     assert!(matches!(
         next_event(&mut witness_reader).await?,
-        SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
+        PartEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part
     ));
     // The revoked peer is not told that the doc left the part. The reader is the store's
     // unfiltered seam, so the omission is the responder's answer rather than a stream that
@@ -251,13 +276,11 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
         obj_id: obj.clone(),
     });
     assert!(
-        !store
-            .page_event_is_readable(&removal, peer.clone())
-            .await?,
+        !store.page_event_is_readable(&removal, peer.clone()).await?,
         "a revoked peer must not be able to read the removal"
     );
     let refused = store
-        .replay_page(
+        .replay_page_for_target(
             SubscriptionTarget::Part {
                 part_id: part.clone(),
                 cursor: add_cursor,
@@ -268,7 +291,7 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
         )
         .await?;
     assert!(
-        matches!(refused, big_sync::ReplayPageOutcome::Unauthorized),
+        matches!(verdict(&refused), TargetVerdict::Unauthorized),
         "a revoked peer's replay must be refused; got {refused:?}"
     );
 
@@ -277,13 +300,10 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
         HostPartStore::open_revision_reader(&store, subscription_request(witness_cursor)).await??;
     let first = next_event(&mut witness_replay).await?;
     assert!(
-        matches!(&first, SubEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part),
+        matches!(&first, PartEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part),
         "unexpected first witness replay event (add_cursor={add_cursor}, witness_cursor={witness_cursor}): {first:?}"
     );
-    assert!(matches!(
-        next_event(&mut witness_replay).await?,
-        SubEvent::ReplayComplete
-    ));
+    assert_replay_complete(&mut witness_replay).await?;
     Ok(())
 }
 
@@ -338,12 +358,14 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
     };
     let mut peer_reader =
         HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
-    assert!(matches!(next_event(&mut peer_reader).await?, SubEvent::Changed(changed) if changed.obj_id == obj));
-    assert!(matches!(next_event(&mut peer_reader).await?, SubEvent::ReplayComplete));
+    assert!(
+        matches!(next_event(&mut peer_reader).await?, PartEvent::Changed(changed) if changed.obj_id == obj)
+    );
     let mut witness_reader =
         HostPartStore::open_revision_reader(&store, subscription_request(0)).await??;
-    assert!(matches!(next_event(&mut witness_reader).await?, SubEvent::Changed(changed) if changed.obj_id == obj));
-    assert!(matches!(next_event(&mut witness_reader).await?, SubEvent::ReplayComplete));
+    assert!(
+        matches!(next_event(&mut witness_reader).await?, PartEvent::Changed(changed) if changed.obj_id == obj)
+    );
     // The never-authorized peer is refused rather than streamed to; that denial is
     // asserted below alongside the revoked peer's.
 
@@ -356,7 +378,7 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
 
     // The still-authorized peer sees the advance...
     assert!(
-        matches!(next_event(&mut witness_reader).await?, SubEvent::Changed(changed) if changed.obj_id == obj)
+        matches!(next_event(&mut witness_reader).await?, PartEvent::Changed(changed) if changed.obj_id == obj)
     );
     // ...while the revoked peer and the never-authorized peer get no notice at all. The
     // reader is the store's unfiltered seam, so the silence is the responder's refusal,
@@ -367,9 +389,12 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
         obj_id: obj.clone(),
         payload: serde_json::json!({"value": 2}),
     });
-    for (label, denied_peer) in [("revoked", peer.clone()), ("never authorized", stranger.clone())] {
+    for (label, denied_peer) in [
+        ("revoked", peer.clone()),
+        ("never authorized", stranger.clone()),
+    ] {
         let refused = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -380,7 +405,7 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
             )
             .await?;
         assert!(
-            matches!(refused, big_sync::ReplayPageOutcome::Unauthorized),
+            matches!(verdict(&refused), TargetVerdict::Unauthorized),
             "a {label} peer must be refused; got {refused:?}"
         );
         assert!(
@@ -440,15 +465,10 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
     // the touch itself is unreadable: the reader is the store's unfiltered seam, so the
     // denial is asserted where it is enforced.
     let refused = store
-        .replay_page(
-            target.clone(),
-            16,
-            peer.clone(),
-            Duration::from_millis(50),
-        )
+        .replay_page_for_target(target.clone(), 16, peer.clone(), Duration::from_millis(50))
         .await?;
     assert!(
-        matches!(refused, big_sync::ReplayPageOutcome::Unauthorized),
+        matches!(verdict(&refused), TargetVerdict::Unauthorized),
         "a peer with no access must be refused; got {refused:?}"
     );
     assert!(
@@ -493,11 +513,9 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
     // The granted peer's page carries the doc: the want row recorded for the dropped touch
     // is what lets the grant self-heal.
     let granted = store
-        .replay_page(target.clone(), 16, peer.clone(), Duration::from_millis(50))
+        .replay_page_for_target(target.clone(), 16, peer.clone(), Duration::from_millis(50))
         .await?;
-    let big_sync::ReplayPageOutcome::Events(page) = granted else {
-        panic!("a granted peer must be answered a page, got {granted:?}");
-    };
+    let page = events_page(&granted);
     assert!(
         page.events
             .iter()
@@ -509,20 +527,21 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
     // A fresh replay from cursor 0 delivers the current row only. The
     // payload refresh performed while granting access collapses the historical
     // touch into one Changed projection.
-    let replay = page_events(&store,
+    let replay = page_events(
+        &store,
         SubPartsRequest {
             lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: part.clone(),
                 cursor: 0,
             }]),
-        }) 
+        },
+    )
     .await??;
     assert!(matches!(
         replay.next().await?,
-        SubEvent::Changed(changed) if changed.obj_id == obj && changed.part_ids == vec![part]
+        PartEvent::Changed(changed) if changed.obj_id == obj && changed.part_ids == vec![part]
     ));
-    assert!(matches!(replay.next().await?, SubEvent::ReplayComplete));
     Ok(())
 }
 
@@ -560,7 +579,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
     // the reader is the store's unfiltered seam, so the denial is asserted where it is
     // enforced.
     let refused = store
-        .replay_page(
+        .replay_page_for_target(
             SubscriptionTarget::Part {
                 part_id: part.clone(),
                 cursor: 0,
@@ -571,7 +590,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
         )
         .await?;
     assert!(
-        matches!(refused, big_sync::ReplayPageOutcome::Unauthorized),
+        matches!(verdict(&refused), TargetVerdict::Unauthorized),
         "a peer with no access must be refused; got {refused:?}"
     );
 
@@ -603,7 +622,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
         )
         .await?;
     let granted = store
-        .replay_page(
+        .replay_page_for_target(
             SubscriptionTarget::Part {
                 part_id: part.clone(),
                 cursor: 0,
@@ -613,9 +632,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
             Duration::from_millis(50),
         )
         .await?;
-    let big_sync::ReplayPageOutcome::Events(page) = granted else {
-        panic!("a granted peer must be answered a page, got {granted:?}");
-    };
+    let page = events_page(&granted);
     assert!(
         page.events.iter().any(|event| matches!(
             event,
@@ -656,7 +673,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
     // deliver: that is what "emitted nothing further" means once no event is pushed to
     // anyone, and it is deterministic where a wall-clock wait was not.
     let after = store
-        .replay_page(
+        .replay_page_for_target(
             SubscriptionTarget::Part {
                 part_id: part.clone(),
                 cursor: granted_resume,
@@ -666,9 +683,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
             Duration::from_millis(50),
         )
         .await?;
-    let big_sync::ReplayPageOutcome::Events(after) = after else {
-        panic!("a granted peer must be answered a page, got {after:?}");
-    };
+    let after = events_page(&after);
     assert!(
         after.events.is_empty(),
         "a reconcile that grants nobody must emit nothing; got {:?}",
@@ -725,21 +740,22 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
             .is_empty(),
     );
 
-    let rx = page_events(&store,
+    let rx = page_events(
+        &store,
         SubPartsRequest {
             lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
                 part_id: crate::global_part_id(),
                 cursor: 0,
             }]),
-        }) 
+        },
+    )
     .await??;
-    assert!(matches!(rx.next().await?, SubEvent::ReplayComplete));
 
     let payload = serde_json::json!({"heads": ["available"]});
     HostPartStore::set_obj_payload(&store, obj.clone(), payload.clone()).await?;
     let event = tokio::time::timeout(Duration::from_secs(2), rx.next()).await??;
-    let SubEvent::Changed(added) = event else {
+    let PartEvent::Changed(added) = event else {
         panic!("payload promotion must first advertise Added, got {event:?}");
     };
     assert_eq!(added.obj_id, obj);

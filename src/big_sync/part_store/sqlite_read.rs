@@ -164,6 +164,73 @@ where
         .collect()
 }
 
+/// Read only a bounded ordered metadata probe, choose a complete revision cutoff, then fetch full rows.
+///
+/// The metadata cost intentionally overcounts repeated object and part keys. Page-local key
+/// dictionaries make the eventual wire page smaller, but the conservative source bound prevents
+/// SQLite from materializing large payloads past the replay read-ahead budget. The first revision
+/// is always included, even when its first row alone exceeds the budget. The probe is bounded by
+/// `max_entries`; if that ends inside a revision, the full revision is fetched because the
+/// reader's atomic-revision contract requires it.
+pub(crate) async fn part_query_rows_with_byte_budget<S>(
+    source: &S,
+    scope_id: i64,
+    selector: &SqlitePartSelector,
+    after: FrontierRevision,
+    through: FrontierRevision,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<(Vec<SqliteFrontierRow>, FrontierRevision), SqliteReadError>
+where
+    S: SqliteReadSource,
+{
+    if selector.is_empty() || after >= through || max_entries == 0 {
+        return Ok((Vec::new(), through));
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+        r#"SELECT m.txid
+             , 64
+                 + length(o.obj_id)
+                 + COALESCE(length(p.part_id), 0)
+                 + CASE WHEN m.event_type = 1 THEN
+                     COALESCE(length(CAST(NULLIF(o.payload_json, '') AS BLOB)), 4)
+                   ELSE 0 END AS row_bytes
+          FROM big_sync_members m
+          JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
+     LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+         WHERE m.scope_id = "#,
+    );
+    query.push_bind(scope_id);
+    query.push(" AND m.txid > ");
+    query.push_bind(i64::try_from(after).expect("frontier revision fits SQLite"));
+    query.push(" AND m.txid <= ");
+    query.push_bind(i64::try_from(through).expect("frontier revision fits SQLite"));
+    push_selector_predicate(&mut query, selector, scope_id);
+    query.push(" ORDER BY m.txid, m.obj_ref, m.maybe_part_ref LIMIT ");
+    query.push_bind(i64::try_from(max_entries).expect("read limit fits SQLite"));
+
+    let metadata = query.build().fetch_all(source.read_pool()).await?;
+    let mut cutoff = None;
+    let mut bytes = 0usize;
+    for row in metadata {
+        let revision = u64::try_from(row.try_get::<i64, _>("txid")?)
+            .expect("SQLite frontier revision is non-negative");
+        let row_bytes = usize::try_from(row.try_get::<i64, _>("row_bytes")?)
+            .expect("SQLite row byte cost is non-negative");
+        bytes = bytes.saturating_add(row_bytes);
+        cutoff = Some(revision);
+        if bytes >= max_bytes {
+            break;
+        }
+    }
+
+    let Some(cutoff) = cutoff else {
+        return Ok((Vec::new(), through));
+    };
+    let rows = part_query_rows(source, scope_id, selector, after, cutoff, None, None).await?;
+    Ok((rows, cutoff))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

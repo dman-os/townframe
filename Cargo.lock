@@ -1178,6 +1178,7 @@ dependencies = [
  "future_form",
  "futures",
  "parking_lot",
+ "postcard",
  "rand 0.9.5",
  "serde",
  "siphasher",

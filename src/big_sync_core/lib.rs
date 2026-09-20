@@ -282,6 +282,15 @@ impl ReplayRoute {
     }
 }
 
+/// Replay scheduling is advisory: live targets get latency priority, while a target with
+/// known backlog is isolated in bulk catch-up. Objects are always live; parts change lanes only
+/// after the responder's per-target drained verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayLane {
+    Live,
+    Bulk,
+}
+
 structstruck::strike! {
     struct PeerState {
         sync_workers: Map<ObjKey, struct SyncWorkerState {
@@ -310,7 +319,9 @@ structstruck::strike! {
         replay_pages: Map<ReplayRoute, struct ReplayPageState {
             task_id: TaskId,
             request_id: crate::rpc::ReplayRequestId,
+            lane: ReplayLane,
             caught_up: bool,
+            waiting_for_credit: bool,
         }>,
         objects: Set<ObjKey>,
 
@@ -333,32 +344,6 @@ structstruck::strike! {
                 }),
             }
         }>
-    }
-}
-
-impl PeerState {
-    fn cursors_for_peer_replay_worker_parts<'a>(
-        &self,
-        parts: impl std::iter::Iterator<Item = &'a PartKey>,
-    ) -> Map<PartKey, CursorIndex> {
-        parts
-            .filter_map(
-                |part_id| match self.parts.get(part_id).map(|state| &state.strat) {
-                    // A part whose strategy is still being negotiated (or that was
-                    // removed and re-added while a replay worker still references
-                    // it) has no replay cursor yet. Skip it: the worker's delayed
-                    // retry resubscribes once the decision lands. Replay is
-                    // at-least-once, so skipping here cannot lose data.
-                    None | Some(PeerPartStrategy::Pending(_)) => None,
-                    Some(PeerPartStrategy::Bucket(BucketState { replay_cursor, .. })) => {
-                        Some((part_id.clone(), *replay_cursor))
-                    }
-                    Some(PeerPartStrategy::Cursor(CursorState { replay_cursor, .. })) => {
-                        Some((part_id.clone(), *replay_cursor))
-                    }
-                },
-            )
-            .collect()
     }
 }
 
@@ -1458,6 +1443,11 @@ impl BigSyncMachine {
 
 // cursor support
 impl BigSyncMachine {
+    /// The replay receive window is separate from sync-task concurrency. A page
+    /// is allowed to refill once the cursor machine has drained below half a
+    /// page of admitted work.
+    const REPLAY_WORK_LOW_WATERMARK: usize = ReplayPageTask::LIMIT as usize / 2;
+
     /// Wanted replay routes, each with the target to request next.
     ///
     /// A part whose strategy is still being negotiated has no replay cursor yet;
@@ -1467,24 +1457,24 @@ impl BigSyncMachine {
         let Some(peer_state) = self.peers.get(&peer_id) else {
             return default();
         };
-        let replay_req_parts: Set<_> = peer_state
-            .parts
-            .iter()
-            .filter_map(|(part_id, state)| match state.strat {
-                PeerPartStrategy::Pending(_) => None,
-                PeerPartStrategy::Bucket(_) | PeerPartStrategy::Cursor(_) => Some(part_id.clone()),
-            })
-            .collect();
-        let mut targets = peer_state
-            .cursors_for_peer_replay_worker_parts(replay_req_parts.iter())
-            .into_iter()
-            .map(|(part_id, cursor)| {
-                (
-                    ReplayRoute::Part(part_id.clone()),
-                    SubscriptionTarget::Part { part_id, cursor },
-                )
-            })
-            .collect::<Map<_, _>>();
+        let mut targets = Map::new();
+        for (part_id, state) in &peer_state.parts {
+            let applied = match &state.strat {
+                PeerPartStrategy::Pending(_) => continue,
+                PeerPartStrategy::Bucket(state) => state.replay_cursor,
+                PeerPartStrategy::Cursor(state) => state.replay_cursor,
+            };
+            let cursor = peer_state
+                .cursor_machine
+                .part_replay_cursor(part_id, applied);
+            targets.insert(
+                ReplayRoute::Part(part_id.clone()),
+                SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor,
+                },
+            );
+        }
         targets.extend(peer_state.objects.iter().cloned().map(|obj_id| {
             let cursor = peer_state.cursor_machine.obj_resume_cursor(&obj_id);
             (
@@ -1503,13 +1493,21 @@ impl BigSyncMachine {
         target: &SubscriptionTarget,
     ) -> Option<SubscriptionTarget> {
         match target {
-            SubscriptionTarget::Part { part_id, .. } => self
-                .peers
-                .get(&peer_id)?
-                .cursors_for_peer_replay_worker_parts(std::iter::once(part_id))
-                .into_iter()
-                .next()
-                .map(|(part_id, cursor)| SubscriptionTarget::Part { part_id, cursor }),
+            SubscriptionTarget::Part { part_id, .. } => {
+                let peer_state = self.peers.get(&peer_id)?;
+                let state = peer_state.parts.get(part_id)?;
+                let applied = match &state.strat {
+                    PeerPartStrategy::Pending(_) => return None,
+                    PeerPartStrategy::Bucket(state) => state.replay_cursor,
+                    PeerPartStrategy::Cursor(state) => state.replay_cursor,
+                };
+                Some(SubscriptionTarget::Part {
+                    part_id: part_id.clone(),
+                    cursor: peer_state
+                        .cursor_machine
+                        .part_replay_cursor(part_id, applied),
+                })
+            }
             SubscriptionTarget::Object { obj_id, .. } => Some(SubscriptionTarget::Object {
                 obj_id: obj_id.clone(),
                 cursor: self
@@ -1521,14 +1519,39 @@ impl BigSyncMachine {
         }
     }
 
-    /// Ask for one more page over `targets` and record the round as in flight.
+    fn replay_lane(&self, peer_id: &PeerKey, target: &SubscriptionTarget) -> ReplayLane {
+        if matches!(target, SubscriptionTarget::Object { .. }) {
+            return ReplayLane::Live;
+        }
+        let route = ReplayRoute::of(target);
+        self.peers
+            .get(peer_id)
+            .and_then(|peer_state| peer_state.replay_pages.get(&route))
+            .map(|state| state.lane)
+            .unwrap_or(ReplayLane::Live)
+    }
+
+    /// Ask for another page and record each lane's round as in flight.
     ///
-    /// One request carries every target of the round, because each target's own cursor travels
-    /// with it: a page per part would be a request per part over the same connection. The
-    /// `caught_up` argument is the default for routes that have no answer yet (a route that
-    /// answered before keeps its own verdict, since a re-issue must not invent progress).
-    fn spawn_replay_pages(&mut self, peer_id: PeerKey, targets: Vec<SubscriptionTarget>, caught_up: bool) {
-        self.spawn_replay_pages_inner(peer_id, targets, caught_up, None);
+    /// A live round and a bulk round are independent requests: objects always stay live, while a
+    /// part moves to bulk only after the responder reports backlog. The target cursor still travels
+    /// with each target, so each lane remains one bounded request rather than one request per part.
+    fn spawn_replay_pages(
+        &mut self,
+        peer_id: PeerKey,
+        targets: Vec<SubscriptionTarget>,
+        caught_up: bool,
+    ) {
+        let mut live = Vec::new();
+        let mut bulk = Vec::new();
+        for target in targets {
+            match self.replay_lane(&peer_id, &target) {
+                ReplayLane::Live => live.push(target),
+                ReplayLane::Bulk => bulk.push(target),
+            }
+        }
+        self.spawn_replay_pages_inner(peer_id.clone(), live, caught_up, None);
+        self.spawn_replay_pages_inner(peer_id, bulk, caught_up, None);
     }
 
     /// Re-issue a page for `targets` after a delay, keeping each route's last verdict.
@@ -1540,7 +1563,16 @@ impl BigSyncMachine {
         retry: Retry,
         delay: Duration,
     ) {
-        self.spawn_replay_pages_inner(peer_id, targets, caught_up, Some((retry, delay)));
+        let mut live = Vec::new();
+        let mut bulk = Vec::new();
+        for target in targets {
+            match self.replay_lane(&peer_id, &target) {
+                ReplayLane::Live => live.push(target),
+                ReplayLane::Bulk => bulk.push(target),
+            }
+        }
+        self.spawn_replay_pages_inner(peer_id.clone(), live, caught_up, Some((retry, delay)));
+        self.spawn_replay_pages_inner(peer_id, bulk, caught_up, Some((retry, delay)));
     }
 
     fn spawn_replay_pages_inner(
@@ -1555,14 +1587,19 @@ impl BigSyncMachine {
         }
         self.replay_request_seq = self.replay_request_seq.wrapping_add(1);
         let request_id = crate::rpc::ReplayRequestId(self.replay_request_seq);
-        // The newest round still in flight for this peer is superseded by this one. The
-        // responder drops a superseded request only if it is still waiting, so a page that
-        // already holds rows ships them: superseding never discards delivered work.
-        let supersede = self
-            .peers
-            .get(&peer_id)
-            .and_then(|state| state.replay_pages.values().map(|page| page.request_id).max());
         let routes: Vec<ReplayRoute> = targets.iter().map(ReplayRoute::of).collect();
+        // A lane request supersedes only the previous request carrying that lane's routes. The
+        // live and bulk requests are intentionally independent so a bulk backlog cannot release
+        // or delay a live long-poll.
+        let supersede = self.peers.get(&peer_id).and_then(|state| {
+            state
+                .replay_pages
+                .iter()
+                .filter(|(route, _)| routes.contains(route))
+                .map(|(_, page)| page.request_id)
+                .max()
+        });
+        let lane = self.replay_lane(&peer_id, &targets[0]);
         tracing::debug!(
             peer_id = %peer_id,
             target_count = targets.len(),
@@ -1597,7 +1634,9 @@ impl BigSyncMachine {
                     ReplayPageState {
                         task_id,
                         request_id,
+                        lane,
                         caught_up,
+                        waiting_for_credit: false,
                     },
                 );
             }
@@ -1615,6 +1654,50 @@ impl BigSyncMachine {
             .into_iter()
             .filter_map(|target| self.refreshed_replay_target(peer_id.clone(), &target))
             .collect()
+    }
+
+    fn replay_work_below_watermark(&self, peer_id: &PeerKey) -> bool {
+        self.peers.get(peer_id).is_none_or(|state| {
+            state.cursor_machine.pending_replay_work() < Self::REPLAY_WORK_LOW_WATERMARK
+        })
+    }
+
+    fn pause_replay_targets_for_credit(
+        &mut self,
+        peer_id: &PeerKey,
+        targets: impl IntoIterator<Item = SubscriptionTarget>,
+    ) {
+        let Some(peer_state) = self.peers.get_mut(peer_id) else {
+            return;
+        };
+        for target in targets {
+            let route = ReplayRoute::of(&target);
+            if let Some(state) = peer_state.replay_pages.get_mut(&route) {
+                state.waiting_for_credit = true;
+            }
+        }
+    }
+
+    fn resume_replay_pages_for_credit(&mut self, peer_id: PeerKey) {
+        if !self.replay_work_below_watermark(&peer_id) {
+            return;
+        }
+        let waiting: Vec<ReplayRoute> = self
+            .peers
+            .get(&peer_id)
+            .into_iter()
+            .flat_map(|state| state.replay_pages.iter())
+            .filter_map(|(route, state)| state.waiting_for_credit.then_some(route.clone()))
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let targets = self.replay_page_targets(peer_id.clone());
+        let targets: Vec<_> = waiting
+            .into_iter()
+            .filter_map(|route| targets.get(&route).cloned())
+            .collect();
+        self.spawn_replay_pages(peer_id, targets, false);
     }
 
     /// The peer-level replay verdict: caught up when every wanted route has an
@@ -1651,13 +1734,23 @@ impl BigSyncMachine {
             .cloned()
             .collect();
         for route in stale {
-            if let Some(state) = peer_state.replay_pages.remove(&route) {
+            if let Some(mut state) = peer_state.replay_pages.remove(&route) {
                 let _state = self.tasks.cancel(state.task_id).expect(ERROR_UNRECONIZED);
+                if force {
+                    // Keep the advisory lane across a forced restart for routes that are still
+                    // wanted, but invalidate the prior caught-up verdict: the new request must
+                    // answer before full sync can settle.
+                    if targets.contains_key(&route) {
+                        state.caught_up = false;
+                        state.waiting_for_credit = false;
+                        peer_state.replay_pages.insert(route, state);
+                    }
+                }
             }
         }
         let missing: Vec<SubscriptionTarget> = targets
             .into_iter()
-            .filter(|(route, _)| !peer_state.replay_pages.contains_key(route))
+            .filter(|(route, _)| force || !peer_state.replay_pages.contains_key(route))
             .map(|(_, target)| target)
             .collect();
         tracing::debug!(
@@ -1665,8 +1758,8 @@ impl BigSyncMachine {
             target_count = missing.len(),
             "refresh peer replay pages"
         );
-        // One request for every route still missing an answer: the round carries the set, so
-        // a peer with many parts costs one request rather than one request per part.
+        // Each lane carries its routes together, so a peer with many parts still costs at most one
+        // live request and one bulk request.
         self.spawn_replay_pages(peer_id.clone(), missing, false);
         self.update_peer_replay_done(peer_id);
     }
@@ -1702,7 +1795,7 @@ impl BigSyncMachine {
             for evt in page.events {
                 peer_state
                     .cursor_machine
-                    .on_subscription_evt(evt.into(), &mut peer_state.cursors_cmd_buf);
+                    .on_subscription_evt(evt, &mut peer_state.cursors_cmd_buf);
             }
             for (target, verdict) in page.targets {
                 let route = ReplayRoute::of(&target);
@@ -1719,12 +1812,29 @@ impl BigSyncMachine {
                     }
                 }
                 match verdict {
-                    TargetVerdict::Events { drained, .. } => {
+                    TargetVerdict::Events { resume, drained } => {
+                        // The page resume is a scheduling cursor. It may be ahead of the
+                        // applied cursor while the emitted work is still pending.
+                        match &target {
+                            SubscriptionTarget::Part { part_id, .. } => peer_state
+                                .cursor_machine
+                                .advance_part_replay_cursor(part_id.clone(), resume),
+                            SubscriptionTarget::Object { obj_id, .. } => peer_state
+                                .cursor_machine
+                                .advance_obj_replay_cursor(obj_id.clone(), resume),
+                        }
                         // A per-page verdict is pacing, never terminal: the round is re-issued
                         // from this result either way, so "caught up" only decides that the
                         // next round waits for an event instead of asking again immediately.
                         if let Some(state) = peer_state.replay_pages.get_mut(&route) {
                             state.caught_up = drained;
+                            state.lane = if matches!(&target, SubscriptionTarget::Object { .. })
+                                || drained
+                            {
+                                ReplayLane::Live
+                            } else {
+                                ReplayLane::Bulk
+                            };
                         }
                         immediate.push(target);
                     }
@@ -1770,14 +1880,18 @@ impl BigSyncMachine {
         // in flight is dropped here rather than asked for again.
         let immediate = self.refresh_replay_targets(peer_id.clone(), immediate);
         let backed_off = self.refresh_replay_targets(peer_id.clone(), backed_off);
-        if !immediate.is_empty() {
-            self.spawn_replay_pages(peer_id.clone(), immediate, false);
-        }
-        if !backed_off.is_empty() {
-            // A round that saw both an unknown and an unauthorized target backs off for the
-            // larger of the two: a delay is pacing, and both routes are retried either way.
-            let delay = backoff.unwrap_or_else(|| Duration::from_secs(2));
-            self.schedule_replay_pages(peer_id.clone(), backed_off, false, retry, delay);
+        if self.replay_work_below_watermark(&peer_id) {
+            if !immediate.is_empty() {
+                self.spawn_replay_pages(peer_id.clone(), immediate, false);
+            }
+            if !backed_off.is_empty() {
+                // A round that saw both an unknown and an unauthorized target backs off for the
+                // larger of the two: a delay is pacing, and both routes are retried either way.
+                let delay = backoff.unwrap_or_else(|| Duration::from_secs(2));
+                self.schedule_replay_pages(peer_id.clone(), backed_off, false, retry, delay);
+            }
+        } else {
+            self.pause_replay_targets_for_credit(&peer_id, immediate.into_iter().chain(backed_off));
         }
         self.update_peer_replay_done(peer_id);
     }
@@ -1825,7 +1939,17 @@ impl BigSyncMachine {
             deets = ?deets,
             "replay page failed; rescheduling",
         );
-        self.schedule_replay_pages(peer_id.clone(), live, caught_up, retry, Duration::from_secs(2));
+        if self.replay_work_below_watermark(&peer_id) {
+            self.schedule_replay_pages(
+                peer_id.clone(),
+                live,
+                caught_up,
+                retry,
+                Duration::from_secs(2),
+            );
+        } else {
+            self.pause_replay_targets_for_credit(&peer_id, live);
+        }
         self.update_peer_replay_done(peer_id);
     }
     fn drain_cursor_machine_cmds(&mut self, peer_id: PeerKey) {
@@ -2014,6 +2138,7 @@ impl BigSyncMachine {
                 }
             }
         }
+        self.resume_replay_pages_for_credit(peer_id);
     }
 
     /// Coalesce an object-removal request into a backend-executed
@@ -2994,6 +3119,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_work_watermark_stops_page_admission_without_advancing_applied_state() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: Set::new(),
+        }));
+        machine.drain_stat_evts().for_each(drop);
+
+        {
+            let state = machine.peers.get_mut(&peer).expect("peer was inserted");
+            for cursor in 0..BigSyncMachine::REPLAY_WORK_LOW_WATERMARK {
+                state.cursor_machine.on_subscription_evt(
+                    PartEvent::Changed(ObjChanged {
+                        cursor: cursor as CursorIndex + 1,
+                        part_ids: Vec::new(),
+                        obj_id: ObjKey::random(),
+                        payload: serde_json::Value::Null,
+                    }),
+                    &mut state.cursors_cmd_buf,
+                );
+            }
+
+            assert_eq!(
+                state.cursor_machine.pending_replay_work(),
+                BigSyncMachine::REPLAY_WORK_LOW_WATERMARK
+            );
+        }
+        assert!(!machine.replay_work_below_watermark(&peer));
+    }
+
+    #[test]
+    fn replay_lane_keeps_objects_live_and_parts_advisory() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let object = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: [object.clone()].into(),
+        }));
+        machine
+            .peers
+            .get_mut(&peer)
+            .expect(ERROR_UNRECONIZED)
+            .replay_pages
+            .insert(
+                ReplayRoute::Part(part.clone()),
+                ReplayPageState {
+                    task_id: 0,
+                    request_id: crate::rpc::ReplayRequestId(0),
+                    lane: ReplayLane::Bulk,
+                    caught_up: false,
+                    waiting_for_credit: false,
+                },
+            );
+
+        assert_eq!(
+            machine.replay_lane(
+                &peer,
+                &SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+            ),
+            ReplayLane::Bulk,
+        );
+        assert_eq!(
+            machine.replay_lane(
+                &peer,
+                &SubscriptionTarget::Object {
+                    obj_id: object,
+                    cursor: 0,
+                },
+            ),
+            ReplayLane::Live,
+        );
+    }
+
     /// A waiter registered for a peer+part must NOT remain stranded after that
     /// peer is removed. `SyncStatMachine::remove_peer` cleans up the peer and
     /// satisfies waiters when their last remaining peer is removed.
@@ -3052,7 +3259,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 7,
                     part_ids: Vec::new(),
                     obj_id: obj.clone(),
@@ -3100,7 +3307,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 7,
                     part_ids: Vec::new(),
                     obj_id: obj.clone(),
@@ -3148,7 +3355,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 1,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3168,7 +3375,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 2,
                     part_id: part.clone(),
                     obj_id: obj.clone(),
@@ -3226,7 +3433,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 1,
                     part_ids: vec![removed_part.clone(), remaining_part.clone()],
                     obj_id: obj.clone(),
@@ -3241,7 +3448,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 2,
                     part_id: removed_part,
                     obj_id: obj.clone(),
@@ -3386,7 +3593,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 2,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3464,7 +3671,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 1,
                     part_id: part.clone(),
                     obj_id: obj.clone(),
@@ -3486,7 +3693,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 2,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3582,7 +3789,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 1,
                     part_id: part.clone(),
                     obj_id: obj.clone(),
@@ -3600,7 +3807,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 2,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3689,7 +3896,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 2,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3838,7 +4045,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 5,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3856,7 +4063,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 6,
                     part_id: part.clone(),
                     obj_id: obj.clone(),
@@ -3914,7 +4121,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Changed(crate::rpc::ObjChanged {
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
                     cursor: 5,
                     part_ids: vec![part.clone()],
                     obj_id: obj.clone(),
@@ -3929,7 +4136,7 @@ mod tests {
         {
             let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
             peer_state.cursor_machine.on_subscription_evt(
-                crate::rpc::SubEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
                     cursor: 6,
                     part_id: part.clone(),
                     obj_id: obj.clone(),

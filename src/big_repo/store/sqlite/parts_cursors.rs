@@ -677,7 +677,7 @@ impl HostPartStore for SqliteBigRepoStore {
             .execute(&mut *tx)
             .await?;
             sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id=?1 AND obj_ref=?2 AND part_ref=?3", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
@@ -1087,7 +1087,7 @@ impl SqliteBigRepoStore {
         obj_ref: i64,
         part_id: &PartKey,
         part_ref: i64,
-    ) -> Res<Option<SubEvent>> {
+    ) -> Res<Option<PartEvent>> {
         sqlx::query!(
             "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
             self.scope().id(),
@@ -1120,7 +1120,7 @@ impl SqliteBigRepoStore {
             )
             .await?;
         sqlx::query!("UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3", i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), part_ref).execute(&mut **tx).await?;
-        Ok(Some(SubEvent::Removed(
+        Ok(Some(PartEvent::Removed(
             big_sync_core::rpc::ObjRemovedFromPart {
                 cursor,
                 part_id: part_id.clone(),

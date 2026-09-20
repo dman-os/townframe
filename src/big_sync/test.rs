@@ -243,7 +243,7 @@ impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
     async fn replay_page(
         &self,
         req: crate::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
-    ) -> Res<BigSyncRpcResult<big_sync_core::rpc::ReplayPageOutcome>> {
+    ) -> Res<BigSyncRpcResult<big_sync_core::rpc::ReplayPage>> {
         WorkCounters::bump(&self.world.work.rpc_replay_pages, 1);
         let req = req.inner;
         tracing::debug!(
@@ -2513,8 +2513,8 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn hidden_part_page_answers_unknown() -> Res<()> {
     use crate::HostPartStoreConfig;
-    use big_sync_core::rpc::SubscriptionTarget;
-    use crate::part_store::ReplayPageOutcome;
+    use crate::part_store::host_contract::SingleTargetPageStore;
+    use big_sync_core::rpc::{SubscriptionTarget, TargetVerdict};
 
     let part = test_part();
     let hidden = PartKey(ByteKey::new([99u8; 32]));
@@ -2541,11 +2541,8 @@ async fn hidden_part_page_answers_unknown() -> Res<()> {
         let peer = peer.clone();
         async move {
             store
-                .replay_page(
-                    SubscriptionTarget::Part {
-                        part_id,
-                        cursor: 0,
-                    },
+                .replay_page_for_target(
+                    SubscriptionTarget::Part { part_id, cursor: 0 },
                     8,
                     peer,
                     Duration::from_millis(50),
@@ -2554,19 +2551,31 @@ async fn hidden_part_page_answers_unknown() -> Res<()> {
         }
     };
 
-    // A visible part is answered a page.
-    let visible = page(part).await?;
+    // A visible part is answered with an events verdict.
+    let visible = page(part.clone()).await?;
     assert!(
-        matches!(visible, ReplayPageOutcome::Events(_)),
-        "a visible part must be answered a page, got {visible:?}"
+        matches!(
+            visible.verdict(&SubscriptionTarget::Part {
+                part_id: part,
+                cursor: 0,
+            }),
+            Some(TargetVerdict::Events { .. })
+        ),
+        "a visible part must be answered with an events verdict, got {visible:?}"
     );
 
     // A hidden part is answered exactly as one that does not exist: the responder's
     // `summarize_parts` pre-check is the peer-facing answer, and it is where the page path
     // and the bucket walk already agree.
-    let hidden_page = page(hidden).await?;
+    let hidden_page = page(hidden.clone()).await?;
     assert!(
-        matches!(hidden_page, ReplayPageOutcome::UnknownPart),
+        matches!(
+            hidden_page.verdict(&SubscriptionTarget::Part {
+                part_id: hidden,
+                cursor: 0,
+            }),
+            Some(TargetVerdict::UnknownPart)
+        ),
         "a hidden part must answer unknown, got {hidden_page:?}"
     );
 

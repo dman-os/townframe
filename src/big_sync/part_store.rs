@@ -6,8 +6,7 @@ use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::rpc::{
     BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, ReplayPage, ReplayPageRequest, SubEvent, SubPartsRequest,
-    SubscriptionTarget, TargetVerdict,
+    PartSummary, ReplayPage, ReplayPageRequest, SubPartsRequest, SubscriptionTarget, TargetVerdict,
 };
 use big_sync_core::{BuckId, ObjKey, PartKey, PeerKey};
 // Only the test-support contract module uses this, so gate it the same way that
@@ -34,27 +33,12 @@ pub mod sqlite;
 pub mod sqlite_core;
 
 /// Local, already-authorized revision stream for part-store consumers.
-/// The single-target answer shape the part-store contract tests assert.
-///
-/// The responder answers a round with a page over a set and a verdict per target. A test that
-/// asks for one target and asserts one answer reads through this adapter, which keeps the
-/// existing contract suite exercising the same behaviour after the round shape changed. New
-/// coverage for sets and per-target verdicts is written against
-/// [`HostPartStore::replay_page_round`].
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayPageOutcome {
-    Events(PartPage),
-    UnknownPart,
-    Unauthorized,
-}
-
 #[async_trait]
 pub trait LocalPartRevisionReader: Send {
     async fn next(
         &mut self,
         limits: RevisionReadLimits,
-    ) -> Res<RevisionRead<FrontierRevision, SubEvent>>;
+    ) -> Res<RevisionRead<FrontierRevision, PartEvent>>;
 }
 
 pub(crate) struct PartRevisionReader {
@@ -63,7 +47,7 @@ pub(crate) struct PartRevisionReader {
     all: bool,
     objects: HashSet<ObjKey>,
     parts: HashSet<PartKey>,
-    pending: std::collections::VecDeque<RevisionRead<FrontierRevision, SubEvent>>,
+    pending: std::collections::VecDeque<RevisionRead<FrontierRevision, PartEvent>>,
     pending_replay_complete: Option<FrontierRevision>,
     last_revision: FrontierRevision,
     replay_complete_seen: bool,
@@ -102,12 +86,12 @@ impl PartRevisionReader {
         key: PartFrontierKey,
         value: Option<PartEvent>,
         revision: FrontierRevision,
-    ) -> Option<SubEvent> {
+    ) -> Option<PartEvent> {
         match (key, value) {
             (PartFrontierKey::Object(_), None) => None,
             (PartFrontierKey::Object(_), Some(PartEvent::Changed(mut event))) => {
                 event.cursor = revision;
-                Some(SubEvent::Changed(event))
+                Some(PartEvent::Changed(event))
             }
             (PartFrontierKey::Part { obj_id, part_id }, value)
                 if self.selects_object(&obj_id) && !self.selects_part(&part_id) =>
@@ -121,7 +105,7 @@ impl PartRevisionReader {
                     // machine books as a content delivery.
                     Some(PartEvent::Removed(_)) | None => return None,
                 };
-                Some(SubEvent::Changed(ObjChanged {
+                Some(PartEvent::Changed(ObjChanged {
                     cursor: revision,
                     part_ids: Vec::new(),
                     obj_id,
@@ -134,12 +118,12 @@ impl PartRevisionReader {
                 event.cursor = revision;
                 event.obj_id = obj_id;
                 event.part_ids = vec![part_id];
-                Some(SubEvent::Changed(event))
+                Some(PartEvent::Changed(event))
             }
             (PartFrontierKey::Part { obj_id, part_id }, Some(PartEvent::Removed(_)) | None)
                 if self.selects_part(&part_id) =>
             {
-                Some(SubEvent::Removed(ObjRemovedFromPart {
+                Some(PartEvent::Removed(ObjRemovedFromPart {
                     cursor: revision,
                     part_id,
                     obj_id,
@@ -157,23 +141,8 @@ impl PartRevisionReader {
         self.all || self.parts.contains(part_id)
     }
 
-    fn merge_changed(events: &mut Vec<SubEvent>, event: SubEvent) {
-        if let SubEvent::Changed(changed) = &event
-            && let Some(SubEvent::Changed(existing)) = events.iter_mut().find(|candidate| {
-                matches!(candidate, SubEvent::Changed(candidate)
-                    if candidate.cursor == changed.cursor && candidate.obj_id == changed.obj_id)
-            })
-        {
-            for part_id in &changed.part_ids {
-                if !existing.part_ids.contains(part_id) {
-                    existing.part_ids.push(part_id.clone());
-                }
-            }
-            existing.part_ids.sort_unstable();
-            existing.payload = changed.payload.clone();
-        } else {
-            events.push(event);
-        }
+    fn merge_changed(events: &mut Vec<PartEvent>, event: PartEvent) {
+        merge_part_event(events, event);
     }
 }
 
@@ -182,7 +151,7 @@ impl LocalPartRevisionReader for PartRevisionReader {
     async fn next(
         &mut self,
         limits: RevisionReadLimits,
-    ) -> Res<RevisionRead<FrontierRevision, SubEvent>> {
+    ) -> Res<RevisionRead<FrontierRevision, PartEvent>> {
         if let Some(read) = self.pending.pop_front() {
             return Ok(read);
         }
@@ -214,7 +183,7 @@ impl LocalPartRevisionReader for PartRevisionReader {
             }
             FrontierRead::Entries { entries, through } => {
                 self.last_revision = self.last_revision.max(through);
-                let mut grouped = BTreeMap::<FrontierRevision, Vec<SubEvent>>::new();
+                let mut grouped = BTreeMap::<FrontierRevision, Vec<PartEvent>>::new();
                 for entry in entries {
                     if let Some(event) = self.project(entry.key, entry.value, entry.revision) {
                         Self::merge_changed(grouped.entry(entry.revision).or_default(), event);
@@ -269,6 +238,80 @@ fn assemble_page(
             (target, verdict)
         })
         .collect()
+}
+
+/// Compute the encoded size of a candidate page before an atomic revision is committed.
+fn replay_page_wire_size(
+    events: Vec<PartEvent>,
+    order: &[SubscriptionTarget],
+    verdicts: &HashMap<SubscriptionTarget, TargetVerdict>,
+) -> Res<usize> {
+    let targets = order
+        .iter()
+        .map(|target| {
+            let verdict = verdicts.get(target).cloned().unwrap_or_else(|| {
+                let cursor = match target {
+                    SubscriptionTarget::Part { cursor, .. }
+                    | SubscriptionTarget::Object { cursor, .. } => *cursor,
+                };
+                TargetVerdict::Events {
+                    resume: cursor,
+                    drained: false,
+                }
+            });
+            (target.clone(), verdict)
+        })
+        .collect();
+    ReplayPage { events, targets }
+        .encoded_size()
+        .map_err(|error| eyre::eyre!(error))
+}
+
+/// Merge one projected event into a page, preserving the existing object projection rules.
+///
+/// Changed rows for one object and revision collapse into one event with the union of part ids;
+/// identical removals are delivered only once. The boolean says whether a new page entry was
+/// added, which lets a global page budget ignore overlap between targets.
+fn merge_part_event(events: &mut Vec<PartEvent>, event: PartEvent) -> bool {
+    if let PartEvent::Changed(changed) = &event
+        && let Some(PartEvent::Changed(existing)) = events.iter_mut().find(|candidate| {
+            matches!(candidate, PartEvent::Changed(candidate)
+                if candidate.cursor == changed.cursor && candidate.obj_id == changed.obj_id)
+        })
+    {
+        for part_id in &changed.part_ids {
+            if !existing.part_ids.contains(part_id) {
+                existing.part_ids.push(part_id.clone());
+            }
+        }
+        existing.part_ids.sort_unstable();
+        existing.payload = changed.payload.clone();
+        false
+    } else if events.iter().any(|candidate| candidate == &event) {
+        false
+    } else {
+        events.push(event);
+        true
+    }
+}
+
+/// Validate the peer's target set before touching storage or authorization state.
+///
+/// Cursors are positions on a logical route, not part of its identity: naming one part or object
+/// twice with different cursors would otherwise create two competing verdicts for one route.
+pub(crate) fn validate_replay_targets(targets: &[SubscriptionTarget]) -> Res<()> {
+    let mut seen_parts = HashSet::new();
+    let mut seen_objects = HashSet::new();
+    for target in targets {
+        let duplicate = match target {
+            SubscriptionTarget::Part { part_id, .. } => !seen_parts.insert(part_id),
+            SubscriptionTarget::Object { obj_id, .. } => !seen_objects.insert(obj_id),
+        };
+        if duplicate {
+            eyre::bail!("a replay page request cannot name a logical route more than once");
+        }
+    }
+    Ok(())
 }
 
 impl Default for HostPartStoreConfig {
@@ -465,8 +508,9 @@ pub trait HostPartStore: Send + Sync {
     /// * **The page's limit is sliced across the targets.** One read ordered by revision lets
     ///   a target with a large backlog starve a target with a small one — the small target's
     ///   newest row sits behind the whole backlog and is never reached — so each target is
-    ///   read from its own bound with its own share of the page. The live/bulk lane split is
-    ///   what makes that affordable: the request carrying a live doc's few targets is small,
+    ///   read from its own bound with its own share of the page. A complete atomic revision
+    ///   may exceed its share: the reader cannot split one revision without losing rows. The
+    ///   live/bulk lane split is what makes that affordable: the request carrying a live doc's few targets is small,
     ///   while the request carrying a large set is latency-insensitive catch-up.
     /// * **Cancellation is cooperative and row-aware.** The read stays outside the select, so
     ///   a cancel never interrupts a page in flight, and a page that already holds rows ships
@@ -486,8 +530,10 @@ pub trait HostPartStore: Send + Sync {
             limit,
             hold_ms: _,
         } = req;
+        validate_replay_targets(&requested)?;
         // Existence and authorization first, per target: a target that cannot be served is
         // answered as such and the rest of the page is still served.
+        let order = requested.clone();
         let mut verdicts: HashMap<SubscriptionTarget, TargetVerdict> = HashMap::new();
         let mut live: Vec<(SubscriptionTarget, CursorIndex)> = Vec::new();
         for target in requested {
@@ -535,11 +581,6 @@ pub trait HostPartStore: Send + Sync {
                 (None, None) => unreachable!("a requested target is either denied or live"),
             }
         }
-        let order: Vec<SubscriptionTarget> = verdicts
-            .keys()
-            .cloned()
-            .chain(live.iter().map(|(target, _)| target.clone()))
-            .collect();
         // `limit` bounds the events the whole page may carry, so a zero limit carries none.
         // Answering before anything is read is what makes the bound deterministic, and every
         // position stays the caller's own because nothing was read.
@@ -572,20 +613,47 @@ pub trait HostPartStore: Send + Sync {
             // Cancellation, first of the two places it is checked: the top of the page loop,
             // before any query. A page that already holds rows is shipped either way.
             if cancel.is_cancelled() {
+                for (target, cursor) in &live {
+                    verdicts.insert(
+                        target.clone(),
+                        TargetVerdict::Events {
+                            resume: *cursor,
+                            drained: false,
+                        },
+                    );
+                }
                 break;
             }
             // Fair drain: one read per target from that target's own bound, each bounded by
-            // its share of the page.
-            let quota = (limit / live.len().max(1)).max(1);
+            // its fair share of the *remaining global* page budget.
+            let mut remaining_page = limit;
             let mut all_drained = true;
             let mut positions = Vec::with_capacity(live.len());
-            for (target, bound) in &live {
+            for (index, (target, bound)) in live.iter().enumerate() {
                 let requested_cursor = *bound;
+                let targets_left = live.len() - index;
+                let quota = if remaining_page == 0 {
+                    0
+                } else {
+                    remaining_page.div_ceil(targets_left)
+                };
                 let mut remaining = quota;
                 let mut resume = requested_cursor;
                 let mut delivered = requested_cursor;
                 let mut drained = false;
                 let mut filled = false;
+                if quota == 0 {
+                    all_drained = false;
+                    positions.push((target.clone(), requested_cursor));
+                    verdicts.insert(
+                        target.clone(),
+                        TargetVerdict::Events {
+                            resume: requested_cursor,
+                            drained: false,
+                        },
+                    );
+                    continue;
+                }
                 let mut reader = match self
                     .open_revision_reader(SubPartsRequest {
                         lower_bound: requested_cursor,
@@ -622,21 +690,14 @@ pub trait HostPartStore: Send + Sync {
                             break;
                         }
                         RevisionRead::Entries { revision, entries } => {
-                            for entry in entries {
-                                let event = match entry {
-                                    SubEvent::Changed(inner) => PartEvent::Changed(inner),
-                                    SubEvent::Removed(inner) => PartEvent::Removed(inner),
-                                    SubEvent::ReplayComplete => continue,
-                                };
+                            let mut revision_events = Vec::new();
+                            for event in entries {
                                 // The peer-facing tombstone rule, applied here rather than in
                                 // the reader: a `Removed` is only useful to a peer whose
                                 // request started at or after the add. The rule is
                                 // request-scoped — it uses this target's requested cursor,
                                 // not the reader's advancing position — and the seam stays
                                 // faithful so the rev-store adapters keep their tombstones.
-                                // The row is still scanned, so the position advances past it
-                                // and the want row recorded for the drop covers a later
-                                // grant.
                                 if let PartEvent::Removed(removed) = &event
                                     && let Some(added_at) = self
                                         .obj_part_added_at(
@@ -654,20 +715,46 @@ pub trait HostPartStore: Send + Sync {
                                 {
                                     continue;
                                 }
-                                delivered = event.cursor();
-                                events.push(event);
-                                remaining -= 1;
-                                if remaining == 0 {
-                                    filled = true;
-                                    break;
+                                revision_events.push(event);
+                            }
+
+                            if revision_events.is_empty() {
+                                // A batch whose rows were all dropped still advances the
+                                // durable read position, but emits no page work.
+                                resume = resume.max(revision);
+                                continue;
+                            }
+
+                            // Build and size the complete revision transactionally. If it does
+                            // not fit, leave the durable cursor before this revision so the next
+                            // page can retry it; an oversized first revision is admitted alone.
+                            let mut candidate = events.clone();
+                            let mut added_events = 0usize;
+                            for event in revision_events {
+                                if merge_part_event(&mut candidate, event) {
+                                    added_events += 1;
                                 }
                             }
-                            if filled {
+                            let oversized =
+                                replay_page_wire_size(candidate.clone(), &order, &verdicts)?
+                                    > ReplayPage::BYTE_BUDGET;
+                            if oversized && !events.is_empty() {
+                                filled = true;
                                 break;
                             }
-                            // A batch whose rows were all dropped advances nothing, so a
-                            // position only moves onto a batch that was handed over.
+                            events = candidate;
+                            remaining_page = remaining_page.saturating_sub(added_events);
+                            remaining = remaining.saturating_sub(added_events);
+                            delivered = revision;
                             resume = resume.max(revision);
+
+                            // `RevisionRead::Entries` is one complete atomic revision. Do not
+                            // stop halfway through it: both event and byte limits are soft at
+                            // this boundary. An oversized revision is sent alone.
+                            if remaining == 0 || oversized {
+                                filled = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -680,10 +767,7 @@ pub trait HostPartStore: Send + Sync {
                     resume = delivered;
                 }
                 positions.push((target.clone(), resume));
-                verdicts.insert(
-                    target.clone(),
-                    TargetVerdict::Events { resume, drained },
-                );
+                verdicts.insert(target.clone(), TargetVerdict::Events { resume, drained });
             }
             live = positions;
             // The page answers as soon as it carries anything, or as soon as a target still
@@ -697,7 +781,11 @@ pub trait HostPartStore: Send + Sync {
             // the hold is the pacing bound, not a deadline.
             let mut wake = match self
                 .open_revision_reader(SubPartsRequest {
-                    lower_bound: live.iter().map(|(_, cursor)| *cursor).min().unwrap_or_default(),
+                    lower_bound: live
+                        .iter()
+                        .map(|(_, cursor)| *cursor)
+                        .min()
+                        .unwrap_or_default(),
                     targets: live.iter().map(|(target, _)| target.clone()).collect(),
                 })
                 .await?
@@ -745,52 +833,12 @@ pub trait HostPartStore: Send + Sync {
                 break;
             }
         }
+        events.sort_by_key(PartEvent::cursor);
         Ok(ReplayPage {
             events,
             targets: assemble_page(order, &mut verdicts),
         })
     }
-    /// Answer one page for a single target, in the single-target shape.
-    ///
-    /// Test support: see [`ReplayPageOutcome`]. The call underneath is the responder's own, so
-    /// a test that uses this still exercises the production path.
-    #[cfg(any(test, feature = "test-support"))]
-    async fn replay_page(
-        &self,
-        target: SubscriptionTarget,
-        limit: u32,
-        subscriber: PeerKey,
-        hold: Duration,
-    ) -> Res<ReplayPageOutcome> {
-        let page = self
-            .replay_page_round(
-                ReplayPageRequest {
-                    request_id: big_sync_core::rpc::ReplayRequestId(0),
-                    supersede: None,
-                    targets: vec![target.clone()],
-                    limit,
-                    hold_ms: u32::try_from(hold.as_millis()).unwrap_or(u32::MAX),
-                },
-                subscriber,
-                hold,
-                CancellationToken::new(),
-            )
-            .await?;
-        let verdict = page
-            .verdict(&target)
-            .cloned()
-            .expect("a round answers every target it was asked about");
-        Ok(match verdict {
-            TargetVerdict::Events { resume, drained } => ReplayPageOutcome::Events(PartPage {
-                events: page.events,
-                resume,
-                drained,
-            }),
-            TargetVerdict::UnknownPart => ReplayPageOutcome::UnknownPart,
-            TargetVerdict::Unauthorized => ReplayPageOutcome::Unauthorized,
-        })
-    }
-
     /// Open a durable revision reader over a set of targets, each carrying its
     /// own bound. This is the read seam for the whole part store: the responder
     /// drives it to answer one page (bounded by the caller's limit, held while
@@ -1307,8 +1355,8 @@ pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{
         BUCKET_LIVE_FP_SEED, BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest,
-        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, SubEvent,
-        SubPartsRequest, SubscriptionTarget,
+        LeafBucketsRequest, ListPartsError, PartEvent, PartPage, SubPartsRequest,
+        SubscriptionTarget,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
     use keyhive_core::access::Access;
@@ -1450,15 +1498,13 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-    /// The pull reader in the shape the tests below were written against: the push
-    /// surface used to hand them a stream of events for a set of targets, so this
-    /// hands one event at a time out of the batches a reader returns and surfaces the
-    /// reader's completion verdict as the `ReplayComplete` event it always was. The
-    /// reader sits behind a mutex so a test can hold `&stream` the way it held the
-    /// receiver half of a channel.
+    /// A test view over a durable revision reader. Events are exposed one at a time,
+    /// while replay completion remains the reader's explicit phase boundary rather
+    /// than being fabricated as an event.
     pub(crate) struct TestEventStream {
         reader: tokio::sync::Mutex<Box<dyn LocalPartRevisionReader>>,
-        pending: tokio::sync::Mutex<std::collections::VecDeque<SubEvent>>,
+        pending: tokio::sync::Mutex<std::collections::VecDeque<PartEvent>>,
+        pending_revision: tokio::sync::Mutex<Option<FrontierRevision>>,
     }
 
     impl TestEventStream {
@@ -1466,25 +1512,45 @@ pub mod host_contract {
             Self {
                 reader: tokio::sync::Mutex::new(reader),
                 pending: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+                pending_revision: tokio::sync::Mutex::new(None),
             }
         }
 
-        pub(crate) async fn next(&self) -> Res<SubEvent> {
-            loop {
-                if let Some(event) = self.pending.lock().await.pop_front() {
-                    return Ok(event);
-                }
-                match self
-                    .reader
+        pub(crate) async fn next_read(&self) -> Res<RevisionRead<FrontierRevision, PartEvent>> {
+            let mut pending = self.pending.lock().await;
+            if !pending.is_empty() {
+                let revision = self
+                    .pending_revision
                     .lock()
                     .await
-                    .next(RevisionReadLimits::default())
-                    .await?
-                {
-                    RevisionRead::Entries { entries, .. } => {
-                        self.pending.lock().await.extend(entries);
+                    .take()
+                    .expect("pending events carry their revision");
+                let entries = pending.drain(..).collect();
+                return Ok(RevisionRead::Entries { revision, entries });
+            }
+            drop(pending);
+            self.reader
+                .lock()
+                .await
+                .next(RevisionReadLimits::default())
+                .await
+        }
+
+        pub(crate) async fn next(&self) -> Res<PartEvent> {
+            loop {
+                match self.next_read().await? {
+                    RevisionRead::Entries {
+                        revision,
+                        mut entries,
+                    } => {
+                        if !entries.is_empty() {
+                            let event = entries.remove(0);
+                            self.pending.lock().await.extend(entries);
+                            *self.pending_revision.lock().await = Some(revision);
+                            return Ok(event);
+                        }
                     }
-                    RevisionRead::ReplayComplete { .. } => return Ok(SubEvent::ReplayComplete),
+                    RevisionRead::ReplayComplete { .. } => continue,
                 }
             }
         }
@@ -1496,6 +1562,33 @@ pub mod host_contract {
     /// for the call sites' shape and deliberately not used — the reader is the store's
     /// unfiltered seam, so a test about authorization asserts the answer the responder
     /// asks for (`read_denied`, `permitted_parts`) instead of filtering a stream.
+    #[async_trait]
+    pub trait SingleTargetPageStore: HostPartStore {
+        async fn replay_page_for_target(
+            &self,
+            target: SubscriptionTarget,
+            limit: u32,
+            subscriber: PeerKey,
+            hold: Duration,
+        ) -> Res<ReplayPage> {
+            self.replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![target],
+                    limit,
+                    hold_ms: u32::try_from(hold.as_millis()).unwrap_or(u32::MAX),
+                },
+                subscriber,
+                hold,
+                CancellationToken::new(),
+            )
+            .await
+        }
+    }
+
+    impl<S: HostPartStore + ?Sized> SingleTargetPageStore for S {}
+
     #[async_trait]
     pub(crate) trait PageEventStore: HostPartStore {
         async fn page_events(
@@ -1534,21 +1627,304 @@ pub mod host_contract {
         }
     }
 
-    async fn recv_sub_event(stream: &TestEventStream) -> Res<SubEvent> {
+    async fn recv_sub_event(stream: &TestEventStream) -> Res<PartEvent> {
         timeout(Duration::from_secs(5), stream.next()).await?
     }
 
-    async fn collect_sub_events(stream: &TestEventStream) -> Res<Vec<SubEvent>> {
-        let mut out = Vec::new();
+    pub(crate) async fn wait_replay_complete(stream: &TestEventStream) -> Res<()> {
         loop {
-            let evt = recv_sub_event(stream).await?;
-            let done = matches!(evt, SubEvent::ReplayComplete);
-            out.push(evt);
-            if done {
-                break;
+            match timeout(Duration::from_secs(5), stream.next_read()).await?? {
+                RevisionRead::Entries { .. } => {}
+                RevisionRead::ReplayComplete { .. } => return Ok(()),
             }
         }
+    }
+
+    fn events_page(page: &ReplayPage) -> PartPage {
+        assert_eq!(page.targets.len(), 1, "test page names one target");
+        let TargetVerdict::Events { resume, drained } = page.targets[0].1 else {
+            panic!("expected an events verdict, got {:?}", page.targets[0].1);
+        };
+        PartPage {
+            events: page.events.clone(),
+            resume,
+            drained,
+        }
+    }
+
+    fn verdict(page: &ReplayPage) -> &TargetVerdict {
+        assert_eq!(page.targets.len(), 1, "test page names one target");
+        &page.targets[0].1
+    }
+
+    pub(crate) async fn collect_sub_events(stream: &TestEventStream) -> Res<Vec<PartEvent>> {
+        let mut out = Vec::new();
+        while let RevisionRead::Entries { entries, .. } =
+            timeout(Duration::from_secs(5), stream.next_read()).await??
+        {
+            out.extend(entries);
+        }
         Ok(out)
+    }
+
+    #[tokio::test]
+    async fn replay_page_rejects_duplicate_targets() -> Res<()> {
+        let store = crate::part_store::memory::MemoryPartStore::new();
+        let target = SubscriptionTarget::Object {
+            obj_id: test_obj(1),
+            cursor: 0,
+        };
+        let same_route = SubscriptionTarget::Object {
+            obj_id: test_obj(1),
+            cursor: 1,
+        };
+        let err = store
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![target, same_route],
+                    limit: 1,
+                    hold_ms: 0,
+                },
+                PeerKey::new([0; 32]),
+                Duration::ZERO,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("duplicate targets are invalid request input");
+        assert!(err.to_string().contains("logical route"));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_page_events_collapses_same_object_revision() {
+        let obj = test_obj(7);
+        let part_a = test_part(8);
+        let part_b = test_part(9);
+        let mut events = vec![PartEvent::Changed(ObjChanged {
+            cursor: 4,
+            part_ids: vec![part_a.clone()],
+            obj_id: obj.clone(),
+            payload: payload("merge", 4),
+        })];
+        assert!(!merge_part_event(
+            &mut events,
+            PartEvent::Changed(ObjChanged {
+                cursor: 4,
+                part_ids: vec![part_b.clone()],
+                obj_id: obj,
+                payload: payload("merge", 4),
+            })
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [PartEvent::Changed(ObjChanged { part_ids, .. })]
+                if part_ids == &vec![part_a, part_b]
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_page_enforces_global_limit_and_merges_ordered_overlap() -> Res<()> {
+        let store = crate::part_store::memory::MemoryPartStore::new();
+        let peer = PeerKey::new([1; 32]);
+        let part_a = test_part(2);
+        let part_b = test_part(3);
+        let first = test_obj(4);
+        let second = test_obj(5);
+        let shared = test_obj(6);
+        for part in [&part_a, &part_b] {
+            store.ensure_part(part.clone()).await?;
+            store
+                .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+                .await?;
+        }
+        for (obj, part, tag, index) in [
+            (first.clone(), part_a.clone(), "first", 1),
+            (second.clone(), part_b.clone(), "second", 2),
+        ] {
+            store
+                .set_obj_payload(obj.clone(), payload(tag, index))
+                .await?;
+            store.add_obj_to_parts(obj, vec![part]).await?;
+        }
+        store
+            .set_obj_payload(shared.clone(), payload("shared", 3))
+            .await?;
+        store
+            .add_obj_to_parts(shared.clone(), vec![part_a.clone(), part_b.clone()])
+            .await?;
+
+        let target_a = SubscriptionTarget::Part {
+            part_id: part_a.clone(),
+            cursor: 0,
+        };
+        let target_b = SubscriptionTarget::Part {
+            part_id: part_b.clone(),
+            cursor: 0,
+        };
+        let limited = store
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![target_b.clone(), target_a.clone()],
+                    limit: 1,
+                    hold_ms: 0,
+                },
+                peer.clone(),
+                Duration::ZERO,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(
+            limited.events.len(),
+            1,
+            "the global page limit applies across targets"
+        );
+
+        let overlapping = store
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(1),
+                    supersede: None,
+                    targets: vec![
+                        target_b,
+                        target_a,
+                        SubscriptionTarget::Object {
+                            obj_id: shared.clone(),
+                            cursor: 0,
+                        },
+                    ],
+                    limit: 32,
+                    hold_ms: 0,
+                },
+                peer,
+                Duration::ZERO,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(
+            overlapping
+                .events
+                .windows(2)
+                .all(|events| events[0].cursor() <= events[1].cursor()),
+            "page events are globally ordered: {:?}",
+            overlapping.events
+        );
+        assert!(
+            overlapping.events.iter().any(|event| {
+                matches!(event, PartEvent::Changed(changed) if changed.obj_id == first)
+            }),
+            "the first target contributes an event"
+        );
+        assert!(
+            overlapping.events.iter().any(|event| {
+                matches!(event, PartEvent::Changed(changed) if changed.obj_id == second)
+            }),
+            "the second target contributes an event"
+        );
+        let shared_events: Vec<_> = overlapping
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                PartEvent::Changed(changed) if changed.obj_id == shared => Some(changed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shared_events.len(),
+            2,
+            "different revisions remain distinct object events"
+        );
+        assert!(
+            shared_events
+                .iter()
+                .any(|event| event.part_ids == vec![part_a.clone(), part_b.clone()]),
+            "the overlapping part route contributes both projected parts"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_page_cancelled_before_read_returns_cursor_verdict() -> Res<()> {
+        let store = crate::part_store::memory::MemoryPartStore::new();
+        let part_id = test_part(1);
+        let peer = PeerKey::new([0; 32]);
+        store.ensure_part(part_id.clone()).await?;
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
+            .await?;
+        let target = SubscriptionTarget::Part {
+            part_id,
+            cursor: 42,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let page = store
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![target.clone()],
+                    limit: 1,
+                    hold_ms: 0,
+                },
+                peer,
+                Duration::ZERO,
+                cancel,
+            )
+            .await?;
+        assert!(page.events.is_empty());
+        assert!(matches!(
+            page.verdict(&target),
+            Some(TargetVerdict::Events {
+                resume: 42,
+                drained: false
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_page_byte_budget_stops_at_an_atomic_revision() -> Res<()> {
+        let store = crate::part_store::memory::MemoryPartStore::new();
+        let part = test_part(90);
+        let obj = test_obj(91);
+        let peer = PeerKey::new([92; 32]);
+        store.ensure_part(part.clone()).await?;
+        store
+            .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), serde_json::json!({"data": "a".repeat(40_000)}))
+            .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
+        store
+            .set_obj_payload(obj.clone(), serde_json::json!({"data": "b".repeat(40_000)}))
+            .await?;
+
+        let page = store
+            .replay_page_for_target(
+                SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+                32,
+                peer,
+                Duration::ZERO,
+            )
+            .await?;
+        assert_eq!(page.events.len(), 1, "the byte budget admits one revision");
+        assert!(
+            page.encoded_size().map_err(|error| eyre::eyre!(error))? <= ReplayPage::BYTE_BUDGET
+        );
+        Ok(())
     }
 
     pub async fn assert_host_part_store_contract<H>(harness: &H) -> Res<()>
@@ -1654,14 +2030,7 @@ pub mod host_contract {
                 observer,
             )
             .await??;
-        loop {
-            if matches!(
-                recv_sub_event(&observer_rx).await?,
-                SubEvent::ReplayComplete
-            ) {
-                break;
-            }
-        }
+        wait_replay_complete(&observer_rx).await?;
 
         let rx = store
             .page_events(
@@ -1675,11 +2044,7 @@ pub mod host_contract {
                 subscriber,
             )
             .await??;
-        loop {
-            if matches!(recv_sub_event(&rx).await?, SubEvent::ReplayComplete) {
-                break;
-            }
-        }
+        wait_replay_complete(&rx).await?;
 
         assert_eq!(
             store.latest_revision().await?,
@@ -1890,7 +2255,7 @@ pub mod host_contract {
         assert!(
             before_events.iter().any(|event| matches!(
                 event,
-                SubEvent::Removed(removed) if removed.cursor == removed_at
+                PartEvent::Removed(removed) if removed.cursor == removed_at
             )),
             "a faithful reader is handed the tombstone even when it never saw the add; got {before_events:?}"
         );
@@ -1899,7 +2264,7 @@ pub mod host_contract {
         // or after the add, and the rule uses the request's own cursor rather than the
         // reader's advancing position.
         let before_add = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -1909,16 +2274,14 @@ pub mod host_contract {
                 Duration::from_millis(50),
             )
             .await?;
-        let ReplayPageOutcome::Events(before_add) = before_add else {
-            panic!("a readable part must be answered a page, got {before_add:?}");
-        };
+        let before_add = events_page(&before_add);
         assert!(
             before_add.events.is_empty(),
             "a peer whose request started before the add is not told about the removal; got {:?}",
             before_add.events
         );
         let at_add = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: added_at,
@@ -1928,9 +2291,7 @@ pub mod host_contract {
                 Duration::from_millis(50),
             )
             .await?;
-        let ReplayPageOutcome::Events(at_add) = at_add else {
-            panic!("a readable part must be answered a page, got {at_add:?}");
-        };
+        let at_add = events_page(&at_add);
         assert!(
             at_add.events.iter().any(|event| matches!(
                 event,
@@ -1979,11 +2340,7 @@ pub mod host_contract {
                 peer,
             )
             .await??;
-        loop {
-            if matches!(recv_sub_event(&rx).await?, SubEvent::ReplayComplete) {
-                break;
-            }
-        }
+        wait_replay_complete(&rx).await?;
 
         // Content does reach the object lane, so the silence below is about membership rather
         // than about a subscription that is not delivering anything at all. A store is free to
@@ -1995,7 +2352,7 @@ pub mod host_contract {
         let mut saw_content = false;
         while !saw_content {
             match recv_sub_event(&rx).await? {
-                SubEvent::Changed(changed) => {
+                PartEvent::Changed(changed) => {
                     assert_eq!(changed.obj_id, obj_id);
                     assert!(
                         changed.part_ids.is_empty(),
@@ -2004,10 +2361,9 @@ pub mod host_contract {
                     );
                     saw_content = changed.payload == payload("object-lane", 1);
                 }
-                SubEvent::Removed(removed) => {
+                PartEvent::Removed(removed) => {
                     panic!("the object lane must not carry a membership removal, got {removed:?}")
                 }
-                SubEvent::ReplayComplete => {}
             }
         }
 
@@ -2075,7 +2431,7 @@ pub mod host_contract {
             const ATTEMPTS: u8 = 8;
             for _ in 0..ATTEMPTS {
                 let outcome = store
-                    .replay_page(
+                    .replay_page_for_target(
                         SubscriptionTarget::Object {
                             obj_id: obj.clone(),
                             cursor,
@@ -2085,10 +2441,9 @@ pub mod host_contract {
                         PAGE_HOLD,
                     )
                     .await?;
-                match outcome {
-                    ReplayPageOutcome::Events(page) if !page.events.is_empty() => return Ok(page),
-                    ReplayPageOutcome::Events(_) => continue,
-                    other => panic!("a granted member reads an object page, got {other:?}"),
+                let page = events_page(&outcome);
+                if !page.events.is_empty() {
+                    return Ok(page);
                 }
             }
             panic!("an object route with buffered events produced no page");
@@ -2157,7 +2512,7 @@ pub mod host_contract {
 
         for attempt in 0..4 {
             let outcome = store
-                .replay_page(
+                .replay_page_for_target(
                     SubscriptionTarget::Part {
                         part_id: part.clone(),
                         cursor: 0,
@@ -2167,9 +2522,7 @@ pub mod host_contract {
                     Duration::from_millis(200),
                 )
                 .await?;
-            let ReplayPageOutcome::Events(page) = outcome else {
-                panic!("a granted part answers a page, got {outcome:?}");
-            };
+            let page = events_page(&outcome);
             assert!(
                 page.events.is_empty(),
                 "a zero limit must carry no events, attempt {attempt} got {}",
@@ -2191,7 +2544,7 @@ pub mod host_contract {
         let mut delivered = 0;
         for _ in 0..8 {
             let outcome = store
-                .replay_page(
+                .replay_page_for_target(
                     SubscriptionTarget::Part {
                         part_id: part.clone(),
                         cursor: 0,
@@ -2201,9 +2554,7 @@ pub mod host_contract {
                     Duration::from_millis(200),
                 )
                 .await?;
-            let ReplayPageOutcome::Events(page) = outcome else {
-                panic!("a granted part answers a page, got {outcome:?}");
-            };
+            let page = events_page(&outcome);
             if !page.events.is_empty() {
                 delivered = page.events.len();
                 break;
@@ -2337,7 +2688,7 @@ pub mod host_contract {
             const ATTEMPTS: u8 = 8;
             for _ in 0..ATTEMPTS {
                 let outcome = store
-                    .replay_page(
+                    .replay_page_for_target(
                         SubscriptionTarget::Part {
                             part_id: part_id.clone(),
                             cursor: 0,
@@ -2347,12 +2698,9 @@ pub mod host_contract {
                         PAGE_HOLD,
                     )
                     .await?;
-                match outcome {
-                    ReplayPageOutcome::Events(page) if !page.events.is_empty() => {
-                        return Ok(page.events);
-                    }
-                    ReplayPageOutcome::Events(_) => continue,
-                    other => panic!("a granted member reads a page, got {other:?}"),
+                let page = events_page(&outcome);
+                if !page.events.is_empty() {
+                    return Ok(page.events);
                 }
             }
             Ok(Vec::new())
@@ -2381,7 +2729,7 @@ pub mod host_contract {
         .await?;
 
         let unknown_outcome = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: unknown,
                     cursor: 0,
@@ -2391,14 +2739,13 @@ pub mod host_contract {
                 Duration::from_millis(0),
             )
             .await?;
-        assert_eq!(
-            unknown_outcome,
-            ReplayPageOutcome::UnknownPart,
+        assert!(
+            matches!(verdict(&unknown_outcome), TargetVerdict::UnknownPart),
             "an unknown part is its own answer"
         );
 
         let denied = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -2408,9 +2755,8 @@ pub mod host_contract {
                 Duration::from_millis(0),
             )
             .await?;
-        assert_eq!(
-            denied,
-            ReplayPageOutcome::Unauthorized,
+        assert!(
+            matches!(verdict(&denied), TargetVerdict::Unauthorized),
             "a subscriber with no access row is denied, not reported as caught up"
         );
 
@@ -2452,7 +2798,7 @@ pub mod host_contract {
         );
 
         let empty = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: granted_empty.clone(),
                     cursor: 0,
@@ -2464,9 +2810,7 @@ pub mod host_contract {
                 Duration::from_millis(50),
             )
             .await?;
-        let ReplayPageOutcome::Events(page) = empty else {
-            panic!("a granted part with nothing to send is an empty page, got {empty:?}");
-        };
+        let page = events_page(&empty);
         assert!(page.events.is_empty(), "this part has nothing to send");
         assert!(page.drained, "an exhausted replay is the caught-up answer");
         assert!(
@@ -2478,7 +2822,7 @@ pub mod host_contract {
         // Asking again from the returned boundary has nothing to add: the claim was about the
         // range up to it, and re-asking re-derives from durable state rather than trusting it.
         let again = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: granted_empty,
                     cursor: page.resume,
@@ -2488,9 +2832,7 @@ pub mod host_contract {
                 Duration::from_millis(50),
             )
             .await?;
-        let ReplayPageOutcome::Events(again) = again else {
-            panic!("a granted part stays a page, got {again:?}");
-        };
+        let again = events_page(&again);
         assert!(
             again.events.is_empty() && again.drained,
             "nothing new past the boundary a drained page reported"
@@ -2543,7 +2885,7 @@ pub mod host_contract {
         {
             assert!(revision > latest);
             saw_membership_event |= entries.iter().any(|entry| match entry {
-                SubEvent::Changed(changed) => {
+                PartEvent::Changed(changed) => {
                     changed.obj_id == obj && changed.part_ids.contains(&part)
                 }
                 _ => false,
@@ -2632,7 +2974,7 @@ pub mod host_contract {
                     );
                     last_revision = revision;
                     if let Some(changed) = entries.iter().find_map(|entry| match entry {
-                        SubEvent::Changed(changed)
+                        PartEvent::Changed(changed)
                             if changed.obj_id == obj
                                 && changed.part_ids == vec![part_a.clone(), part_b.clone()] =>
                         {
@@ -2661,7 +3003,7 @@ pub mod host_contract {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision > replay_through);
                 assert!(
-                    matches!(entries.as_slice(), [SubEvent::Removed(removed)] if removed.obj_id == obj && removed.part_id == part_a)
+                    matches!(entries.as_slice(), [PartEvent::Removed(removed)] if removed.obj_id == obj && removed.part_id == part_a)
                 );
                 revision
             }
@@ -2754,7 +3096,7 @@ pub mod host_contract {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision > removed_revision);
                 assert!(
-                    matches!(entries.as_slice(), [SubEvent::Changed(changed)] if changed.obj_id == obj)
+                    matches!(entries.as_slice(), [PartEvent::Changed(changed)] if changed.obj_id == obj)
                 );
             }
             other => panic!("expected live revision, got {other:?}"),
@@ -3909,11 +4251,7 @@ pub mod host_contract {
                 reader,
             )
             .await??;
-        loop {
-            if matches!(recv_sub_event(&rx).await?, SubEvent::ReplayComplete) {
-                break;
-            }
-        }
+        wait_replay_complete(&rx).await?;
 
         store
             .set_obj_payload(obj.clone(), payload("readable-subscribe", 1))
@@ -3924,12 +4262,12 @@ pub mod host_contract {
 
         loop {
             match recv_sub_event(&rx).await? {
-                SubEvent::Changed(event) => {
+                PartEvent::Changed(event) => {
                     assert_eq!(event.obj_id, obj);
                     assert!(event.part_ids.contains(&part), "the touched part is named");
                     break;
                 }
-                SubEvent::ReplayComplete | SubEvent::Removed(_) => {}
+                PartEvent::Removed(_) => {}
             }
         }
         Ok(())
@@ -3991,7 +4329,7 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
-            [SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
+            [PartEvent::Changed(changed)] => {
                 assert_eq!(changed.part_ids, vec![part_b.clone()]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("sub-3", 3));
@@ -4005,7 +4343,7 @@ pub mod host_contract {
             .await?;
         let live_evt = recv_sub_event(&rx).await?;
         match live_evt {
-            SubEvent::Changed(transition) => {
+            PartEvent::Changed(transition) => {
                 assert_eq!(transition.part_ids, vec![part_b]);
                 assert_eq!(transition.obj_id, obj);
                 assert_eq!(transition.payload, payload("sub-4", 4));
@@ -4061,18 +4399,12 @@ pub mod host_contract {
         let auth_events = collect_sub_events(&auth_rx).await?;
         assert!(
             auth_events.iter().any(|evt| match evt {
-                SubEvent::Changed(changed) => {
+                PartEvent::Changed(changed) => {
                     changed.obj_id == obj && changed.part_ids == vec![part.clone()]
                 }
                 _ => false,
             }),
             "authorized subscriber must receive the document event during replay; got {auth_events:?}"
-        );
-        assert!(
-            auth_events
-                .iter()
-                .any(|evt| matches!(evt, SubEvent::ReplayComplete)),
-            "authorized subscriber must receive ReplayComplete"
         );
 
         // The denied peer's answer is the responder's verdict, not a filtered stream:
@@ -4084,18 +4416,10 @@ pub mod host_contract {
             cursor: 0,
         };
         let denied_outcome = store
-            .replay_page(
-                target,
-                16,
-                denied_peer.clone(),
-                Duration::from_millis(50),
-            )
+            .replay_page_for_target(target, 16, denied_peer.clone(), Duration::from_millis(50))
             .await?;
         assert!(
-            matches!(
-                denied_outcome,
-                crate::part_store::ReplayPageOutcome::Unauthorized
-            ),
+            matches!(verdict(&denied_outcome), TargetVerdict::Unauthorized),
             "a peer with no access must be refused the target; got {denied_outcome:?}"
         );
         let transition = PartEvent::Changed(ObjChanged {
@@ -4202,7 +4526,7 @@ pub mod host_contract {
         // A change to one object is one logical event, even when it has
         // multiple subscribed part tags.
         let auth_live = recv_sub_event(&auth_rx).await?;
-        let SubEvent::Changed(auth_changed) = auth_live else {
+        let PartEvent::Changed(auth_changed) = auth_live else {
             panic!("authorized subscriber expected Changed, got {auth_live:?}");
         };
         assert_eq!(auth_changed.obj_id, obj);
@@ -4220,7 +4544,7 @@ pub mod host_contract {
         );
 
         let relay_live = recv_sub_event(&relay_rx).await?;
-        let SubEvent::Changed(relay_changed) = relay_live else {
+        let PartEvent::Changed(relay_changed) = relay_live else {
             panic!("relay subscriber expected Changed, got {relay_live:?}");
         };
         assert_eq!(relay_changed.obj_id, obj);
@@ -4247,7 +4571,7 @@ pub mod host_contract {
             cursor: 0,
         };
         let refused = store
-            .replay_page(
+            .replay_page_for_target(
                 denied_target,
                 16,
                 denied_peer.clone(),
@@ -4255,7 +4579,7 @@ pub mod host_contract {
             )
             .await?;
         assert!(
-            matches!(refused, ReplayPageOutcome::Unauthorized),
+            matches!(verdict(&refused), TargetVerdict::Unauthorized),
             "a denied peer must be refused the part's page; got {refused:?}"
         );
         assert!(
@@ -4290,7 +4614,7 @@ pub mod host_contract {
             part_b: PartKey,
             peer: PeerKey,
             live: bool,
-        ) -> Res<Vec<SubEvent>> {
+        ) -> Res<Vec<PartEvent>> {
             store.ensure_part(part_a.clone()).await?;
             store.ensure_part(part_b.clone()).await?;
             for part in [part_a.clone(), part_b.clone()] {
@@ -4409,7 +4733,6 @@ pub mod host_contract {
             requested_parts: BTreeSet<PartKey>,
             state: CanonicalState,
             last_cursor: Option<CursorIndex>,
-            replay_complete_count: u8,
             changed_groups: HashMap<(CursorIndex, ObjKey), BTreeSet<PartKey>>,
             violations: Vec<String>,
         }
@@ -4425,7 +4748,6 @@ pub mod host_contract {
                         live_parts: BTreeSet::new(),
                     },
                     last_cursor: None,
-                    replay_complete_count: 0,
                     changed_groups: HashMap::new(),
                     violations: Vec::new(),
                 }
@@ -4466,12 +4788,9 @@ pub mod host_contract {
                 }
             }
 
-            fn observe(&mut self, event: SubEvent) {
+            fn observe(&mut self, event: PartEvent) {
                 match event {
-                    SubEvent::ReplayComplete => {
-                        self.replay_complete_count = self.replay_complete_count.saturating_add(1);
-                    }
-                    SubEvent::Changed(inner) => {
+                    PartEvent::Changed(inner) => {
                         self.cursor(inner.cursor);
                         if inner.obj_id != self.obj {
                             self.violations.push(format!(
@@ -4487,7 +4806,7 @@ pub mod host_contract {
                             .or_default()
                             .extend(inner.part_ids);
                     }
-                    SubEvent::Removed(inner) => {
+                    PartEvent::Removed(inner) => {
                         self.cursor(inner.cursor);
                         if inner.obj_id != self.obj {
                             self.violations.push(format!(
@@ -4503,12 +4822,6 @@ pub mod host_contract {
 
             fn finish(self, expected: CanonicalState) -> CanonicalState {
                 let mut violations = self.violations;
-                if self.replay_complete_count != 1 {
-                    violations.push(format!(
-                        "expected exactly one ReplayComplete, got {}",
-                        self.replay_complete_count
-                    ));
-                }
                 if self.state != expected {
                     violations.push(format!(
                         "canonical state mismatch: observed {:?}, expected {:?}",
@@ -4527,7 +4840,7 @@ pub mod host_contract {
             obj: ObjKey,
             part_a: PartKey,
             part_b: PartKey,
-            events: Vec<SubEvent>,
+            events: Vec<PartEvent>,
             expected: CanonicalState,
         ) -> CanonicalState {
             let mut ledger = EventLedger::new(mode, obj, part_a, part_b);
@@ -4615,7 +4928,7 @@ pub mod host_contract {
             store: &dyn HostPartStore,
             obj: ObjKey,
             live: bool,
-        ) -> Res<Vec<SubEvent>> {
+        ) -> Res<Vec<PartEvent>> {
             if !live {
                 store
                     .set_obj_payload(obj.clone(), payload("zero-part", 1))
@@ -4661,10 +4974,10 @@ pub mod host_contract {
                 cursor: 0,
             };
             let refused = store
-                .replay_page(target.clone(), 16, peer.clone(), Duration::from_millis(50))
+                .replay_page_for_target(target.clone(), 16, peer.clone(), Duration::from_millis(50))
                 .await?;
             assert!(
-                matches!(refused, ReplayPageOutcome::Unauthorized),
+                matches!(verdict(&refused), TargetVerdict::Unauthorized),
                 "a partless object must not be delivered to a remote subscriber (live={live}); got {refused:?}"
             );
             assert!(
@@ -4684,10 +4997,10 @@ pub mod host_contract {
             if live {
                 store.set_obj_payload(obj, payload("zero-part", 1)).await?;
                 let refused_again = store
-                    .replay_page(target, 16, peer, Duration::from_millis(50))
+                    .replay_page_for_target(target, 16, peer, Duration::from_millis(50))
                     .await?;
                 assert!(
-                    matches!(refused_again, ReplayPageOutcome::Unauthorized),
+                    matches!(verdict(&refused_again), TargetVerdict::Unauthorized),
                     "a partless object stays refused on the live path (live={live}); got {refused_again:?}"
                 );
             }
@@ -4740,7 +5053,7 @@ pub mod host_contract {
             part: PartKey,
             peer: PeerKey,
             live: bool,
-        ) -> Res<Vec<SubEvent>> {
+        ) -> Res<Vec<PartEvent>> {
             store.ensure_part(part.clone()).await?;
             store
                 .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
@@ -4806,7 +5119,7 @@ pub mod host_contract {
             part: PartKey,
             peer: PeerKey,
             live: bool,
-        ) -> Res<Vec<SubEvent>> {
+        ) -> Res<Vec<PartEvent>> {
             store.ensure_part(part.clone()).await?;
             store
                 .set_part_members(part.clone(), HashMap::from([(peer.clone(), Access::Read)]))
@@ -5035,7 +5348,7 @@ pub mod host_contract {
         let changes: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                SubEvent::Changed(changed) if changed.obj_id == obj => Some(changed),
+                PartEvent::Changed(changed) if changed.obj_id == obj => Some(changed),
                 _ => None,
             })
             .collect();
@@ -5154,7 +5467,7 @@ pub mod host_contract {
         let events = collect_sub_events(&rx).await?;
 
         assert!(
-            events.contains(&SubEvent::Removed(ObjRemovedFromPart {
+            events.contains(&PartEvent::Removed(ObjRemovedFromPart {
                 cursor: removed_at,
                 part_id: part_a.clone(),
                 obj_id: obj_a.clone(),
@@ -5164,7 +5477,7 @@ pub mod host_contract {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                SubEvent::Changed(changed)
+                PartEvent::Changed(changed)
                     if changed.obj_id == obj_b && changed.part_ids == vec![part_b.clone()]
             )),
             "a sibling part asking from the lower bound is not dragged up to another target's cursor: {events:?}"
@@ -5281,7 +5594,9 @@ pub mod host_contract {
         let backlog: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                SubEvent::Changed(changed) if changed.obj_id == obj_backlog => Some(changed.cursor),
+                PartEvent::Changed(changed) if changed.obj_id == obj_backlog => {
+                    Some(changed.cursor)
+                }
                 _ => None,
             })
             .collect();
@@ -5612,7 +5927,7 @@ pub mod host_contract {
         async fn next(
             &mut self,
             _limits: RevisionReadLimits,
-        ) -> Res<RevisionRead<FrontierRevision, SubEvent>> {
+        ) -> Res<RevisionRead<FrontierRevision, PartEvent>> {
             if !self.replay_complete {
                 self.replay_complete = true;
                 return Ok(RevisionRead::ReplayComplete { through: 0 });
@@ -5640,7 +5955,6 @@ pub mod host_contract {
         ) -> Res<Result<HashMap<PartKey, PartSummary>, ListPartsError>> {
             Ok(Ok(HashMap::new()))
         }
-
 
         async fn latest_revision(&self) -> Res<CursorIndex> {
             unreachable!("the page path does not read the latest revision")
@@ -5757,7 +6071,7 @@ pub mod host_contract {
     async fn a_held_page_that_delivers_nothing_is_caught_up_by_the_reader() -> Res<()> {
         let store = EmptyLogStore::default();
         let outcome = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: test_part(171),
                     cursor: 7,
@@ -5767,10 +6081,11 @@ pub mod host_contract {
                 Duration::from_millis(20),
             )
             .await?;
-        let ReplayPageOutcome::Events(page) = outcome else {
-            panic!("a readable page answers with events, got {outcome:?}");
-        };
-        assert!(page.events.is_empty(), "the log has nothing for this target");
+        let page = events_page(&outcome);
+        assert!(
+            page.events.is_empty(),
+            "the log has nothing for this target"
+        );
         assert!(
             page.drained,
             "a target with no rows is caught up: the reader reported its replay complete"

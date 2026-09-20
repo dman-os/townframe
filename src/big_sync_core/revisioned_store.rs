@@ -238,7 +238,12 @@ mod tests {
             };
             let mut reader = store.open((), 0).await.unwrap();
             assert_eq!(
-                reader.next(RevisionReadLimits::default()).await.unwrap(),
+                reader
+                    .next(RevisionReadLimits {
+                        max_entries: NonZeroUsize::new(1).expect("literal is non-zero"),
+                    })
+                    .await
+                    .unwrap(),
                 RevisionRead::Entries {
                     revision: 3,
                     entries: vec![1, 2]

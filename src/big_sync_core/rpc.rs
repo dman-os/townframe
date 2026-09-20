@@ -1,6 +1,6 @@
 //! TODO: rate limiting
 
-use serde::{Deserializer, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::interlude::*;
 
@@ -21,7 +21,7 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     fn replay_page<'a>(
         &'a self,
         req: ReplayPageRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<ReplayPageOutcome>>;
+    ) -> K::Future<'a, BigSyncRpcResult<ReplayPage>>;
 
     /// Smart get_changed_buckets. It will dynamically adjust the levels to include
     /// according to change counts [`GetChangedBucketsRequest::since`].
@@ -414,7 +414,7 @@ structstruck::strike! {
 /// events with one position, as `list_events` returns them — so the two are named for what
 /// they carry rather than sharing a shape, and a page over a set never collapses one
 /// target's position into another's.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReplayPage {
     /// The events this page carries, collapsed per object and ordered by position.
     pub events: Vec<PartEvent>,
@@ -422,6 +422,186 @@ pub struct ReplayPage {
     /// that target resumes from.
     pub targets: Vec<(SubscriptionTarget, TargetVerdict)>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReplayPageWire {
+    parts: Vec<PartKey>,
+    objects: Vec<ObjKey>,
+    events: Vec<ReplayEventWire>,
+    targets: Vec<(SubscriptionTarget, TargetVerdict)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum ReplayEventWire {
+    Changed(ReplayChangedWire),
+    Removed(ReplayRemovedWire),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReplayChangedWire {
+    cursor: CursorIndex,
+    object: u32,
+    parts: Vec<u32>,
+    #[serde(
+        serialize_with = "value_as_string",
+        deserialize_with = "value_from_string"
+    )]
+    payload: ObjPayload,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReplayRemovedWire {
+    cursor: CursorIndex,
+    part: u32,
+    object: u32,
+}
+
+fn intern_page_key<K>(
+    key: &K,
+    keys: &mut Vec<K>,
+    indices: &mut std::collections::HashMap<K, u32>,
+) -> u32
+where
+    K: Clone + Eq + std::hash::Hash,
+{
+    if let Some(index) = indices.get(key) {
+        return *index;
+    }
+    let index = u32::try_from(keys.len()).expect("replay page key dictionary exceeds u32");
+    keys.push(key.clone());
+    indices.insert(key.clone(), index);
+    index
+}
+
+impl ReplayPage {
+    /// Conservative encoded page budget used by replay responders.
+    pub const BYTE_BUDGET: usize = 64 * 1024;
+
+    fn to_wire(&self) -> ReplayPageWire {
+        let mut parts = Vec::new();
+        let mut part_indices = std::collections::HashMap::new();
+        let mut objects = Vec::new();
+        let mut object_indices = std::collections::HashMap::new();
+        let events = self
+            .events
+            .iter()
+            .map(|event| match event {
+                PartEvent::Changed(changed) => ReplayEventWire::Changed(ReplayChangedWire {
+                    cursor: changed.cursor,
+                    object: intern_page_key(&changed.obj_id, &mut objects, &mut object_indices),
+                    parts: changed
+                        .part_ids
+                        .iter()
+                        .map(|part| intern_page_key(part, &mut parts, &mut part_indices))
+                        .collect(),
+                    payload: changed.payload.clone(),
+                }),
+                PartEvent::Removed(removed) => ReplayEventWire::Removed(ReplayRemovedWire {
+                    cursor: removed.cursor,
+                    part: intern_page_key(&removed.part_id, &mut parts, &mut part_indices),
+                    object: intern_page_key(&removed.obj_id, &mut objects, &mut object_indices),
+                }),
+            })
+            .collect();
+        ReplayPageWire {
+            parts,
+            objects,
+            events,
+            targets: self.targets.clone(),
+        }
+    }
+
+    /// Size of the page in the postcard representation used by IRPC.
+    pub fn encoded_size(&self) -> Result<usize, String> {
+        postcard::to_allocvec(&self.to_wire())
+            .map(|bytes| bytes.len())
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Serialize for ReplayPage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.to_wire().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplayPage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ReplayPageWire::deserialize(deserializer)?;
+        let mut events = Vec::with_capacity(wire.events.len());
+        for event in wire.events {
+            match event {
+                ReplayEventWire::Changed(changed) => {
+                    let obj_id = wire
+                        .objects
+                        .get(usize::try_from(changed.object).map_err(|_| {
+                            serde::de::Error::custom("replay object index does not fit usize")
+                        })?)
+                        .cloned()
+                        .ok_or_else(|| {
+                            serde::de::Error::custom("replay object index is out of bounds")
+                        })?;
+                    let part_ids = changed
+                        .parts
+                        .into_iter()
+                        .map(|index| {
+                            wire.parts
+                                .get(usize::try_from(index).map_err(|_| {
+                                    serde::de::Error::custom("replay part index does not fit usize")
+                                })?)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    serde::de::Error::custom("replay part index is out of bounds")
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    events.push(PartEvent::Changed(ObjChanged {
+                        cursor: changed.cursor,
+                        part_ids,
+                        obj_id,
+                        payload: changed.payload,
+                    }));
+                }
+                ReplayEventWire::Removed(removed) => {
+                    let obj_id = wire
+                        .objects
+                        .get(usize::try_from(removed.object).map_err(|_| {
+                            serde::de::Error::custom("replay object index does not fit usize")
+                        })?)
+                        .cloned()
+                        .ok_or_else(|| {
+                            serde::de::Error::custom("replay object index is out of bounds")
+                        })?;
+                    let part_id = wire
+                        .parts
+                        .get(usize::try_from(removed.part).map_err(|_| {
+                            serde::de::Error::custom("replay part index does not fit usize")
+                        })?)
+                        .cloned()
+                        .ok_or_else(|| {
+                            serde::de::Error::custom("replay part index is out of bounds")
+                        })?;
+                    events.push(PartEvent::Removed(ObjRemovedFromPart {
+                        cursor: removed.cursor,
+                        part_id,
+                        obj_id,
+                    }));
+                }
+            }
+        }
+        Ok(Self {
+            events,
+            targets: wire.targets,
+        })
+    }
+}
+
 fn value_as_string<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -435,44 +615,6 @@ where
 {
     let str = String::deserialize(deserializer)?;
     serde_json::from_str(&str).map_err(serde::de::Error::custom)
-}
-
-structstruck::strike! {
-    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
-    pub enum SubEvent {
-        Changed(ObjChanged),
-        Removed(ObjRemovedFromPart),
-        ReplayComplete,
-    }
-}
-
-impl From<PartEvent> for SubEvent {
-    fn from(evt: PartEvent) -> Self {
-        match evt {
-            PartEvent::Changed(inner) => Self::Changed(inner),
-            PartEvent::Removed(inner) => Self::Removed(inner),
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl ReplayPage {
-    /// The answer of a round that named exactly one target, as one page.
-    ///
-    /// Test support: a round carries a verdict per target, so a test that asked about one
-    /// target reads its verdict as the single answer it is asserting on. Panics if the page
-    /// does not carry exactly one target, or if that target was not answered with events.
-    pub fn sole_target_answer(&self) -> PartPage {
-        assert_eq!(self.targets.len(), 1, "one target was asked about");
-        match &self.targets[0].1 {
-            TargetVerdict::Events { resume, drained } => PartPage {
-                events: self.events.clone(),
-                resume: *resume,
-                drained: *drained,
-            },
-            other => panic!("one target was answered with events, got {other:?}"),
-        }
-    }
 }
 
 impl ReplayPage {
@@ -500,9 +642,7 @@ impl PartEvent {
 /// The id is the caller's own: a peer names it in [`CancelReplayRequest`] to cancel
 /// exactly that request, and the responder remembers nothing about it past the
 /// request's lifetime.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ReplayRequestId(pub u64);
 
 /// A request for one bounded page over a set of targets.
@@ -543,18 +683,16 @@ pub struct ReplayPageRequest {
     pub hold_ms: u32,
 }
 
-/// What a page request answered: one bounded page over the requested targets.
-///
-/// The page itself is the answer, so the wire signatures that name an answer type name
-/// this one.
-pub type ReplayPageOutcome = ReplayPage;
-
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
 )]
 pub enum RpcError {
     /// TransportError
     TransportError,
+    /// InvalidRequest {0}
+    InvalidRequest(String),
+    /// Internal
+    Internal,
 }
 
 #[derive(
@@ -566,3 +704,53 @@ pub enum ListPartsError {
 }
 
 pub type BigSyncRpcResult<T> = Result<T, RpcError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_page_compact_wire_round_trips_and_deduplicates_keys() {
+        let obj = ObjKey::new(b"object-with-variable-length-key");
+        let part = PartKey::new(b"part-with-variable-length-key");
+        let page = ReplayPage {
+            events: vec![
+                PartEvent::Changed(ObjChanged {
+                    cursor: 3,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"value": 1}),
+                }),
+                PartEvent::Removed(ObjRemovedFromPart {
+                    cursor: 4,
+                    part_id: part,
+                    obj_id: obj,
+                }),
+            ],
+            targets: Vec::new(),
+        };
+        let wire = page.to_wire();
+        assert_eq!(wire.objects.len(), 1);
+        assert_eq!(wire.parts.len(), 1);
+        let encoded = postcard::to_allocvec(&page).expect("encode replay page");
+        let decoded: ReplayPage = postcard::from_bytes(&encoded).expect("decode replay page");
+        assert_eq!(decoded, page);
+    }
+
+    #[test]
+    fn replay_page_rejects_invalid_dictionary_indices() {
+        let wire = ReplayPageWire {
+            parts: Vec::new(),
+            objects: vec![ObjKey::new(b"object")],
+            events: vec![ReplayEventWire::Removed(ReplayRemovedWire {
+                cursor: 1,
+                part: 0,
+                object: 1,
+            })],
+            targets: Vec::new(),
+        };
+        let encoded = postcard::to_allocvec(&wire).expect("encode invalid replay page");
+        let error = postcard::from_bytes::<ReplayPage>(&encoded).expect_err("invalid index");
+        assert!(!error.to_string().is_empty());
+    }
+}

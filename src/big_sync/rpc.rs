@@ -1,12 +1,12 @@
 use crate::interlude::*;
 
-use crate::part_store::{HostPartStore, ReadTarget};
+use crate::part_store::{HostPartStore, ReadTarget, validate_replay_targets};
 
 use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPage,
-    ReplayPageOutcome, ReplayPageRequest, TargetVerdict,
+    ReplayPageRequest, RpcError, TargetVerdict,
 };
 use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
@@ -95,7 +95,7 @@ pub trait WireBigSyncRpcClient: Send + Sync {
     async fn replay_page(
         &self,
         req: ScopedRequest<ReplayPageRequest>,
-    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
+    ) -> Res<BigSyncRpcResult<ReplayPage>>;
 
     async fn get_changed_buckets(
         &self,
@@ -130,10 +130,7 @@ impl HostBigRpcClient for ScopedRpcClient {
             .await
     }
 
-    async fn replay_page(
-        &self,
-        req: ReplayPageRequest,
-    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>> {
+    async fn replay_page(&self, req: ReplayPageRequest) -> Res<BigSyncRpcResult<ReplayPage>> {
         self.inner
             .replay_page(ScopedRequest {
                 scope_key: Arc::clone(&self.scope_key),
@@ -174,8 +171,7 @@ pub trait HostBigRpcClient: Send + Sync {
         req: PeerSummaryRequest,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
 
-    async fn replay_page(&self, req: ReplayPageRequest)
-    -> Res<BigSyncRpcResult<ReplayPageOutcome>>;
+    async fn replay_page(&self, req: ReplayPageRequest) -> Res<BigSyncRpcResult<ReplayPage>>;
 
     async fn get_changed_buckets(
         &self,
@@ -193,7 +189,7 @@ pub trait HostBigRpcClient: Send + Sync {
 pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
     PeerSummary(ScopedRequest<PeerSummaryRequest>),
-    #[rpc(tx = channel::oneshot::Sender<ReplayPageOutcome>)]
+    #[rpc(tx = channel::oneshot::Sender<Result<ReplayPage, RpcError>>)]
     ReplayPage(ScopedRequest<ReplayPageRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<Vec<BucketSummary>, ListPartsError>>)]
     GetChangedBuckets(ScopedRequest<GetChangedBucketsRequest>),
@@ -379,7 +375,7 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
     async fn replay_page(
         &self,
         req: ScopedRequest<ReplayPageRequest>,
-    ) -> Res<BigSyncRpcResult<ReplayPageOutcome>> {
+    ) -> Res<BigSyncRpcResult<ReplayPage>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
             Err(err) => {
@@ -387,7 +383,7 @@ impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
                 return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
             }
         };
-        Ok(Ok(response))
+        Ok(response)
     }
 
     async fn get_changed_buckets(
@@ -426,7 +422,7 @@ struct BigSyncRpcWorker {
     /// inserted when the request starts, removed when it answers — so a peer can only ever name
     /// its own in-flight requests, and nothing outlives the request it belongs to.
     replay_cancels: std::sync::Mutex<
-        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, CancellationToken>>,
+        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>,
     >,
 }
 
@@ -440,7 +436,7 @@ impl BigSyncRpcWorker {
         &self,
     ) -> std::sync::MutexGuard<
         '_,
-        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, CancellationToken>>,
+        HashMap<PeerKey, HashMap<big_sync_core::rpc::ReplayRequestId, Arc<CancellationToken>>>,
     > {
         self.replay_cancels
             .lock()
@@ -457,21 +453,33 @@ impl BigSyncRpcWorker {
         peer: &PeerKey,
         request_id: big_sync_core::rpc::ReplayRequestId,
         cancel: CancellationToken,
-    ) {
+    ) -> Arc<CancellationToken> {
+        let cancel = Arc::new(cancel);
         let mut cancels = self.replay_cancels();
         let per_peer = cancels.entry(peer.clone()).or_default();
-        if let Some(previous) = per_peer.insert(request_id, cancel) {
+        if let Some(previous) = per_peer.insert(request_id, Arc::clone(&cancel)) {
             previous.cancel();
         }
+        cancel
     }
 
-    /// Drop a request's registration once it has answered.
-    fn forget_replay_request(&self, peer: &PeerKey, request_id: big_sync_core::rpc::ReplayRequestId) {
+    /// Drop a request's registration once it has answered, but only if this request still owns it.
+    fn forget_replay_request(
+        &self,
+        peer: &PeerKey,
+        request_id: big_sync_core::rpc::ReplayRequestId,
+        registration: &Arc<CancellationToken>,
+    ) {
         let mut cancels = self.replay_cancels();
         if let Some(per_peer) = cancels.get_mut(peer) {
-            per_peer.remove(&request_id);
-            if per_peer.is_empty() {
-                cancels.remove(peer);
+            let owned = per_peer
+                .get(&request_id)
+                .is_some_and(|current| Arc::ptr_eq(current, registration));
+            if owned {
+                per_peer.remove(&request_id);
+                if per_peer.is_empty() {
+                    cancels.remove(peer);
+                }
             }
         }
     }
@@ -599,6 +607,13 @@ impl BigSyncRpcWorker {
                     limit,
                     hold_ms,
                 } = inner.inner;
+                if let Err(err) = validate_replay_targets(&targets) {
+                    tx.send(Err(RpcError::InvalidRequest(err.to_string())))
+                        .await
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
+                    return;
+                }
                 // An unauthenticated caller is not a special case of "nothing to send": every
                 // target it named is unauthorized, and the page says so per target.
                 let Some(subscriber) = authenticated_peer else {
@@ -607,10 +622,10 @@ impl BigSyncRpcWorker {
                         .into_iter()
                         .map(|target| (target, TargetVerdict::Unauthorized))
                         .collect();
-                    tx.send(ReplayPage {
+                    tx.send(Ok(ReplayPage {
                         events: Vec::new(),
                         targets,
-                    })
+                    }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -622,10 +637,10 @@ impl BigSyncRpcWorker {
                         .into_iter()
                         .map(|target| (target, TargetVerdict::UnknownPart))
                         .collect();
-                    tx.send(ReplayPage {
+                    tx.send(Ok(ReplayPage {
                         events: Vec::new(),
                         targets,
-                    })
+                    }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -635,12 +650,12 @@ impl BigSyncRpcWorker {
                 // that a request superseding it reaches this request's task. The responder
                 // only ever drops a request that is still waiting: one whose read already
                 // produced rows ships them.
-                let cancel = CancellationToken::new();
-                self.register_replay_request(&subscriber, request_id, cancel.clone());
+                let cancel =
+                    self.register_replay_request(&subscriber, request_id, CancellationToken::new());
                 if let Some(superseded) = supersede {
                     self.cancel_replay_request(&subscriber, superseded);
                 }
-                let out = store
+                let out = match store
                     .replay_page_round(
                         ReplayPageRequest {
                             request_id,
@@ -651,11 +666,17 @@ impl BigSyncRpcWorker {
                         },
                         subscriber.clone(),
                         Duration::from_millis(u64::from(hold_ms)).min(MAX_PAGE_HOLD),
-                        cancel,
+                        cancel.as_ref().clone(),
                     )
                     .await
-                    .unwrap();
-                self.forget_replay_request(&subscriber, request_id);
+                {
+                    Ok(page) => Ok(page),
+                    Err(err) => {
+                        tracing::error!(error = ?err, "replay page failed");
+                        Err(RpcError::Internal)
+                    }
+                };
+                self.forget_replay_request(&subscriber, request_id, &cancel);
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -733,7 +754,8 @@ mod tests {
     use crate::part_store::HostPartStore;
     use crate::part_store::memory::MemoryPartStore;
     use big_sync_core::rpc::{
-        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, SubscriptionTarget,
+        LeafBucketRequest, PartEvent, ReplayPageRequest, ReplayRequestId, RpcError,
+        SubscriptionTarget,
     };
     use big_sync_core::{BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey};
     use iroh::protocol::Router;
@@ -752,8 +774,10 @@ mod tests {
         let older = CancellationToken::new();
         let newer = CancellationToken::new();
 
-        worker.register_replay_request(&peer, ReplayRequestId(3), older.clone());
-        worker.register_replay_request(&peer, ReplayRequestId(3), newer.clone());
+        let older_registration =
+            worker.register_replay_request(&peer, ReplayRequestId(3), older.clone());
+        let newer_registration =
+            worker.register_replay_request(&peer, ReplayRequestId(3), newer.clone());
 
         assert!(
             older.is_cancelled(),
@@ -764,10 +788,17 @@ mod tests {
             "the newer request keeps its own cancellation live"
         );
 
-        // Answering, cancelling and forgetting an id that is not in flight are all no-ops.
-        worker.forget_replay_request(&peer, ReplayRequestId(3));
+        // The old request can finish after the replacement was installed, but must not erase it.
+        worker.forget_replay_request(&peer, ReplayRequestId(3), &older_registration);
         worker.cancel_replay_request(&peer, ReplayRequestId(3));
-        worker.forget_replay_request(&peer, ReplayRequestId(9));
+        assert!(
+            newer.is_cancelled(),
+            "the old request cannot erase the newer registration"
+        );
+
+        // Forgetting the current registration and touching an unknown id are no-ops afterward.
+        worker.forget_replay_request(&peer, ReplayRequestId(3), &newer_registration);
+        worker.forget_replay_request(&peer, ReplayRequestId(9), &older_registration);
     }
 
     /// A panic taken while the registry was held must not turn one bad request into every later
@@ -788,7 +819,7 @@ mod tests {
             "the test's own panic is what leaves the registry poisoned"
         );
 
-        worker.register_replay_request(
+        let _registration = worker.register_replay_request(
             &PeerKey::new([8u8; 32]),
             ReplayRequestId(1),
             CancellationToken::new(),
@@ -946,10 +977,10 @@ mod tests {
     async fn replay_page_answer(
         caller: Caller<'_>,
         req: ScopedRequest<ReplayPageRequest>,
-    ) -> Res<ReplayPageOutcome> {
+    ) -> Res<ReplayPage> {
         Ok(match caller {
             Caller::Peer(client) => client.replay_page(req).await??,
-            Caller::Unauthenticated(client) => client.rpc(req).await?,
+            Caller::Unauthenticated(client) => client.rpc(req).await??,
         })
     }
 
@@ -1204,19 +1235,29 @@ mod tests {
             .await?
             .expect("a granted part answers a leaf walk");
         let expected_page = store
-            .replay_page(
-                page_target.clone(),
-                16,
+            .replay_page_round(
+                ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(0),
+                    supersede: None,
+                    targets: vec![page_target.clone()],
+                    limit: 16,
+                    hold_ms: 250,
+                },
                 granted_peer.clone(),
                 Duration::from_millis(250),
+                CancellationToken::new(),
             )
             .await?;
-        let crate::part_store::ReplayPageOutcome::Events(expected_page) = expected_page else {
-            panic!("a granted page carries events");
-        };
         assert!(
             !expected_page.events.is_empty(),
             "the granted page carries the seeded events"
+        );
+        assert!(
+            matches!(
+                expected_page.verdict(&page_target),
+                Some(TargetVerdict::Events { .. })
+            ),
+            "the granted page carries an events verdict"
         );
 
         // The table: one row per caller, and every arm is asserted for that caller.
@@ -1317,15 +1358,16 @@ mod tests {
             )
             .await?;
 
+        let target = SubscriptionTarget::Part {
+            part_id: part_id.clone(),
+            cursor: 0,
+        };
         let page_request = |request_id: u64, supersede: Option<u64>, hold_ms: u32| ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
                 request_id: big_sync_core::rpc::ReplayRequestId(request_id),
                 supersede: supersede.map(big_sync_core::rpc::ReplayRequestId),
-                targets: vec![SubscriptionTarget::Part {
-                    part_id: part_id.clone(),
-                    cursor: 0,
-                }],
+                targets: vec![target.clone()],
                 limit: 16,
                 hold_ms,
             },
@@ -1355,25 +1397,68 @@ mod tests {
             "a parked page must not serialize the next request behind its hold, waited {:?}",
             started.elapsed()
         );
-        let page = fresh.sole_target_answer();
-        assert!(page.events.is_empty(), "the part still has nothing to send");
+        assert!(
+            fresh.events.is_empty(),
+            "the part still has nothing to send"
+        );
+        assert!(
+            matches!(fresh.verdict(&target), Some(TargetVerdict::Events { .. })),
+            "the fresh page carries an events verdict"
+        );
 
         // The supersede reached the parked request's own task: it answers instead of
         // waiting out the rest of its hold.
         let released = tokio::time::timeout(Duration::from_secs(3), held)
             .await
             .expect("a superseded request stops waiting instead of holding to its deadline")??;
-        let released = released.sole_target_answer();
         assert!(
             released.events.is_empty(),
             "the released page carries nothing to send"
         );
+        assert!(
+            matches!(
+                released.verdict(&target),
+                Some(TargetVerdict::Events { .. })
+            ),
+            "the released page carries an events verdict"
+        );
 
         // The registry is still usable after the release: a drain-only request answers.
-        let after = granted.replay_page(page_request(2, None, 0)).await??;
+        let self_superseded = granted
+            .replay_page(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(2),
+                    supersede: Some(big_sync_core::rpc::ReplayRequestId(2)),
+                    targets: vec![SubscriptionTarget::Part {
+                        part_id: part_id.clone(),
+                        cursor: 0,
+                    }],
+                    limit: 16,
+                    hold_ms: 0,
+                },
+            })
+            .await??;
+        assert!(self_superseded.events.is_empty());
+        assert!(matches!(
+            self_superseded.verdict(&SubscriptionTarget::Part {
+                part_id: part_id.clone(),
+                cursor: 0,
+            }),
+            Some(TargetVerdict::Events {
+                resume: 0,
+                drained: false
+            })
+        ));
+
+        let after = granted.replay_page(page_request(3, None, 0)).await??;
         assert!(
-            after.sole_target_answer().events.is_empty(),
+            after.events.is_empty(),
             "the dispatch loop still serves a request after a supersede"
+        );
+        assert!(
+            matches!(after.verdict(&target), Some(TargetVerdict::Events { .. })),
+            "the dispatch loop still serves a target verdict after a supersede"
         );
 
         rpc_stop.stop().await?;
@@ -1417,65 +1502,86 @@ mod tests {
             )
             .await?;
 
+        let target = SubscriptionTarget::Part {
+            part_id: part_id.clone(),
+            cursor: 0,
+        };
         let page_request = |hold_ms: u32, limit: u32| ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
                 request_id: big_sync_core::rpc::ReplayRequestId(0),
                 supersede: None,
-                targets: vec![SubscriptionTarget::Part {
-                    part_id: part_id.clone(),
-                    cursor: 0,
-                }],
+                targets: vec![target.clone()],
                 limit,
                 hold_ms,
             },
         };
+        let invalid = granted
+            .replay_page(ScopedRequest {
+                scope_key: Arc::from("test-scope"),
+                inner: ReplayPageRequest {
+                    request_id: big_sync_core::rpc::ReplayRequestId(9),
+                    supersede: None,
+                    targets: vec![
+                        target.clone(),
+                        SubscriptionTarget::Part {
+                            part_id: part_id.clone(),
+                            cursor: 1,
+                        },
+                    ],
+                    limit: 16,
+                    hold_ms: 0,
+                },
+            })
+            .await?
+            .expect_err("duplicate logical routes are invalid input");
+        assert!(matches!(
+            invalid,
+            RpcError::InvalidRequest(reason) if reason.contains("logical route")
+        ));
 
         // A page that carries nothing without the replay half reporting completion is not
         // a verdict: it answers `drained: false` and carries the caller's own cursor. A
         // zero limit reaches that branch without draining anything, which is the same
         // answer a page that runs out of its hold gives.
         let undrained = granted.replay_page(page_request(50, 0)).await??;
-        let undrained = undrained.sole_target_answer();
         assert!(
             undrained.events.is_empty(),
             "a page that carries nothing has no events"
         );
+        let Some(TargetVerdict::Events { resume, drained }) = undrained.verdict(&target) else {
+            panic!("a bounded page must carry an events verdict");
+        };
         assert!(
-            !undrained.drained,
+            !drained,
             "a page that carried nothing is not a caught-up verdict"
         );
-        assert_eq!(
-            undrained.resume, 0,
-            "and it resumes from the caller's own cursor"
-        );
+        assert_eq!(*resume, 0, "and it resumes from the caller's own cursor");
 
         // Nothing has joined the part, so this page can only leave on its hold — and
         // this time the replay half has reported completion, which *is* the caught-up
         // verdict.
         let quiet = granted.replay_page(page_request(50, 16)).await??;
-        let quiet = quiet.sole_target_answer();
         assert!(quiet.events.is_empty(), "a quiet part carries no events");
-        assert!(
-            quiet.drained,
-            "a quiet part whose replay completed is caught up"
-        );
-        assert_eq!(
-            quiet.resume, 0,
-            "and it resumes from the caller's own cursor"
-        );
+        let Some(TargetVerdict::Events { resume, drained }) = quiet.verdict(&target) else {
+            panic!("a quiet page must carry an events verdict");
+        };
+        assert!(*drained, "a quiet part whose replay completed is caught up");
+        assert_eq!(*resume, 0, "and it resumes from the caller's own cursor");
 
         // The event that lands after the quiet page is still the caller's to fetch, from
         // the cursor the caller already holds.
         seed_test_store(&store, part_id.clone()).await?;
         let late = granted.replay_page(page_request(250, 16)).await??;
-        let late = late.sole_target_answer();
         assert!(
             !late.events.is_empty(),
             "the event written after the quiet page must still be fetchable",
         );
+        let Some(TargetVerdict::Events { drained, .. }) = late.verdict(&target) else {
+            panic!("a late page must carry an events verdict");
+        };
         assert!(
-            late.drained,
+            *drained,
             "the page ran to the end of the log, so it is caught up"
         );
         // The write's own touch has to be fetchable. The page may also carry the
@@ -1493,28 +1599,29 @@ mod tests {
         // page that stops on its own limit is not caught up, because backlog
         // remains, and the caller asks again from the cursor it got back.
         let truncated = granted.replay_page(page_request(250, 1)).await??;
-        let truncated = truncated.sole_target_answer();
         assert_eq!(
             truncated.events.len(),
             1,
             "a one-event page carries one event"
         );
-        assert!(
-            !truncated.drained,
-            "a page that stopped on its limit leaves backlog"
-        );
+        let Some(TargetVerdict::Events { drained, .. }) = truncated.verdict(&target) else {
+            panic!("a truncated page must carry an events verdict");
+        };
+        assert!(!drained, "a page that stopped on its limit leaves backlog");
 
         // `hold_ms == 0` is a drain-only request: it answers out of the log and
         // never enters the wait, so it cannot take its hold's worth of time.
         let started = std::time::Instant::now();
         let drain_only = granted.replay_page(page_request(0, 16)).await??;
-        let drain_only = drain_only.sole_target_answer();
         assert!(
             !drain_only.events.is_empty(),
             "a drain-only page still carries the backlog"
         );
+        let Some(TargetVerdict::Events { drained, .. }) = drain_only.verdict(&target) else {
+            panic!("a drain-only page must carry an events verdict");
+        };
         assert!(
-            drain_only.drained,
+            *drained,
             "a drain-only page still reports the reader's caught-up verdict"
         );
         assert!(

@@ -10,9 +10,6 @@ pub mod backend;
 pub mod delta_walker_state;
 pub mod keyed_frontier;
 mod part_store;
-/// The single-target answer shape the part-store contract tests assert.
-#[cfg(any(test, feature = "test-support"))]
-pub use part_store::ReplayPageOutcome;
 pub mod rpc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stress_support;
@@ -37,7 +34,7 @@ pub use delta_walker_state::{SqliteDeltaWalkerStateRepo, SqliteDeltaWalkerStateT
 #[cfg(feature = "test-support")]
 pub use part_store::host_contract as host_part_store_contract;
 #[cfg(feature = "test-support")]
-pub use part_store::host_contract::HostPartStoreContractHarness;
+pub use part_store::host_contract::{HostPartStoreContractHarness, SingleTargetPageStore};
 pub use part_store::memory::MemoryPartStore;
 pub use part_store::sqlite::{
     SqlitePartStore, open_sqlite_revision_reader, open_sqlite_revision_reader_all,

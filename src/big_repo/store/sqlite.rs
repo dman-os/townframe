@@ -7,7 +7,7 @@ use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
-    SubEvent, SubPartsRequest,
+    SubPartsRequest,
 };
 use big_sync_core::{BuckId, ByteKey, Fingerprint};
 use futures::future::BoxFuture;
@@ -68,7 +68,6 @@ pub(crate) enum TreeStorageMutation {
     DeleteAllCommits,
     DeleteAllFragments,
 }
-
 
 /// One node's Keyhive ingestion ledger.
 ///
@@ -443,41 +442,36 @@ impl SqliteBigRepoStore {
         SqliteCore::next_cursor(tx).await
     }
 
-
-    fn event_kind(event: &SubEvent) -> &'static str {
+    fn event_kind(event: &PartEvent) -> &'static str {
         match event {
-            SubEvent::Changed(_) => "changed",
-            SubEvent::Removed(_) => "removed",
-            SubEvent::ReplayComplete => "replay_complete",
+            PartEvent::Changed(_) => "changed",
+            PartEvent::Removed(_) => "removed",
         }
     }
 
     /// Payload-free description of an event, for diagnostics that must not
     /// spill object content into logs.
-    fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartKey>) {
+    fn event_diagnostic(event: &PartEvent) -> (CursorIndex, Vec<PartKey>) {
         match event {
-            SubEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
-            SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id.clone()]),
-            SubEvent::ReplayComplete => (CursorIndex::default(), Vec::new()),
+            PartEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
+            PartEvent::Removed(inner) => (inner.cursor, vec![inner.part_id.clone()]),
         }
     }
 
-    async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
+    async fn publish(&self, events: Vec<PartEvent>) -> Res<()> {
         // Events reach readers through the durable frontier: the write that produced
         // them bumped the scope's revision, and this wake is what tells a waiting
         // reader to look again. Nothing is routed and nobody is registered — a reader
         // holds no subscription — so the only thing a publish owes anyone is the
         // signal itself.
         for event in events {
-            if !matches!(event, SubEvent::ReplayComplete) {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store published event",
-                );
-            }
+            let (cursor, part_ids) = Self::event_diagnostic(&event);
+            tracing::debug!(
+                ?cursor,
+                ?part_ids,
+                event_kind = Self::event_kind(&event),
+                "part-store published event",
+            );
         }
         self.local_revision_wakeups.notify_waiters();
         Ok(())

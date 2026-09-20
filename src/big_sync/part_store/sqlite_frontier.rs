@@ -1,7 +1,9 @@
 //! SQLite facade joining the keyed-frontier read and write halves.
 
 use super::PartFrontierKey;
-use super::sqlite_read::{SqliteFrontierRow, SqlitePartSelector, part_query_rows};
+use super::sqlite_read::{
+    SqliteFrontierRow, SqlitePartSelector, part_query_rows, part_query_rows_with_byte_budget,
+};
 use super::sqlite_write::SqliteFrontierWrite;
 use crate::keyed_frontier::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
 use big_sync_core::keyed_frontier::{
@@ -71,6 +73,31 @@ impl SqliteReadSource for SqlitePartFrontier {
 
     fn changed(&self) -> &Notify {
         &self.changed
+    }
+
+    fn fetch_rows_with_byte_budget<'a>(
+        &'a self,
+        selector: &'a SqlitePartSelector,
+        after: FrontierRevision,
+        through: FrontierRevision,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(Vec<Self::Row>, FrontierRevision), SqliteReadError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(part_query_rows_with_byte_budget(
+            self,
+            self.scope_id,
+            selector,
+            after,
+            through,
+            max_entries,
+            max_bytes,
+        ))
     }
 
     fn initial_after(&self, selector: &SqlitePartSelector) -> FrontierRevision {

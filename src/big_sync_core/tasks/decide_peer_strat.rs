@@ -401,7 +401,7 @@ mod tests {
         fn replay_page<'a>(
             &'a self,
             _req: crate::rpc::ReplayPageRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<crate::rpc::ReplayPageOutcome>> {
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<crate::rpc::ReplayPage>> {
             unreachable!("the decision task does not page events")
         }
 

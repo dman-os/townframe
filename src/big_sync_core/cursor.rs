@@ -58,6 +58,9 @@ pub struct CursorSyncMachine {
     /// object for good — every later delivery read as "not newer" and nothing
     /// re-emitted it.
     object_replays: HashMap<ObjKey, ObjectReplay>,
+    /// The newest cursor scanned for each part route. This is a scheduling cursor,
+    /// distinct from the applied watermark owned by `jobs`.
+    part_replay_cursors: HashMap<PartKey, CursorIndex>,
     /// Per-part slot bookkeeping AND the obj-job aggregation gating it: the
     /// [`WatermarkMachine`] primitive rather than a machine-local copy, so
     /// "what is outstanding, what has settled, when may the cursor advance"
@@ -79,9 +82,11 @@ pub struct CursorSyncMachine {
 ///
 /// `acknowledged` is the newest cursor whose replay the backend completed. It is
 /// the only cursor that may suppress a re-delivery: the backend observed that
-/// replay and decided what the object needed. It is also the position an object
-/// route resumes from — the route carries it to the store, which would otherwise
-/// replay the object's derived part from the start on every page.
+/// replay and decided what the object needed.
+///
+/// `replay_cursor` is the newest cursor scanned by the responder. It is separate
+/// from `acknowledged`, so a page can make scheduling progress without claiming
+/// that the backend applied the work.
 ///
 /// `in_flight` is the newest cursor emitted and still owed. It only collapses a
 /// burst of duplicate deliveries of the *same* cursor into one job; the claim is
@@ -89,14 +94,48 @@ pub struct CursorSyncMachine {
 /// when the job dies without one.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ObjectReplay {
+    /// The newest cursor the backend has acknowledged as applied.
     acknowledged: CursorIndex,
+    /// The newest cursor the replay responder has scanned for this object route.
+    /// This may be ahead of `acknowledged` while work is pending.
+    replay_cursor: CursorIndex,
     in_flight: Option<CursorIndex>,
 }
 
 impl CursorSyncMachine {
     pub(crate) fn remove_part(&mut self, part_id: PartKey) {
         // Drops the part's slot book and every waiter that gated only it.
-        self.jobs.retire_stream(part_id);
+        self.jobs.retire_stream(part_id.clone());
+        self.part_replay_cursors.remove(&part_id);
+    }
+
+    /// Number of replay work units admitted by this cursor machine but not yet
+    /// settled. This is deliberately independent of the task scheduler's live
+    /// capacity: the outer machine uses it only as a replay receive window.
+    pub(crate) fn pending_replay_work(&self) -> usize {
+        self.jobs.pending_jobs().len()
+            + self
+                .object_replays
+                .values()
+                .filter(|replay| replay.in_flight.is_some())
+                .count()
+    }
+
+    pub(crate) fn part_replay_cursor(
+        &self,
+        part_id: &PartKey,
+        applied: CursorIndex,
+    ) -> CursorIndex {
+        self.part_replay_cursors
+            .get(part_id)
+            .copied()
+            .unwrap_or(applied)
+            .max(applied)
+    }
+
+    pub(crate) fn advance_part_replay_cursor(&mut self, part_id: PartKey, cursor: CursorIndex) {
+        let entry = self.part_replay_cursors.entry(part_id).or_default();
+        *entry = (*entry).max(cursor);
     }
 
     /// Release the *claim* an object's replay held because the job that owed it is
@@ -112,6 +151,7 @@ impl CursorSyncMachine {
     pub(crate) fn abandon_obj_sync(&mut self, obj_id: &ObjKey) {
         if let Some(replay) = self.object_replays.get_mut(obj_id) {
             replay.in_flight = None;
+            replay.replay_cursor = replay.acknowledged;
         }
     }
 
@@ -124,8 +164,13 @@ impl CursorSyncMachine {
     pub(crate) fn obj_resume_cursor(&self, obj_id: &ObjKey) -> CursorIndex {
         self.object_replays
             .get(obj_id)
-            .map(|replay| replay.acknowledged)
+            .map(|replay| replay.replay_cursor)
             .unwrap_or_default()
+    }
+
+    pub(crate) fn advance_obj_replay_cursor(&mut self, obj_id: ObjKey, cursor: CursorIndex) {
+        let replay = self.object_replays.entry(obj_id).or_default();
+        replay.replay_cursor = replay.replay_cursor.max(cursor);
     }
 
     /// Whether `(obj_id, cursor)` still owes `kind` on some part.
@@ -189,13 +234,13 @@ impl CursorSyncMachine {
     }
     pub fn on_subscription_evt(
         &mut self,
-        evt: crate::rpc::SubEvent,
+        evt: crate::rpc::PartEvent,
         out: &mut Vec<CursorMachineCommand>,
     ) {
         use crate::rpc::*;
 
         match evt {
-            SubEvent::Changed(evt) => {
+            PartEvent::Changed(evt) => {
                 tracing::trace!(
                     ?evt.obj_id,
                     ?evt.cursor,
@@ -255,7 +300,7 @@ impl CursorSyncMachine {
                     remote_payload: evt.payload,
                 });
             }
-            SubEvent::Removed(evt) => {
+            PartEvent::Removed(evt) => {
                 tracing::trace!(
                     ?evt.obj_id,
                     ?evt.cursor,
@@ -278,7 +323,6 @@ impl CursorSyncMachine {
                     part_id: evt.part_id,
                 });
             }
-            SubEvent::ReplayComplete => unreachable!(),
         }
     }
 
@@ -306,6 +350,7 @@ impl CursorSyncMachine {
             if cursor > replay.acknowledged {
                 replay.acknowledged = cursor;
             }
+            replay.replay_cursor = replay.replay_cursor.max(cursor);
             if replay
                 .in_flight
                 .is_some_and(|in_flight| cursor >= in_flight)
@@ -380,7 +425,7 @@ impl CursorSyncMachine {
 mod tests {
     use super::*;
     use crate::ByteKey;
-    use crate::rpc::{ObjChanged, ObjRemovedFromPart, SubEvent};
+    use crate::rpc::{ObjChanged, ObjRemovedFromPart, PartEvent};
 
     fn obj(seed: u8) -> ObjKey {
         ObjKey(ByteKey::new([seed; 32]))
@@ -392,8 +437,8 @@ mod tests {
 
     /// A membership touch: the object is present in `parts` as of `cursor`. There is no
     /// separate "added" kind, so a first membership and a changed one are the same event.
-    fn touched(cursor: CursorIndex, obj_id: &ObjKey, parts: &[PartKey]) -> SubEvent {
-        SubEvent::Changed(ObjChanged {
+    fn touched(cursor: CursorIndex, obj_id: &ObjKey, parts: &[PartKey]) -> PartEvent {
+        PartEvent::Changed(ObjChanged {
             cursor,
             part_ids: parts.to_vec(),
             obj_id: obj_id.clone(),
@@ -403,8 +448,8 @@ mod tests {
 
     /// A touch that names no part cursor: the object is the target, so its own
     /// cursor is the only thing that can order the replay.
-    fn touched_obj_only(cursor: CursorIndex, obj_id: &ObjKey) -> SubEvent {
-        SubEvent::Changed(ObjChanged {
+    fn touched_obj_only(cursor: CursorIndex, obj_id: &ObjKey) -> PartEvent {
+        PartEvent::Changed(ObjChanged {
             cursor,
             part_ids: Vec::new(),
             obj_id: obj_id.clone(),
@@ -412,8 +457,8 @@ mod tests {
         })
     }
 
-    fn removed(cursor: CursorIndex, obj_id: &ObjKey, part_id: &PartKey) -> SubEvent {
-        SubEvent::Removed(ObjRemovedFromPart {
+    fn removed(cursor: CursorIndex, obj_id: &ObjKey, part_id: &PartKey) -> PartEvent {
+        PartEvent::Removed(ObjRemovedFromPart {
             cursor,
             part_id: part_id.clone(),
             obj_id: obj_id.clone(),
@@ -429,7 +474,7 @@ mod tests {
         }
     }
 
-    fn feed(machine: &mut CursorSyncMachine, evt: SubEvent) -> Vec<CursorMachineCommand> {
+    fn feed(machine: &mut CursorSyncMachine, evt: PartEvent) -> Vec<CursorMachineCommand> {
         let mut out = Vec::new();
         machine.on_subscription_evt(evt, &mut out);
         out
@@ -482,10 +527,25 @@ mod tests {
             feed(&mut machine, touched(5, &o, std::slice::from_ref(&p))),
             vec![sync_obj(&o, 5, vec![p.clone()])]
         );
+        assert_eq!(machine.pending_replay_work(), 1);
         assert_eq!(
             settle(&mut machine, &o, 5, CursorJobCompletionKind::Sync),
             vec![set_cursor(&p, 5), idle(&p)]
         );
+        assert_eq!(machine.pending_replay_work(), 0);
+    }
+
+    #[test]
+    fn replay_resume_is_scheduling_state_not_acknowledgement() {
+        let o = obj(13);
+        let mut machine = CursorSyncMachine::default();
+
+        machine.advance_obj_replay_cursor(o.clone(), 7);
+        assert_eq!(machine.obj_resume_cursor(&o), 7);
+        assert_eq!(machine.object_replays[&o].acknowledged, 0);
+
+        machine.abandon_obj_sync(&o);
+        assert_eq!(machine.obj_resume_cursor(&o), 0);
     }
 
     /// Regression guard: an object-target touch is deduped against the replay the
@@ -976,14 +1036,5 @@ mod tests {
             settle(&mut machine, &o, 5, CursorJobCompletionKind::Sync),
             vec![]
         );
-    }
-
-    /// The machine is only ever fed replay-derived events, and a replay page's end is not one of
-    /// them, so this arm is an invariant rather than a case to handle.
-    #[test]
-    #[should_panic]
-    fn replay_complete_is_a_programming_error() {
-        let mut machine = CursorSyncMachine::default();
-        feed(&mut machine, SubEvent::ReplayComplete);
     }
 }

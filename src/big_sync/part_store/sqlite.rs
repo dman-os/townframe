@@ -4,22 +4,20 @@ use super::PartStoreStats;
 use super::sqlite_core::EVENT_REMOVED;
 use super::{PartFrontierKey, PartScope, ReadTarget, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
-use crate::keyed_frontier::open_sqlite_reader;
+use crate::keyed_frontier::open_sqlite_reader_with_byte_budget;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
 #[cfg(test)]
 use big_sync_core::ByteKey;
-use big_sync_core::keyed_frontier::{
-    KeyedFrontier, KeyedFrontierTransaction,
-};
+use big_sync_core::keyed_frontier::{KeyedFrontier, KeyedFrontierTransaction};
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart,
-    PartEvent, PartPage, PartSummary, SubEvent, SubPartsRequest,
+    PartEvent, PartPage, PartSummary, SubPartsRequest,
 };
 use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
 #[cfg(test)]
@@ -105,7 +103,9 @@ pub async fn open_sqlite_revision_reader(
         }
     }
     let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
-    let reader = open_sqlite_reader(frontier, selector).await?;
+    let reader =
+        open_sqlite_reader_with_byte_budget(frontier, selector, Some(REPLAY_READ_AHEAD_BYTES))
+            .await?;
     Ok(Ok(Box::new(super::PartRevisionReader::new(
         reader, objects, parts,
     ))))
@@ -122,12 +122,13 @@ pub async fn open_sqlite_revision_reader_all(
     after: CursorIndex,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
     let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
-    let reader = open_sqlite_reader(
+    let reader = open_sqlite_reader_with_byte_budget(
         frontier,
         SqlitePartSelector {
             all: Some(after),
             ..Default::default()
         },
+        Some(REPLAY_READ_AHEAD_BYTES),
     )
     .await?;
     Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
@@ -135,6 +136,10 @@ pub async fn open_sqlite_revision_reader_all(
 
 use super::sqlite_core::MemberState;
 use super::sqlite_core::SqliteCore;
+
+/// Conservative source read-ahead. The responder's compact wire-page builder owns exact sizing;
+/// this bound keeps SQLite from materializing unbounded JSON before that builder sees a revision.
+const REPLAY_READ_AHEAD_BYTES: usize = 64 * 1024;
 
 /// Thin forwarding helpers so call sites inside SqlitePartStore's
 /// HostPartStore impl continue to compile without changes.
@@ -601,7 +606,7 @@ impl HostPartStore for SqlitePartStore {
                 )
                 .await?;
         }
-        let mut events = vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+        let mut events = vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
             cursor,
             part_ids: live_parts
                 .iter()
@@ -632,7 +637,7 @@ impl HostPartStore for SqlitePartStore {
             )
             .execute(&mut **tx)
             .await?;
-            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
@@ -1116,7 +1121,7 @@ impl HostPartStore for SqlitePartStore {
                 "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                 self.core.scope_id, obj_ref, part_ref
             ).execute(&mut **tx).await?;
-            events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
@@ -1124,7 +1129,7 @@ impl HostPartStore for SqlitePartStore {
             }));
         }
         for event in &events {
-            let SubEvent::Changed(changed) = event else {
+            let PartEvent::Changed(changed) = event else {
                 continue;
             };
             for event_part in &changed.part_ids {
@@ -1444,7 +1449,12 @@ impl HostPartStore for SqlitePartStore {
                 }
             }
         }
-        let reader = open_sqlite_reader(self.frontier.clone(), selector).await?;
+        let reader = open_sqlite_reader_with_byte_budget(
+            self.frontier.clone(),
+            selector,
+            Some(REPLAY_READ_AHEAD_BYTES),
+        )
+        .await?;
         Ok(Ok(Box::new(super::PartRevisionReader::new(
             reader, objects, parts,
         ))))
@@ -1454,12 +1464,13 @@ impl HostPartStore for SqlitePartStore {
         &self,
         after: CursorIndex,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
-        let reader = open_sqlite_reader(
+        let reader = open_sqlite_reader_with_byte_budget(
             self.frontier.clone(),
             SqlitePartSelector {
                 all: Some(after),
                 ..Default::default()
             },
+            Some(REPLAY_READ_AHEAD_BYTES),
         )
         .await?;
         Ok(Ok(Box::new(super::PartRevisionReader::new_all(reader))))
@@ -1836,11 +1847,32 @@ impl ObservedStore for SqlitePartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::part_store::host_contract::{self, HostPartStoreContractHarness, PageEventStore};
+
+    async fn collect_to_boundary(stream: &host_contract::TestEventStream) -> Res<Vec<PartEvent>> {
+        host_contract::collect_sub_events(stream).await
+    }
+
+    fn verdict(page: &ReplayPage) -> &TargetVerdict {
+        assert_eq!(page.targets.len(), 1, "test page names one target");
+        &page.targets[0].1
+    }
+
+    fn events_page(page: &ReplayPage) -> PartPage {
+        let TargetVerdict::Events { resume, drained } = verdict(page) else {
+            panic!("expected an events verdict, got {:?}", verdict(page));
+        };
+        PartPage {
+            events: page.events.clone(),
+            resume: *resume,
+            drained: *drained,
+        }
+    }
+    use crate::part_store::host_contract::{
+        self, HostPartStoreContractHarness, PageEventStore, SingleTargetPageStore,
+    };
     use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
     use big_sync_core::part_store::contract;
-    use big_sync_core::rpc::SubscriptionTarget;
-    use crate::part_store::ReplayPageOutcome;
+    use big_sync_core::rpc::{ReplayPage, SubscriptionTarget, TargetVerdict};
 
     async fn test_sql() -> Res<SqlCtx> {
         let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
@@ -1992,7 +2024,7 @@ mod tests {
         let target = |part_id: PartKey| SubscriptionTarget::Part { part_id, cursor: 0 };
         // The control: the same page reaches a part that is not hidden.
         let control = store
-            .replay_page(
+            .replay_page_for_target(
                 target(visible),
                 8,
                 subscriber.clone(),
@@ -2000,19 +2032,19 @@ mod tests {
             )
             .await?;
         assert!(
-            !matches!(control, ReplayPageOutcome::UnknownPart),
+            !matches!(verdict(&control), TargetVerdict::UnknownPart),
             "the control page must reach a visible part, got {control:?}"
         );
-        assert_eq!(
-            store
-                .replay_page(
-                    target(hidden.clone()),
-                    8,
-                    subscriber,
-                    Duration::from_millis(0),
-                )
-                .await?,
-            ReplayPageOutcome::UnknownPart,
+        let hidden_page = store
+            .replay_page_for_target(
+                target(hidden.clone()),
+                8,
+                subscriber,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert!(
+            matches!(verdict(&hidden_page), TargetVerdict::UnknownPart),
             "a hidden part must read as unknown on the page path"
         );
 
@@ -2029,8 +2061,7 @@ mod tests {
                 .await
                 .expect("the local reader answers within the timeout")?;
             match evt {
-                SubEvent::Changed(changed) if changed.obj_id == member => saw_member = true,
-                SubEvent::ReplayComplete => break,
+                PartEvent::Changed(changed) if changed.obj_id == member => saw_member = true,
                 _ => {}
             }
         }
@@ -2293,7 +2324,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sqlite_membership_cache_rehydrates_after_restart() -> Res<()> {
         use keyhive_core::access::Access;
-        use tokio::time::{Duration, timeout};
+        use tokio::time::Duration;
 
         let sql = test_sql().await?;
         let scope_key = "big-sync-sqlite-test://membership-restart";
@@ -2321,17 +2352,9 @@ mod tests {
             )
             .await?;
 
-        // Helper to drain through ReplayComplete.
+        // Helper to drain through the reader's explicit replay boundary.
         async fn drain_through_replay(stream: &host_contract::TestEventStream) -> Res<()> {
-            loop {
-                match timeout(Duration::from_secs(5), stream.next()).await? {
-                    Ok(SubEvent::ReplayComplete) => return Ok(()),
-                    Ok(_) => continue,
-                    Err(_) => {
-                        eyre::bail!("the reader stopped answering before its replay completed");
-                    }
-                }
-            }
+            host_contract::wait_replay_complete(stream).await
         }
 
         let sub = |peer: PeerKey| {
@@ -2369,21 +2392,19 @@ mod tests {
         // The denied peer's answer is the responder's refusal, not a filtered stream: the
         // reader is the store's unfiltered seam, so the denial is asserted where it is
         // enforced.
+        let denied_page = store1
+            .replay_page_for_target(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
+                },
+                16,
+                denied.clone(),
+                Duration::from_millis(50),
+            )
+            .await?;
         assert!(
-            matches!(
-                store1
-                    .replay_page(
-                        big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part.clone(),
-                            cursor: 0,
-                        },
-                        16,
-                        denied.clone(),
-                        Duration::from_millis(50),
-                    )
-                    .await?,
-                crate::part_store::ReplayPageOutcome::Unauthorized
-            ),
+            matches!(verdict(&denied_page), TargetVerdict::Unauthorized),
             "a peer outside the part's members must be refused"
         );
 
@@ -2426,21 +2447,19 @@ mod tests {
             .expect("authorized must receive live event after restart");
         // Denied must still be denied after restart: the refusal reads the members this
         // scope persisted, so it survives the store being recreated.
+        let denied_again = store2
+            .replay_page_for_target(
+                big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
+                },
+                16,
+                denied.clone(),
+                Duration::from_millis(50),
+            )
+            .await?;
         assert!(
-            matches!(
-                store2
-                    .replay_page(
-                        big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part.clone(),
-                            cursor: 0,
-                        },
-                        16,
-                        denied.clone(),
-                        Duration::from_millis(50),
-                    )
-                    .await?,
-                crate::part_store::ReplayPageOutcome::Unauthorized
-            ),
+            matches!(verdict(&denied_again), TargetVerdict::Unauthorized),
             "the refusal must survive a restart: it reads the persisted members"
         );
 
@@ -2478,7 +2497,7 @@ mod tests {
             .await?
             .map_err(eyre::Report::from)?;
         match rx.next().await.expect("subscription channel stays open") {
-            SubEvent::Changed(changed) => {
+            PartEvent::Changed(changed) => {
                 assert_eq!(changed.cursor, 1);
                 assert_eq!(changed.obj_id, obj_id);
                 assert!(changed.part_ids.is_empty());
@@ -2486,10 +2505,6 @@ mod tests {
             }
             event => panic!("expected object Changed, got {event:?}"),
         }
-        assert_eq!(
-            rx.next().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
-        );
         Ok(())
     }
 
@@ -2523,10 +2538,10 @@ mod tests {
             cursor: 0,
         };
         let refused = store
-            .replay_page(target.clone(), 16, peer.clone(), Duration::from_millis(50))
+            .replay_page_for_target(target.clone(), 16, peer.clone(), Duration::from_millis(50))
             .await?;
         assert!(
-            matches!(refused, crate::part_store::ReplayPageOutcome::Unauthorized),
+            matches!(verdict(&refused), TargetVerdict::Unauthorized),
             "a partless object must not be delivered to a remote subscriber; got {refused:?}"
         );
         let leaked = PartEvent::Changed(ObjChanged {
@@ -2554,13 +2569,10 @@ mod tests {
         // The live path answers the same way: a second change still cannot reach that
         // peer, because the refusal is the authorization answer and not a stream filter.
         let refused_again = store
-            .replay_page(target, 16, peer, Duration::from_millis(50))
+            .replay_page_for_target(target, 16, peer, Duration::from_millis(50))
             .await?;
         assert!(
-            matches!(
-                refused_again,
-                crate::part_store::ReplayPageOutcome::Unauthorized
-            ),
+            matches!(verdict(&refused_again), TargetVerdict::Unauthorized),
             "a partless object stays refused on the live path; got {refused_again:?}"
         );
         Ok(())
@@ -2633,17 +2645,13 @@ mod tests {
             .await?
             .map_err(eyre::Report::from)?;
         match rx.next().await.expect("subscription channel stays open") {
-            SubEvent::Changed(added) => {
+            PartEvent::Changed(added) => {
                 assert_eq!(added.cursor, second_cursor);
                 assert_eq!(added.part_ids[0], second_part);
                 assert_eq!(added.obj_id, obj_id);
             }
             event => panic!("expected only newer second-part Added, got {event:?}"),
         }
-        assert_eq!(
-            rx.next().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
-        );
         Ok(())
     }
 
@@ -2713,7 +2721,7 @@ mod tests {
             .await?
             .map_err(eyre::Report::from)?;
         match rx.next().await.expect("subscription channel stays open") {
-            SubEvent::Changed(changed) => {
+            PartEvent::Changed(changed) => {
                 assert_eq!(changed.cursor, revision);
                 assert_eq!(changed.obj_id, obj_id);
                 assert_eq!(
@@ -2723,10 +2731,6 @@ mod tests {
             }
             event => panic!("expected coalesced Changed, got {event:?}"),
         }
-        assert_eq!(
-            rx.next().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
-        );
         Ok(())
     }
 
@@ -2796,23 +2800,17 @@ mod tests {
         // it replays the log, not a peer's replica. Peer policy is the responder's, asserted
         // below with the request's own cursor.
         let before = sub(0).await??;
-        let mut before_events = Vec::new();
-        loop {
-            match before.next().await? {
-                SubEvent::ReplayComplete => break,
-                event => before_events.push(event),
-            }
-        }
+        let before_events = collect_to_boundary(&before).await?;
         assert!(
             before_events
                 .iter()
-                .any(|event| matches!(event, SubEvent::Removed(_))),
+                .any(|event| matches!(event, PartEvent::Removed(_))),
             "a faithful reader is handed the tombstone; got {before_events:?}"
         );
 
         // A peer whose request started before the add is not told about the removal...
         let before_page = store
-            .replay_page(
+            .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
                     part_id: part_id.clone(),
                     cursor: 0,
@@ -2822,9 +2820,7 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await?;
-        let crate::part_store::ReplayPageOutcome::Events(before_page) = before_page else {
-            panic!("a readable part must be answered a page, got {before_page:?}");
-        };
+        let before_page = events_page(&before_page);
         assert!(
             before_page.events.is_empty(),
             "a peer whose request started before the add is not told about the removal, got {:?}",
@@ -2835,18 +2831,14 @@ mod tests {
         let after = sub(added_cursor).await??;
         assert_eq!(
             after.next().await.expect("the reader stays open"),
-            SubEvent::Removed(ObjRemovedFromPart {
+            PartEvent::Removed(ObjRemovedFromPart {
                 cursor: tombstone_cursor,
                 part_id: part_id.clone(),
                 obj_id: obj_id.clone(),
             })
         );
-        assert_eq!(
-            after.next().await.expect("the reader stays open"),
-            SubEvent::ReplayComplete
-        );
         let at_add = store
-            .replay_page(
+            .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
                     part_id: part_id.clone(),
                     cursor: added_cursor,
@@ -2856,9 +2848,7 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await?;
-        let crate::part_store::ReplayPageOutcome::Events(at_add) = at_add else {
-            panic!("a readable part must be answered a page, got {at_add:?}");
-        };
+        let at_add = events_page(&at_add);
         assert!(
             at_add.events.iter().any(|event| matches!(
                 event,
@@ -2900,7 +2890,7 @@ mod tests {
             .map_err(eyre::Report::from)?;
         assert!(matches!(
             rx.next().await.expect("subscription channel stays open"),
-            SubEvent::Changed(ObjChanged { cursor: 1, .. })
+            PartEvent::Changed(ObjChanged { cursor: 1, .. })
         ));
 
         put_frontier_event(
@@ -2914,19 +2904,93 @@ mod tests {
             }),
         )
         .await?;
-
-        assert_eq!(
-            rx.next().await.expect("subscription channel stays open"),
-            SubEvent::ReplayComplete
-        );
         match rx.next().await.expect("subscription channel stays open") {
-            SubEvent::Changed(changed) => {
+            PartEvent::Changed(changed) => {
                 assert_eq!(changed.cursor, 2);
                 assert_eq!(changed.obj_id, obj_id);
                 assert_eq!(changed.payload, serde_json::json!({"value": 2}));
             }
             event => panic!("expected post-boundary Changed, got {event:?}"),
         }
+        Ok(())
+    }
+
+    /// The metadata pass stops before the second large revision while retaining complete
+    /// revision boundaries. The second pass then fetches that revision on the next read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_byte_read_ahead_cuts_large_revisions_without_loss() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://byte-read-ahead").await?;
+        let first = ObjKey::new(vec![0x11; 257]);
+        let second = ObjKey::new(vec![0x22; 263]);
+        store
+            .set_obj_payload(
+                first.clone(),
+                serde_json::json!({"data": "a".repeat(40_000)}),
+            )
+            .await?;
+        store
+            .set_obj_payload(
+                second.clone(),
+                serde_json::json!({"data": "b".repeat(40_000)}),
+            )
+            .await?;
+
+        let mut reader = store.open_revision_reader_all(0).await??;
+        let limits = big_sync_core::revisioned_store::RevisionReadLimits {
+            max_entries: std::num::NonZeroUsize::new(1024).expect("literal is non-zero"),
+        };
+        let first_read = reader.next(limits).await?;
+        assert!(matches!(
+            &first_read,
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. }
+                if entries.iter().all(|event| matches!(event,
+                    PartEvent::Changed(changed) if changed.obj_id == first))
+        ));
+        let second_read = reader.next(limits).await?;
+        assert!(matches!(
+            second_read,
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. }
+                if entries.iter().any(|event| matches!(event,
+                    PartEvent::Changed(changed) if changed.obj_id == second))
+        ));
+        Ok(())
+    }
+
+    /// A single revision larger than the read-ahead budget is still delivered, then the cursor
+    /// advances normally so it cannot be stranded by the conservative bound.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_byte_read_ahead_delivers_an_oversized_first_revision() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://byte-read-ahead-oversized").await?;
+        let first = ObjKey::new(vec![0x31; 64]);
+        let second = ObjKey::new(vec![0x32; 64]);
+        store
+            .set_obj_payload(
+                first.clone(),
+                serde_json::json!({"data": "a".repeat(80_000)}),
+            )
+            .await?;
+        store
+            .set_obj_payload(second.clone(), serde_json::json!({"data": "b"}))
+            .await?;
+
+        let mut reader = store.open_revision_reader_all(0).await??;
+        let limits = big_sync_core::revisioned_store::RevisionReadLimits {
+            max_entries: std::num::NonZeroUsize::new(1024).expect("literal is non-zero"),
+        };
+        let first_read = reader.next(limits).await?;
+        assert!(matches!(
+            first_read,
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. }
+                if entries.iter().any(|event| matches!(event,
+                    PartEvent::Changed(changed) if changed.obj_id == first))
+        ));
+        let second_read = reader.next(limits).await?;
+        assert!(matches!(
+            second_read,
+            big_sync_core::revisioned_store::RevisionRead::Entries { entries, .. }
+                if entries.iter().any(|event| matches!(event,
+                    PartEvent::Changed(changed) if changed.obj_id == second))
+        ));
         Ok(())
     }
 
@@ -3061,11 +3125,9 @@ mod tests {
         const PAGE_HOLD: Duration = Duration::from_millis(50);
         loop {
             let outcome = store
-                .replay_page(target.clone(), limit, peer.clone(), PAGE_HOLD)
+                .replay_page_for_target(target.clone(), limit, peer.clone(), PAGE_HOLD)
                 .await?;
-            let ReplayPageOutcome::Events(page) = outcome else {
-                panic!("expected a page, got {outcome:?}");
-            };
+            let page = events_page(&outcome);
             if !page.events.is_empty() || page.drained {
                 return Ok(page);
             }
@@ -3135,7 +3197,7 @@ mod tests {
         let mut cursor = page.resume;
         loop {
             let outcome = store
-                .replay_page(
+                .replay_page_for_target(
                     SubscriptionTarget::Part {
                         part_id: part_id.clone(),
                         cursor,
@@ -3145,9 +3207,7 @@ mod tests {
                     Duration::from_millis(50),
                 )
                 .await?;
-            let ReplayPageOutcome::Events(page) = outcome else {
-                panic!("expected a page, got {outcome:?}");
-            };
+            let page = events_page(&outcome);
             if page.events.is_empty() && !page.drained {
                 continue;
             }
@@ -3185,7 +3245,7 @@ mod tests {
             .await?;
 
         let unknown = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: test_part_id(246),
                     cursor: 0,
@@ -3195,10 +3255,10 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await?;
-        assert_eq!(unknown, ReplayPageOutcome::UnknownPart);
+        assert!(matches!(verdict(&unknown), TargetVerdict::UnknownPart));
 
         let denied = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: ungranted_part,
                     cursor: 0,
@@ -3208,16 +3268,15 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await?;
-        assert_eq!(
-            denied,
-            ReplayPageOutcome::Unauthorized,
+        assert!(
+            matches!(verdict(&denied), TargetVerdict::Unauthorized),
             "a part with no access row is denied, not reported as empty"
         );
 
         // A granted part with nothing to send is an empty page, and the hold
         // bounds how long the responder waits for something to arrive.
         let empty = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: granted_part,
                     cursor: 0,
@@ -3227,9 +3286,7 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await?;
-        let ReplayPageOutcome::Events(page) = empty else {
-            panic!("expected a page, got {empty:?}");
-        };
+        let page = events_page(&empty);
         assert!(page.events.is_empty(), "no events to send");
         assert!(page.drained, "an exhausted replay is the caught-up answer");
         assert!(

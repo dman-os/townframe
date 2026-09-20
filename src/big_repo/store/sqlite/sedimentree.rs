@@ -23,13 +23,12 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-
     pub(crate) async fn set_obj_payload_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         obj_id: ObjKey,
         payload: ObjPayload,
-    ) -> Res<Vec<SubEvent>> {
+    ) -> Res<Vec<PartEvent>> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
         let old_payload_json: Option<String> = sqlx::query_scalar!(
@@ -151,7 +150,7 @@ impl SqliteBigRepoStore {
                 "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3",
                 i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), part_ref
             ).execute(&mut **tx).await?;
-            added_events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+            added_events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
                 obj_id: obj_id.clone(),
@@ -159,7 +158,7 @@ impl SqliteBigRepoStore {
             }));
         }
         let mut events = added_events;
-        events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+        events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
             cursor,
             part_ids: changed_part_ids,
             obj_id,
@@ -484,7 +483,7 @@ impl SqliteBigRepoStore {
                     )
                     .execute(&mut *tx)
                     .await?;
-                    events.push(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor,
                         part_ids: vec![part_id.clone()],
                         obj_id: doc.clone(),
@@ -517,7 +516,7 @@ impl SqliteBigRepoStore {
                         &new,
                     )
                     .await?;
-                    events.push(SubEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                    events.push(PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
                         cursor,
                         part_id: part_id.clone(),
                         obj_id: doc,
@@ -914,7 +913,7 @@ impl SqliteBigRepoStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: SedimentreeId,
         mutation: TreeStorageMutation,
-    ) -> Result<(Vec<SubEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
+    ) -> Result<(Vec<PartEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
         let mut guard = match &mutation {
             TreeStorageMutation::DeleteCommit(_)
             | TreeStorageMutation::DeleteFragment(_)
@@ -1687,10 +1686,10 @@ mod tests {
         {
             for event in entries {
                 match event {
-                    SubEvent::Changed(changed) if changed.part_ids.contains(&part) => {
+                    PartEvent::Changed(changed) if changed.part_ids.contains(&part) => {
                         replayed.insert(changed.obj_id);
                     }
-                    SubEvent::Changed(changed) if changed.part_ids.contains(&sibling) => {
+                    PartEvent::Changed(changed) if changed.part_ids.contains(&sibling) => {
                         saw_late = true;
                     }
                     _ => {}

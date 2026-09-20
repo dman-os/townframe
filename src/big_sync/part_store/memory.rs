@@ -1,9 +1,6 @@
 use crate::interlude::*;
 
-use big_sync_core::keyed_frontier::{
-    FrontierMutation, FrontierRevision,
-    KeyedFrontierResult,
-};
+use big_sync_core::keyed_frontier::{FrontierMutation, FrontierRevision, KeyedFrontierResult};
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
@@ -288,7 +285,6 @@ fn part_permits(
         .and_then(|member_map| member_map.get(&principal))
         .is_some_and(|state| state.access.is_fetcher())
 }
-
 
 impl MemoryPartStoreScopeState {
     /// The subset of `scope`'s candidate parts that `principal` may read; `None` when
@@ -1643,10 +1639,17 @@ impl ObservedStore for MemoryPartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::rpc::SubEvent;
-    use crate::part_store::host_contract::{self, HostPartStoreContractHarness, PageEventStore};
+    use crate::part_store::host_contract::{
+        self, HostPartStoreContractHarness, PageEventStore, SingleTargetPageStore,
+    };
     use big_sync_core::ByteKey;
+    use big_sync_core::rpc::{PartEvent, ReplayPage, TargetVerdict};
     use std::{collections::HashSet, time::Duration};
+
+    fn verdict(page: &ReplayPage) -> &TargetVerdict {
+        assert_eq!(page.targets.len(), 1, "test page names one target");
+        &page.targets[0].1
+    }
 
     struct MemoryHostHarness {
         store: MemoryPartStore,
@@ -1778,7 +1781,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn hidden_parts_are_invisible_to_the_page_path() -> Res<()> {
         use big_sync_core::rpc::SubscriptionTarget;
-        use crate::part_store::ReplayPageOutcome;
 
         let hidden = PartKey(ByteKey::new([70u8; 32]));
         let visible = PartKey(ByteKey::new([71u8; 32]));
@@ -1805,7 +1807,7 @@ mod tests {
         let target = |part_id: PartKey| SubscriptionTarget::Part { part_id, cursor: 0 };
         // The control: the same page reaches a part that is not hidden.
         let control = store
-            .replay_page(
+            .replay_page_for_target(
                 target(visible),
                 8,
                 subscriber.clone(),
@@ -1813,19 +1815,19 @@ mod tests {
             )
             .await?;
         assert!(
-            !matches!(control, ReplayPageOutcome::UnknownPart),
+            !matches!(verdict(&control), TargetVerdict::UnknownPart),
             "the control page must reach a visible part, got {control:?}"
         );
-        assert_eq!(
-            store
-                .replay_page(
-                    target(hidden.clone()),
-                    8,
-                    subscriber,
-                    Duration::from_millis(0),
-                )
-                .await?,
-            ReplayPageOutcome::UnknownPart,
+        let hidden_page = store
+            .replay_page_for_target(
+                target(hidden.clone()),
+                8,
+                subscriber,
+                Duration::from_millis(0),
+            )
+            .await?;
+        assert!(
+            matches!(verdict(&hidden_page), TargetVerdict::UnknownPart),
             "a hidden part must read as unknown on the page path"
         );
 
@@ -1842,8 +1844,7 @@ mod tests {
                 .await
                 .expect("the local reader answers within the timeout")?;
             match evt {
-                SubEvent::Changed(changed) if changed.obj_id == member => saw_member = true,
-                SubEvent::ReplayComplete => break,
+                PartEvent::Changed(changed) if changed.obj_id == member => saw_member = true,
                 _ => {}
             }
         }
@@ -1860,7 +1861,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_page_denied_for_unreadable_part() -> Res<()> {
         use big_sync_core::rpc::SubscriptionTarget;
-        use crate::part_store::ReplayPageOutcome;
 
         let store = MemoryPartStore::new();
         let part = PartKey(ByteKey::new([67u8; 32]));
@@ -1880,7 +1880,7 @@ mod tests {
             .await?;
 
         let readable = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -1891,12 +1891,12 @@ mod tests {
             )
             .await?;
         assert!(
-            matches!(readable, ReplayPageOutcome::Events(_)),
+            matches!(verdict(&readable), TargetVerdict::Events { .. }),
             "a granted member reads a page, got {readable:?}"
         );
 
         let denied = store
-            .replay_page(
+            .replay_page_for_target(
                 SubscriptionTarget::Part {
                     part_id: part,
                     cursor: 0,
@@ -1906,9 +1906,8 @@ mod tests {
                 Duration::from_millis(0),
             )
             .await?;
-        assert_eq!(
-            denied,
-            ReplayPageOutcome::Unauthorized,
+        assert!(
+            matches!(verdict(&denied), TargetVerdict::Unauthorized),
             "a subscriber with no access row is denied, not reported as caught up"
         );
         Ok(())
@@ -1968,21 +1967,18 @@ mod tests {
         // it must not be lost in either case.
         store.add_obj_to_parts(second.clone(), vec![part]).await?;
 
-        let mut seen = HashSet::new();
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(2), rx.next()).await??;
-            match event {
-                SubEvent::Changed(event) => {
-                    seen.insert(event.obj_id);
-                }
-                SubEvent::ReplayComplete => break,
-                SubEvent::Removed(_) => {}
-            }
-        }
+        let seen = host_contract::collect_sub_events(&rx)
+            .await?
+            .into_iter()
+            .filter_map(|event| match event {
+                PartEvent::Changed(event) => Some(event.obj_id),
+                PartEvent::Removed(_) => None,
+            })
+            .collect::<HashSet<_>>();
         if !seen.contains(&second) {
             let event = tokio::time::timeout(Duration::from_secs(2), rx.next()).await??;
             assert!(
-                matches!(&event, SubEvent::Changed(event) if event.obj_id == second),
+                matches!(&event, PartEvent::Changed(event) if event.obj_id == second),
                 "immediate mutation was not delivered after replay: {event:?}"
             );
         }
@@ -2023,13 +2019,10 @@ mod tests {
             .await??;
         store.add_obj_to_parts(obj, vec![part.clone()]).await?;
         tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match rx.next().await {
-                    Ok(SubEvent::Changed(_)) => return Ok::<_, eyre::Report>(()),
-                    Ok(SubEvent::ReplayComplete) => continue,
-                    Ok(_) => continue,
-                    Err(_) => return Err(ferr!("stream closed")),
-                }
+            match rx.next().await {
+                Ok(PartEvent::Changed(_)) => Ok::<_, eyre::Report>(()),
+                Ok(event) => Err(ferr!("unexpected authorized event: {event:?}")),
+                Err(_) => Err(ferr!("stream closed")),
             }
         })
         .await??;
@@ -2039,7 +2032,7 @@ mod tests {
         // means — so the peer-facing absence is asserted where it is enforced: the page's
         // answer, on both the replay and the live path.
         let denied = store
-            .replay_page(
+            .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -2050,7 +2043,7 @@ mod tests {
             )
             .await?;
         assert!(
-            matches!(denied, crate::part_store::ReplayPageOutcome::Unauthorized),
+            matches!(verdict(&denied), TargetVerdict::Unauthorized),
             "a peer without access must be refused the page, got {denied:?}"
         );
         let second_obj = ObjKey(ByteKey::new([5u8; 32]));
@@ -2062,7 +2055,7 @@ mod tests {
             .add_obj_to_parts(second_obj, vec![part.clone()])
             .await?;
         let denied_again = store
-            .replay_page(
+            .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -2073,10 +2066,7 @@ mod tests {
             )
             .await?;
         assert!(
-            matches!(
-                denied_again,
-                crate::part_store::ReplayPageOutcome::Unauthorized
-            ),
+            matches!(verdict(&denied_again), TargetVerdict::Unauthorized),
             "a peer without access stays refused on the live path, got {denied_again:?}"
         );
 
@@ -2116,18 +2106,10 @@ mod tests {
             .add_obj_to_parts(obj.clone(), vec![part.clone()])
             .await?;
         tokio::time::timeout(Duration::from_secs(2), async {
-            let mut saw_touch = false;
-            let mut saw_replay_complete = false;
-            loop {
-                match rx.next().await {
-                    Ok(SubEvent::Changed(_)) => saw_touch = true,
-                    Ok(SubEvent::ReplayComplete) => saw_replay_complete = true,
-                    Ok(event) => return Err(ferr!("unexpected authorized event: {event:?}")),
-                    Err(_) => return Err(ferr!("authorized subscriber closed")),
-                }
-                if saw_touch && saw_replay_complete {
-                    return Ok::<_, eyre::Report>(());
-                }
+            match rx.next().await {
+                Ok(PartEvent::Changed(_)) => Ok::<_, eyre::Report>(()),
+                Ok(event) => Err(ferr!("unexpected authorized event: {event:?}")),
+                Err(_) => Err(ferr!("authorized subscriber closed")),
             }
         })
         .await??;
@@ -2138,8 +2120,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match rx.next().await {
-                    Ok(SubEvent::Changed(_)) => return,
-                    Ok(SubEvent::ReplayComplete) => continue,
+                    Ok(PartEvent::Changed(_)) => return,
                     Ok(_) => continue,
                     Err(_) => return,
                 }
@@ -2155,7 +2136,7 @@ mod tests {
             .set_obj_payload(obj.clone(), serde_json::json!("updated"))
             .await?;
         let denied = store
-            .replay_page(
+            .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
                     part_id: part.clone(),
                     cursor: 0,
@@ -2166,7 +2147,7 @@ mod tests {
             )
             .await?;
         assert!(
-            matches!(denied, crate::part_store::ReplayPageOutcome::Unauthorized),
+            matches!(verdict(&denied), TargetVerdict::Unauthorized),
             "a revoked peer must be refused the page, got {denied:?}"
         );
 
