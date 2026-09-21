@@ -58,6 +58,10 @@
           androidApiLevel = "31";
           rustVersion = "2026-08-16";
 
+          # The browser farm below is keyed by browser *revision*, so the npm runner that
+          # drives it must be the same playwright version as `pkgs.playwright-driver` here
+          # (1.63.0 <-> chromium 1243). A mismatch makes playwright look for a revision this
+          # farm does not have and the sysadmin e2e job dies at browser launch.
           # Nixpkgs' playwright-webkit at the pinned rev links libWPEWebKit against
           # libmanette (gamepad support) but webkit.nix does not list it in buildInputs, so
           # autoPatchelfHook dies with `could not satisfy dependency libmanette-0.2.so.0`.
