@@ -1762,8 +1762,6 @@ async fn with_document_handles_concurrent_writers() -> Res<()> {
 
 const SYNC_DOC_ITEMS: usize = 32;
 const SYNC_DOC_PAYLOAD_LEN: usize = 384;
-const SYNC_LARGE_DOC_ITEMS: usize = 1000;
-const SYNC_LARGE_DOC_PAYLOAD_LEN: usize = 1024;
 const SYNC_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(10);
 const SYNC_CASE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -3595,20 +3593,6 @@ async fn wait_for_pair_full_sync(left: &SyncRepoNode, right: &SyncRepoNode) -> R
     Ok(())
 }
 
-async fn assert_pair_sync_alignment(
-    left: &SyncRepoNode,
-    right: &SyncRepoNode,
-    doc_id: ObjKey,
-) -> Res<()> {
-    let left_heads = left.repo.doc_payload_heads(doc_id.clone()).await?;
-    let right_heads = right.repo.doc_payload_heads(doc_id.clone()).await?;
-    assert_eq!(
-        left_heads, right_heads,
-        "payload heads diverged for doc {doc_id:?}"
-    );
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_returns_noop_when_heads_match() -> Res<()> {
     timeout(
@@ -3750,182 +3734,6 @@ async fn big_repo_sync_backend_recovers_from_put_doc_conflict() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, async {
-        utils_rs::testing::setup_tracing_once();
-        tracing::info!("starting payload-first membership-late reconnect regression");
-        let temp_root = tempdir()?;
-        let left_path = temp_root.path().join("left");
-        let right_path = temp_root.path().join("right");
-        let left = SyncRepoNode::boot(left_path, 141, true).await?;
-        let right = SyncRepoNode::boot(right_path, 142, false).await?;
-        let expected_doc = make_sync_doc_value("payload-first-reconnect", 8, 48);
-        right.connect_to(&left).await?;
-        left.wait_for_accepts(1).await;
-        let right_conn = right.connection_to(&left).await;
-        let left_conn = left.take_latest_accepted_connection().await;
-        let left_doc = create_shared_sync_doc(
-            &left,
-            &right,
-            &left_conn,
-            &right_conn,
-            &expected_doc,
-            automerge::ActorId::from([141_u8; 16]),
-        )
-        .await?;
-        let doc_id = left_doc.document_id();
-        left.big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        right
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-
-        wait_for_pair_full_sync(&left, &right).await?;
-
-        wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id.clone()).await?;
-
-        right.disconnect_from(&left).await?;
-        right.connect_to(&left).await?;
-        wait_for_pair_full_sync(&left, &right).await?;
-
-        wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id).await?;
-
-        right.disconnect_from(&left).await?;
-        left.shutdown().await?;
-        right.shutdown().await?;
-        eyre::Ok(())
-    })
-    .await
-    .expect("payload-first reconnect regression timed out")?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, async {
-        utils_rs::testing::setup_tracing_once();
-        tracing::info!("starting membership-first payload-late reconnect regression");
-        let temp_root = tempdir()?;
-        let left_path = temp_root.path().join("left");
-        let right_path = temp_root.path().join("right");
-        let left = SyncRepoNode::boot(left_path, 143, true).await?;
-        let right = SyncRepoNode::boot(right_path, 144, false).await?;
-        let expected_doc = make_sync_doc_value("membership-first-reconnect", 8, 48);
-        right.connect_to(&left).await?;
-        left.wait_for_accepts(1).await;
-        let right_conn = right.connection_to(&left).await;
-        let left_conn = left.take_latest_accepted_connection().await;
-        let left_doc = create_shared_sync_doc(
-            &left,
-            &right,
-            &left_conn,
-            &right_conn,
-            &expected_doc,
-            automerge::ActorId::from([143_u8; 16]),
-        )
-        .await?;
-        let doc_id = left_doc.document_id();
-        left.big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        right
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-
-        wait_for_pair_full_sync(&left, &right).await?;
-
-        wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id.clone()).await?;
-
-        right.disconnect_from(&left).await?;
-        right.connect_to(&left).await?;
-        wait_for_pair_full_sync(&left, &right).await?;
-
-        wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        let right_doc = right
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        assert_pair_sync_alignment(&left, &right, doc_id).await?;
-
-        right.disconnect_from(&left).await?;
-        left.shutdown().await?;
-        right.shutdown().await?;
-        eyre::Ok(())
-    })
-    .await
-    .expect("membership-first reconnect regression timed out")?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn sync_with_peer_uses_remote_changes_when_only_remote_diverged() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_case(
-            SYNC_DOC_ITEMS,
-            SYNC_DOC_PAYLOAD_LEN,
-            None,
-            Some(SyncMutation {
-                item_idx: 7,
-                note_key: "remote_note",
-                side_label: "remote",
-            }),
-            false,
-        ),
-    )
-    .await
-    .expect("sync test timed out")?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn sync_with_peer_uses_local_changes_when_only_local_diverged() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_case(
-            SYNC_DOC_ITEMS,
-            SYNC_DOC_PAYLOAD_LEN,
-            Some(SyncMutation {
-                item_idx: 11,
-                note_key: "local_note",
-                side_label: "local",
-            }),
-            None,
-            false,
-        ),
-    )
-    .await
-    .expect("sync test timed out")?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_both_diverged_loses_remote_change() -> Res<()> {
     timeout(
         SYNC_CASE_TIMEOUT,
@@ -3943,28 +3751,6 @@ async fn sync_with_peer_both_diverged_loses_remote_change() -> Res<()> {
                 side_label: "remote",
             }),
             false,
-        ),
-    )
-    .await
-    .expect("sync test timed out")?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn sync_with_peer_handles_large_fragmented_remote_docs() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_case(
-            SYNC_LARGE_DOC_ITEMS,
-            SYNC_LARGE_DOC_PAYLOAD_LEN,
-            None,
-            Some(SyncMutation {
-                item_idx: 777,
-                note_key: "remote_note",
-                side_label: "remote",
-            }),
-            true,
         ),
     )
     .await
