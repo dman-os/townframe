@@ -27,7 +27,6 @@
 //! crate-private admission store and the crate-private Keyhive helpers. The raw
 //! admission log is not exposed (§1).
 
-use std::collections::VecDeque;
 use crate::interlude::*;
 use crate::keyhive::{BigKeyhiveHandle, EventSubject};
 use crate::runtime2::keyhive_admission;
@@ -43,6 +42,7 @@ use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::principal::identifier::Identifier;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;

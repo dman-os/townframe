@@ -1,8 +1,4 @@
 //! FIXME: find a way to avoid blocking on BigSyncMachineCommands
-//! A part the peer answers it does not know keeps full sync blocked until the embedder
-//! drops it from the subscription set: the refusal is usually a race, and the machine
-//! does not decide that a part its peer cannot answer for is synced. The answer is
-//! reported once per transition as [`SyncStatEvent::PeerPartUnanswered`].
 
 mod interlude {
     pub use utils_rs::prelude::*;

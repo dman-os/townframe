@@ -21,9 +21,13 @@
 //! whole durable state. `set_part_members` is a full replacement and therefore
 //! idempotent, which is also why a replayed entry needs no sparse memory row.
 //!
-//! The host wiring spawns this beside the blob-pin machines with the repository's
-//! two inventory documents (see `rt.rs`), and the boot seed runs inside the spawn
-//! before the reader opens, per ADR 013 §8.
+//! Whoever serves the derived parts owns this machine: `IrohSyncRepo::boot` spawns
+//! it with the repository's two inventory documents, beside the part stores that
+//! serve them, and the boot seed runs inside the spawn before the reader opens,
+//! per ADR 013 §8. An `Rt` does not: the clone path and any headless sync boot the
+//! serving boundary without one, and a part whose rows were never written refuses
+//! every peer — which reads to that peer as an unknown part, blocking its full
+//! sync forever.
 
 use crate::interlude::*;
 
@@ -591,8 +595,12 @@ mod tests {
             .await;
             if settled.is_err() {
                 return Err(ferr!(
-                    "the walker never settled revision {revision}; it is stuck at {}",
-                    self.durable_revision().await
+                    "the walker never settled revision {revision}; it is stuck at {} (head now {})",
+                    self.durable_revision().await,
+                    KeyhiveAccessRevisionStore::<SqliteDeltaWalkerStateRepo>::new(&self.repo)
+                        .latest_revision()
+                        .await
+                        .unwrap_or(u64::MAX)
                 ));
             }
             Ok(())
@@ -897,22 +905,39 @@ mod tests {
         Ok(())
     }
 
-    /// The user-facing proof for ADR 013 §8: a real boot has to leave each derived
-    /// inventory partition readable by exactly the readers of its inventory document,
-    /// before any event on that document arrives.
+    /// The user-facing proof for ADR 013 §8: the spawn that serves these parts has
+    /// to leave each derived inventory partition readable by exactly the readers of
+    /// its inventory document, before any event on that document arrives.
     ///
-    /// The seed runs inside `Rt::boot` before the machine's reader opens, so the rows
-    /// are already present when the booted context is handed back: a boot that never
-    /// ran the writer has none. The document ids and the part store come from the
-    /// booted `RepoCtx`, never from a fixture the test picked.
+    /// The seed runs inside the spawn before the machine's reader opens, so the rows
+    /// are already present when it returns: a spawn that never ran the seed leaves a
+    /// part with no access rows, which refuses every peer (and reads to it as an
+    /// unknown part, blocking its full sync forever — the failure the serving
+    /// boundary's own tests, `cli_clone_and_wait_until_synced_smoke` and
+    /// `long_test_iroh_clone_sync_batch_100_docs_with_blobs`, exercise end to end).
+    /// The document ids and the part store come from the booted `RepoCtx`, never from
+    /// a fixture the test picked.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_boot_makes_the_inventory_parts_read_by_their_document_closure() -> Res<()> {
-        let test_cx = crate::test_support::test_cx("boot_inventory_part_permissions").await?;
+    async fn a_serving_spawn_seeds_the_inventory_parts_before_any_event() -> Res<()> {
+        let test_cx = crate::test_support::test_cx("serving_inventory_part_permissions").await?;
         let rcx = Arc::clone(&test_cx.rt.rcx);
         // The blob part store is built on the repository's own sqlite ctx
         // (`open_blob_part_store(big_repo.sql_ctx())`), and the access rows live there.
         let store_sql = test_cx._acx.sql_ctx();
         let local_peer = test_cx._acx.local_peer_id();
+        // Exactly what `IrohSyncRepo::boot` spawns: the parts it serves plus the
+        // store, state and repository they are derived from.
+        let writer = spawn_blob_inventory_permission_writer(
+            Arc::clone(&rcx.blob_part_store),
+            Arc::clone(&rcx.sqlite_local_state_repo),
+            Arc::clone(&rcx.big_repo),
+            vec![
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
+            ],
+            CancellationToken::new(),
+        )
+        .await?;
 
         for inventory_doc in [
             rcx.core_inventory_doc_id.clone(),
@@ -947,6 +972,7 @@ mod tests {
             );
         }
 
+        writer.stop().await?;
         test_cx.stop().await?;
         Ok(())
     }

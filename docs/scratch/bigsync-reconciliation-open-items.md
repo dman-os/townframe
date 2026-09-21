@@ -591,10 +591,15 @@ Test `the_boot_seed_writes_a_fresh_part_from_keyhive`: on a store nothing has wr
 alone populates the part with exactly the document's closure. Negative check by me: with the seed's
 loop forced to zero iterations, that test fails with `left: {}` against the real closure.
 
-**Step 2, the host wiring**: `Rt::boot` spawns the writer beside `spawn_blob_pin_worker` (blob part
-store, local state repo, big repo, the two inventory documents, a child cancel token), `RtStopToken`
-gained `blob_inventory_permission_stop`, and it is stopped *before* the blob-pin machines because
-shutdown order is the reverse of construction. `crate::blobs` re-exports the entry point the way the
+**Step 2, the host wiring**: `IrohSyncRepo::boot` spawns the writer (blob part store, local state
+repo, big repo, the two inventory documents, a child of the repo's cancel token) and
+`IrohSyncRepoStopToken` gained `blob_inventory_permission_stop`, stopped after the blob worker and the
+RPC server that serve those parts. It used to live in `Rt::boot`; that was wrong for the same reason
+the parts are wrong without it — the clone path and any headless sync boot the serving boundary
+without an `Rt`, so the parts were served with no access rows at all. A peer then sees them as unknown
+parts and `wait_for_full_sync` never resolves (this is what timed out `cli_clone_and_wait_until_synced_smoke`
+4/4 and `long_test_iroh_clone_sync_batch_100_docs_with_blobs` in CI). An `Rt` does not serve parts, so
+it does not own the writer. `crate::blobs` re-exports the entry point the way the
 pin workers are re-exported, and the `dead_code` allowance it needed while it had no caller is gone.
 Verified: `clippy -p daybook_core --all-targets --all-features` exit 0 and 4/4 on
 `nextest -p daybook_core -E 'test(permission_writer)'`.

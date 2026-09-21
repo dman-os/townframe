@@ -655,7 +655,11 @@ mod tests {
             sent.expect("the retry opens the gate");
             drop(retried.expect("retry must succeed"));
             assert_eq!(
-                state.progress().await.expect("progress is readable").upstream_revision,
+                state
+                    .progress()
+                    .await
+                    .expect("progress is readable")
+                    .upstream_revision,
                 4,
                 "the watermark the dropped read computed has to reach the state repo"
             );

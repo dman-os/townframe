@@ -4,8 +4,8 @@ Big Sync is an efficent sync coordinator for large lists of objects.
 
 # Why
 
-Our primary user of this system is [./big_repo.md], the automerge CRDT storage and sync system.
-While big_repo uses the [./subduction.md] protocol to sync each CRDT across peers, big_sync handles the mass/collection sync usecases including:
+Our primary user of this system is [big_repo](./big_repo.md), the automerge CRDT storage and sync system.
+While big_repo uses the [subduction](./subduction.md) protocol to sync each CRDT across peers, big_sync handles the mass/collection sync usecases including:
 - efficiently diff presence *and versions* of objects across peers
   - Set reconcilliation in other words
 - efficient live change notifications of objects to connected peers

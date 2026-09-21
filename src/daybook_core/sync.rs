@@ -148,6 +148,9 @@ pub struct IrohSyncRepoStopToken {
     big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     big_sync_worker_stop: big_sync::StopToken,
     blob_sync_worker_stop: big_sync::StopToken,
+    /// The blob-inventory access-row writer. It writes into the store the blob worker and the
+    /// RPC server serve from, so it stops after both are down.
+    blob_inventory_permission_stop: crate::repos::RepoStopToken,
     // partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
 }
 
@@ -167,6 +170,7 @@ impl IrohSyncRepoStopToken {
         self.big_sync_rpc_stop.stop().await?;
         self.blob_sync_worker_stop.stop().await?;
         self.big_repo_rpc_stop_token.stop().await?;
+        self.blob_inventory_permission_stop.stop().await?;
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
@@ -212,7 +216,23 @@ impl IrohSyncRepo {
 
         let cancel_token = CancellationToken::new();
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
-
+        // The blob-inventory parts are served to peers through `big_sync_rpc` below, and a part
+        // with no access rows refuses everyone (ADR 013 decision A1/A2). The writer is spawned
+        // here, at the boundary that serves those parts, rather than in `Rt`: a process that
+        // syncs without an `Rt` (the clone path, and any headless sync) would otherwise serve
+        // parts whose rows were never written, which reads to a peer as an unknown part and
+        // blocks `wait_for_full_sync` forever.
+        let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
+            Arc::clone(&rcx.blob_part_store),
+            Arc::clone(&rcx.sqlite_local_state_repo),
+            Arc::clone(&rcx.big_repo),
+            vec![
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
+            ],
+            cancel_token.clone(),
+        )
+        .await?;
         let (incoming_conn_tx, incoming_conn_rx) = mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = mpsc::unbounded_channel();
         let (clone_rpc_tx, clone_rpc_rx) = mpsc::channel(128);
@@ -356,6 +376,7 @@ impl IrohSyncRepo {
                 big_sync_rpc_stop,
                 big_sync_worker_stop,
                 blob_sync_worker_stop,
+                blob_inventory_permission_stop,
             },
         ))
     }

@@ -29,7 +29,7 @@
   - [ ] Built in updater
   - [x] Per sink switch/index rebuild
   - [ ] Some std::mem::take sites can be a drain()
-  - [ ] Rewrite big_sync_core
+  - [x] Rewrite big_sync_core
     - Avoid push based or channel based replay
       - Pull RPC with limits
       - i.e. rev store
