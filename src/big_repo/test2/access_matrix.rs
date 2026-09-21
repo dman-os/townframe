@@ -1223,7 +1223,10 @@ async fn read_optional_text(handle: &crate::BigDocHandle, key: &str) -> Option<S
 #[tokio::test(flavor = "multi_thread")]
 async fn tier2_is_event_permitted_fail_closed_coverage() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let pair = Pair::boot(200, 201, "Owner", "Reader").await?;
+    // Ungranted fixture: this test asserts what a *document* grant does and does not
+    // authorize, and `Pair::boot` grants the mirror part each side subscribes (`/seds`),
+    // which would then legitimately appear in the permitted answer below.
+    let pair = Pair::boot_ungranted(200, 201, "Owner", "Reader").await?;
     let _owner_peer = pair.left().repo.local_peer_id();
     let reader_peer = pair.right().repo.local_peer_id();
     let unknown_peer = big_sync_core::PeerKey::new([0x99; 32]);

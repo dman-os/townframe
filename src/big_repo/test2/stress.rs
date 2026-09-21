@@ -435,6 +435,10 @@ impl StressFixture for BigRepoStressFixture {
         // visibility, so both directions agree by construction.
         let left_parts = self.available_sync_parts(left, right).await?;
         let right_parts = left_parts.clone();
+        // Part access is explicit on the serving side. This harness registers routes
+        // directly instead of going through `connect_with_parts`, so it grants them here.
+        left.allow_part_pull(right, &left_parts).await?;
+        right.allow_part_pull(left, &right_parts).await?;
         left.set_peer_parts(right, left_parts).await?;
         right.set_peer_parts(left, right_parts).await?;
         Ok(())
