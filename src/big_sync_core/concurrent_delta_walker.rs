@@ -70,6 +70,11 @@ where
     state: R,
     key_of: DeltaKeyFn<S, K>,
     durable_revision: u64,
+    /// A watermark the book has already drained to but whose durable write did
+    /// not commit: the future that was committing it was cancelled. The next
+    /// entry point commits it, so a dropped read cannot strand the durable cursor
+    /// behind the in-memory one.
+    durable_pending: Option<u64>,
     watermarks: WatermarkMachine<(), K, (), (), u64>,
     buffered: VecDeque<ConcurrentDelta<K, S::Entry>>,
 }
@@ -98,6 +103,7 @@ where
             state,
             key_of: Box::new(key_of),
             durable_revision,
+            durable_pending: None,
             watermarks: WatermarkMachine::default(),
             buffered: VecDeque::new(),
         })
@@ -120,6 +126,9 @@ where
         &mut self,
         limit: NonZeroUsize,
     ) -> Result<ConcurrentDeltaRead<K, S::Entry>, ConcurrentDeltaWalkerError<S::Error>> {
+        if let Some(pending) = self.durable_pending.take() {
+            self.persist_ready(Some(pending)).await?;
+        }
         if !self.buffered.is_empty() {
             let count = limit.get().min(self.buffered.len());
             return Ok(ConcurrentDeltaRead::Entries {
@@ -176,6 +185,9 @@ where
         key: K,
         cursor: u64,
     ) -> Result<DeltaAck, ConcurrentDeltaWalkerError<S::Error>> {
+        if let Some(pending) = self.durable_pending.take() {
+            self.persist_ready(Some(pending)).await?;
+        }
         let settled = self.watermarks.settle(key.clone(), cursor, ());
         if settled.is_empty() {
             return Ok(DeltaAck::Stale);
@@ -199,6 +211,13 @@ where
         if through <= self.durable_revision {
             return Ok(None);
         }
+        // Armed before the first await: cancelling any of the awaits below drops
+        // the transaction without committing, and the caller that dropped it may
+        // never come back for this value, so the next entry point has to.
+        self.durable_pending = Some(match self.durable_pending {
+            Some(pending) => pending.max(through),
+            None => through,
+        });
         let mut expected = self.durable_revision;
         loop {
             let mut transaction = self.state.begin().await?;
@@ -218,6 +237,7 @@ where
             }
             transaction.commit().await?;
             self.durable_revision = through;
+            self.durable_pending = None;
             return Ok(Some(through));
         }
     }
@@ -245,12 +265,24 @@ mod tests {
     #[derive(Default, Clone)]
     struct MemoryStateRepo {
         inner: Arc<Mutex<MemoryState>>,
+        /// When set, opening a transaction waits for a rendezvous on this channel.
+        /// A test uses it to drop a read inside the durable persist, the one
+        /// cancellation window that leaves a watermark computed but uncommitted.
+        persist_gate: Option<async_channel::Receiver<()>>,
     }
 
     impl MemoryStateRepo {
         fn new(progress: u64) -> Self {
             Self {
                 inner: Arc::new(Mutex::new(MemoryState { progress })),
+                persist_gate: None,
+            }
+        }
+
+        fn gated(progress: u64, persist_gate: async_channel::Receiver<()>) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(MemoryState { progress })),
+                persist_gate: Some(persist_gate),
             }
         }
     }
@@ -329,6 +361,9 @@ mod tests {
         async fn begin<'a>(
             &'a self,
         ) -> crate::delta_walker_state::DeltaWalkerStateResult<Self::Transaction<'a>> {
+            if let Some(gate) = &self.persist_gate {
+                gate.recv().await.expect("persist gate is open");
+            }
             Ok(MemoryStateTx {
                 inner: Arc::clone(&self.inner),
                 staged: None,
@@ -578,6 +613,53 @@ mod tests {
             let ack = walker.ack(7, 10).await.expect("ack must succeed");
             assert!(matches!(ack, DeltaAck::Stale));
             assert_eq!(walker.durable_revision(), 10);
+        });
+    }
+
+    /// A read cancelled inside the durable write leaves the watermark computed but
+    /// uncommitted. It must be retried by the next entry point: the in-memory book
+    /// has already drained past it, so nothing else will ever compute it again and
+    /// the durable cursor would stay behind for the life of the machine.
+    #[test]
+    fn a_read_dropped_mid_persist_retries_the_watermark() {
+        futures::executor::block_on(async {
+            // An entry-less revision: the walker advances over it with no task to
+            // settle, which is the case that writes a watermark from `next`.
+            let source = ScriptedSource::with(vec![
+                RevisionRead::Entries {
+                    revision: 4,
+                    entries: Vec::new(),
+                },
+                RevisionRead::ReplayComplete { through: 4 },
+            ]);
+            // Capacity one, empty: the first `begin` parks on it until the test
+            // releases the gate.
+            let (gate_tx, gate_rx) = async_channel::bounded::<()>(1);
+            let state = MemoryStateRepo::gated(0, gate_rx);
+            let mut walker = open_walker(&source, state.clone()).await;
+
+            let mut read = Box::pin(walker.next(TEST_BATCH_LIMIT));
+            assert!(
+                futures::poll!(read.as_mut()).is_pending(),
+                "the read parks inside the durable write"
+            );
+            drop(read);
+            assert_eq!(
+                walker.durable_revision(),
+                0,
+                "a write that never committed must not report itself durable"
+            );
+
+            // The next entry point commits what the dropped read computed.
+            let (retried, sent) = futures::join!(walker.next(TEST_BATCH_LIMIT), gate_tx.send(()));
+            sent.expect("the retry opens the gate");
+            drop(retried.expect("retry must succeed"));
+            assert_eq!(
+                state.progress().await.expect("progress is readable").upstream_revision,
+                4,
+                "the watermark the dropped read computed has to reach the state repo"
+            );
+            assert_eq!(walker.durable_revision(), 4);
         });
     }
 }

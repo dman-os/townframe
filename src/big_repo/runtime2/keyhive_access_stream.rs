@@ -27,6 +27,7 @@
 //! crate-private admission store and the crate-private Keyhive helpers. The raw
 //! admission log is not exposed (§1).
 
+use std::collections::VecDeque;
 use crate::interlude::*;
 use crate::keyhive::{BigKeyhiveHandle, EventSubject};
 use crate::runtime2::keyhive_admission;
@@ -242,18 +243,45 @@ where
             store: self.source.clone(),
             reader: self.source.open((), after).await?,
             keyhive: self.keyhive.clone(),
+            staged: VecDeque::new(),
+            ready: VecDeque::new(),
+            staged_revision: 0,
+            staged_computed_at: None,
             memory: selector.memory,
         })
     }
 }
 
 /// One open reader over the admission log's subject-bearing events.
+///
+/// Reading is two-staged for cancellation safety. The admission cursor advances
+/// the moment a page is read out of the log, while resolving that page into
+/// entries awaits Keyhive once per row; a consumer driving this reader from a
+/// `select!` (every machine that walks it does) can drop the read at any of
+/// those awaits. Losing the page there would lose it for good — the cursor is
+/// already past it — so the rows are parked in [`Self::staged`] and the resolved
+/// entries in [`Self::ready`] until they have been handed over: a cancelled read
+/// re-serves them instead of skipping them.
 pub struct KeyhiveAccessReader<M> {
     /// The source, held only to observe the admission head for
     /// [`KeyhiveAccessDelta::computed_at_seq`].
     store: keyhive_admission::Store,
     reader: keyhive_admission::Reader,
     keyhive: BigKeyhiveHandle,
+    /// Rows of the page being resolved, oldest first. A row leaves this queue
+    /// only once it has been resolved (into `ready`) or rejected as unknown, so
+    /// a read dropped mid-resolution finds the work still queued.
+    staged: VecDeque<keyhive_admission::AdmittedRow>,
+    /// Entries resolved out of `staged` and not yet handed to the caller.
+    ready: VecDeque<KeyhiveAccessDelta>,
+    /// The revision of the page in `staged`/`ready`, i.e. the highest seq read
+    /// from the log for it. Every entry of one page carries it.
+    staged_revision: u64,
+    /// The admission head observed before the staged page's closures were read,
+    /// so every entry's closure is at or ahead of the seq it carries. Observed
+    /// lazily at the first resolution pass, which is always before that pass's
+    /// closure reads.
+    staged_computed_at: Option<u64>,
     /// Held for the `Watched` shape, which is `todo!()`: under `All` no closure
     /// cache is consulted, and that is what the spy test asserts. The `Watched`
     /// lane reads this field, and removes the `expect` below when it does.
@@ -295,28 +323,71 @@ where
         // `limits` bounds the *source* rows read, not the entries emitted: a
         // page whose rows name no subject is returned as an entry-less
         // revision and the walker settles it without a task.
-        let (revision, rows) = match self.reader.next(limits).await? {
-            RevisionRead::ReplayComplete { through } => {
-                return Ok(RevisionRead::ReplayComplete { through });
+        let limit = limits.max_entries.get();
+        loop {
+            if !self.ready.is_empty() {
+                let count = limit.min(self.ready.len());
+                return Ok(RevisionRead::Entries {
+                    revision: self.staged_revision,
+                    entries: self.ready.drain(..count).collect(),
+                });
             }
-            RevisionRead::Entries { revision, entries } => (revision, entries),
-        };
-        if rows.is_empty() {
-            return Ok(RevisionRead::Entries {
-                revision,
-                entries: Vec::new(),
-            });
+            if !self.staged.is_empty() {
+                self.resolve_staged(limit).await?;
+                continue;
+            }
+            match self.reader.next(limits).await? {
+                RevisionRead::ReplayComplete { through } => {
+                    return Ok(RevisionRead::ReplayComplete { through });
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    // Parked before anything can be awaited: the cursor this
+                    // page was read at is already past it, so the rows have to
+                    // outlive a cancelled read.
+                    self.staged_revision = revision;
+                    self.staged_computed_at = None;
+                    self.staged.extend(entries);
+                    if self.staged.is_empty() {
+                        return Ok(RevisionRead::Entries {
+                            revision,
+                            entries: Vec::new(),
+                        });
+                    }
+                }
+            }
         }
-        // Observed before the closures are read, so every entry's closure is at
-        // or ahead of the seq it carries.
-        let computed_at_seq = self.store.latest_revision().await?;
-        let mut entries = Vec::new();
-        for row in rows {
+    }
+}
+
+impl<M> KeyhiveAccessReader<M>
+where
+    M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo,
+{
+    /// Resolve staged rows into entries until `ready` holds `limit` of them or
+    /// the page runs out.
+    ///
+    /// Every await here is before the row's removal from `staged`, so a read
+    /// cancelled in the middle of this re-resolves the same row on the next
+    /// call rather than dropping it.
+    async fn resolve_staged(&mut self, limit: usize) -> Res<()> {
+        if self.staged_computed_at.is_none() {
+            self.staged_computed_at = Some(self.store.latest_revision().await?);
+        }
+        let computed_at_seq = self
+            .staged_computed_at
+            .expect("observed at the head of this pass");
+        while self.ready.len() < limit {
+            let Some(row) = self.staged.front().cloned() else {
+                return Ok(());
+            };
             let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
                 .map_err(|err| ferr!("admitted Keyhive event decode failed: {err}"))?;
             let id = match self.keyhive.event_subject_id(event).await? {
                 EventSubject::Named(id) => id,
-                EventSubject::Unnamed => continue,
+                EventSubject::Unnamed => {
+                    self.staged.pop_front();
+                    continue;
+                }
                 // The event is early, not wrong: its delegate has not been
                 // ingested yet, so this revision names no subject this hive can
                 // read. The closure is read-time state and a later row naming
@@ -327,19 +398,23 @@ where
                     tracing::debug!(
                         "keyhive access row names a proof chain this hive cannot resolve yet"
                     );
+                    self.staged.pop_front();
                     continue;
                 }
             };
             let Some(subject) = self.access_subject(id).await? else {
+                self.staged.pop_front();
                 continue;
             };
-            entries.push(KeyhiveAccessDelta {
+            let agents = self.keyhive.agents_for_membered(id).await;
+            self.staged.pop_front();
+            self.ready.push_back(KeyhiveAccessDelta {
                 subject,
-                agents: self.keyhive.agents_for_membered(id).await,
+                agents,
                 computed_at_seq,
             });
         }
-        Ok(RevisionRead::Entries { revision, entries })
+        Ok(())
     }
 }
 
@@ -797,6 +872,63 @@ mod tests {
             "the admission head is observed before the closures are read"
         );
         assert_eq!(harness.memory.reads(), 0, "`All` consults no closure cache");
+    }
+
+    /// A read cancelled while it is resolving must not lose the page it read:
+    /// the admission cursor has already moved past it, so the rows have to be
+    /// re-served out of the reader's own parking rather than read again from the
+    /// log.
+    ///
+    /// This is the drop every `select!`-driven machine performs when a task
+    /// completion becomes ready while a page is being resolved — the case that
+    /// silently skipped a page's subjects and left the consumer's durable cursor
+    /// behind the admission head forever.
+    #[tokio::test]
+    async fn a_cancelled_read_re_serves_its_page() {
+        let harness = Harness::new().await;
+        let (_, member) = harness.member_group().await;
+        let (first, first_bytes) = harness.group_with_member_delegation(&member).await;
+        let (second, second_bytes) = harness.group_with_member_delegation(&member).await;
+        harness.admit(first_bytes).await;
+        harness.admit(second_bytes).await;
+
+        // Poll the read a few times, drop it, and keep the attempt only if the
+        // drop landed while the page was parked mid-resolution. Later attempts
+        // give the log query longer to land, so the window is reached without the
+        // test having to observe the cursor through the read's own borrow.
+        for polls in 1..=32 {
+            let mut reader = harness
+                .stream()
+                .open(all_selector(&harness.memory), 0)
+                .await
+                .expect("open reader");
+            let mut read = Box::pin(reader.next(RevisionReadLimits::default()));
+            let mut delivered = false;
+            for _ in 0..polls {
+                if futures::poll!(read.as_mut()).is_ready() {
+                    delivered = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            drop(read);
+            if delivered || reader.staged.len() != 2 || !reader.ready.is_empty() {
+                continue;
+            }
+
+            assert_eq!(
+                page(&mut reader)
+                    .await
+                    .iter()
+                    .map(|entry| entry.subject)
+                    .collect::<Vec<_>>(),
+                vec![AccessSubject::Group(first), AccessSubject::Group(second)],
+                "a read dropped while its page is parked must re-serve the whole page: \
+                 the log cursor is already past it"
+            );
+            return;
+        }
+        panic!("no drop landed on a parked page; the cancellation window is untested");
     }
 
     #[tokio::test]
