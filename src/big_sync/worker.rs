@@ -62,6 +62,10 @@ structstruck::strike! {
             peer_id: PeerKey,
             resp: tokio::sync::oneshot::Sender<()>,
         },
+        SetReplayHoldMs {
+            hold_ms: u32,
+            resp: tokio::sync::oneshot::Sender<()>,
+        },
         WaitForFullSync {
             waiter_id: u64,
             peer_ids: std::collections::HashSet<PeerKey>,
@@ -212,6 +216,23 @@ impl BigSyncWorkerHandle {
             .await
             .wrap_err(ERROR_CHANNEL)?;
         tracing::debug!(peer_id = %peer_id, "queue remove peer");
+        resp_rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+
+    /// Shorten the live-lane replay hold (see [`big_sync_core::BigSyncMachine::set_replay_hold_ms`]).
+    ///
+    /// A test that waits for a settled cluster needs to observe a lane parked waiting for
+    /// events rather than wait out the production park. The default is unchanged.
+    pub async fn set_replay_hold_ms(&self, hold_ms: u32) -> Res<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::SetReplayHoldMs {
+                hold_ms,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?;
         Ok(())
     }
@@ -754,6 +775,11 @@ impl BigSyncWorker {
                 self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
+            }
+            BigSyncWorkerMsg::SetReplayHoldMs { hold_ms, resp } => {
+                self.machine.set_replay_hold_ms(hold_ms);
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+                tracing::debug!(hold_ms, "accept set replay hold");
             }
             BigSyncWorkerMsg::WaitForFullSync {
                 waiter_id,

@@ -730,6 +730,10 @@ structstruck::strike! {
         all_seen_peer: Set<PeerKey>,
         peers: Map<PeerKey, PeerState>,
         stat_machine: SyncStatMachine,
+        /// Overrides [`ReplayPageTask::HOLD_MS`] for this machine. `None` is the
+        /// production pacing; a shorter value is for tests, whose settling waits cannot
+        /// see a parked live lane and would otherwise assert before the wake lands.
+        replay_hold_ms: Option<u32>,
 
         /// Strategy hint for parts with no explicit per-part override. A caller that
         /// wants the bucket path for every part it syncs sets this to
@@ -766,6 +770,14 @@ impl BigSyncMachine {
     /// this is the knob an embedder uses to opt into (or out of) the bucket path.
     pub fn set_default_sync_mode(&mut self, mode: SyncMode) {
         self.default_sync_mode = mode;
+    }
+
+    /// Shorten the live-lane replay hold. See [`ReplayPageTask::HOLD_MS`]: a test that
+    /// waits for a settled cluster has to be able to observe a lane that is parked
+    /// waiting for events, so it turns the production park down instead of having the
+    /// responder ignore the request.
+    pub fn set_replay_hold_ms(&mut self, hold_ms: u32) {
+        self.replay_hold_ms = Some(hold_ms);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1661,7 +1673,7 @@ impl BigSyncMachine {
                 })
             });
         let hold_ms = if all_targets_caught_up {
-            ReplayPageTask::HOLD_MS
+            self.replay_hold_ms.unwrap_or(ReplayPageTask::HOLD_MS)
         } else {
             0
         };
