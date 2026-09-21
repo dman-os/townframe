@@ -670,13 +670,15 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
         Sendable::from_future(async move {
             let local_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&self.local_peer_id.to_bytes32())
-                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
             // The document id can be a peer-supplied object key routed to a worker, so it
             // converts fallibly; the local peer id is this process's own 32-byte identity.
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -706,11 +708,13 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
         Sendable::from_future(async move {
             let local_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&self.local_peer_id.to_bytes32())
-                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -1281,7 +1285,7 @@ where
         Sendable::from_future(async move {
             if !self
                 .storage
-                .contains_sedimentree_id(SedimentreeId::new(doc_id.to_bytes32()))
+                .contains_sedimentree_id(SedimentreeId::new(doc_id.to_bytes32()?))
                 .await
                 .map_err(|err| ferr!("failed checking finalized sedimentree: {err}"))?
             {
@@ -1375,7 +1379,7 @@ where
         request_id: subduction_keyhive::message::RequestId,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<KeyhiveSyncOutcome>> {
         Sendable::from_future(async move {
-            let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32());
+            let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32()?);
             match self
                 .keyhive_protocol
                 .initiate_sync_with_request(&kh_peer_id, request_id)
@@ -1421,7 +1425,7 @@ where
             //         return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
             //     }
             // }
-            let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.to_bytes32());
+            let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.to_bytes32()?);
             let result = self
                 .subduction
                 .sync_with_peer(
@@ -1697,7 +1701,7 @@ where
                 endpoint_addr,
                 &signer,
                 subduction_core::handshake::audience::Audience::known(
-                    subduction_core::peer::id::PeerId::new(expected_peer.to_bytes32()),
+                    subduction_core::peer::id::PeerId::new(expected_peer.to_bytes32()?),
                 ),
             )
             .await?;
@@ -1711,7 +1715,9 @@ where
 
             // Register with ephemeral backend.
             ephemeral_backend
-                .subscribe_peer(subduction_core::peer::id::PeerId::new(peer_id.to_bytes32()))
+                .subscribe_peer(subduction_core::peer::id::PeerId::new(
+                    peer_id.to_bytes32()?,
+                ))
                 .await;
 
             // Register with keyhive protocol.
@@ -1824,8 +1830,9 @@ where
             // Capture before `accept_incoming` consumes the connection: the
             // subscription needs the remote endpoint id to derive its address.
             let remote_endpoint_id = conn.remote_id();
-            let subduction_peer_id =
-                subduction_core::peer::id::PeerId::new(local_peer_id.to_bytes32());
+            let subduction_peer_id = subduction_core::peer::id::PeerId::new(
+                local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+            );
             let result: IrohConnectResult =
                 accept_incoming(conn, &signer, nonce_cache.as_ref(), subduction_peer_id).await?;
             let peer_id = PeerKey::new(result.authenticated.peer_id().as_bytes());
@@ -1838,7 +1845,9 @@ where
 
             // Register with ephemeral backend.
             ephemeral_backend
-                .subscribe_peer(subduction_core::peer::id::PeerId::new(peer_id.to_bytes32()))
+                .subscribe_peer(subduction_core::peer::id::PeerId::new(
+                    peer_id.to_bytes32()?,
+                ))
                 .await;
 
             // Register with keyhive protocol.
@@ -1951,7 +1960,7 @@ where
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         Sendable::from_future(async move {
-            let peer_keyhive = KeyhivePeerId::from_bytes(peer_id.to_bytes32());
+            let peer_keyhive = KeyhivePeerId::from_bytes(peer_id.to_bytes32()?);
             let owns_adapter = keyhive_adapter_owner
                 .lock()
                 .expect(ERROR_MUTEX)
@@ -2522,7 +2531,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[42; 32]);
 
@@ -2589,7 +2599,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[47; 32]);
 
@@ -2652,7 +2663,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[44; 32]);
         let h1 = sedimentree_core::loose_commit::id::CommitId::new([7; 32]);

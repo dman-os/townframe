@@ -1,4 +1,5 @@
 use super::*;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 use crate::encrypted_blob::decode_encrypted_blob;
 use am_utils_rs::codecs::ThroughJson;
@@ -14,7 +15,14 @@ use big_sync_core::{ByteKey, PartKey, PeerKey, SyncCompletionDeets};
 /// bucket-diff. The offline-reopen stall this used to opt out for is covered by
 /// `bucket_band_reconciles_after_offline_reopen`.
 const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::Bucket);
-use futures::lock::Mutex;
+
+/// The scope the machine's RPC calls carry. A peer's responder is looked up by this string, so
+/// the node that serves the calls registers its store under it.
+const BIG_SYNC_RPC_SCOPE: &str = "big-repo-test";
+
+/// How long a caught-up live lane may park on the peer. The production hold is 15s and a test
+/// that waits for convergence cannot pay that, so the client's own pacing knob is short here.
+const HARNESS_REPLAY_HOLD_MS: u32 = 50;
 use nonempty::NonEmpty;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -174,14 +182,14 @@ async fn recv_head_batch(
 }
 
 async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
-    let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32());
+    let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
     repo.keyhive().get_agent_by_peer_id(&kh_peer_id).await
 }
 
 fn keyhive_document_id_for_big_repo_doc(
     doc_id: DocumentId,
 ) -> keyhive_core::principal::document::id::DocumentId {
-    let doc_id_bytes = doc_id.to_bytes32();
+    let doc_id_bytes = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
         .expect("doc id should be a valid keyhive document id");
     keyhive_core::principal::document::id::DocumentId::from(
@@ -351,7 +359,9 @@ async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history(
         if head.0[0] == 0 {
             repo.wait_for_quiescence(None).await?;
 
-            let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+            let sed_id = sedimentree_core::id::SedimentreeId::new(
+                doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+            );
             let head_id = sedimentree_core::loose_commit::id::CommitId::new(head.0);
             let fragments = <SqliteBigRepoStore as subduction_core::storage::traits::Storage<
                 future_form::Sendable,
@@ -401,7 +411,8 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = owner
         .repo
         .keyhive()
@@ -463,7 +474,8 @@ async fn bucket_band_reconciles_after_offline_reopen() -> Res<()> {
     let client_conn = client.connection_to(&owner).await;
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = owner
         .repo
         .keyhive()
@@ -1019,7 +1031,8 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = owner
         .repo
         .keyhive()
@@ -1156,7 +1169,8 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = owner
         .repo
         .keyhive()
@@ -1430,7 +1444,8 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
     owner_conn.sync_keyhive_with_peer().await?;
 
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = owner
         .repo
         .keyhive()
@@ -1522,11 +1537,13 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
     owner.wait_for_accepts(2).await;
     let owner_conn = owner.take_latest_accepted_connection().await;
     let client_conn = client.connection_to(&owner).await;
-    let owner_kh_peer_id = KeyhivePeerId::from_bytes(owner.peer_id().to_bytes32());
-    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let owner_kh_peer_id =
+        KeyhivePeerId::from_bytes(owner.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
+    let grantee_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     owner_conn.sync_keyhive_with_peer().await?;
     let reopened_kh = client.repo.keyhive().clone_keyhive();
-    let doc_id_bytes = doc_id.to_bytes32();
+    let doc_id_bytes = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let reopened_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(
             ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
@@ -2033,7 +2050,8 @@ async fn create_shared_sync_doc(
     owner_conn.sync_keyhive_with_peer().await?;
 
     let doc = new_sync_doc(owner_actor, value);
-    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(grantee.peer_id().to_bytes32());
+    let grantee_kh_peer_id =
+        KeyhivePeerId::from_bytes(grantee.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let grantee_agent = owner
         .repo
         .keyhive()
@@ -2052,10 +2070,10 @@ async fn create_shared_sync_doc(
     // (has_doc_worker || contains_sedimentree) passes for
     // subsequent sync scenarios.
     let doc_id = handle.document_id();
-    // The runtime listener registers the doc in global_part_id() on the
-    // grantee when the delegation arrives via ephemeral notification.
-    // If the grantee restarted and the listener isn't active, the caller
-    // is responsible for restoring partition membership.
+    // The store records the doc in seds_part_id() as soon as it holds the
+    // sedimentree's content, which is what the bootstrap above makes true. A
+    // grantee that restarted before that write happened holds no tree, so it
+    // is the caller's job to restore it by writing the document again.
     // The delegations above reach each node's local Keyhive asynchronously
     // through its hub. Both the doc sync below and callers that write to the
     // document right after this helper would otherwise race their own
@@ -2070,11 +2088,13 @@ async fn create_shared_sync_doc(
     // cannot see it. Wait until the grantee actually observes access, so
     // callers get a document they can both sync and write.
     let grantee_local = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&grantee.peer_id().to_bytes32())
-            .map_err(|_| crate::ferr!("grantee peer id is not a verifying key"))?,
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &grantee.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+        )
+        .map_err(|_| crate::ferr!("grantee peer id is not a verifying key"))?,
     );
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .map_err(|_| crate::ferr!("doc id is not a verifying key"))?,
     );
     // Bounded only for a fast, attributed failure: the grant is normally
@@ -2098,8 +2118,10 @@ async fn create_shared_sync_doc(
             let doc_known = known_docs.contains(&big_sync_core::ObjKey::new(doc_id.as_bytes()));
             let grantee_docs = grantee.repo.keyhive().docs_for_agent(&grantee_local).await;
             let owner_local = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&owner.peer_id().to_bytes32())
-                    .map_err(|_| crate::ferr!("owner peer id is not a verifying key"))?,
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &owner.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| crate::ferr!("owner peer id is not a verifying key"))?,
             );
             let owner_access = owner
                 .repo
@@ -2161,267 +2183,6 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
-pub(crate) type StressReplaySubscriptions = HashMap<
-    (
-        big_sync_core::rpc::ReplaySessionId,
-        big_sync_core::rpc::ReplaySubscriptionId,
-    ),
-    (
-        u64,
-        HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>,
-    ),
->;
-
-pub(crate) struct StressBigSyncRpcClient {
-    pub(crate) target_part_store: SharedPartStore,
-    pub(crate) subscriber: PeerKey,
-    pub(crate) replay_subscriptions: Arc<Mutex<StressReplaySubscriptions>>,
-}
-
-#[async_trait::async_trait]
-impl big_sync::rpc::WireBigSyncRpcClient for StressBigSyncRpcClient {
-    async fn peer_summary(
-        &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::PeerSummaryRequest>,
-    ) -> Res<
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<big_sync_core::rpc::PeerSummaryResult, big_sync_core::rpc::ListPartsError>,
-        >,
-    > {
-        let summarized = self
-            .target_part_store
-            .summarize_parts(req.inner.parts)
-            .await?;
-        // A part-level failure is a response error, not a transport one.
-        let summarized = match summarized {
-            Ok(parts) => parts,
-            Err(err) => return Ok(Ok(Err(err))),
-        };
-        let asker = Some(self.subscriber.clone());
-        let mut summaries = HashMap::new();
-        for (part_id, summary) in summarized {
-            let since = req
-                .inner
-                .asker_part_cursors
-                .get(&part_id)
-                .copied()
-                .unwrap_or(0);
-            let dirty = self
-                .target_part_store
-                .part_dirty_count(part_id.clone(), asker.clone(), since)
-                .await?;
-            summaries.insert(part_id, summary.into_strat_summaries(dirty));
-        }
-        Ok(Ok(Ok(big_sync_core::rpc::PeerSummaryResult {
-            parts: summaries,
-        })))
-    }
-
-    async fn replay_page(
-        &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
-    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplayPage>> {
-        // The double caps the caller's hold so a caught-up page answers promptly
-        // rather than parking on the long production poll.
-        let hold =
-            Duration::from_millis(u64::from(req.inner.hold_ms)).min(Duration::from_millis(50));
-        Ok(Ok(self
-            .target_part_store
-            .replay_page_round(
-                req.inner,
-                self.subscriber.clone(),
-                hold,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?))
-    }
-
-    async fn replay_subscription(
-        &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::ReplaySubscriptionRequest>,
-    ) -> Res<big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::ReplaySubscriptionResponse>>
-    {
-        use big_sync_core::rpc::{
-            ReplayPage, ReplayPageRequest, ReplaySubscriptionPage, ReplaySubscriptionRequest,
-            ReplaySubscriptionResponse, RpcError,
-        };
-        let hold =
-            |hold_ms| Duration::from_millis(u64::from(hold_ms)).min(Duration::from_millis(50));
-        match req.inner {
-            ReplaySubscriptionRequest::Open {
-                session_id,
-                subscription_id,
-                generation,
-                targets,
-            } => {
-                let mut target_map = HashMap::new();
-                for entry in targets {
-                    if target_map.insert(entry.id, entry.target).is_some() {
-                        return Ok(Err(RpcError::InvalidRequest(
-                            "duplicate replay target id".into(),
-                        )));
-                    }
-                }
-                self.replay_subscriptions
-                    .lock()
-                    .await
-                    .insert((session_id, subscription_id), (generation, target_map));
-                Ok(Ok(ReplaySubscriptionResponse::Opened { generation }))
-            }
-            ReplaySubscriptionRequest::Update {
-                session_id,
-                subscription_id,
-                generation,
-                additions,
-                removals,
-            } => {
-                let mut subscriptions = self.replay_subscriptions.lock().await;
-                let Some((current_generation, target_map)) =
-                    subscriptions.get_mut(&(session_id, subscription_id))
-                else {
-                    return Ok(Err(RpcError::UnknownSubscription));
-                };
-                if generation == *current_generation {
-                    return Ok(Ok(ReplaySubscriptionResponse::Updated { generation }));
-                }
-                if generation != current_generation.saturating_add(1) {
-                    return Ok(Err(RpcError::StaleSubscriptionGeneration));
-                }
-                for target_id in removals {
-                    target_map.remove(&target_id);
-                }
-                for entry in additions {
-                    if target_map.insert(entry.id, entry.target).is_some() {
-                        return Ok(Err(RpcError::InvalidRequest(
-                            "duplicate replay target id".into(),
-                        )));
-                    }
-                }
-                *current_generation = generation;
-                Ok(Ok(ReplaySubscriptionResponse::Updated { generation }))
-            }
-            ReplaySubscriptionRequest::Close {
-                session_id,
-                subscription_id,
-            } => {
-                let removed = self
-                    .replay_subscriptions
-                    .lock()
-                    .await
-                    .remove(&(session_id, subscription_id));
-                if removed.is_none() {
-                    return Ok(Err(RpcError::UnknownSubscription));
-                }
-                Ok(Ok(ReplaySubscriptionResponse::Closed))
-            }
-            ReplaySubscriptionRequest::Next {
-                session_id,
-                subscription_id,
-                request_id,
-                supersede,
-                targets,
-                limit,
-                hold_ms,
-            } => {
-                let subscriptions = self.replay_subscriptions.lock().await;
-                let Some((_, target_map)) = subscriptions.get(&(session_id, subscription_id))
-                else {
-                    return Ok(Err(RpcError::UnknownSubscription));
-                };
-                let requested = targets
-                    .iter()
-                    .map(|(target_id, cursor)| {
-                        target_map
-                            .get(target_id)
-                            .cloned()
-                            .map(|target| target.with_cursor(*cursor))
-                            .ok_or(RpcError::InvalidRequest("unknown replay target id".into()))
-                    })
-                    .collect::<Result<Vec<_>, _>>();
-                let requested = match requested {
-                    Ok(requested) => requested,
-                    Err(error) => return Ok(Err(error)),
-                };
-                let target_ids = targets
-                    .iter()
-                    .map(|(target_id, _)| {
-                        (
-                            target_map
-                                .get(target_id)
-                                .expect("requested target was validated above")
-                                .clone(),
-                            *target_id,
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-                drop(subscriptions);
-                let page = self
-                    .target_part_store
-                    .replay_page_round(
-                        ReplayPageRequest {
-                            session_id,
-                            request_id,
-                            supersede,
-                            targets: requested,
-                            limit,
-                            hold_ms,
-                        },
-                        self.subscriber.clone(),
-                        hold(hold_ms),
-                        tokio_util::sync::CancellationToken::new(),
-                    )
-                    .await?;
-                let target_verdicts = page
-                    .targets
-                    .iter()
-                    .filter_map(|(target, verdict)| {
-                        target_ids
-                            .get(&big_sync_core::rpc::ReplaySubscriptionTarget::from(target))
-                            .map(|target_id| (*target_id, verdict.clone()))
-                    })
-                    .collect();
-                Ok(Ok(ReplaySubscriptionResponse::Page(
-                    ReplaySubscriptionPage {
-                        page: ReplayPage {
-                            events: page.events,
-                            targets: Vec::new(),
-                        },
-                        targets: target_verdicts,
-                    },
-                )))
-            }
-        }
-    }
-
-    async fn get_changed_buckets(
-        &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::GetChangedBucketsRequest>,
-    ) -> Res<
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<Vec<big_sync_core::rpc::BucketSummary>, big_sync_core::rpc::ListPartsError>,
-        >,
-    > {
-        Ok(Ok(self
-            .target_part_store
-            .get_changed_buckets(req.inner, self.subscriber.clone())
-            .await?))
-    }
-
-    async fn leaf_buckets(
-        &self,
-        req: big_sync::rpc::ScopedRequest<big_sync_core::rpc::LeafBucketsRequest>,
-    ) -> Res<
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<big_sync_core::rpc::LeafBucketResult, big_sync_core::rpc::LeafBucketsError>,
-        >,
-    > {
-        Ok(Ok(self
-            .target_part_store
-            .leaf_buckets(req.inner, self.subscriber.clone())
-            .await?))
-    }
-}
-
 struct SyncRepoNode {
     #[expect(dead_code)] // kept alive by boot(); used for teardown diagnostics
     path: PathBuf,
@@ -2437,6 +2198,10 @@ struct SyncRepoNode {
     accept_notify: Arc<Notify>,
     accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
     big_sync_stop: big_sync::StopToken,
+    /// The node's real big-sync responder, and the token that stops it. A peer in this process
+    /// reaches it directly, so a call takes the same dispatch a socket would.
+    big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
+    big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     sync_backend: Arc<BigRepoSyncBackend>,
 }
 
@@ -2466,7 +2231,7 @@ impl SyncRepoNode {
             "big-repo-sync-test",
             None,
             HARNESS_SYNC_MODE,
-            Arc::from("big-repo-test"),
+            Arc::from(BIG_SYNC_RPC_SCOPE),
         )?;
         let big_sync_host = Arc::new(big_sync::Ctx {
             store: shared_store,
@@ -2497,14 +2262,26 @@ impl SyncRepoNode {
         );
         let mut sync_backends = HashMap::new();
         sync_backends.insert(BigRepo::BACKEND_ID.into(), Arc::clone(&sync_backend) as _);
+        // The node serves its own big-sync responder, so a peer's calls land on the production
+        // dispatch without needing a socket. Built before the machine, so shutdown stops the
+        // machine first.
+        let (big_sync_rpc, big_sync_rpc_stop) =
+            big_sync::rpc::spawn_big_sync_rpc(HashMap::from([(
+                Arc::from(BIG_SYNC_RPC_SCOPE),
+                Arc::clone(&big_sync_host.store),
+            )]))
+            .await?;
         let (big_sync_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
             Arc::clone(&big_sync_host.store),
             sync_backends,
             "big-repo-sync-test-main",
             None,
             HARNESS_SYNC_MODE,
-            Arc::from("big-repo-test"),
+            Arc::from(BIG_SYNC_RPC_SCOPE),
         )?;
+        big_sync_worker
+            .set_replay_hold_ms(HARNESS_REPLAY_HOLD_MS)
+            .await?;
 
         let accept_count = Arc::new(AtomicUsize::new(0));
         let accept_notify = Arc::new(Notify::new());
@@ -2541,6 +2318,8 @@ impl SyncRepoNode {
             connections,
             stop_token,
             big_sync_stop,
+            big_sync_rpc,
+            big_sync_rpc_stop,
             endpoint,
             router,
             repo_rpc_stop,
@@ -2613,6 +2392,20 @@ impl SyncRepoNode {
                 None,
             )
             .await?;
+        // A part the scope does not hold answers as unknown, and a read is authorized per caller,
+        // so the fixture states what the rest of the test assumes: these parts exist on both sides,
+        // and each side may read the other's.
+        for part in stress_support::test_parts() {
+            for (store, reader) in [
+                (Arc::clone(&remote.big_sync_store), self.peer_id()),
+                (Arc::clone(&self.big_sync_store), remote.peer_id()),
+            ] {
+                store.ensure_part(part.clone()).await?;
+                store
+                    .add_part_member(part.clone(), reader, keyhive_core::access::Access::Read)
+                    .await?;
+            }
+        }
         let parts = stress_support::test_parts()
             .into_iter()
             .map(|part_id| (part_id, BigRepo::BACKEND_ID.into()))
@@ -2620,11 +2413,7 @@ impl SyncRepoNode {
         self.big_sync_worker
             .set_peer(
                 remote.peer_id(),
-                Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&remote.big_sync_store),
-                    subscriber: self.peer_id(),
-                    replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
-                }),
+                Arc::new(remote.big_sync_rpc.in_memory_client(self.peer_id())),
                 parts,
                 HashMap::new(),
             )
@@ -2637,11 +2426,7 @@ impl SyncRepoNode {
             .big_sync_worker
             .set_peer(
                 self.peer_id(),
-                Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&self.big_sync_store),
-                    subscriber: remote.peer_id(),
-                    replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
-                }),
+                Arc::new(self.big_sync_rpc.in_memory_client(remote.peer_id())),
                 parts,
                 HashMap::new(),
             )
@@ -2683,6 +2468,7 @@ impl SyncRepoNode {
         self.endpoint.close().await;
         self.stop_token.stop().await?;
         self.big_sync_stop.stop().await?;
+        self.big_sync_rpc_stop.stop().await?;
         self.repo_rpc_stop.stop().await?;
         drop(self.router);
         Ok(())
@@ -2747,7 +2533,8 @@ async fn run_sync_case(
     // Keyhive setup: contact cards + grant access
     let server_conn = server.take_latest_accepted_connection().await;
     client_conn.sync_keyhive_with_peer().await?;
-    let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+    let client_kh_peer_id =
+        KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     let client_agent = server
         .repo
         .keyhive()
@@ -3236,7 +3023,8 @@ async fn run_sync_backend_case(
     // CGKA tree state. Any content written after this will use a
     // PCS key that includes the client's leaf.
     {
-        let client_kh_peer_id = KeyhivePeerId::from_bytes(client.peer_id().to_bytes32());
+        let client_kh_peer_id =
+            KeyhivePeerId::from_bytes(client.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
         let client_agent = server
             .repo
             .keyhive()
@@ -3362,11 +3150,11 @@ async fn run_sync_backend_case(
         } else {
             sync_part_hints.clone()
         };
-        // The runtime auto-adds docs to the global partition on read access
-        // (marker model). Include it in expectations.
+        // The store adds a document to `/seds` when it writes the tree's content, which is what
+        // makes it a locally available sedimentree. Include it in expectations.
         let mut parts = base;
-        if !parts.contains(&crate::global_part_id()) {
-            parts.push(crate::global_part_id());
+        if !parts.contains(&crate::seds_part_id()) {
+            parts.push(crate::seds_part_id());
         }
         parts
     };

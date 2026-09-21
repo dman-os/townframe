@@ -26,6 +26,13 @@ pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
 
     /// Fetch a source page using a backend-specific conservative byte bound.
     ///
+    /// `max_bytes` is a bound a source has to honour, not a hint it may drop: a caller that
+    /// passes a budget is asking for a page whose payload stays inside the replay read-ahead,
+    /// so an implementation that cannot measure a row's cost must still supply one. The page
+    /// takes at least one entry even when that entry alone exceeds the budget — a page that
+    /// returns nothing while rows still match loses the walk's position — so the bound is soft
+    /// by exactly that one entry.
+    ///
     /// The returned revision is always the last complete revision selected. This is deliberately
     /// separate from [`fetch_rows`]: the generic frontier reader remains a faithful row reader,
     /// while SQLite can avoid materializing large JSON payloads beyond the replay read-ahead.
@@ -36,21 +43,14 @@ pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
         after: FrontierRevision,
         through: FrontierRevision,
         max_entries: usize,
-        _max_bytes: usize,
+        max_bytes: usize,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<(Vec<Self::Row>, FrontierRevision), SqliteReadError>>
                 + Send
                 + 'a,
         >,
-    > {
-        Box::pin(async move {
-            let rows = self
-                .fetch_rows(selector, after, through, None, Some(max_entries))
-                .await?;
-            Ok((rows, through))
-        })
-    }
+    >;
 
     /// Return the source cursor represented by a selector's lower bound.
     /// Selectors with independent per-key bounds retain the shared cursor at

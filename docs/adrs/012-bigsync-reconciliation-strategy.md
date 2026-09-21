@@ -188,10 +188,15 @@ Keys are path-shaped, and a key's value may itself be a path. Object keys carry 
 `o:` scheme so that the boundary between scheme and value is unambiguous: for a value
 like `/object/path`, a naive `/o/` prefix produces `/o//object/path` (a doubled slash
 because the value already begins with `/`), and a bare `/o` prefix leaves the boundary
-unreadable. Reserved part keys are themselves plain paths, so `/seds` stays `/seds`.
+unreadable. Reserved part keys are themselves plain paths, so the part key's *bytes* are
+`/seds`. That is a statement about the bytes and the bytes only: the key's text form is
+multibase base58btc for every key (`z` + the bytes), with no specialization by key shape,
+so nothing can be mistaken for raw text and `Display`/`FromStr` are exact inverses.
+`/seds` remains a *label* — it is how the docs, the migration comments and this ADR name
+the key — not its text form.
 
 **As built.** The renames have landed — `ObjKey` / `PartKey` / `PeerKey` / `ByteKey`
-across 89 files — together with `GLOBAL_PART_ID` becoming `global_part_id()`, since a
+across 89 files — together with `GLOBAL_PART_ID` becoming `seds_part_id()` (it names the
 `const` cannot hold a key once keys stop being const-constructible. The representation is
 `Arc<[u8]>`, and it was chosen on measurement rather than taste: 16 bytes per key with an
 O(1) clone that is an atomic increment, against 24 for `Vec<u8>`, 16 for `Box<[u8]>`, 32
@@ -728,20 +733,38 @@ The primary protocol should keep the replay task discrete and pull-based while m
 set stateful. This is stateful control-plane metadata, not a push stream, server-owned cursor, or
 retained event queue:
 
-1. An `OpenReplaySubscription` request sends the client session ID and initial target set once and
-   returns a bounded subscription handle plus a generation.
-2. `UpdateReplaySubscription` sends coalesced additions and removals. The client debounces rapid
-   target changes, and the server applies only the newest generation.
-3. `NextReplayPage` names the session, handle, and asks for one bounded page. It retains the existing
-   `limit`, `hold_ms`, page `request_id`, supersede behavior, and per-target resume verdicts.
-4. `CloseReplaySubscription` releases the handle. Handles are scoped to the authenticated peer,
-   storage scope, and client session; they expire when abandoned and must be recreated from a full
-   target set after reconnect.
+1. The first `Update` for an unknown subscription ID opens the subscription: it carries the client session
+   ID and its additions and returns the generation. There is no separate open request — open's full target
+   list is just every target as an addition, and it would need the same per-entry outcome handling.
+2. `Update` sends coalesced additions and removals. The client debounces rapid target changes, and the
+   server applies only the newest generation. Removals are applied before additions, so one request may
+   remove a target and re-add the same part under a fresh target ID; the fresh ID keeps old and new from
+   colliding even if the server still holds stale entries. The answer reports **partial success**: entries
+   the server could not accept come back as `UnknownPart` or `Unauthorized`, and the client retries exactly
+   those entries, with their original IDs so a retry is idempotent, on the task's own backoff. New
+   additions join the pending batch and reset that backoff.
+3. `Next` names the session and subscription and asks for one bounded page. It retains the existing
+   `limit`, `hold_ms`, page `request_id`, supersede behavior, and per-target resume verdicts. A page
+   verdict of `UnknownPart` or `Unauthorized` is a **successful** `Next`: it means a target the subscription
+   still lists cannot be served, and the client answers it with an `Update` that removes that target and
+   re-adds the part under a fresh ID. `Next` is never paced per target — it holds on the server and
+   re-issues — and only a whole-request failure (transport, a peer that went away) takes the task backoff.
+4. `Close` releases the subscription. Subscriptions are scoped to the authenticated peer, storage scope,
+   and client session; they expire when abandoned, and reconnect recreates one by opening a fresh
+   subscription ID with an `Update`.
 
+
+A target that comes back unknown or unauthorized is **blocked**: it stays in the subscription, it keeps
+blocking full sync, and the server never removes it. Both rejection kinds are one machine outcome, because
+absent access rows cannot distinguish a revocation from a grant that has not landed yet. The block clears
+when an update for that entry succeeds or the embedder drops the target; only the client ever changes the
+set, so a page that reports a bad target can never desync the session.
 The existing full-target page request is the migration implementation and must be improved while this
-lands, but it is not a second long-term protocol surface. `NextReplayPage` can invoke the same
-discrete replay task: the task receives the current target snapshot from the subscription registry,
-and its result has the same bounded page and cursor semantics.
+lands, but it is not a second long-term protocol surface.
+`Update` and `Next` are each discrete calls. An `Update` performs one reconfiguration and reports per-entry
+outcomes; a `Next` fetches one bounded page. Neither carries a target snapshot to re-derive decisions
+from: the machine owns the subscription state and hands the task the parameters for the one call it is
+making.
 
 This does not require a stateful transport. HTTP remains ordinary request/response transport: the
 subscription handle is carried in each `Update` and `Next` request, while `Next` is the one long-poll
@@ -817,15 +840,18 @@ projection must therefore not turn a part-level deletion into a payload-less `Ch
 that shape means *resolve the membership*, and the machine books it as content.
 
 
-**As built, a page hands out tombstones it cannot know are wanted.** The stamps went with `Added`
-(above), so for an arbitrary cursor the server cannot tell whether the reader ever saw the object,
-and the membership row's `txid` is overwritten by each transition rather than kept per kind. The
-page therefore spends its row budget on `event_type = 2` rows like any other —
-`list_events_with_policy`'s cutoff and row queries select them unconditionally — which a fresh
-subscriber on a long-lived part pays in round trips before it reaches content. Correctness is
-unaffected: applying a removal for an object the replica does not hold is a no-op on both sides
-(`remove_obj_from_part` returns early on an unknown object ref, and the reader's replica knows its
-own membership). So this is a cost, not a bug, and the `added_at` predicate above is its fix.
+**As built, the page draws its rows with the stamp as a predicate.** The predicate above is
+applied where the page's rows are selected: `push_selector_predicate` adds
+`m.event_type != 2 OR m.added_at <= <that key's requested cursor>` to its per-key branches, so a
+page never fetches a tombstone it cannot use, and the reads a page already makes — the
+byte-budget probe and the value pass — are the only ones it makes. The request-scoped nature is
+load-bearing and is now explicit in the interface: a *page* read
+(`HostPartStore::open_page_reader`) applies the predicate, because a page's cursor is a claim
+about what the requester already has; a *pull* read (`HostPartStore::open_revision_reader`) is
+handed the log whole, tombstones included, because its bound is only where it starts streaming
+and it then advances; and an `All` read carries no per-key cursor at all, so it also keeps the
+log whole. The old per-event lookup (`obj_part_added_at`, called once per `Removed` in the page
+builder) is gone: the stamp never crosses the store boundary.
 
 **Membership removal is not payload removal.** An object removed from every part does **not** lose
 its payload: `remove_obj_from_part` nulls the payload when the live count reaches zero, and that is
@@ -1413,13 +1439,20 @@ The store and the protocol need to expose, for a view:
    of scope for the current change by decision rather than by omission: it is an addition, not a
    fix, it depends on the unmeasured item-width `ℓ` (decision 5, and the deferred list below),
    and nothing already built needs it to work.
-9. **`/seds`.** Landed. The rename is in place — `global_part_id()` returns the reserved
-   `/seds` — and it stays a real part: the three remaining special cases are gone.
-   `add_obj_to_parts` no longer filters `/seds` out of its inputs, the batch write path
-   carries plain membership instead of a `desired_global` flag (a local principal records
-   the membership when it can read the part, by the same rule as every other part), and
-   `scope_includes_part` resolves it generically. The gossip path records `/seds`
-   memberships from remote events like any other part, which decision 12 now states.
+9. **`/seds`.** Landed. It is named for what it is — `seds_part_id()` returns the reserved
+   key `/seds`, this node's local index of the sedimentrees it has saved — and it stays a real
+   part: the three remaining special cases are gone. `add_obj_to_parts` no longer filters
+   `/seds` out of its inputs, the batch write path carries plain membership instead of a
+   `desired_global` flag, and `scope_includes_part` resolves it generically. The store owns it,
+   because the store is the side that knows a tree exists: every content mutation runs through
+   `mutate_tree_in_tx`, which writes the membership for the tree-derived object alongside the
+   payload, and `delete_sedimentree_id` removes it again. The group-part worker's subject is
+   keyhive-derived group membership, so it no longer writes `/seds` at all. The gossip path
+   records `/seds` memberships from remote events like any other part, which decision 12 now
+   states. Being local bookkeeping, it carries no derived access rows: access rows are written
+   only for parts with a derived agent set, which `/seds` never has. What a peer may see through
+   it is decided per event by the readability filter, and a peer meant to pull the partition
+   itself is granted `/seds` explicitly.
 
 Steps 1–3 are the near-term focus: a bucket that works for the authorized case,
 with a measured dirty count replacing the global-watermark heuristic and no part

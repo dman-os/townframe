@@ -244,7 +244,7 @@ pub(crate) async fn grant_docs_admin(
     use big_repo::keyhive_core::{access::Access, principal::identifier::Identifier};
     let group_ident = Identifier::from(group.id());
     for doc_id in doc_ids {
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
             .map_err(|err| eyre::eyre!("invalid doc_id verifying key: {err}"))?;
         let doc_ident = Identifier::from(vk);
         if matches!(

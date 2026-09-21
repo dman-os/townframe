@@ -226,7 +226,7 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
     };
     HostPartStore::set_obj_payload(&store, obj.clone(), serde_json::json!({"value": 1})).await?;
     store.ensure_part(part.clone()).await?;
-    let both = HashSet::from([crate::global_part_id(), part.clone()]);
+    let both = HashSet::from([crate::seds_part_id(), part.clone()]);
     store
         .reconcile_group_part_batch(&[grant(vec![peer.clone(), witness.clone()], both)], 1, true)
         .await?;
@@ -257,7 +257,7 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
 
     // Revoke `peer` and drop the doc out of `part` in the same reconcile, so a
     // removal for `part` is published for a peer that may no longer read it.
-    let only_seds = HashSet::from([crate::global_part_id()]);
+    let only_seds = HashSet::from([crate::seds_part_id()]);
     store
         .reconcile_group_part_batch(&[grant(vec![witness.clone()], only_seds)], 2, true)
         .await?;
@@ -341,7 +341,7 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
             ),
         )]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
     };
     HostPartStore::set_obj_payload(&store, obj.clone(), serde_json::json!({"value": 1})).await?;
     store.ensure_part(part.clone()).await?;
@@ -438,7 +438,7 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
                 doc: obj.clone(),
                 agents: HashMap::from([(other.clone(), keyhive_core::access::Access::Read)]),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashSet::from([part.clone()])
                     .iter()
                     .map(|part| {
@@ -497,7 +497,7 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
                 doc: obj.clone(),
                 agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashMap::from([(
                     part.clone(),
                     Arc::new(HashMap::from([(
@@ -564,7 +564,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
                 doc: obj.clone(),
                 agents: HashMap::new(),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashSet::from([part.clone()])
                     .iter()
                     .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -603,7 +603,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
                 doc: obj.clone(),
                 agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashSet::from([part.clone()])
                     .iter()
                     .map(|part| {
@@ -651,7 +651,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
                 doc: obj,
                 agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashSet::from([part.clone()])
                     .iter()
                     .map(|part| {
@@ -705,14 +705,14 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
     )
     .await?;
     let obj = ObjKey(ByteKey::new([223; 32]));
-    HostPartStore::ensure_part(&store, crate::global_part_id()).await?;
+    HostPartStore::ensure_part(&store, crate::seds_part_id()).await?;
     store
         .reconcile_group_part_batch(
             &[GroupPartReconciliation {
                 doc: obj.clone(),
                 agents: HashMap::new(),
                 managed_group_parts: HashSet::new(),
-                desired_group_parts: HashSet::from([crate::global_part_id()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id()]),
                 part_agents: HashSet::<PartKey>::new()
                     .iter()
                     .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -725,16 +725,16 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
 
     assert_eq!(
         HostPartStore::obj_parts(&store, obj.clone()).await?,
-        vec![crate::global_part_id()]
+        vec![crate::seds_part_id()]
     );
     assert_eq!(
-        HostPartStore::member_count(&store, crate::global_part_id()).await?,
+        HostPartStore::member_count(&store, crate::seds_part_id()).await?,
         0
     );
     assert!(
-        HostPartStore::list_events(&store, HashSet::from([crate::global_part_id()]), 0, 8,)
+        HostPartStore::list_events(&store, HashSet::from([crate::seds_part_id()]), 0, 8,)
             .await??
-            .get(&crate::global_part_id())
+            .get(&crate::seds_part_id())
             .expect(ERROR_IMPOSSIBLE)
             .events
             .is_empty(),
@@ -745,7 +745,7 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
         SubPartsRequest {
             lower_bound: 0,
             targets: HashSet::from([SubscriptionTarget::Part {
-                part_id: crate::global_part_id(),
+                part_id: crate::seds_part_id(),
                 cursor: 0,
             }]),
         },
@@ -765,11 +765,11 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
             .first()
             .cloned()
             .expect("a touch names its part"),
-        crate::global_part_id()
+        crate::seds_part_id()
     );
     assert_eq!(added.payload, payload);
     assert_eq!(
-        HostPartStore::member_count(&store, crate::global_part_id()).await?,
+        HostPartStore::member_count(&store, crate::seds_part_id()).await?,
         1
     );
     Ok(())
@@ -2218,13 +2218,13 @@ async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
 
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(group_part.clone()).await?;
-    store.ensure_part(crate::global_part_id()).await?;
+    store.ensure_part(crate::seds_part_id()).await?;
 
     let mutations = vec![GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([group_part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), group_part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), group_part.clone()]),
         part_agents: HashSet::from([group_part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2240,7 +2240,7 @@ async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
         "doc should be in the managed group part"
     );
     assert!(
-        parts.contains(&crate::global_part_id()),
+        parts.contains(&crate::seds_part_id()),
         "doc should be in `/seds` when the reconciliation desires it"
     );
     assert_eq!(store.keyhive_group_part_cursor().await?, 42);
@@ -2263,7 +2263,7 @@ async fn reconcile_batch_assigns_unique_paginateable_part_cursors() -> Res<()> {
         doc,
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2326,7 +2326,7 @@ async fn reconcile_group_part_batch_removes_stale_managed_membership() -> Res<()
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part_a.clone(), part_b.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part_a.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part_a.clone()]),
         part_agents: HashSet::from([part_a.clone()])
             .iter()
             .map(|part| {
@@ -2374,7 +2374,7 @@ async fn reconcile_group_part_batch_cursor_advances() -> Res<()> {
         doc: doc.clone(),
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2413,7 +2413,7 @@ async fn reconcile_group_part_batch_rolls_back_on_cursor_update_failure() -> Res
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part])
             .iter()
             .map(|part| {
@@ -2455,13 +2455,13 @@ async fn reconcile_group_part_batch_removes_seds_when_membership_drops() -> Res<
 
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(group_part.clone()).await?;
-    store.ensure_part(crate::global_part_id()).await?;
+    store.ensure_part(crate::seds_part_id()).await?;
     // Local decision puts the doc into both the managed group part AND `/seds`.
     let seed: &[GroupPartReconciliation] = &[GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([group_part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), group_part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), group_part.clone()]),
         part_agents: HashSet::from([group_part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2470,7 +2470,7 @@ async fn reconcile_group_part_batch_removes_seds_when_membership_drops() -> Res<
     store.reconcile_group_part_batch(seed, 100, true).await?;
 
     let parts_before = HostPartStore::obj_parts(&store, doc.clone()).await?;
-    assert!(parts_before.contains(&crate::global_part_id()));
+    assert!(parts_before.contains(&crate::seds_part_id()));
     assert!(parts_before.contains(&group_part));
 
     // Reconcile: both parts are managed, but `/seds` is no longer desired. It drops out
@@ -2480,7 +2480,7 @@ async fn reconcile_group_part_batch_removes_seds_when_membership_drops() -> Res<
     let mutations = vec![GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::new(),
-        managed_group_parts: HashSet::from([group_part.clone(), crate::global_part_id()]),
+        managed_group_parts: HashSet::from([group_part.clone(), crate::seds_part_id()]),
         desired_group_parts: HashSet::from([group_part.clone()]),
         part_agents: HashSet::from([group_part.clone()])
             .iter()
@@ -2494,7 +2494,7 @@ async fn reconcile_group_part_batch_removes_seds_when_membership_drops() -> Res<
     let parts = HostPartStore::obj_parts(&store, doc).await?;
     assert!(parts.contains(&group_part), "managed part should remain");
     assert!(
-        !parts.contains(&crate::global_part_id()),
+        !parts.contains(&crate::seds_part_id()),
         "`/seds` should be removed when its membership is no longer desired"
     );
     assert_eq!(store.keyhive_group_part_cursor().await?, 110);
@@ -2515,23 +2515,23 @@ async fn gossip_records_seds_membership_like_any_other_part() -> Res<()> {
 
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(group_part.clone()).await?;
-    store.ensure_part(crate::global_part_id()).await?;
+    store.ensure_part(crate::seds_part_id()).await?;
 
     HostPartStore::add_obj_to_parts(
         &store,
         doc.clone(),
-        vec![group_part.clone(), crate::global_part_id()],
+        vec![group_part.clone(), crate::seds_part_id()],
     )
     .await?;
 
     let parts = HostPartStore::obj_parts(&store, doc).await?;
     assert_eq!(
         parts.into_iter().collect::<HashSet<_>>(),
-        HashSet::from([group_part, crate::global_part_id()]),
+        HashSet::from([group_part, crate::seds_part_id()]),
         "gossip records every part the event names, `/seds` included"
     );
     assert_eq!(
-        HostPartStore::member_count(&store, crate::global_part_id()).await?,
+        HostPartStore::member_count(&store, crate::seds_part_id()).await?,
         1,
         "`/seds` membership arrives through the ordinary path"
     );
@@ -2554,7 +2554,7 @@ async fn reconcile_group_part_batch_noop_still_advances_cursor() -> Res<()> {
         doc: doc.clone(),
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2573,7 +2573,7 @@ async fn reconcile_group_part_batch_noop_still_advances_cursor() -> Res<()> {
     assert!(parts.contains(&part), "doc should still be in the part");
     assert_eq!(
         parts.iter().cloned().collect::<HashSet<_>>(),
-        HashSet::from([part.clone(), crate::global_part_id()]),
+        HashSet::from([part.clone(), crate::seds_part_id()]),
         "the group part and the local /seds membership, and nothing spurious"
     );
     Ok(())
@@ -2621,7 +2621,7 @@ async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part.clone()])
             .iter()
             .map(|part| {
@@ -2666,7 +2666,7 @@ async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
     );
     assert_eq!(
         parts_after_second.iter().cloned().collect::<HashSet<_>>(),
-        HashSet::from([part.clone(), crate::global_part_id()]),
+        HashSet::from([part.clone(), crate::seds_part_id()]),
         "no extra parts should appear after duplicate delivery"
     );
     // Cursor must advance monotonically (higher wins).
@@ -2676,7 +2676,7 @@ async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
                 doc,
                 agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
                 managed_group_parts: HashSet::from([part.clone()]),
-                desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+                desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
                 part_agents: HashSet::from([part])
                     .iter()
                     .map(|part| {
@@ -2720,7 +2720,7 @@ async fn reconcile_group_part_cursor_survives_store_restart() -> Res<()> {
         doc: doc.clone(),
         agents: HashMap::new(),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part.clone()])
             .iter()
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
@@ -2795,7 +2795,7 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
             (witness.clone(), keyhive_core::access::Access::Read),
         ]),
         managed_group_parts: HashSet::from([part.clone(), left_part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashMap::from([(
             part.clone(),
             Arc::new(HashMap::from([
@@ -2858,7 +2858,7 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part])
             .iter()
             .map(|part| {
@@ -2931,7 +2931,7 @@ async fn reconcile_group_part_batch_rolls_back_on_bucket_write_failure() -> Res<
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part])
             .iter()
             .map(|part| {
@@ -2976,7 +2976,7 @@ async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() ->
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
         managed_group_parts: HashSet::from([part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id(), part.clone()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id(), part.clone()]),
         part_agents: HashSet::from([part])
             .iter()
             .map(|part| {
@@ -3057,8 +3057,8 @@ async fn reconcile_group_part_batch_does_not_revoke_a_foreign_parts_rows() -> Re
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), read), (witness.clone(), read)]),
         part_agents: HashMap::from([(group_part.clone(), Arc::clone(&both))]),
-        managed_group_parts: HashSet::from([group_part.clone(), crate::global_part_id()]),
-        desired_group_parts: HashSet::from([group_part.clone(), crate::global_part_id()]),
+        managed_group_parts: HashSet::from([group_part.clone(), crate::seds_part_id()]),
+        desired_group_parts: HashSet::from([group_part.clone(), crate::seds_part_id()]),
     }];
     store.reconcile_group_part_batch(&seed, 1, true).await?;
 
@@ -3082,7 +3082,7 @@ async fn reconcile_group_part_batch_does_not_revoke_a_foreign_parts_rows() -> Re
         agents: HashMap::from([(witness.clone(), read)]),
         part_agents: HashMap::from([(group_part.clone(), Arc::clone(&revoked))]),
         managed_group_parts: HashSet::from([group_part.clone()]),
-        desired_group_parts: HashSet::from([crate::global_part_id()]),
+        desired_group_parts: HashSet::from([crate::seds_part_id()]),
     }];
     store
         .reconcile_group_part_batch(&mutations, 2, true)
@@ -3137,17 +3137,17 @@ async fn reconcile_group_part_batch_keeps_seds_rows_when_the_doc_leaves_seds() -
 
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(group_part.clone()).await?;
-    store.ensure_part(crate::global_part_id()).await?;
+    store.ensure_part(crate::seds_part_id()).await?;
     // The part-level owner's rows, written as a full replacement (`set_part_members`).
     store
         .set_part_members(
-            crate::global_part_id(),
+            crate::seds_part_id(),
             HashMap::from([(embedder.clone(), read), (member.clone(), read)]),
         )
         .await?;
 
     let group_agents = Arc::new(HashMap::from([(member.clone(), read)]));
-    let seds = crate::global_part_id();
+    let seds = crate::seds_part_id();
     let seed = [GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::from([(member.clone(), read)]),

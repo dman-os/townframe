@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use big_sync_core::keyed_frontier::{FrontierMutation, FrontierRevision, KeyedFrontierResult};
 use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
 use big_sync_core::rpc::{
     BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
     GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
@@ -46,9 +47,9 @@ structstruck::strike! {
                                 added_at: CursorIndex,
                                 changed_at: CursorIndex,
                                 removed_at: Option<CursorIndex>,
-                                /// ADR 012 decision 1: the object's deepest bucket index.
-                                /// Stored so a bucket's members are a range of *this*
-                                /// rather than of the key, which stopped being possible.
+                                /// The bucket this object's key hashes to: `buck_index` is the
+                                /// assigned bucket, not the key itself, so a bucket's members are a
+                                /// contiguous range of these indices.
                                 buck_index: u16,
                             }
                         >,
@@ -153,6 +154,99 @@ impl MemoryKeyedFrontierSelector<PartFrontierKey> for MemoryPartEventSelector {
             .chain(self.object_bounds.values().copied())
             .min()
             .unwrap_or(0)
+    }
+}
+
+/// The memory twin of the SQLite tombstone predicate (ADR 012 decision 9).
+///
+/// This store keeps `added_at` in its member state rather than on the frontier entry, so the
+/// filter rides the reader instead of the read query: a `Removed` whose membership became
+/// present after this reader's own requested cursor for that key is not handed out at all.
+/// The unbounded `All` reader has no bound and keeps the log whole.
+struct MemoryPartRevisionReader {
+    inner: Box<dyn super::LocalPartRevisionReader>,
+    selector: MemoryPartEventSelector,
+    state: Arc<surelock::mutex::Mutex<MemoryPartStoreScopeState>>,
+}
+
+impl MemoryPartRevisionReader {
+    fn is_the_readers_business(&self, event: &PartEvent) -> bool {
+        // An `All` read has no per-key requested cursor to compare against, so it keeps the
+        // log whole; only a read that named keys with positions applies the predicate.
+        if self.selector.all.is_some() {
+            return true;
+        }
+        let PartEvent::Removed(removed) = event else {
+            return true;
+        };
+        let key = PartFrontierKey::Part {
+            obj_id: removed.obj_id.clone(),
+            part_id: removed.part_id.clone(),
+        };
+        let Some(bound) = self.selector.lower_bound(&key) else {
+            return true;
+        };
+        let added_at = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.state);
+            guard
+                .parts
+                .get(&removed.part_id)
+                .and_then(|part| part.members.get(&removed.obj_id))
+                .map(|member| member.added_at)
+        });
+        added_at.is_none_or(|added_at| added_at <= bound)
+    }
+}
+
+#[async_trait]
+impl super::LocalPartRevisionReader for MemoryPartRevisionReader {
+    async fn next(
+        &mut self,
+        limits: RevisionReadLimits,
+    ) -> Res<RevisionRead<FrontierRevision, PartEvent>> {
+        match self.inner.next(limits).await? {
+            RevisionRead::Entries { revision, entries } => Ok(RevisionRead::Entries {
+                revision,
+                entries: entries
+                    .into_iter()
+                    .filter(|event| self.is_the_readers_business(event))
+                    .collect(),
+            }),
+            complete => Ok(complete),
+        }
+    }
+}
+
+impl MemoryPartEventSelector {
+    /// The requested cursors a page names: the same per-key bound the frontier read is
+    /// bounded by, in the shape the tombstone predicate asks `lower_bound` for. A page always
+    /// names keys, so `all` stays `None` and the predicate applies to every key it holds.
+    fn for_page_request(reqs: &SubPartsRequest) -> Self {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        Self {
+            all: None,
+            part_cursors: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Part { part_id, cursor } => {
+                        Some((part_id.clone(), reqs.lower_bound.max(*cursor)))
+                    }
+                    SubscriptionTarget::Object { .. } => None,
+                })
+                .collect(),
+            object_bounds: reqs
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    SubscriptionTarget::Object { obj_id, cursor } => {
+                        Some((obj_id.clone(), reqs.lower_bound.max(*cursor)))
+                    }
+                    SubscriptionTarget::Part { .. } => None,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -694,21 +788,6 @@ impl HostPartStore for MemoryPartStore {
                 .map(|deets| deets.parts.iter().cloned().collect())
                 .unwrap_or_default())
         })
-    }
-
-    async fn obj_part_added_at(
-        &self,
-        obj_id: ObjKey,
-        part_id: PartKey,
-    ) -> Res<Option<CursorIndex>> {
-        Ok(surelock::key::lock_scope(|key| {
-            let (guard, _key) = key.lock(&self.inner);
-            guard
-                .parts
-                .get(&part_id)
-                .and_then(|part| part.members.get(&obj_id))
-                .map(|member| member.added_at)
-        }))
     }
 
     async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
@@ -1257,6 +1336,22 @@ impl HostPartStore for MemoryPartStore {
         Ok(Ok(Box::new(super::PartRevisionReader::new(
             reader, objects, parts,
         ))))
+    }
+
+    async fn open_page_reader(
+        &self,
+        reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        // The page reader is the pull reader plus ADR 012 decision 9's tombstone predicate.
+        // Memory keeps `added_at` in its member state rather than on the frontier entry, so the
+        // predicate is applied as events come back instead of in the read.
+        let selector = MemoryPartEventSelector::for_page_request(&reqs);
+        let inner = self.open_revision_reader(reqs).await??;
+        Ok(Ok(Box::new(MemoryPartRevisionReader {
+            inner,
+            selector,
+            state: Arc::clone(&self.inner),
+        })))
     }
 
     async fn open_revision_reader_all(
@@ -2028,9 +2123,10 @@ mod tests {
         .await??;
 
         // The peer without access is refused by the responder rather than streamed to. The
-        // reader is the store's faithful seam — it carries the event, which is what faithful
-        // means — so the peer-facing absence is asserted where it is enforced: the page's
-        // answer, on both the replay and the live path.
+        // The peer without access is refused by the responder rather than streamed to: the
+        // reader carries the event and authorization is not its filter, so the peer-facing
+        // absence is asserted where it is enforced — the page's answer, on both the replay and
+        // the live path.
         let denied = store
             .replay_page_for_target(
                 big_sync_core::rpc::SubscriptionTarget::Part {
@@ -2129,8 +2225,8 @@ mod tests {
         .await
         .ok();
 
-        // Revoking access is answered by the responder, not by filtering the reader: the
-        // reader is the store's faithful seam and it carries the change.
+        // Revoking access is answered by the responder, not by filtering the reader: the reader
+        // carries the change and authorization is not its filter.
         store.set_part_members(part.clone(), HashMap::new()).await?;
         store
             .set_obj_payload(obj.clone(), serde_json::json!("updated"))

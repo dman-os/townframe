@@ -344,6 +344,15 @@ pub enum SubscriptionTarget {
     },
 }
 
+impl SubscriptionTarget {
+    /// Where this route resumes from. The wire carries the position next to the entry id it
+    /// belongs to, so a round that holds the route can name both without a second lookup.
+    pub fn cursor(&self) -> CursorIndex {
+        match self {
+            Self::Part { cursor, .. } | Self::Object { cursor, .. } => *cursor,
+        }
+    }
+}
 /// Stable identity for one client-owned replay session. It namespaces subscription and
 /// in-flight request identifiers, which are only unique within a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -393,7 +402,7 @@ impl From<&SubscriptionTarget> for ReplaySubscriptionTarget {
     }
 }
 
-/// One target definition sent when opening or changing a subscription.
+/// One target definition sent when changing a subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplaySubscriptionTargetEntry {
     pub id: ReplayTargetId,
@@ -403,12 +412,15 @@ pub struct ReplaySubscriptionTargetEntry {
 /// A request against a logical replay subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplaySubscriptionRequest {
-    Open {
-        session_id: ReplaySessionId,
-        subscription_id: ReplaySubscriptionId,
-        generation: u64,
-        targets: Vec<ReplaySubscriptionTargetEntry>,
-    },
+    /// The one reconfiguration call.
+    ///
+    /// The first `Update` for an unknown subscription id opens the subscription, so there is
+    /// no separate open request: opening is the same call with every target as an addition,
+    /// which is also what gives opening the same per-entry outcome handling as any other
+    /// change. Removals are applied before additions, so one request may remove a target and
+    /// re-add the same part under a fresh target id. An `Update` no newer than the generation
+    /// the responder holds is not applied, and the answer names the generation that was held
+    /// instead.
     Update {
         session_id: ReplaySessionId,
         subscription_id: ReplaySubscriptionId,
@@ -441,8 +453,18 @@ pub struct ReplaySubscriptionPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplaySubscriptionResponse {
-    Opened { generation: u64 },
-    Updated { generation: u64 },
+    /// The answer to an `Update`.
+    ///
+    /// `rejected` names the entries the responder could not accept, with the reason; every
+    /// entry the request carried that is not named here landed. A refused entry keeps the
+    /// caller-owned id it was sent with, so re-sending it is idempotent, and only the client
+    /// ever removes it. `generation` is the generation the responder holds after the answer:
+    /// a value other than the one the request sent says the update was not applied because a
+    /// newer one had already reached the responder.
+    Updated {
+        generation: u64,
+        rejected: Vec<(ReplayTargetId, TargetVerdict)>,
+    },
     Page(ReplaySubscriptionPage),
     Closed,
 }
@@ -809,8 +831,6 @@ pub enum RpcError {
     UnknownSubscription,
     /// SubscriptionLimit
     SubscriptionLimit,
-    /// StaleSubscriptionGeneration
-    StaleSubscriptionGeneration,
     /// Internal
     Internal,
 }

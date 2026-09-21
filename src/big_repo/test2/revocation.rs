@@ -5,6 +5,7 @@ use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use big_sync::HostPartStore;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate::Res<()> {
@@ -49,7 +50,7 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
         .revoke_doc_access(doc_id.clone(), reader_agent)
         .await?;
 
-    let bytes: [u8; 32] = doc_id.to_bytes32();
+    let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|_| crate::ferr!("doc id is not a valid verifying key"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
@@ -83,8 +84,10 @@ async fn tier6_revoke_uses_authoritative_frontier_and_removes_access() -> crate:
             .keyhive()
             .agent_access_on(
                 &keyhive_core::principal::identifier::Identifier::from(
-                    ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
-                        .expect("peer id must be a verifying key"),
+                    ed25519_dalek::VerifyingKey::from_bytes(
+                        &pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE)
+                    )
+                    .expect("peer id must be a verifying key"),
                 ),
                 keyhive_core::principal::identifier::Identifier::from(vk),
             )
@@ -189,12 +192,16 @@ async fn tier6_revoked_member_write_is_rejected_locally() -> crate::Res<()> {
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
-                    .expect("peer id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-                    .expect("doc id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("doc id must be a verifying key"),
             ),
         )
         .await;
@@ -352,12 +359,16 @@ async fn tier6_stale_reader_sync_is_rejected_unauthorized_by_remote() -> crate::
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
-                    .expect("peer id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("peer id must be a verifying key"),
             ),
             keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-                    .expect("doc id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("doc id must be a verifying key"),
             ),
         )
         .await;
@@ -436,7 +447,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let old_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
+        .get_peer_part_cursor(pair.left().peer_id(), crate::seds_part_id())
         .await?;
     let mut sync_stats = pair.right().worker.subscribe_stats();
 
@@ -473,7 +484,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let revoked_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
+        .get_peer_part_cursor(pair.left().peer_id(), crate::seds_part_id())
         .await?;
     assert!(
         revoked_cursor > old_cursor,
@@ -490,7 +501,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
         &backend,
         pair.left().peer_id(),
         doc_id.clone(),
-        vec![crate::global_part_id()],
+        vec![crate::seds_part_id()],
         None,
     )
     .await?;
@@ -542,7 +553,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     let fresh_cursor = pair
         .right()
         .store
-        .get_peer_part_cursor(pair.left().peer_id(), crate::global_part_id())
+        .get_peer_part_cursor(pair.left().peer_id(), crate::seds_part_id())
         .await?;
     assert!(
         fresh_cursor > revoked_cursor,

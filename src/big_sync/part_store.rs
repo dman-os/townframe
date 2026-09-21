@@ -430,22 +430,6 @@ pub trait HostPartStore: Send + Sync {
         self.list_events(parts, cursor, limit).await
     }
 
-    /// The revision at which `obj_id` was added to `part_id`, or `None` when the store
-    /// keeps no such record.
-    ///
-    /// The peer-facing tombstone rule asks this: a `Removed` is only useful to a reader
-    /// whose request started at or after the add (`added_at <= cursor`), because a
-    /// tombstone for a member the reader never saw costs a round trip and carries no
-    /// information. `None` means "no information, deliver it" — a store that keeps no
-    /// record of the add must not silently drop a removal on that account.
-    async fn obj_part_added_at(
-        &self,
-        _obj_id: ObjKey,
-        _part_id: PartKey,
-    ) -> Res<Option<CursorIndex>> {
-        Ok(None)
-    }
-
     /// Whether a peer-facing read of `target` must be refused to `subscriber`.
     ///
     /// The one authorization answer for the whole peer-facing read surface: a page,
@@ -658,7 +642,7 @@ pub trait HostPartStore: Send + Sync {
                     continue;
                 }
                 let mut reader = match self
-                    .open_revision_reader(SubPartsRequest {
+                    .open_page_reader(SubPartsRequest {
                         lower_bound: requested_cursor,
                         targets: HashSet::from([target.clone()]),
                     })
@@ -695,23 +679,10 @@ pub trait HostPartStore: Send + Sync {
                         RevisionRead::Entries { revision, entries } => {
                             let mut revision_events = Vec::new();
                             for event in entries {
-                                // The peer-facing tombstone rule, applied here rather than in
-                                // the reader: a `Removed` is only useful to a peer whose
-                                // request started at or after the add. The rule is
-                                // request-scoped — it uses this target's requested cursor,
-                                // not the reader's advancing position — and the seam stays
-                                // faithful so the rev-store adapters keep their tombstones.
-                                if let PartEvent::Removed(removed) = &event
-                                    && let Some(added_at) = self
-                                        .obj_part_added_at(
-                                            removed.obj_id.clone(),
-                                            removed.part_id.clone(),
-                                        )
-                                        .await?
-                                    && added_at > requested_cursor
-                                {
-                                    continue;
-                                }
+                                // The tombstone rule (ADR 012 decision 9) is the read's: a
+                                // reader is never handed a `Removed` whose `added_at` is after
+                                // its own requested cursor, so there is nothing to look up or
+                                // compare for this event here.
                                 if !self
                                     .page_event_is_readable(&event, subscriber.clone())
                                     .await?
@@ -790,7 +761,7 @@ pub trait HostPartStore: Send + Sync {
                 "replay page entering long poll",
             );
             let mut wake = match self
-                .open_revision_reader(SubPartsRequest {
+                .open_page_reader(SubPartsRequest {
                     lower_bound: live
                         .iter()
                         .map(|(_, cursor)| *cursor)
@@ -915,6 +886,21 @@ pub trait HostPartStore: Send + Sync {
         _reqs: SubPartsRequest,
     ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
         Err(ferr!("revision reader is not available"))
+    }
+
+    /// Open the read a page is drawn from: the same durable revision reader, with ADR 012
+    /// decision 9's tombstone predicate applied to the requested cursors in `reqs`.
+    ///
+    /// A page's cursor is a claim about what the requester already has, so a removal whose add
+    /// is newer than that cursor is not the requester's business and is not fetched at all.
+    /// A pull consumer's bound is where it starts streaming and it then advances, so
+    /// [`Self::open_revision_reader`] hands that reader the log whole — tombstones for adds it
+    /// never saw included, which its own replica discards as no-ops.
+    async fn open_page_reader(
+        &self,
+        _reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+        Err(ferr!("page reader is not available"))
     }
 
     /// Open a durable revision reader over every part and object in the scope,
@@ -1673,10 +1659,7 @@ pub mod host_contract {
             reqs: SubPartsRequest,
             _subscriber: PeerKey,
         ) -> Res<Result<TestEventStream, ListPartsError>> {
-            Ok(self
-                .open_revision_reader(reqs)
-                .await?
-                .map(TestEventStream::new))
+            Ok(self.open_page_reader(reqs).await?.map(TestEventStream::new))
         }
 
         async fn page_events_local(
@@ -2303,9 +2286,9 @@ pub mod host_contract {
             "the tombstone cursor is newer than the add it removes"
         );
 
-        // The seam is faithful: a reader replays the log, tombstones included, so it is
-        // handed this removal even though its own cursor never saw the add. Peer policy is
-        // the responder's, asserted below.
+        // The read applies the rule, so a page whose request started before the add is not
+        // handed the removal — the same answer the target page below gives, because it is the
+        // same read rather than two paths.
         let before = store
             .page_events(
                 SubPartsRequest {
@@ -2320,11 +2303,11 @@ pub mod host_contract {
             .await??;
         let before_events = collect_sub_events(&before).await?;
         assert!(
-            before_events.iter().any(|event| matches!(
+            !before_events.iter().any(|event| matches!(
                 event,
                 PartEvent::Removed(removed) if removed.cursor == removed_at
             )),
-            "a faithful reader is handed the tombstone even when it never saw the add; got {before_events:?}"
+            "a request that started before the add is not handed the removal; got {before_events:?}"
         );
 
         // The peer-facing rule: a `Removed` reaches a peer only when the request started at
@@ -3066,6 +3049,8 @@ pub mod host_contract {
         store
             .remove_obj_from_part(obj.clone(), part_a.clone())
             .await?;
+        // The pull reader is handed what the log holds: it replays the log rather than a peer's
+        // replica, so this removal arrives even though its own cursor never saw the add.
         let removed_revision = match reader.next(RevisionReadLimits::default()).await? {
             RevisionRead::Entries { revision, entries } => {
                 assert!(revision > replay_through);
@@ -3076,6 +3061,52 @@ pub mod host_contract {
             }
             other => panic!("expected tombstone revision, got {other:?}"),
         };
+        // A page read applies ADR 012 decision 9 with the request's own cursor: the same
+        // removal is not its business below the add, and is at or after it.
+        let mut below_the_add = store
+            .open_page_reader(SubPartsRequest {
+                lower_bound: 0,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_a.clone(),
+                    cursor: 0,
+                }]),
+            })
+            .await??;
+        let mut saw_removal = false;
+        while let RevisionRead::Entries { entries, .. } =
+            below_the_add.next(RevisionReadLimits::default()).await?
+        {
+            saw_removal |= entries.iter().any(|entry| matches!(
+                entry,
+                PartEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part_a
+            ));
+        }
+        assert!(
+            !saw_removal,
+            "a page request below the add is not handed the removal"
+        );
+        let mut at_the_add = store
+            .open_page_reader(SubPartsRequest {
+                lower_bound: replay_through,
+                targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id: part_a.clone(),
+                    cursor: replay_through,
+                }]),
+            })
+            .await??;
+        let mut saw_removal = false;
+        while let RevisionRead::Entries { entries, .. } =
+            at_the_add.next(RevisionReadLimits::default()).await?
+        {
+            saw_removal |= entries.iter().any(|entry| matches!(
+                entry,
+                PartEvent::Removed(removed) if removed.obj_id == obj && removed.part_id == part_a
+            ));
+        }
+        assert!(
+            saw_removal,
+            "a page request at the add is handed the removal"
+        );
 
         let missing_obj = test_obj(204);
         let mut filtered = store
@@ -6008,6 +6039,15 @@ pub mod host_contract {
     #[async_trait]
     impl HostPartStore for EmptyLogStore {
         async fn open_revision_reader(
+            &self,
+            _reqs: SubPartsRequest,
+        ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+            Ok(Ok(Box::new(SilentlyEmptyReader {
+                replay_complete: false,
+            })))
+        }
+
+        async fn open_page_reader(
             &self,
             _reqs: SubPartsRequest,
         ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {

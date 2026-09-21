@@ -26,6 +26,7 @@ use future_form::Sendable;
 use keyhive_core::access::Access;
 use sedimentree_core::id::SedimentreeId;
 use subduction_core::storage::traits::Storage;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 /// Read a string value at `key` under ROOT.
 async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
@@ -96,7 +97,7 @@ async fn load_fragment_metas(
     store: &crate::SqliteBigRepoStore,
     doc_id: crate::DocumentId,
 ) -> crate::Res<Vec<sedimentree_core::fragment::Fragment>> {
-    let sed_id = SedimentreeId::new(doc_id.to_bytes32());
+    let sed_id = SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
     <crate::SqliteBigRepoStore as Storage<Sendable>>::load_fragment_metas(store, sed_id)
         .await
         .map_err(|e| crate::ferr!("failed loading fragment metas: {e}"))
@@ -148,7 +149,7 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
         "at least one fragment must exist after a boundary commit, \
          got {} fragments for sedimentree {:?}",
         fragments.len(),
-        SedimentreeId::new(doc_id.to_bytes32()),
+        SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE)),
     );
     tracing::info!(
         "stored {} fragment(s); first fragment head={:?}",

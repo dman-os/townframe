@@ -48,15 +48,23 @@ structstruck::strike! {
 structstruck::strike! {
 #[derive(Debug, Default)]
 pub struct CursorSyncMachine {
-    /// What each object-target's *content* replay has reached. An object
-    /// target has no part cursor to advance, so the object's own cursor orders
-    /// the replay — and the sync backend acknowledges it by completing the
-    /// sync. The machine may not infer that from having emitted the trigger:
-    /// an emitted-but-unacknowledged replay is still outstanding, so a
-    /// re-delivery of the *same* cursor still has to reach the backend. Keeping
-    /// the emitted cursor here instead let one replay whose job died strand the
-    /// object for good — every later delivery read as "not newer" and nothing
-    /// re-emitted it.
+    /// What each object-target's *content* replay has reached, in flight, for this session.
+    ///
+    /// An object target has no part cursor to advance, so `SyncTarget::Object { cursor }`
+    /// carries the object's own position — its index in that object's own event stream
+    /// (the keyed frontier for the object), not a position in any part's stream. The
+    /// route is session-scoped: nothing here is persisted per peer (the durable
+    /// `big_sync_peer_cursors` table is keyed by `part_ref` and has no object column), so a
+    /// route with no recorded position starts at 0, as `replay_page` seeds it, rather than
+    /// at "the lowest cursor of the parts this peer is tracking" — that derivation is not
+    /// even defined for an object that belongs to no tracked part, and would silently
+    /// under-read rather than fail.
+    ///
+    /// The machine may not infer the position from having emitted the trigger: an
+    /// emitted-but-unacknowledged replay is still outstanding, so a re-delivery of the
+    /// *same* cursor still has to reach the backend. Keeping the emitted cursor here
+    /// instead let one replay whose job died strand the object for good — every later
+    /// delivery read as "not newer" and nothing re-emitted it.
     object_replays: HashMap<ObjKey, ObjectReplay>,
     /// The newest cursor scanned for each part route. This is a scheduling cursor,
     /// distinct from the applied watermark owned by `jobs`.

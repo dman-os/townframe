@@ -419,7 +419,9 @@ where
                 return Ok(FrontierRead::Entries { entries, through });
             }
             if iters.is_multiple_of(100_000) {
-                // Never monopolise a poll: a spin is diagnosable, not a hang.
+                // Not a spin: every iteration awaits `changed()` below. A wake storm (the
+                // frontier is notified while this reader neither advances nor selects rows) can
+                // still drive many passes, so yield rather than monopolise the runtime.
                 tracing::warn!(
                     selector = std::any::type_name::<S>(),
                     iters,

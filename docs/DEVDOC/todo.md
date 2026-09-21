@@ -34,6 +34,8 @@
       - Pull RPC with limits
       - i.e. rev store
     - Reuse the other machinery
+    - [ ] Make BigSyncM.set_peer incremental
+  - [ ] Evalute every storage layer/API with regards to evolution
 
 - [ ] ~Replace sqlx with seaorm~ use sqlx query macros (compile times?)
 - [ ] Plugs

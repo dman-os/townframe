@@ -1227,3 +1227,85 @@ where the page ended (`done = end == items.len()` in memory, `entries.len() == t
 a page that returns nothing while rows still match reports `done = false` with `next_after = None`: the
 walk loses its position and re-asks from the head rather than terminating. That is why the byte budget
 takes the first entry even when it alone exceeds the budget.
+
+---
+
+## M. PR #51 reviewer comments — status board (2026-09-21)
+
+PR #51 carries **58 inline comments**: 40 from `cubic-dev-ai[bot]` (2026-09-18) and 18 from the operator
+(2026-09-20/21, 7 questions and 11 follow-up replies). Re-pull them with:
+
+```sh
+gh api repos/dman-os/townframe/pulls/51/comments --paginate > /tmp/pr51-inline.json
+```
+
+**The cubic comments are the same batch §H triaged** (the "external LLM reviewer" of §H: claim ids A1–D6 map
+1:1 onto the inline comments). §H holds the per-claim verdict and rationale; this section adds (a) the
+current status of each claim at head `7ee31c40`, verified by reading the site, and (b) the operator's own
+comments, which are **newer than §H and were untriaged until now**.
+
+### M.1 Cubic inline comments → §H claim → status at head `7ee31c40`
+
+| cubic site | §H id | status | evidence at head |
+|---|---|---|---|
+| `big_sync/rpc.rs:14` | A7 | **OPEN** | `rpc.rs:15` is still `b"townframe/big-sync/0"` while the wire enum it gates changed |
+| `big_sync/rpc.rs:368` | A8 | **OPEN** | `spawn_rpc_handler` spawns unconditionally and acquires the permit *inside* the task (`rpc.rs:360-374`) |
+| `big_sync/worker.rs:123` | A9 | **OPEN** | `is_idle()` tests `delayed`/`spawn_queue`/`stop_queue`/`active_sync_tasks`/`zombie_tasks` only — no `task_counts.live`, no `active_machine_tasks` |
+| `big_sync/part_store/memory.rs:195` | A1 | **OPEN** (H-E) | materialization still mutates membership rows only; the object route reads the keyed frontier |
+| `big_sync/part_store/memory.rs:303` | A2 | **OPEN** (H-E) | `FromObject` resolves `objs[obj].parts` and nothing else (`memory.rs:302-310`); no `object_part_key()` candidate, so a share-only peer stays `Unauthorized` |
+| `big_sync_core/cursor.rs:188`, `:301` | A3, A4 | **DONE** | §H.5: `owes_obj_sync_completion` + `entry().or_default()` seeding, with two new tests and both negative probes reproduced |
+| `store/sqlite/sedimentree.rs:633`, `:635` | B2, B3 | **DONE** | access rows are replaced only for parts present in `mutation.part_agents`; a missing entry `continue`s instead of the part-wide delete (`sedimentree.rs:341-356`) |
+| `daybook_core/blobs.rs:79` (×2), `:895` | C1–C3 | **DONE** | H.9: `BlobId` is a 32-byte-digest type, path escape unrepresentable, `TryFrom<&ObjKey>` rejects other widths |
+| `big_sync_core/ids.rs:114` | A5 / H-D | **DONE** | `to_bytes32` keeps its assert by design; the doc comment states the minted-vs-peer-delivered split, and H-D made the sync edges fallible (see §H.5/line 363) |
+| `test2/harness/topo.rs:255`, `:394` | B12, B13 | **DONE** | `connect_with_parts_inner(…, part_access: true)` grants both ways before connecting; `boot_ungranted`/`connect_ungranted` exist for denial tests (`dd2f313d`) |
+| `store/sqlite.rs:646` | B1 | **refuted** | §H.2: delivered ids come from the subscriber's own requested targets; delivery-then-denial is the revocation-settling path by design. Site also moved (file is 595 lines now; `permitted_parts` is a store method) |
+| `big_repo/backend.rs:27`, `keyhive.rs:1070`, `rpc.rs:84`, `runtime2/{handle.rs:618, io.rs:336, messages.rs:133, mod.rs:111, native.rs:1700}` | B4–B11 | **refuted** | §H.2: each identity is 32 bytes where it is minted (handshake-authenticated peers, local `Runtime2Cmd`s, local contact cards) — not remote-reachable. `backend.rs:27` now carries a comment saying the width is peer input where it is |
+| `big_sync/delta_walker_state.rs:86` | A6 | **refuted** | §H.2: the `ns/consumer` mapping is non-injective but every call site passes literal constants; length-prefix if a caller ever embeds a key |
+| `docs/adrs/012-…:400` | C11 | open (H-H) | object-partness is still a prefix test over hashed keys |
+| `docs/adrs/010-…:455`, `:460`, `:498` | C4, C5, C6 | decisions (H.3) | ADR 010's own open question 1, and the `TaskDeclarationV1` redeclaration |
+| `docs/adrs/011-…:300`, `:322`, `:463`, `:470` | C7, C8, C9, C10 | decisions (H.3) | lane bounds, empty-slot takeover, retention without deadline, archive-absent durability |
+| `docs/scratch/bigsync-reconciliation-open-items.md:169` | C12 | open (H-H) | the bullet now reads "Reader predicate … `Access::is_reader()` … The rule is 'mirror the doc part'", so the relay-filter wording is gone; confirm the surrounding text when the H-H pass runs |
+| `x/task-coordination-demo.ts:64`, `:353`, `:383`, `:471` | D1–D3, D6 | **refuted** | §H.2: an unreferenced, unbuilt Deno thought experiment outside every pipeline; the shapes are the ADR's accepted behaviour |
+| `x/task-coordination-demo.ts:389`, `:404` | D4, D5 | open (H-I) | demo-only, lowest priority |
+
+Net: of 40 cubic comments, **18 are refuted, 10 are done, 5 are open code fixes (A7, A8, A9, A1, A2), 7 are
+doc/decision items (C4–C12), and 2 are demo fidelity (D4, D5)**.
+
+### M.2 Operator review comments (2026-09-20/21) — triaged here for the first time
+
+| id | site | comment | triage | action |
+|---|---|---|---|---|
+| 4057265519 | `big_sync_core/tasks/decide_peer_strat.rs:228` | does `dirt_count` equal the events a cursor replay will see (i.e. excludes objects we cannot see)? | **question, answerable from code** | trace `dirt_count` → replay event construction and write the answer at the site |
+| 4057269506 + 4057273829 | `big_sync_core/cursor.rs:52` | what is "the object's own cursor"? and: per-peer durable cursors are not needed, only per-session; object peers should start at 0 | **design decision** | the operator's reply is the answer: session-scoped durability, object peers start at 0. Needs a decision recorded in §K (cursor epochs) and possibly a code change |
+| 4057311300 + 4057312071 | `big_sync_core/ids.rs:145` | `Display` of a transformed key is misleading for UTF-8-looking keys, and `FromStr` is more dangerous | **valid** | make the transformed spelling self-identifying (delimiters/marker) and make `FromStr` reject or disambiguate; both directions need a round-trip test |
+| 4057315452 | `big_sync/part_store.rs:16` | what are "access transitions for a principal"? are there grant/revoke events? | **doc fix** | reword to the concrete shapes (`big_sync_syncable` rows, grant/revoke via `BigRepoDomainNotification`); no such event stream exists beyond that |
+| 4057351947 | `daybook_core/sync/tests.rs:1173` | we do not use in-test timeouts, we rely on nextest | **valid, AGENTS rule** | remove the internal 180 s deadline and the 45 s dump cadence (or gate the cadence behind a diagnostic switch) |
+| 4057357825 | `big_sync/keyed_frontier/sqlite_read.rs:39` | why is `_max_bytes` a lie? | **valid** | the parameter is accepted and ignored, so a byte budget the caller passes is not honoured. Implement it or drop the parameter and its callers |
+| 4057362338 | `big_sync/migrations/001_init.sql:69` | do not litter comments with backcompat facts | **partly valid** | the comment explains why `0` cannot occur rather than backcompat, but it is long; trim to the invariant and move the rationale to the migration header |
+| 4057367976 | `big_sync/part_store/memory.rs:52` | add an AGENTS rule against over-referencing ADRs in comments; here say the bucket is derived from the `ObjKey` hash and the index is the assigned bucket | **valid, two parts** | reword the site comment; add the comment-style rule to `AGENTS.md` |
+| 4058406955 | `big_sync_core/lib.rs:249` | should `UNAUTHORIZED_BACKOFF` be a config knob like the other backoffs? | **decision** | it is a `const` with a rationale comment now; promote to the same knob as the other backoffs, or keep and record why |
+| 4058442902 + 4058444320 | `big_sync_core/tasks/replay_page.rs:114` | clone may carry hundreds of object keys; the whole `replay_page` design is inefficient | **valid perf, larger redesign** | the clone is avoidable now (borrow/`Arc` the request); the task-shape complaint belongs with the cursor/`replay` redesign, not this PR |
+| 4058530255 | `big_repo/runtime2/types.rs:82` | does anyone implement the "retry" on `WorkerUnavailable`? is this a timing or hub-shutdown result, and why can the hub not start another doc worker? | **question, answerable from code** | find the matcher/retry site; if retry is unimplemented the doc comment is wrong and the failure is terminal |
+| 4058542226 + 4058546184 | `big_sync/part_store.rs:706` | N queries per object in a page; read `added_at` with the event rows instead | **valid perf** | join `added_at` into the event query (both stores), or batch the lookups; measure the page cost first |
+| 4058555411 | `big_repo/runtime2/group_part_worker.rs:768` | misuse of `/seds`: that key means locally available sedimentrees, not a readable set. Are there `global_part_id` readers on AFW? | **resolved (2026-09-21)** | renamed to `seds_part_id()`; membership is now written by the store when it writes a tree's content (`mutate_tree_in_tx`, removed again by `delete_sedimentree_id`), the group-part worker no longer touches it, it carries no derived access rows, and the AFW has no reference to it.
+| 4062805222 | `big_sync/keyed_frontier/memory.rs:421` | a warn branch in a notify-driven loop — is this a spin loop that should panic? | **decision** | the branch guards a 100 000-iteration spin with `// Never monopolise a poll: a spin is diagnosable, not a hang`. Either make the spin impossible and panic, or keep and record why |
+
+### M.3 Proposed work order
+
+1. **H-F (A7, A8, A9)** — `big_sync/rpc.rs`, `big_sync/worker.rs`. Smallest, self-contained, one of them
+   (A8) is a resource-exhaustion bug. A7 is a one-line ALPN bump once we accept the wire break.
+2. **H-E (A1, A2)** — `big_sync/part_store.rs`, `memory.rs` (+ the sqlite twin): a share-only peer is
+   `Unauthorized` forever, which is an authorization-shaped defect and belongs before cosmetics.
+3. **Operator batch 1 (cheap, no decisions):** the `tests.rs:1173` timeout, `sqlite_read.rs:39`
+   `_max_bytes`, the `part_store/memory.rs:52` comment + the AGENTS rule, the `part_store.rs:16` wording,
+   the migration comment.
+4. **Operator batch 2 (questions to answer from code, then either fix or document):** `decide_peer_strat.rs:228`,
+   `types.rs:82`, `group_part_worker.rs:768`, `ids.rs:145`.
+5. **Operator batch 3 (perf/design, needs sizing):** `replay_page.rs:114` clone, `part_store.rs:706` N-queries,
+   `lib.rs:249` knob, `keyed_frontier/memory.rs:421` spin-or-panic.
+6. **H-H (docs: C4–C12)** — includes the decision-shaped ADR items that are currently only open questions
+   in ADR 010/011.
+7. **H-I (demo D4, D5)** — last.
+
+Cross-checked against §C/§D/§G so nothing already landed is re-fixed: B13 landed in §G, H-A/C/D and B2/B3
+landed in H.5–H.9 and at the sites above.

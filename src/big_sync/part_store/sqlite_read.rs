@@ -2,6 +2,8 @@
 
 use crate::keyed_frontier::{SqliteReadError, SqliteReadSource};
 use big_sync_core::keyed_frontier::FrontierRevision;
+
+use super::sqlite_core::EVENT_REMOVED;
 use big_sync_core::{ObjKey, PartKey};
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::collections::BTreeMap;
@@ -23,12 +25,26 @@ pub(crate) struct SqlitePartSelector {
     pub(crate) all: Option<FrontierRevision>,
     pub(crate) objects: BTreeMap<ObjKey, FrontierRevision>,
     pub(crate) parts: BTreeMap<PartKey, FrontierRevision>,
+    /// Whether a removal whose add is newer than this key's requested cursor is excluded
+    /// (ADR 012 decision 9). Set by the part store's own request-scoped reads; a selector
+    /// built by hand — the raw frontier's contract, the `All` local read — leaves it off and
+    /// is handed every row the log holds.
+    pub(crate) apply_tombstone_rule: bool,
 }
 
 impl SqlitePartSelector {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.all.is_none() && self.objects.is_empty() && self.parts.is_empty()
+    }
+
+    /// A selector for a request-scoped read: the per-key cursors plus the tombstone predicate
+    /// (ADR 012 decision 9), so a removal the reader never saw is not fetched at all.
+    pub(crate) fn request_scoped() -> Self {
+        Self {
+            apply_tombstone_rule: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -77,6 +93,13 @@ fn push_selector_predicate(
         query.push_bind(id_blob(obj_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+        if selector.apply_tombstone_rule {
+            // A membership deletion is a part-lane fact, so an object route never admits one:
+            // the projection drops it either way, and not fetching it keeps the row budget
+            // honest.
+            query.push(" AND m.event_type != ");
+            query.push_bind(EVENT_REMOVED);
+        }
         query.push(")");
     }
     for (part_id, lower_bound) in &selector.parts {
@@ -90,6 +113,17 @@ fn push_selector_predicate(
         query.push_bind(part_blob(part_id.clone()));
         query.push(") AND m.txid > ");
         query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+        if selector.apply_tombstone_rule {
+            // ADR 012 decision 9: a removal belongs to a reader that could have seen the add,
+            // and the requested cursor is the per-key bound this branch is already built from.
+            // `added_at` is the membership row's own column, so the predicate rides the read
+            // that fetches the row instead of a lookup per event.
+            query.push(" AND (m.event_type != ");
+            query.push_bind(EVENT_REMOVED);
+            query.push(" OR m.added_at <= ");
+            query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+            query.push(")");
+        }
         query.push(")");
     }
     if first {
@@ -243,6 +277,7 @@ mod tests {
             all: None,
             objects: BTreeMap::from([(object.clone(), 7)]),
             parts: BTreeMap::from([(part.clone(), 19)]),
+            ..Default::default()
         };
         assert_eq!(selector.objects[&object], 7);
         assert_eq!(selector.parts[&part], 19);

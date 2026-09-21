@@ -124,7 +124,7 @@ fn inventory_parts(documents: &[DocumentId]) -> Res<BTreeMap<AccessSubject, Part
     documents
         .iter()
         .map(|doc_id| {
-            let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+            let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                 .map_err(|_| ferr!("inventory document id is not an Ed25519 point: {doc_id}"))?;
             Ok((
                 AccessSubject::Document(Identifier::from(verifying_key)),
@@ -441,6 +441,10 @@ mod tests {
         repo: SharedBigRepo,
         part_store: SharedPartStore,
         store_sql: SqlCtx,
+        /// The scope `store_sql`'s sink rows belong to. `SharedPartStore` is a
+        /// scope-erased trait object, and the rows `part_members_in` reads are keyed by
+        /// `(scope, part_id)`, so the scope is resolved here and carried alongside.
+        store_scope_id: i64,
         local_state: Arc<SqliteLocalStateRepo>,
         state: SqliteDeltaWalkerStateRepo,
         teardown: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
@@ -455,10 +459,22 @@ mod tests {
             let temp = tempfile::tempdir()?;
             let (repo, _big_sync, teardown) = boot_repo().await?;
             let store_sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+            let store_scope: Arc<str> = Arc::from("daybook-blobs-test");
             let part_store: SharedPartStore = Arc::new(
-                SqlitePartStore::new(store_sql.clone(), "daybook-blobs-test", BuckId::MAX_LEVEL)
-                    .await?,
+                SqlitePartStore::new(
+                    store_sql.clone(),
+                    Arc::clone(&store_scope),
+                    BuckId::MAX_LEVEL,
+                )
+                .await?,
             );
+            // The store above ensured the scope; resolve its id rather than reading it
+            // back through the trait object, which has no scope.
+            let store_scope_id = big_sync::sqlite_core::SqliteCore::ensure_scope_id(
+                &store_sql.write_pool,
+                &store_scope,
+            )
+            .await?;
             let (local_state, local_state_stop) =
                 SqliteLocalStateRepo::boot(temp.path().join("local_state")).await?;
             let sql = local_state
@@ -486,6 +502,7 @@ mod tests {
                 repo,
                 part_store,
                 store_sql,
+                store_scope_id,
                 local_state,
                 state,
                 teardown: teardown_future,
@@ -523,6 +540,7 @@ mod tests {
                 repo: _,
                 part_store: _,
                 store_sql: _,
+                store_scope_id: _,
                 local_state: _,
                 state: _,
                 teardown,
@@ -532,7 +550,7 @@ mod tests {
 
         /// The access rows of one part, exactly as the sink stores them.
         async fn part_members(&self, part: &PartKey) -> Res<BTreeMap<PeerKey, Access>> {
-            part_members_in(&self.store_sql, part).await
+            part_members_in(&self.store_sql, self.store_scope_id, part).await
         }
 
         /// The machine's expectation for one watched document: that document's
@@ -642,7 +660,7 @@ mod tests {
     }
 
     fn doc_identifier(doc_id: &DocumentId) -> Res<Identifier> {
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
             .map_err(|_| ferr!("document id is not an Ed25519 point: {doc_id}"))?;
         Ok(Identifier::from(verifying_key))
     }
@@ -668,35 +686,96 @@ mod tests {
 
     /// The access rows of one part, exactly as the sink stores them in `sql`.
     ///
+    /// A part's identity is the `(scope, part_id)` pair: `part_id` is unique only
+    /// within a scope (`UNIQUE(scope_id, part_id)`), so a read that names only the
+    /// part unions the rows of every scope in the database that holds the same part
+    /// name. The scope id is the caller's to resolve — the ctx carries none.
+    ///
     /// Parameterised by the sqlite ctx rather than the harness's private store, so a
     /// test that reads the booted repository's own store asks the same question the
     /// same way.
-    async fn part_members_in(sql: &SqlCtx, part: &PartKey) -> Res<BTreeMap<PeerKey, Access>> {
+    async fn part_members_in(
+        sql: &SqlCtx,
+        scope_id: i64,
+        part: &PartKey,
+    ) -> Res<BTreeMap<PeerKey, Access>> {
         let rows = sqlx::query(
             "SELECT s.principal_id AS principal_id, s.access_level AS access_level
                FROM big_sync_syncable s
                JOIN big_sync_parts p ON p.part_ref = s.part_ref
-              WHERE p.part_id = ?",
+              WHERE p.scope_id = ?1 AND p.part_id = ?2",
         )
+        .bind(scope_id)
         .bind(big_sync::sqlite_core::SqliteCore::part_blob(part.clone()))
         .fetch_all(&sql.read_pool)
         .await?;
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let principal: Vec<u8> = row.get("principal_id");
                 let level: i64 = row.get("access_level");
-                (
-                    PeerKey::new(
-                        <[u8; 32]>::try_from(principal.as_slice())
-                            .expect("a principal id is 32 bytes"),
-                    ),
+                // A principal id is read back out of storage, so a width other than the 32
+                // bytes every fixed-width consumer takes is reported rather than assumed.
+                let principal =
+                    PeerKey::new(<[u8; 32]>::try_from(principal.as_slice()).map_err(|_| {
+                        eyre::eyre!(
+                            "a principal id is {} bytes wide, expected 32",
+                            principal.len()
+                        )
+                    })?);
+                Ok((
+                    principal,
                     big_sync::sqlite_core::decode_access(
                         u8::try_from(level).expect("an access level fits a byte"),
                     ),
-                )
+                ))
             })
-            .collect())
+            .collect()
+    }
+
+    /// A part's rows belong to its `(scope, part_id)` pair, not to the part name:
+    /// `part_id` is unique only within a scope (`UNIQUE(scope_id, part_id)`), so a read
+    /// that names the part alone unions every scope in the database that holds the same
+    /// name. Twenty scopes each holding `part` with twenty members is the shape the
+    /// unscoped predicate answers with 400 rows; each scope must see its own twenty.
+    #[tokio::test]
+    async fn part_members_are_read_from_one_scope() -> Res<()> {
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let part = PartKey::new([0x5E; 32]);
+        let peer = |scope: u8, member: u8| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = scope;
+            bytes[1] = member;
+            PeerKey::new(bytes)
+        };
+
+        let mut scopes = Vec::new();
+        for scope in 0..20u8 {
+            let scope_key: Arc<str> = Arc::from(format!("daybook-blobs-scope-{scope}"));
+            let store: SharedPartStore = Arc::new(
+                SqlitePartStore::new(sql.clone(), Arc::clone(&scope_key), BuckId::MAX_LEVEL)
+                    .await?,
+            );
+            let scope_id =
+                big_sync::sqlite_core::SqliteCore::ensure_scope_id(&sql.write_pool, &scope_key)
+                    .await?;
+            // Every scope holds the same part name; only the scope tells the members apart.
+            let expected: BTreeMap<PeerKey, Access> = (0..20u8)
+                .map(|member| (peer(scope, member), Access::Read))
+                .collect();
+            store
+                .set_part_members(part.clone(), expected.clone().into_iter().collect())
+                .await?;
+            scopes.push((scope_id, expected));
+        }
+
+        for (scope_id, expected) in &scopes {
+            assert_eq!(
+                part_members_in(&sql, *scope_id, &part).await?,
+                expected.clone(),
+                "scope {scope_id} must see only its own members"
+            );
+        }
+        Ok(())
     }
 
     /// ADR 013 §9: a consumer whose cursor sits below the archive floor can never be
@@ -924,6 +1003,13 @@ mod tests {
         // The blob part store is built on the repository's own sqlite ctx
         // (`open_blob_part_store(big_repo.sql_ctx())`), and the access rows live there.
         let store_sql = test_cx._acx.sql_ctx();
+        // That ctx is shared by every scope in the database, so the blob store's own
+        // scope has to be named: `open_blob_part_store` built it under `BLOB_SCOPE_KEY`.
+        let store_scope_id = big_sync::sqlite_core::SqliteCore::ensure_scope_id(
+            &store_sql.write_pool,
+            &Arc::from(crate::repo::BLOB_SCOPE_KEY),
+        )
+        .await?;
         let local_peer = test_cx._acx.local_peer_id();
         // Exactly what `IrohSyncRepo::boot` spawns: the parts it serves plus the
         // store, state and repository they are derived from.
@@ -951,7 +1037,7 @@ mod tests {
             );
 
             assert_eq!(
-                part_members_in(&store_sql, &part).await?,
+                part_members_in(&store_sql, store_scope_id, &part).await?,
                 expected,
                 "a boot writes the inventory document's own closure into its derived part"
             );

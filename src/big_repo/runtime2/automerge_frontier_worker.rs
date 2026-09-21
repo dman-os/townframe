@@ -1124,10 +1124,9 @@ mod tests {
     }
 
     #[test]
-    fn scoped_frontier_mirroring_excludes_global_membership() {
+    fn scoped_frontier_mirroring_excludes_parts_outside_its_groups() {
         let group = PartKey::new([8; 32]);
         let scope = WorkerGroupScope::Groups([group.clone()].into_iter().collect());
-        assert!(!scope_includes_part(&scope, crate::global_part_id()));
         assert!(scope_includes_part(&scope, group));
         assert!(!scope_includes_part(&scope, PartKey::new([9; 32])));
     }

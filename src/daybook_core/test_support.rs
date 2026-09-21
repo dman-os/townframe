@@ -313,7 +313,8 @@ pub async fn test_cx_with_options(
     let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
     let secret_store = secrets_rs::SecretStore::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
-    let local_peer_key = daybook_types::doc::format_peer_key(&peer_id.to_bytes32());
+    let local_peer_key =
+        daybook_types::doc::format_peer_key(&peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
     let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
     let core_inventory_daybook_id = drawer_repo
         .add(daybook_types::doc::AddDocArgs {

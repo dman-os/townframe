@@ -20,13 +20,14 @@ impl BigRepoSyncBackend {
 /// events were received but never applied, which is an apply-side defect
 /// instead. Without this, both look identical in a rejection message.
 async fn describe_local_policy_state(repo: &crate::BigRepo, doc_id: crate::DocumentId) -> String {
-    let Ok(local_key) = ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
-    else {
+    let Ok(local_key) = ed25519_dalek::VerifyingKey::from_bytes(
+        &repo.local_peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    ) else {
         return "local peer id is not a verifying key".to_owned();
     };
     // The document id came off the sync edge, so its width is peer input rather than an
     // invariant to assert.
-    let Ok(doc_bytes) = doc_id.try_to_bytes32() else {
+    let Ok(doc_bytes) = doc_id.to_bytes32() else {
         return "document id is not 32 bytes wide".to_owned();
     };
     let Ok(doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&doc_bytes) else {
@@ -172,10 +173,11 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     NotAuthorized,
                 }
 
-                let local_key =
-                    ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32())
-                        .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
-                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.try_to_bytes32()?)
+                let local_key = ed25519_dalek::VerifyingKey::from_bytes(
+                    &repo.local_peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| eyre::eyre!("local peer id is not a verifying key"))?;
+                let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| eyre::eyre!("document id is not a verifying key"))?;
                 let local = keyhive_core::principal::identifier::Identifier::from(local_key);
                 let document = keyhive_core::principal::identifier::Identifier::from(doc_key);

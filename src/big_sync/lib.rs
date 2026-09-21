@@ -37,7 +37,8 @@ pub use part_store::host_contract as host_part_store_contract;
 pub use part_store::host_contract::{HostPartStoreContractHarness, SingleTargetPageStore};
 pub use part_store::memory::MemoryPartStore;
 pub use part_store::sqlite::{
-    SqlitePartStore, open_sqlite_revision_reader, open_sqlite_revision_reader_all,
+    SqlitePartStore, open_sqlite_page_reader, open_sqlite_revision_reader,
+    open_sqlite_revision_reader_all,
 };
 pub use part_store::sqlite_core;
 pub use part_store::{

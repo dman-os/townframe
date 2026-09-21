@@ -98,65 +98,43 @@ impl ByteKey {
         self.0.to_vec()
     }
 
-    /// The key's bytes as a fixed-width 32-byte array.
+    /// The key's bytes as a fixed-width 32-byte array, or an error naming its width.
     ///
     /// ADR 012 decision 1 makes keys variable-length, but the fixed-width consumers at
     /// the workspace edges — ed25519 verifying keys, `KeyhivePeerId`, keyhive archive
-    /// reservations, automerge change hashes — still take a `[u8; 32]`. A key this
-    /// process minted is a 32-byte digest by construction, so a different length there is
-    /// an invariant break rather than something to handle. A key a peer delivered is not:
-    /// the sync edges convert that one through a fallible path of their own instead of
-    /// reaching for this assertion.
-    #[must_use]
-    pub fn to_bytes32(&self) -> [u8; 32] {
+    /// reservations, automerge change hashes — still take a `[u8; 32]`. This is the only
+    /// conversion to that width and it is fallible, because the width of a key that
+    /// arrived from outside the process — a peer-delivered id, a caller-supplied
+    /// argument, a key parsed out of text — is external input rather than an invariant.
+    ///
+    /// A key this process minted *is* a 32-byte digest by construction, and the site that
+    /// knows that says so with `.expect(ERROR_IMPOSSIBLE)`; every site that cannot know it
+    /// propagates this error instead of panicking.
+    pub fn to_bytes32(&self) -> Res<[u8; 32]> {
         self.as_bytes()
             .try_into()
-            .expect("key that must be 32 bytes is not")
+            .map_err(|_| eyre::eyre!("key is {} bytes wide, expected 32", self.0.len()))
     }
 }
 
-/// The reserved key spaces of ADR 012 decision 1, which read as the text they are:
-/// `/…` collection keys such as `/seds`, and `o:/…` object-part keys over a
-/// path-shaped object key.
+/// The key's text form: multibase base58btc, always (`z` followed by the bytes).
 ///
-/// Everything else — a group part, an object part over a digest, an object, a peer — is
-/// binary or non-textual, and renders as multibase base58btc instead.
-fn reserved_text(bytes: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    if text.chars().any(char::is_control) {
-        return None;
-    }
-    let reserved = match text.strip_prefix("o:") {
-        Some(payload) => payload.starts_with('/'),
-        None => text.starts_with('/'),
-    };
-    reserved.then_some(text)
-}
-
+/// One encoding, with no specialization by key shape. A key is an arbitrary byte string
+/// (ADR 012 decision 1) — a reserved name such as `/seds`, an `o:`-prefixed object part, a
+/// digest, a peer id — and every one of them renders the same way, so what a key *means* is
+/// never inferred from what its bytes happen to spell. `Display` and `FromStr` are exact
+/// inverses, text that does not carry the prefix is rejected rather than read as a name, and
+/// the `o:` scheme stays part of the key's bytes, encoded like any other prefix byte.
+/// Presenting a key as human-readable text is a labelling question, not an encoding one.
 impl std::fmt::Display for ByteKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // ADR 012 decision 1: the reserved key spaces read as the text they are, so
-        // `"/seds"` and `"o:/object/path"` are their own names and the `o:` scheme stays
-        // readable on a key whose payload is itself a path. An object part over a digest
-        // keeps the scheme and renders its payload as multibase base58btc (`o:z…`), and
-        // every other key renders as multibase outright. `FromStr` is the exact inverse:
-        // only a path-shaped payload is read back as literal text, which is what keeps
-        // the two total on every key rather than ambiguous on keys that begin with `z`.
-        match reserved_text(&self.0) {
-            Some(text) => formatter.write_str(text),
-            None => match self.0.strip_prefix(b"o:") {
-                Some(payload) => write!(
-                    formatter,
-                    "o:{}",
-                    utils_rs::hash::encode_base58_multibase(payload)
-                ),
-                None => write!(
-                    formatter,
-                    "{}",
-                    utils_rs::hash::encode_base58_multibase(&self.0)
-                ),
-            },
-        }
+        // One encoding for every key: base58btc under the multibase `z` prefix. The text form
+        // deliberately does not depend on what the key's bytes happen to say.
+        write!(
+            formatter,
+            "{}",
+            utils_rs::hash::encode_base58_multibase(&self.0)
+        )
     }
 }
 
@@ -167,28 +145,18 @@ impl std::fmt::Debug for ByteKey {
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
-/// Key text is neither a reserved key space nor a multibase base58btc string
+/// Key text is not a multibase base58btc string
 pub struct DecodeError;
 
 impl std::str::FromStr for ByteKey {
     type Err = DecodeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        // The inverse of `Display`, and deliberately not total: this parse is an
-        // external boundary — a blob hash out of a URL or blob metadata, a uniffi
-        // caller, an id read back from storage — where text that is not a key has to
-        // be an error rather than a fresh identity. A key is the reserved text it reads
-        // as (`/seds`, `o:/object/path`), or `o:` followed by a multibase payload, or
-        // multibase.
-        if reserved_text(value.as_bytes()).is_some() {
-            return Ok(Self::new(value.as_bytes()));
-        }
-        if let Some(payload) = value.strip_prefix("o:") {
-            let encoded = payload.strip_prefix('z').ok_or(DecodeError)?;
-            let mut bytes = b"o:".to_vec();
-            bytes.extend_from_slice(&bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?);
-            return Ok(Self::new(bytes));
-        }
+        // The inverse of `Display`, and deliberately not total: this parse is an external
+        // boundary — a blob hash out of a URL or blob metadata, a uniffi caller, an id read
+        // back from storage — where text that is not a key has to be an error rather than a
+        // fresh identity. A key is a `z`-prefixed multibase base58btc string and nothing else:
+        // a name like `/seds` is a label for a key, not its text form.
         let encoded = value.strip_prefix('z').ok_or(DecodeError)?;
         Ok(Self::new(
             bs58::decode(encoded).into_vec().map_err(|_| DecodeError)?,
@@ -216,8 +184,8 @@ impl<'de> serde::Deserialize<'de> for ByteKey {
     {
         if deserializer.is_human_readable() {
             let str = String::deserialize(deserializer)?;
-            // One codec: the human-readable form is `Display`, so a reserved key reads
-            // back as the text it is alongside multibase keys. (`FromStr` rather than
+            // One codec, both directions: the human-readable form is the key's `Display`,
+            // base58btc under the multibase `z` prefix. (`FromStr` rather than
             // `decode_base58_multibase`, which indexes the first byte and so panics on
             // the empty string instead of erroring.)
             std::str::FromStr::from_str(&str).map_err(serde::de::Error::custom)
@@ -382,39 +350,41 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
-    /// ADR 012 decision 1: a reserved key space is its own name, and the `o:` scheme stays
-    /// readable over both a path-shaped and a digest payload.
+    /// One encoding for every key: base58btc under the multibase `z` prefix, whatever the
+    /// key's bytes happen to spell. The `o:` scheme and the reserved `/…` names are part of
+    /// a key's bytes, not a display convention, so they are encoded like any other prefix
+    /// byte and no key can be mistaken for raw text.
     #[test]
-    fn reserved_key_spaces_read_as_their_text() {
-        assert_eq!(PartKey::new("/seds").to_string(), "/seds");
-        assert_eq!(PartKey::new("/drawer/plans").to_string(), "/drawer/plans");
-
-        let path = ObjKey::new(b"/object/path");
-        assert_eq!(path.to_string(), "/object/path");
-        assert_eq!(
-            PartKey::new(b"o:/object/path").to_string(),
-            "o:/object/path"
-        );
-
-        // A digest renders as multibase, and an `o:`-prefixed key keeps the scheme in
-        // front of it, so it reads as an object part name rather than as an unrelated
-        // digest.
+    fn every_key_renders_as_one_multibase_encoding() {
+        for key in [
+            PartKey::new("/seds"),
+            PartKey::new("/drawer/plans"),
+            PartKey::new(b"o:/object/path"),
+            PartKey::new(b"o:\x00\x01"),
+            PartKey::new([4; 32]),
+        ] {
+            let text = key.to_string();
+            assert!(text.starts_with('z'), "{text} is not multibase base58btc");
+            assert!(
+                !text.starts_with('/') && !text.starts_with("o:"),
+                "{text} reads as text rather than as an encoded key"
+            );
+            assert_eq!(text.parse::<PartKey>().expect("own text form parses"), key);
+        }
         let digest = ObjKey::new([7; 32]);
         assert!(digest.to_string().starts_with('z'), "{digest}");
+        // An object part keeps its `o:` scheme only *inside* the bytes: the text form encodes
+        // `o:` plus the digest, so decoding recovers both halves rather than a digest alone.
         let mut part_bytes = b"o:".to_vec();
         part_bytes.extend_from_slice(digest.as_bytes());
-        let part = PartKey::new(part_bytes).to_string();
-        assert!(part.starts_with("o:z"), "{part}");
-        assert_eq!(
-            part.strip_prefix("o:")
-                .and_then(|payload| payload.parse::<ObjKey>().ok()),
-            Some(digest)
-        );
+        let part = PartKey::new(part_bytes.clone());
+        assert_eq!(part.to_string().parse::<PartKey>().unwrap(), part);
+        assert_eq!(part.as_bytes(), part_bytes.as_slice());
     }
 
-    /// `Display` and `FromStr` are inverses on every key the crate constructs. The `o:`
-    /// payload is only read back as text when it is path-shaped, which is what keeps the
-    /// pair total instead of ambiguous on a payload that itself begins with `z`.
+    /// `Display` and `FromStr` are inverses on every key the crate constructs, including keys
+    /// whose bytes are text-shaped: the text form is always the encoding of the bytes, never
+    /// the bytes read as themselves.
     #[test]
     fn keys_round_trip_through_their_text_form() {
         for key in [
@@ -447,6 +417,11 @@ mod tests {
         assert!("o:".parse::<PartKey>().is_err());
         assert!("o:notbase58".parse::<PartKey>().is_err());
         assert!("z0OIl!".parse::<PartKey>().is_err());
+        // Text-shaped keys are no longer special: a name is a label, not a text form.
+        assert!("/seds".parse::<PartKey>().is_err());
+        assert!("/object/path".parse::<ObjKey>().is_err());
+        assert!("o:/object/path".parse::<PartKey>().is_err());
+        assert!("o:z3abc".parse::<PartKey>().is_err());
     }
 
     /// The human-readable serde form is the same codec, so a stored id reads as itself and
@@ -458,7 +433,9 @@ mod tests {
                 serde::de::value::StrDeserializer::<serde::de::value::Error>::new(text),
             )
         };
-        assert_eq!(read("/seds").unwrap(), PartKey::new("/seds"));
+        let seds = PartKey::new("/seds");
+        assert_eq!(read(&seds.to_string()).unwrap(), seds);
+        assert!(read("/seds").is_err(), "a label is not a text form");
         assert!(read("").is_err());
         assert!(read("not_base58_hash").is_err());
     }

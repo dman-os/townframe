@@ -1,7 +1,6 @@
 mod interlude {
     pub use big_sync_core::{ObjKey, PartKey, PeerKey};
 
-    pub(crate) use crate::TryKeyBytes32;
     pub use future_form::{FutureForm, Local, Sendable};
     pub use utils_rs::prelude::*;
 }
@@ -120,12 +119,15 @@ pub use changes::{
 pub type DocumentId = big_sync_core::ObjKey;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
-/// The reserved partition listing every sedimentree we have saved locally: every doc we
-/// can read appears here as a member, which is what makes it the store-wide enumeration
-/// surface. ADR 012 decision 12 keeps this a *real part* rather than a synthetic marker,
-/// and names it with the reserved key `/seds`. Embedders pass this part key to big_sync's
-/// `set_peer`.
-pub fn global_part_id() -> big_sync_core::PartKey {
+/// The `/seds` partition: this node's local index of the sedimentrees it has saved. A document
+/// joins it when the store writes its tree's content — the moment the sedimentree exists
+/// locally — and leaves it when the tree is deleted. It is a *real part* with ordinary
+/// membership rows (ADR 012 decision 12), written through the store's normal membership
+/// seam, but nothing derives access rows for it: membership here is local bookkeeping, not a
+/// readable set. What a peer may see through it is decided per event by the readability
+/// filter, and a peer that is meant to pull the partition itself is granted `/seds`
+/// explicitly.
+pub fn seds_part_id() -> big_sync_core::PartKey {
     big_sync_core::PartKey::new("/seds")
 }
 /// Return the deterministic BigSync partition derived from a Keyhive group.
@@ -133,43 +135,18 @@ pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartKey {
     runtime2::group_part_id(group_id)
 }
 
-/// Fallible counterpart of [`big_sync_core::ByteKey::to_bytes32`], for the keys a peer
-/// delivered.
-///
-/// ADR 012 decision 1 makes a key an arbitrary byte string, so the width of a key that
-/// arrived from the sync edge is external input: a length other than the 32 bytes the
-/// fixed-width consumers at the workspace edges require is something to report, not an
-/// invariant break, and must not panic the process. `to_bytes32` stays the assertion for
-/// keys this process minted — a local id is a 32-byte digest by construction, and a
-/// different length there is a programming error.
-///
-/// Implemented on `ByteKey` and reached on `ObjKey`, `PartKey` and `PeerKey` through
-/// their `Deref`, so the sync edge names the same conversion the infallible path does.
-pub(crate) trait TryKeyBytes32 {
-    /// The key's bytes, or an error naming the key's width if it is not 32 bytes.
-    fn try_to_bytes32(&self) -> Res<[u8; 32]>;
-}
-
-impl TryKeyBytes32 for big_sync_core::ByteKey {
-    fn try_to_bytes32(&self) -> Res<[u8; 32]> {
-        let bytes = self.as_bytes();
-        bytes
-            .try_into()
-            .map_err(|_| eyre::eyre!("key is {} bytes wide, expected 32", bytes.len()))
-    }
-}
-
 #[cfg(test)]
 mod key_bytes32_tests {
     use super::*;
 
-    /// A 32-byte key converts on every key type through `Deref`; a key any other width is
-    /// an error, not the panic the infallible conversion would raise.
+    /// A 32-byte key converts on every key type through `Deref`, and a key any other width
+    /// is an error rather than the panic a fixed-width assertion would raise. This is the
+    /// conversion every sync edge reaches, so its failure mode is part of the contract.
     #[test]
-    fn fallible_key_conversion_reports_a_wrong_width() {
-        assert_eq!(ObjKey::new([3; 32]).try_to_bytes32().unwrap(), [3; 32]);
+    fn key_conversion_reports_a_wrong_width() {
+        assert_eq!(ObjKey::new([3; 32]).to_bytes32().unwrap(), [3; 32]);
 
-        let error = ObjKey::new(b"/object/path").try_to_bytes32().unwrap_err();
+        let error = ObjKey::new(b"/object/path").to_bytes32().unwrap_err();
         assert!(error.to_string().contains("expected 32"), "{error}");
     }
 }
@@ -553,8 +530,9 @@ impl BigRepo {
     }
     /// Resolve this repository's local Keyhive agent.
     pub async fn local_keyhive_agent(&self) -> Res<BigKeyhiveAgent> {
-        let peer_id =
-            subduction_keyhive::KeyhivePeerId::from_bytes(self.local_peer_id.to_bytes32());
+        let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(
+            self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+        );
         self.keyhive
             .get_agent_by_peer_id(&peer_id)
             .await?
@@ -576,7 +554,7 @@ impl BigRepo {
     }
     /// Resolve a connected peer's Keyhive agent.
     pub async fn keyhive_agent_for_peer(&self, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {
-        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32());
+        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(peer_id.to_bytes32()?);
         self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
     }
     /// Grant administrative membership without exposing the Keyhive access type.
@@ -664,6 +642,17 @@ impl BigRepo {
     #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
     pub async fn doc_head_state(&self, document_id: DocumentId) -> Res<runtime2::DocHeadState> {
         self.runtime.doc_head_state(document_id).await
+    }
+
+    /// Query head state *without* creating a document worker. `doc_head_state` acquires a
+    /// worker and a lease to answer, and a live handle is itself a materialization driver — so
+    /// an observation that must not change what it observes goes through here. Answers `None`
+    /// when no worker exists for the document.
+    pub async fn inspect_doc_head_state(
+        &self,
+        document_id: DocumentId,
+    ) -> Res<Option<runtime2::DocHeadState>> {
+        self.runtime.inspect_doc_head_state(document_id).await
     }
 
     pub async fn document_sync_snapshot(
@@ -852,7 +841,11 @@ impl BigRepo {
     ) -> Result<bool, CreateDocError> {
         let Some((bytes, initial_keys)) = self
             .keyhive_storage
-            .staged_doc_content(doc_id.to_bytes32())
+            .staged_doc_content(doc_id.to_bytes32().map_err(|err| {
+                CreateDocError::from(eyre::eyre!(
+                    "staged document id is not a fixed-width key: {err}"
+                ))
+            })?)
             .await
             .map_err(|err| {
                 CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))

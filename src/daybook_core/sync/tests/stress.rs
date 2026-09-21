@@ -519,8 +519,10 @@ async fn collect_diagnostic_report(
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-                    .expect("stress document id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("stress document id must be a verifying key"),
             );
             let registered = !node
                 .sync_repo
@@ -917,8 +919,10 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-                    .expect("stress document id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("stress document id must be a verifying key"),
             );
             let registered = !node
                 .sync_repo

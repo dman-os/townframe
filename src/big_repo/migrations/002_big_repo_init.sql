@@ -73,10 +73,6 @@ CREATE TABLE big_repo_causal_ciphertext_index (
     , PRIMARY KEY(scope_id, sedimentree_id, content_ref, digest, kind)
  ) STRICT;
 
-CREATE INDEX big_repo_keyhive_event_log_hash_idx
-    ON big_repo_keyhive_event_log(scope_id, event_hash);
-CREATE INDEX big_repo_keyhive_admissions_seq_idx
-    ON big_repo_keyhive_admissions(scope_id, seq);
 CREATE INDEX big_repo_causal_ciphertext_update_idx
     ON big_repo_causal_ciphertext_index(scope_id, sedimentree_id, pcs_update_hash);
 

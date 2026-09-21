@@ -26,6 +26,7 @@
 use super::harness::{Node, Topo, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 // ─── Read helpers ───────────────────────────────────────────────────────────
 
 async fn assert_relay_only(
@@ -33,10 +34,13 @@ async fn assert_relay_only(
     relay: &super::harness::Node,
     doc_id: crate::DocumentId,
 ) -> crate::Res<()> {
-    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(&relay.peer_id().to_bytes32())
-        .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-        .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
+    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(
+        &relay.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
+    let doc_vk =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     let access = repo
         .keyhive()
         .agent_access_on(
@@ -46,16 +50,30 @@ async fn assert_relay_only(
         .await;
     assert_eq!(access, Some(Access::Relay));
     repo.wait_for_quiescence(None).await?;
-    // Global-part membership is written only by local group-part
-    // reconciliation (big-sync gossip drops global_part_id()), so a Relay-only
-    // holder must never record the doc there — regardless of markers synced
-    // from peers over the discovery partition.
-    assert!(
-        !relay
-            .obj_parts_contains(doc_id, crate::global_part_id())
-            .await?,
-        "Relay-only access must not place the document in the readable global partition"
-    );
+    // `/seds` is the store's local index of the sedimentree trees this node has saved, so a
+    // Relay-only holder that pulls the document *is* listed there: it holds the heads and the
+    // encrypted fragments. That membership is local bookkeeping, not a readable set — what a
+    // peer may see through the partition is decided per event by the readability filter. The
+    // boundary this helper protects is therefore materialization: the relay must never walk its
+    // stored heads into a live document.
+    // Observe WITHOUT creating a document worker. `doc_head_state` acquires a worker and a
+    // lease to answer, and a live handle is itself a materialization driver — with the
+    // frontier worker disabled, an assert that used it would be measuring its own observation.
+    // The property is that content arriving for a peer holding only Relay access, with nothing
+    // driving it, does not become a live document; `inspect_doc_head_state` answers `None`
+    // when no worker exists, which is the strongest form of that.
+    if let Some(state) = repo.inspect_doc_head_state(doc_id).await? {
+        assert!(
+            state.materialized_heads.is_none(),
+            "a Relay-only holder must not materialize the document it relays: state={:?} sedimentree_heads={} materialized_heads={}",
+            state.state,
+            state.sedimentree_heads.len(),
+            state
+                .materialized_heads
+                .as_ref()
+                .map_or(0, |heads| heads.len()),
+        );
+    }
     Ok(())
 }
 
@@ -230,9 +248,28 @@ async fn tier3_pull_only_relay_does_not_materialize() -> crate::Res<()> {
         .sync_doc_with_peer(doc_id.clone())
         .await?;
     assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
-    let relay_state = topo.topo_node(1).repo.doc_head_state(doc_id).await?;
-    assert!(!relay_state.sedimentree_heads.is_empty());
-    assert!(relay_state.materialized_heads.is_none());
+    // The store indexes the trees this node has saved, so the relay that pulled the document is
+    // listed in its own `/seds` — access is not the criterion, holding the bytes is. That is
+    // precisely why the boundary is asserted by materialization above and not by membership.
+    assert!(
+        topo.topo_node(1)
+            .obj_parts_contains(doc_id.clone(), crate::seds_part_id())
+            .await?,
+        "a relay holding the sedimentree bytes is listed in its own `/seds` index"
+    );
+    // Same non-driving observation: the relay holds the tree's bytes (payload + indexed parts)
+    // and no worker is driving them into a document.
+    let relay_snapshot = topo
+        .topo_node(1)
+        .repo
+        .document_sync_snapshot(doc_id)
+        .await?;
+    assert!(relay_snapshot.payload_present);
+    assert_ne!(
+        relay_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "a relay must not materialize a document it only holds"
+    );
     drop(owner_doc);
     Ok(())
 }
@@ -261,11 +298,17 @@ async fn tier3_read_only_relay_materializes_without_edit_access() -> crate::Res<
     )
     .await?;
     assert_eq!(read_title(&relay_doc).await, "read-only-relay");
-    let relay_vk =
-        ed25519_dalek::VerifyingKey::from_bytes(&topo.topo_node(1).peer_id().to_bytes32())
-            .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-        .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
+    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(
+        &topo
+            .topo_node(1)
+            .peer_id()
+            .to_bytes32()
+            .expect(ERROR_IMPOSSIBLE),
+    )
+    .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
+    let doc_vk =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     assert_eq!(
         topo.topo_node(1)
             .repo
@@ -947,17 +990,31 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     let owner_doc = guard.node(0).repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    // Grant R Relay access; grant Read via public agent for the future reader.
+    // Grant R Relay access, and grant the reader Read by its own agent. The relay is Relay-only,
+    // so it cannot open what it forwards: it holds the heads and the encrypted fragments. A
+    // grant to the *public* principal would instead make the document readable by anyone, and a
+    // readable document does materialize without an application handle — by design: received
+    // content is applied through a transient worker so overlap nodes can publish causal-key
+    // healing checkpoints (`hub.rs`, sync session apply route). Materialization-on-arrival is
+    // therefore not the boundary this topology pins; the boundary is that a Relay-only holder
+    // never opens what it forwards.
     let relay_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(1)).await?;
     guard
         .node(0)
         .repo
         .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
+    let reader_card = guard.node(2).repo.local_keyhive_contact_card();
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Read)
+        .receive_keyhive_contact_card(&reader_card)
+        .await?;
+    let reader_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(2)).await?;
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     a_r.sync_keyhive_with_peer().await?;
     // Verify the relay only has Relay access (no Read).
@@ -967,10 +1024,19 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     // materialize because the relay only has Relay access).
     sync_doc_no_materialize(&r_a, doc_id.clone()).await?;
     // R must NOT materialise.
-    let r_state = guard.node(1).repo.doc_head_state(doc_id.clone()).await?;
-    assert!(
-        r_state.materialized_heads.is_none(),
-        "relay must NOT materialise after first sync"
+    // R must NOT materialise — observed without driving. `doc_head_state` would acquire a worker
+    // and a live handle is itself a materialization driver, so with the frontier worker disabled
+    // this assert would be measuring its own observation.
+    let r_snapshot = guard
+        .node(1)
+        .repo
+        .document_sync_snapshot(doc_id.clone())
+        .await?;
+    assert_ne!(
+        r_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "relay must NOT materialise after first sync: stage={:?}",
+        r_snapshot.stage
     );
 
     // Phase 2: owner writes an update while the reader is still absent.
@@ -1001,8 +1067,18 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
 
     // Relay retains Relay-only access and sedimentree heads.
     assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id.clone()).await?;
-    let relay_state = guard.node(1).repo.doc_head_state(doc_id.clone()).await?;
-    assert!(!relay_state.sedimentree_heads.is_empty());
+    // Non-driving again: bytes, not a worker.
+    let relay_snapshot = guard
+        .node(1)
+        .repo
+        .document_sync_snapshot(doc_id.clone())
+        .await?;
+    assert!(relay_snapshot.payload_present);
+    assert_ne!(
+        relay_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "relay must still not have materialized the document it forwarded"
+    );
 
     // Sedimentree parity across all three nodes.
     let mut baseline = guard

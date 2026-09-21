@@ -157,13 +157,20 @@ pub(crate) struct RepoCtxParts {
     pub secret_store: secrets_rs::SecretStore,
 }
 
+/// SQLite scope key of the standalone part store backing the blob partitions.
+///
+/// A part's identity is the `(scope, part_id)` pair, so anything that addresses
+/// blob-part rows directly needs this key: `SqlCtx` is shared by every scope in the
+/// database and carries none of them.
+pub(crate) const BLOB_SCOPE_KEY: &str = "daybook-blobs";
+
 /// Opens the standalone, policy-free part store backing the blob partitions.
 /// Blob data is content-addressed (possession of the hash is authorization);
 /// the keyhive membership policy lives on the doc store and is deliberately
 /// absent here.
 pub(crate) async fn open_blob_part_store(sql: SqlCtx) -> Res<SharedPartStore> {
     let store =
-        big_sync::SqlitePartStore::new(sql, "daybook-blobs", big_sync_core::BuckId::MAX_LEVEL)
+        big_sync::SqlitePartStore::new(sql, BLOB_SCOPE_KEY, big_sync_core::BuckId::MAX_LEVEL)
             .await?;
     Ok(Arc::new(store))
 }
@@ -237,7 +244,12 @@ impl RepoCtx {
                 }
             }
             Err(self2) => {
-                warn!("someone is still holding on to the RepoCtx, shutdown order bug lurks!");
+                // The count is the whole point of the log: 2 is the documented test-harness case (it
+                // retains the worker token past shutdown), anything higher is a real holder ordering bug.
+                warn!(
+                    strong_count = std::sync::Arc::strong_count(&self2),
+                    "someone is still holding on to the RepoCtx, shutdown order bug lurks!"
+                );
                 let stop = self2
                     .big_repo_stop
                     .lock()

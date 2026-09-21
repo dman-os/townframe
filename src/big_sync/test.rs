@@ -1,9 +1,12 @@
-use crate::{SyncBackend, interlude::*};
+use crate::interlude::*;
 
+use crate::SyncBackend;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+#[cfg(test)]
+mod stress;
 
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
@@ -17,15 +20,6 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
-type MemoryReplayTargetMap =
-    HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>;
-type MemoryReplaySubscriptions = HashMap<
-    (
-        big_sync_core::rpc::ReplaySessionId,
-        big_sync_core::rpc::ReplaySubscriptionId,
-    ),
-    (u64, MemoryReplayTargetMap),
->;
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::HostPartStore;
 use crate::part_store::memory::MemoryPartStore;
@@ -193,300 +187,109 @@ impl TestWorld {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct MemoryRpcClient {
+/// The storage scope every node in these tests serves, and the key the fixture registers its store
+/// under. The machine sends the same key, so a responder finds the store it serves.
+const TEST_SCOPE: &str = "big-sync-test";
+
+/// The production live-lane hold is fifteen seconds; a test does not sit on it.
+const TEST_REPLAY_HOLD_MS: u32 = 50;
+
+/// The liveness gate in front of a worker in this process.
+///
+/// Every node runs the real responder — the same dispatch the iroh protocol handler feeds — so the
+/// only thing left for a test to emulate is a peer that is not there: taking a peer offline is
+/// expressed here, by refusing its requests the way a closed socket would. The work counters the
+/// strategy tests read ride here too, because this is the last hop the machine's own calls take.
+struct OfflineGatedRpcClient {
     world: Arc<TestWorld>,
-    _source_part_store: Arc<dyn HostPartStore>,
-    source_peer_id: PeerKey,
-    target_peer_id: PeerKey,
-    target_part_store: Arc<dyn HostPartStore>,
-    replay_subscriptions: Arc<Mutex<MemoryReplaySubscriptions>>,
+    peer_id: PeerKey,
+    inner: crate::rpc::BigSyncRpcClient,
 }
 
-impl MemoryRpcClient {
-    fn new(
-        world: Arc<TestWorld>,
-        source_part_store: Arc<dyn HostPartStore>,
-        source_peer_id: PeerKey,
-        target_peer_id: PeerKey,
-        target_part_store: Arc<dyn HostPartStore>,
-    ) -> Self {
-        Self {
-            world,
-            _source_part_store: source_part_store,
-            source_peer_id,
-            target_peer_id,
-            target_part_store,
-            replay_subscriptions: Arc::new(Mutex::new(HashMap::new())),
-        }
+impl OfflineGatedRpcClient {
+    fn online(&self) -> bool {
+        self.world.is_online(self.peer_id.clone())
     }
 }
 
 #[async_trait]
-impl crate::rpc::WireBigSyncRpcClient for MemoryRpcClient {
+impl crate::rpc::WireBigSyncRpcClient for OfflineGatedRpcClient {
     async fn peer_summary(
         &self,
         req: crate::rpc::ScopedRequest<PeerSummaryRequest>,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
-        WorkCounters::bump(&self.world.work.rpc_peer_summary, 1);
-        let req = req.inner;
-        tracing::debug!(
-            target_peer_id = %self.target_peer_id,
-            part_count = req.parts.len(),
-            "memory rpc peer summary"
-        );
-        if !self.world.is_online(self.target_peer_id.clone()) {
+        if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        let asker = Some(self.source_peer_id.clone());
-        let parts = self.target_part_store.summarize_parts(req.parts).await??;
-        let mut summaries = HashMap::new();
-        for (part_id, summary) in parts {
-            let since = req.asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-            let dirty = self
-                .target_part_store
-                .part_dirty_count(part_id.clone(), asker.clone(), since)
-                .await?;
-            summaries.insert(part_id, summary.into_strat_summaries(dirty));
-        }
-        Ok(Ok(Ok(PeerSummaryResult { parts: summaries })))
+        WorkCounters::bump(&self.world.work.rpc_peer_summary, 1);
+        self.inner.peer_summary(req).await
     }
 
     async fn replay_page(
         &self,
         req: crate::rpc::ScopedRequest<big_sync_core::rpc::ReplayPageRequest>,
     ) -> Res<BigSyncRpcResult<big_sync_core::rpc::ReplayPage>> {
-        WorkCounters::bump(&self.world.work.rpc_replay_pages, 1);
-        let req = req.inner;
-        tracing::debug!(
-            target_peer_id = %self.target_peer_id,
-            targets = ?req.targets,
-            "memory rpc replay page"
-        );
-        if !self.world.is_online(self.target_peer_id.clone()) {
+        if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        // A short hold keeps a caught-up client from spinning while still letting
-        // it observe new events soon after they land. The double caps the
-        // caller's request rather than honouring the long production hold, so a
-        // test does not sit on the long poll.
-        let hold = Duration::from_millis(u64::from(req.hold_ms)).min(Duration::from_millis(50));
-        let outcome = self
-            .target_part_store
-            .replay_page_round(
-                req,
-                self.source_peer_id.clone(),
-                hold,
-                CancellationToken::new(),
-            )
-            .await?;
-        Ok(Ok(outcome))
+        WorkCounters::bump(&self.world.work.rpc_replay_pages, 1);
+        self.inner.replay_page(req).await
     }
 
     async fn replay_subscription(
         &self,
         req: crate::rpc::ScopedRequest<big_sync_core::rpc::ReplaySubscriptionRequest>,
     ) -> Res<BigSyncRpcResult<big_sync_core::rpc::ReplaySubscriptionResponse>> {
-        if !self.world.is_online(self.target_peer_id.clone()) {
+        if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        let scope_key = req.scope_key;
-        match req.inner {
-            big_sync_core::rpc::ReplaySubscriptionRequest::Open {
-                session_id,
-                subscription_id,
-                generation,
-                targets,
-            } => {
-                let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
-                subscriptions.insert(
-                    (session_id, subscription_id),
-                    (
-                        generation,
-                        targets
-                            .into_iter()
-                            .map(|entry| (entry.id, entry.target))
-                            .collect(),
-                    ),
-                );
-                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Opened {
-                    generation,
-                }))
-            }
-            big_sync_core::rpc::ReplaySubscriptionRequest::Update {
-                session_id,
-                subscription_id,
-                generation,
-                additions,
-                removals,
-            } => {
-                let mut subscriptions = self.replay_subscriptions.lock().expect(ERROR_MUTEX);
-                let Some((current_generation, targets)) =
-                    subscriptions.get_mut(&(session_id, subscription_id))
-                else {
-                    return Ok(Err(big_sync_core::rpc::RpcError::UnknownSubscription));
-                };
-                if generation != *current_generation
-                    && generation != current_generation.saturating_add(1)
-                {
-                    return Ok(Err(
-                        big_sync_core::rpc::RpcError::StaleSubscriptionGeneration,
-                    ));
-                }
-                for id in removals {
-                    targets.remove(&id);
-                }
-                for entry in additions {
-                    targets.insert(entry.id, entry.target);
-                }
-                *current_generation = generation;
-                Ok(Ok(
-                    big_sync_core::rpc::ReplaySubscriptionResponse::Updated { generation },
-                ))
-            }
-            big_sync_core::rpc::ReplaySubscriptionRequest::Close {
-                session_id,
-                subscription_id,
-            } => {
-                self.replay_subscriptions
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .remove(&(session_id, subscription_id));
-                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Closed))
-            }
-            big_sync_core::rpc::ReplaySubscriptionRequest::Next {
-                session_id,
-                subscription_id,
-                request_id,
-                supersede,
-                targets: requested,
-                limit,
-                hold_ms,
-            } => {
-                let target_map = self
-                    .replay_subscriptions
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .get(&(session_id, subscription_id))
-                    .map(|(_, target_map)| target_map.clone())
-                    .ok_or(big_sync_core::rpc::RpcError::UnknownSubscription);
-                let target_map = match target_map {
-                    Ok(target_map) => target_map,
-                    Err(error) => return Ok(Err(error)),
-                };
-                let requested_ids: std::collections::HashSet<_> =
-                    requested.iter().map(|(id, _)| *id).collect();
-                let page_targets = requested
-                    .into_iter()
-                    .map(|(id, cursor)| {
-                        target_map
-                            .get(&id)
-                            .map(|target| target.with_cursor(cursor))
-                            .ok_or(big_sync_core::rpc::RpcError::InvalidRequest(
-                                "unknown replay target id".into(),
-                            ))
-                    })
-                    .collect::<Result<Vec<_>, _>>();
-                let page_targets = match page_targets {
-                    Ok(page_targets) => page_targets,
-                    Err(error) => return Ok(Err(error)),
-                };
-                let page = self
-                    .replay_page(crate::rpc::ScopedRequest {
-                        scope_key,
-                        inner: big_sync_core::rpc::ReplayPageRequest {
-                            session_id,
-                            request_id,
-                            supersede,
-                            targets: page_targets,
-                            limit,
-                            hold_ms,
-                        },
-                    })
-                    .await?;
-                let page = page?;
-                let reverse: HashMap<_, _> = target_map
-                    .iter()
-                    .map(|(id, target)| (target.clone(), *id))
-                    .collect();
-                let target_verdicts = page
-                    .targets
-                    .iter()
-                    .filter_map(|(target, verdict)| {
-                        let id = reverse
-                            .get(&big_sync_core::rpc::ReplaySubscriptionTarget::from(target))?;
-                        requested_ids.contains(id).then_some((*id, verdict.clone()))
-                    })
-                    .collect();
-                Ok(Ok(big_sync_core::rpc::ReplaySubscriptionResponse::Page(
-                    big_sync_core::rpc::ReplaySubscriptionPage {
-                        page: big_sync_core::rpc::ReplayPage {
-                            events: page.events,
-                            targets: Vec::new(),
-                        },
-                        targets: target_verdicts,
-                    },
-                )))
-            }
+        // A subscription page is a page: the counted work is the same whether the machine asks
+        // through the stateless route or through a subscription.
+        if matches!(
+            &req.inner,
+            big_sync_core::rpc::ReplaySubscriptionRequest::Next { .. }
+        ) {
+            WorkCounters::bump(&self.world.work.rpc_replay_pages, 1);
         }
+        self.inner.replay_subscription(req).await
     }
+
     async fn get_changed_buckets(
         &self,
         req: crate::rpc::ScopedRequest<GetChangedBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
-        let req = req.inner;
-        tracing::debug!(
-            target_peer_id = %self.target_peer_id,
-            part_id = %req.part_id,
-            offset = ?req.offset,
-            since = req.since,
-            limit_hint = req.limit_hint,
-            "memory rpc get changed buckets"
-        );
-        if !self.world.is_online(self.target_peer_id.clone()) {
+        if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
         WorkCounters::bump(&self.world.work.rpc_get_changed_buckets, 1);
-        let response = self
-            .target_part_store
-            .get_changed_buckets(req, self.source_peer_id.clone())
-            .await?;
-        if let Ok(summaries) = &response {
+        let response = self.inner.get_changed_buckets(req).await?;
+        if let Ok(Ok(summaries)) = &response {
             WorkCounters::bump(
                 &self.world.work.bucket_summaries_returned,
                 summaries.len() as u64,
             );
         }
-        Ok(Ok(response))
+        Ok(response)
     }
 
     async fn leaf_buckets(
         &self,
         req: crate::rpc::ScopedRequest<LeafBucketsRequest>,
     ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
-        let req = req.inner;
-        tracing::debug!(
-            target_peer_id = %self.target_peer_id,
-            part_id = %req.part_id,
-            bucket_count = req.buckets.len(),
-            since = req.since,
-            "memory rpc leaf buckets"
-        );
-        if !self.world.is_online(self.target_peer_id.clone()) {
+        if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
         WorkCounters::bump(&self.world.work.rpc_leaf_buckets, 1);
-        let res = self
-            .target_part_store
-            .leaf_buckets(req, self.source_peer_id.clone())
-            .await??;
-        let returned = res
-            .bucks
-            .values()
-            .map(|page| page.entries.len() as u64)
-            .sum::<u64>();
-        WorkCounters::bump(&self.world.work.leaf_objects_returned, returned);
-        Ok(Ok(Ok(res)))
+        let response = self.inner.leaf_buckets(req).await?;
+        if let Ok(Ok(result)) = &response {
+            let returned = result
+                .bucks
+                .values()
+                .map(|page| page.entries.len() as u64)
+                .sum::<u64>();
+            WorkCounters::bump(&self.world.work.leaf_objects_returned, returned);
+        }
+        Ok(response)
     }
 }
 
@@ -696,17 +499,31 @@ struct NodeHarness {
     /// The hint this node was booted with, so a restart hands back the same band instead
     /// of silently dropping to the default mid-scenario.
     sync_mode: Option<SyncMode>,
+    /// The responder this node serves to the peers in this process, and the token that stops it.
+    rpc: crate::rpc::BigSyncRpcHandle,
+    rpc_stop: crate::rpc::BigSyncRpcStopToken,
 }
 
 impl NodeHarness {
     async fn connect_to(&self, remote: &NodeHarness) -> Res<()> {
-        let client = Arc::new(MemoryRpcClient::new(
-            Arc::clone(&self.world),
-            Arc::clone(&self.store),
-            self.peer_id.clone(),
-            remote.peer_id.clone(),
-            Arc::clone(&remote.store),
-        ));
+        // Every part read is authorized per caller, and the machine subscribes to the parts it is
+        // handed, so the fixture states the access the rest of the test assumes: the peer that
+        // connects is a reader of those parts on the node it connects to.
+        for part in test_parts() {
+            remote
+                .store
+                .add_part_member(
+                    part,
+                    self.peer_id.clone(),
+                    keyhive_core::access::Access::Read,
+                )
+                .await?;
+        }
+        let client = Arc::new(OfflineGatedRpcClient {
+            world: Arc::clone(&self.world),
+            peer_id: remote.peer_id.clone(),
+            inner: remote.rpc.in_memory_client(self.peer_id.clone()),
+        });
         self.host
             .worker
             .set_peer(
@@ -771,6 +588,7 @@ impl NodeHarness {
 
     async fn stop(self) -> Res<()> {
         self.stop.stop().await?;
+        self.rpc_stop.stop().await?;
         self.world.set_online(self.peer_id.clone(), false);
         self.world.remove_store(self.peer_id.clone());
         Ok(())
@@ -1039,14 +857,21 @@ where
         Arc::clone(&store_for_worker),
         Arc::clone(&world),
     ));
+    // Built before the machine, so shutdown stops the machine first.
+    let (rpc, rpc_stop) = crate::rpc::spawn_big_sync_rpc(HashMap::from([(
+        Arc::from(TEST_SCOPE),
+        Arc::clone(&store_for_worker),
+    )]))
+    .await?;
     let (handle, stop) = crate::spawn_big_sync_worker_with_options(
         Arc::clone(&store_for_worker),
         [(TEST_BACKEND_ID.into(), backend)].into(),
         "big-sync-test",
         None,
         sync_mode,
-        Arc::from("big-sync-test"),
+        Arc::from(TEST_SCOPE),
     )?;
+    handle.set_replay_hold_ms(TEST_REPLAY_HOLD_MS).await?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),
         worker: handle.clone(),
@@ -1063,6 +888,8 @@ where
         host,
         handle,
         stop,
+        rpc,
+        rpc_stop,
     })
 }
 
@@ -1108,10 +935,13 @@ async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarne
         handle: _handle,
         stop,
         sqlite_temp_dir: _sqlite_temp_dir,
+        rpc: _rpc,
+        rpc_stop,
         ..
     } = node;
     node_world.set_online(peer_id.clone(), false);
     stop.stop().await?;
+    rpc_stop.stop().await?;
     node_world.remove_store(peer_id.clone());
     let Some(memory_store) = restart_memory_store else {
         eyre::bail!("node is not restartable with a memory store");
@@ -1311,11 +1141,11 @@ async fn collect_stats(
 /// out has to pick a deadline larger than the pacing, and picking one equal to it
 /// turns the test into a race with the tick.
 ///
-/// `Tasks` doubles a retry's backoff per attempt, capped at the task frame's
-/// `max_backoff` (one minute by default), so the delta clears the pacing constant
-/// with margin rather than landing on its boundary.
+/// `Tasks` doubles a retry's backoff per attempt, capped at the frame's `max_backoff`
+/// (a minute by default), so the delta clears that cap with margin rather than landing
+/// on its boundary.
 async fn advance_past_backoff(nodes: &[&NodeHarness]) -> Res<()> {
-    let delta = big_sync_core::unauthorized_backoff() * 3;
+    let delta = Duration::from_secs(90);
     for node in nodes {
         node.handle.advance_clock(delta).await?;
     }
@@ -2748,6 +2578,3 @@ async fn hidden_part_page_answers_unknown() -> Res<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod stress;

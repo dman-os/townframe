@@ -347,7 +347,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .collect(),
                 )
                 .ok_or_else(|| ferr!("automerge document has no content heads"))?;
-                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?);
                 // Stage the plaintext before creating the Keyhive authority.
                 // This is the recovery record for a crash in any later step.
                 let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
@@ -504,7 +504,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 }
                 runtime_io
                     .contains_sedimentree(sedimentree_core::id::SedimentreeId::new(
-                        doc_id.try_to_bytes32()?,
+                        doc_id.to_bytes32()?,
                     ))
                     .await
             }
@@ -887,14 +887,14 @@ where
             } => {
                 let request_id = subduction_core::connection::message::RequestId {
                     requestor: subduction_core::peer::id::PeerId::new(
-                        self.local_peer_id.to_bytes32(),
+                        self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
                     ),
                     nonce: waiter_id,
                 };
                 // The document id reaches this command from the sync backend, so its width
                 // is peer input: derive the fixed-width sedimentree id fallibly, and fail
                 // this sync attempt rather than the hub loop when it does not fit.
-                let doc_key = match doc_id.try_to_bytes32() {
+                let doc_key = match doc_id.to_bytes32() {
                     Ok(doc_key) => doc_key,
                     Err(error) => {
                         resp.send(Err(crate::runtime2::types::SyncDocError::Other(error)))
@@ -999,7 +999,7 @@ where
                 self.handle_release_internal_lease(doc_id, generation);
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
-                let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+                let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?);
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::ContainsSedimentree,
                     F::contains_sedimentree(Arc::clone(&self.runtime_io), sedimentree_id, resp),
@@ -2558,7 +2558,7 @@ where
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {
             requestor: subduction_keyhive::KeyhivePeerId::from_bytes(
-                self.local_peer_id.to_bytes32(),
+                self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
             ),
             nonce: round_id,
         };

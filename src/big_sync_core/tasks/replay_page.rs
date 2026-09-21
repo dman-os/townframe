@@ -7,30 +7,46 @@ use crate::{
     tasks::{TaskCtx, TaskResultDeets},
 };
 
-/// One bounded page over a set of targets.
+/// One round of a logical replay subscription: at most one `Update`, then at most one page.
 ///
-/// The task is discrete: it asks for one page and completes. Re-issuing is the machine's job,
-/// so a page cannot outlive the connection and a client's processing rate is what decides how
-/// fast events arrive (ADR 012 decision 9). One request carries every target of the round:
-/// each target's own cursor travels with it, so a page per part would be one request per part
-/// over the same connection.
+/// The round is discrete. A round that carries a subscription change and a page makes both
+/// calls in order; a round that only reconfigures the subscription carries no targets and
+/// therefore no page call (ADR 012 decision 9: `Update` and `Next` are each discrete calls).
 #[derive(Debug, Clone)]
 pub struct ReplaySubscriptionTaskState {
-    pub session_id: rpc::ReplaySessionId,
     pub subscription_id: rpc::ReplaySubscriptionId,
+    /// The generation this round's `Update` carries.
     pub generation: u64,
-    pub targets: Vec<rpc::ReplaySubscriptionTargetEntry>,
+    /// The one `Update` this round makes.
     pub request: Option<rpc::ReplaySubscriptionRequest>,
+}
+
+/// What the responder answered about this round's `Update`.
+#[derive(Debug, Clone)]
+pub enum ReplayUpdateOutcome {
+    /// The responder applied the update. Every entry it carried that is not named in
+    /// `rejected` landed.
+    Applied {
+        /// The generation the round's update carried.
+        generation: u64,
+        rejected: Vec<(rpc::ReplayTargetId, rpc::TargetVerdict)>,
+    },
+    /// A newer update had already reached the responder, so this one did not apply. The
+    /// round's own generation is `generation`; `current` is the one the responder holds.
+    Superseded { generation: u64, current: u64 },
 }
 
 #[derive(Debug, Clone)]
 pub struct ReplayPageTask {
     pub peer_id: PeerKey,
-    /// Names the client-owned replay session for this page and its request ids.
+    /// Names the client-owned replay session for this round and its request ids.
     pub session_id: rpc::ReplaySessionId,
     /// This request's id, so the round that replaces it can name it.
     pub request_id: rpc::ReplayRequestId,
-    pub targets: Vec<rpc::SubscriptionTarget>,
+    /// The targets this round pages: the responder's entry id for each route, with the cursor
+    /// this round resumes from. The wire names entries by id, so the round carries the id it
+    /// was scheduled with instead of looking it up by route again.
+    pub targets: Vec<(rpc::ReplayTargetId, rpc::SubscriptionTarget)>,
     /// The page this round supersedes, if it is replacing one still in flight. The responder
     /// drops that request only if it is still waiting, so a page already holding rows ships
     /// them and superseding never discards delivered work.
@@ -39,7 +55,8 @@ pub struct ReplayPageTask {
     /// Long-poll duration for this page. Catch-up requests are drain-only; only an
     /// established live lane waits.
     pub hold_ms: u32,
-    /// Optional stateful target-set operation to perform before fetching this page.
+    /// The stateful target-set operation this round performs. A round without one is a plain
+    /// page over the subscription the responder already holds.
     pub subscription: Option<ReplaySubscriptionTaskState>,
 }
 
@@ -47,6 +64,8 @@ pub struct ReplayPageTask {
 pub struct ReplayPageResult {
     pub peer_id: PeerKey,
     pub page: rpc::ReplayPage,
+    /// The outcome of the `Update` this round carried, when it carried one.
+    pub update: Option<ReplayUpdateOutcome>,
 }
 
 structstruck::strike! {
@@ -54,6 +73,9 @@ structstruck::strike! {
     pub struct ReplayPageTaskError {
         pub peer_id: PeerKey,
         pub targets: Vec<rpc::SubscriptionTarget>,
+        /// The subscription this round carried an `Update` for. A round whose update failed
+        /// never asked for its page, so the machine retries the update rather than a page.
+        pub updated_subscription_id: Option<rpc::ReplaySubscriptionId>,
         pub deets:
             pub enum ReplayPageTaskErrorDeets {
                 #![derive(thiserror::Error, displaydoc::Display)]
@@ -86,16 +108,28 @@ impl ReplayPageTask {
         Rng: rand::Rng,
     {
         let peer_id = self.peer_id.clone();
-        let targets = self.targets.clone();
+        let updated_subscription_id = self.subscription.as_ref().and_then(|subscription| {
+            subscription
+                .request
+                .as_ref()
+                .map(|_| subscription.subscription_id)
+        });
+        // The routes are cloned only on the way out of a failed round: a successful round would
+        // otherwise copy every target, cursors and object keys included, for nobody.
         self.run_run(cx).await.map_err(|deets| ReplayPageTaskError {
             peer_id,
-            targets,
+            targets: self
+                .targets
+                .iter()
+                .map(|(_, target)| target.clone())
+                .collect(),
+            updated_subscription_id,
             deets,
         })
     }
 
     async fn run_run<K, PStore, Rpc, Rng>(
-        self,
+        &self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
     ) -> Result<TaskResultDeets, ReplayPageTaskErrorDeets>
     where
@@ -110,128 +144,19 @@ impl ReplayPageTask {
             return Err(ReplayPageTaskErrorDeets::Rpc(rpc::RpcError::TransportError));
         };
         let rpc_started = std::time::Instant::now();
-        let page = if let Some(subscription) = self.subscription.clone() {
-            if let Some(request) = subscription.request.clone() {
-                match peer_rpc.replay_subscription(request).await {
-                    Ok(rpc::ReplaySubscriptionResponse::Opened { .. })
-                    | Ok(rpc::ReplaySubscriptionResponse::Updated { .. }) => {}
-                    Err(rpc::RpcError::UnknownSubscription)
-                    | Err(rpc::RpcError::StaleSubscriptionGeneration)
-                    | Err(rpc::RpcError::InvalidRequest(_)) => {
-                        peer_rpc
-                            .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
-                                session_id: subscription.session_id,
-                                subscription_id: subscription.subscription_id,
-                                generation: subscription.generation,
-                                targets: subscription.targets.clone(),
-                            })
-                            .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                    Ok(response) => {
-                        return Err(rpc::RpcError::InvalidRequest(format!(
-                            "unexpected replay subscription response before page: {response:?}"
-                        ))
-                        .into());
-                    }
-                }
-            }
-            let next = rpc::ReplaySubscriptionRequest::Next {
-                session_id: self.session_id,
-                subscription_id: subscription.subscription_id,
-                request_id: self.request_id,
-                supersede: self.supersede,
-                targets: self
-                    .targets
-                    .iter()
-                    .map(|target| {
-                        let descriptor = rpc::ReplaySubscriptionTarget::from(target);
-                        let entry = subscription
-                            .targets
-                            .iter()
-                            .find(|entry| entry.target == descriptor)
-                            .expect("every replay page target has a subscription id");
-                        (
-                            entry.id,
-                            match target {
-                                rpc::SubscriptionTarget::Part { cursor, .. }
-                                | rpc::SubscriptionTarget::Object { cursor, .. } => *cursor,
-                            },
-                        )
-                    })
-                    .collect(),
-                limit: self.limit,
-                hold_ms: self.hold_ms,
-            };
-            tracing::debug!(
-                peer_id = %self.peer_id,
-                ?self.request_id,
-                supersede = ?self.supersede,
-                target_count = self.targets.len(),
-                hold_ms = self.hold_ms,
-                "replay subscription next request",
-            );
-            let response = match peer_rpc.replay_subscription(next.clone()).await {
-                Ok(response) => response,
-                Err(rpc::RpcError::UnknownSubscription) | Err(rpc::RpcError::InvalidRequest(_)) => {
-                    peer_rpc
-                        .replay_subscription(rpc::ReplaySubscriptionRequest::Open {
-                            session_id: self.session_id,
-                            subscription_id: subscription.subscription_id,
-                            generation: subscription.generation,
-                            targets: subscription.targets.clone(),
-                        })
-                        .await?;
-                    peer_rpc.replay_subscription(next).await?
-                }
-                Err(error) => return Err(error.into()),
-            };
-            tracing::debug!(
-                peer_id = %self.peer_id,
-                ?self.request_id,
-                "replay subscription next response received",
-            );
-            let rpc::ReplaySubscriptionResponse::Page(subscription_page) = response else {
-                return Err(rpc::RpcError::InvalidRequest(
-                    "replay subscription did not return a page".into(),
-                )
-                .into());
-            };
-            let page_targets = subscription_page
-                .targets
-                .into_iter()
-                .filter_map(|(id, verdict)| {
-                    let entry = subscription.targets.iter().find(|entry| entry.id == id)?;
-                    let current = self
-                        .targets
-                        .iter()
-                        .find(|target| rpc::ReplaySubscriptionTarget::from(*target) == entry.target)
-                        .cloned()
-                        .unwrap_or_else(|| entry.target.with_cursor(0));
-                    let target = match verdict {
-                        rpc::TargetVerdict::Events { resume, .. } => {
-                            entry.target.with_cursor(resume)
-                        }
-                        _ => current,
-                    };
-                    Some((target, verdict))
-                })
-                .collect();
+        let update = self.update_subscription::<K, Rpc>(peer_rpc).await?;
+        let page = if self.targets.is_empty()
+            || matches!(update, Some(ReplayUpdateOutcome::Superseded { .. }))
+        {
+            // Nothing to ask for: an update-only round pages nothing, and a round whose
+            // update was overtaken must not ask for ids the responder may not hold — the
+            // machine re-sends the update and pages once it lands.
             rpc::ReplayPage {
-                events: subscription_page.page.events,
-                targets: page_targets,
+                events: Vec::new(),
+                targets: Vec::new(),
             }
         } else {
-            peer_rpc
-                .replay_page(rpc::ReplayPageRequest {
-                    session_id: self.session_id,
-                    request_id: self.request_id,
-                    supersede: self.supersede,
-                    targets: self.targets.clone(),
-                    limit: self.limit,
-                    hold_ms: self.hold_ms,
-                })
-                .await?
+            self.fetch_page::<K, Rpc>(peer_rpc, update.as_ref()).await?
         };
         tracing::debug!(
             peer_id = %self.peer_id,
@@ -242,8 +167,145 @@ impl ReplayPageTask {
             "replay page rpc completed",
         );
         Ok(TaskResultDeets::ReplayPage(ReplayPageResult {
-            peer_id: self.peer_id,
+            peer_id: self.peer_id.clone(),
             page,
+            update,
         }))
+    }
+
+    /// Make this round's `Update`, if it carries one.
+    async fn update_subscription<K, Rpc>(
+        &self,
+        peer_rpc: &Rpc,
+    ) -> Result<Option<ReplayUpdateOutcome>, ReplayPageTaskErrorDeets>
+    where
+        K: FutureForm,
+        Rpc: BigSyncRpcClient<K>,
+    {
+        let Some(subscription) = &self.subscription else {
+            return Ok(None);
+        };
+        let Some(request) = subscription.request.clone() else {
+            return Ok(None);
+        };
+        match peer_rpc.replay_subscription(request).await? {
+            rpc::ReplaySubscriptionResponse::Updated {
+                generation,
+                rejected,
+            } => Ok(Some(if generation == subscription.generation {
+                ReplayUpdateOutcome::Applied {
+                    generation,
+                    rejected,
+                }
+            } else {
+                // The responder holds a newer generation, so this update did not apply and
+                // its entries still owe an answer.
+                ReplayUpdateOutcome::Superseded {
+                    generation: subscription.generation,
+                    current: generation,
+                }
+            })),
+            rpc::ReplaySubscriptionResponse::Closed => Err(rpc::RpcError::InvalidRequest(
+                "replay subscription closed while updating".into(),
+            )
+            .into()),
+            response => Err(rpc::RpcError::InvalidRequest(format!(
+                "unexpected replay subscription response to an update: {response:?}"
+            ))
+            .into()),
+        }
+    }
+
+    /// Ask for the one page this round carries.
+    async fn fetch_page<K, Rpc>(
+        &self,
+        peer_rpc: &Rpc,
+        update: Option<&ReplayUpdateOutcome>,
+    ) -> Result<rpc::ReplayPage, ReplayPageTaskErrorDeets>
+    where
+        K: FutureForm,
+        Rpc: BigSyncRpcClient<K>,
+    {
+        let subscription = self
+            .subscription
+            .as_ref()
+            .expect("a page round belongs to a subscription");
+        // An entry this round's own update refused is not in the responder's target set, so
+        // it must not be named here: the responder has nothing to answer for it, and naming
+        // it would fail the whole page instead of reporting it per target.
+        let refused: std::collections::HashSet<rpc::ReplayTargetId> = match update {
+            Some(ReplayUpdateOutcome::Applied { rejected, .. }) => {
+                rejected.iter().map(|(id, _)| *id).collect()
+            }
+            _ => std::collections::HashSet::new(),
+        };
+        let targets: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|(id, _)| !refused.contains(id))
+            .map(|(id, target)| (*id, target.cursor()))
+            .collect();
+        if targets.is_empty() {
+            // Every target of the round was refused by its own update, so there is nothing
+            // the responder can answer for. The round reports the refusals instead.
+            return Ok(rpc::ReplayPage {
+                events: Vec::new(),
+                targets: Vec::new(),
+            });
+        }
+        let next = rpc::ReplaySubscriptionRequest::Next {
+            session_id: self.session_id,
+            subscription_id: subscription.subscription_id,
+            request_id: self.request_id,
+            supersede: self.supersede,
+            targets,
+            limit: self.limit,
+            hold_ms: self.hold_ms,
+        };
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            ?self.request_id,
+            supersede = ?self.supersede,
+            target_count = self.targets.len(),
+            hold_ms = self.hold_ms,
+            "replay subscription next request",
+        );
+        let response = peer_rpc.replay_subscription(next).await?;
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            ?self.request_id,
+            "replay subscription next response received",
+        );
+        let rpc::ReplaySubscriptionResponse::Page(subscription_page) = response else {
+            return Err(rpc::RpcError::InvalidRequest(
+                "replay subscription did not return a page".into(),
+            )
+            .into());
+        };
+        // A verdict names an entry of this round; an id the round does not carry is a superseded
+        // round's answer and is dropped. `Events` moves the route to the position the responder
+        // resumed from. A refusal carries no position, so the route keeps the one this round asked
+        // from, and the machine re-adds it under a fresh id (ADR 012 decision 9).
+        let page_targets = subscription_page
+            .targets
+            .into_iter()
+            .filter_map(|(id, verdict)| {
+                let (_, target) = self
+                    .targets
+                    .iter()
+                    .find(|(target_id, _)| *target_id == id)?;
+                let target = match verdict {
+                    rpc::TargetVerdict::Events { resume, .. } => {
+                        rpc::ReplaySubscriptionTarget::from(target).with_cursor(resume)
+                    }
+                    _ => target.clone(),
+                };
+                Some((target, verdict))
+            })
+            .collect();
+        Ok(rpc::ReplayPage {
+            events: subscription_page.page.events,
+            targets: page_targets,
+        })
     }
 }

@@ -204,7 +204,6 @@ impl SqliteBigRepoStore {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut transitions = Vec::new();
         let mut transition_event_payloads = HashMap::new();
-        let mut reconciled_docs = HashMap::new();
 
         for mutation in mutations {
             let obj_ref = self
@@ -248,7 +247,6 @@ impl SqliteBigRepoStore {
             .await?
             .into_iter()
             .collect();
-            reconciled_docs.insert(mutation.doc.clone(), mutation.agents.clone());
 
             let current_rows: Vec<Vec<u8>> = sqlx::query_scalar!(
                 "SELECT p.part_id AS 'part_id: Vec<u8>' FROM big_sync_members m
@@ -1073,9 +1071,17 @@ impl SqliteBigRepoStore {
                     .collect::<Vec<_>>(),
             ),
         });
-        let events = self
+        let mut events = self
             .set_obj_payload_in_tx(tx, Self::obj_id(id), payload)
             .await?;
+        // The payload of a tree-derived object has just landed, and every content mutation comes
+        // through here, so this is where the store learns the sedimentree exists locally. `/seds`
+        // is the local index of exactly those, which is why the membership is written here and not
+        // by the group-part worker, whose subject is keyhive-derived group membership.
+        events.extend(
+            self.add_obj_to_parts_in_tx(tx, Self::obj_id(id), vec![crate::seds_part_id()])
+                .await?,
+        );
 
         Ok((events, guard))
     }
@@ -1284,7 +1290,16 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         Sendable::from_future(async move {
             let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             self.save_tree(&mut tx, id).await?;
+            // The tree exists in this store now, which is exactly what `/seds` lists: this
+            // node's local index of the sedimentrees it has saved. This is the only place that
+            // learns a tree appeared, so the membership is written here, in the same
+            // transaction. It carries no access rows: what a peer may see through the partition
+            // is decided per event by the readability filter.
+            let events = self
+                .add_obj_to_parts_in_tx(&mut tx, Self::obj_id(id), vec![crate::seds_part_id()])
+                .await?;
             tx.commit().await?;
+            self.publish(events).await?;
             Ok(())
         })
     }
@@ -1326,7 +1341,16 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             )
             .execute(&mut *tx)
             .await?;
+            // The tree is gone, so the sedimentree is no longer one this node holds, and its
+            // membership of `/seds` goes with it. Publish after committing, like any other
+            // membership change.
+            let events = self
+                .remove_seds_membership_in_tx(&mut tx, id)
+                .await?
+                .into_iter()
+                .collect();
             tx.commit().await?;
+            self.publish(events).await?;
             Ok(())
         })
     }

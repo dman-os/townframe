@@ -9,6 +9,7 @@ use super::log_nickname;
 use crate::{BigRepo, DocumentId, Res};
 use keyhive_crypto::digest::Digest;
 use std::collections::{BTreeMap, BTreeSet};
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DocumentKeyhiveSnapshot {
@@ -24,7 +25,7 @@ pub(crate) async fn document_snapshot(
     repo: &BigRepo,
     doc_id: DocumentId,
 ) -> Res<DocumentKeyhiveSnapshot> {
-    let bytes: [u8; 32] = doc_id.to_bytes32();
+    let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|_| crate::ferr!("document id is not a valid Ed25519 point"))?;
     let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);

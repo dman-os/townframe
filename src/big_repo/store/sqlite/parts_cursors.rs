@@ -186,33 +186,6 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn obj_part_added_at(
-        &self,
-        obj_id: ObjKey,
-        part_id: PartKey,
-    ) -> Res<Option<CursorIndex>> {
-        // The member row is the record of the add. A row that is gone, or one that
-        // predates the column, reports `None` — which delivers the tombstone rather than
-        // dropping a removal on the strength of a record we do not have.
-        let added_at: Option<i64> = sqlx::query_scalar(
-            "SELECT m.added_at
-               FROM big_sync_members m
-              WHERE m.scope_id = ?1
-                AND m.obj_ref = (
-                    SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-                )
-                AND m.maybe_part_ref = (
-                    SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3
-                )",
-        )
-        .bind(self.scope().id())
-        .bind(Self::obj_blob(obj_id))
-        .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(added_at.map(|value| u64::try_from(value).expect(ERROR_IMPOSSIBLE)))
-    }
-
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
         let rows = sqlx::query!(
             "SELECT p.part_id
@@ -608,82 +581,7 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let obj_ref = self.core.ensure_obj_ref(&mut tx, obj_id.clone()).await?;
-        let payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
-        let Some(payload_json) = payload_json.filter(|str| !str.is_empty()) else {
-            for part_id in parts {
-                let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
-                sqlx::query!("INSERT OR IGNORE INTO big_sync_pending_members(scope_id,obj_ref,part_ref) VALUES (?1,?2,?3)", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-            }
-            tx.commit().await?;
-            return Ok(());
-        };
-        let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
-        let mut events = Vec::new();
-        for part_id in parts {
-            let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
-            let old = self
-                .load_member_state(&mut tx, part_id.clone(), obj_id.clone())
-                .await?;
-            if matches!(old, MemberState::Live(_)) {
-                continue;
-            }
-            let cursor = Self::next_cursor(&mut tx).await?;
-            // `added_at` is stamped by the row that becomes present: the insert arm is a
-            // first add, and the conflict arm restamps only a row that was absent
-            // (`EVENT_REMOVED`), so a present-to-present touch keeps its add cursor.
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                     event_type = excluded.event_type
-                   , txid = excluded.txid
-                   , added_at = CASE
-                         WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
-                         ELSE big_sync_members.added_at
-                     END",
-                self.scope().id(),
-                obj_ref,
-                part_ref,
-                EVENT_CHANGED,
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                EVENT_REMOVED
-            )
-            .execute(&mut *tx)
-            .await?;
-            self.apply_bucket_transition(
-                &mut tx,
-                part_id.clone(),
-                obj_id.clone(),
-                cursor,
-                &old,
-                &MemberState::Live(payload.clone()),
-            )
-            .await?;
-            sqlx::query!(
-                "UPDATE big_sync_parts
-                 SET latest_cursor = MAX(latest_cursor, ?1)
-                 WHERE scope_id = ?2 AND part_ref = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                self.scope().id(),
-                part_ref
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id=?1 AND obj_ref=?2 AND part_ref=?3", self.scope().id(), obj_ref, part_ref).execute(&mut *tx).await?;
-            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor,
-                part_ids: vec![part_id],
-                obj_id: obj_id.clone(),
-                payload: payload.clone(),
-            }));
-        }
+        let events = self.add_obj_to_parts_in_tx(&mut tx, obj_id, parts).await?;
         tx.commit().await?;
         self.publish(events).await?;
         Ok(())
@@ -995,6 +893,19 @@ impl HostPartStore for SqliteBigRepoStore {
         .await
     }
 
+    async fn open_page_reader(
+        &self,
+        reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn big_sync::LocalPartRevisionReader>, ListPartsError>> {
+        big_sync::open_sqlite_page_reader(
+            self.sql.read_pool.clone(),
+            self.scope().id(),
+            Arc::clone(&self.local_revision_wakeups),
+            reqs,
+        )
+        .await
+    }
+
     async fn open_revision_reader_all(
         &self,
         after: u64,
@@ -1071,6 +982,113 @@ impl HostPartStore for SqliteBigRepoStore {
 }
 
 impl SqliteBigRepoStore {
+    /// [`HostPartStore::add_obj_to_parts`] inside a transaction the caller owns, returning the
+    /// events for the caller to publish once it commits. A caller that is already recording why
+    /// the object exists (the store saving a sedimentree, say) uses this so the membership lands
+    /// with that fact rather than after it.
+    ///
+    /// An object whose payload the store does not hold has no membership to record yet, so it
+    /// becomes a pending want.
+    pub(crate) async fn add_obj_to_parts_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        obj_id: ObjKey,
+        parts: Vec<PartKey>,
+    ) -> Res<Vec<PartEvent>> {
+        let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
+        let payload_json: Option<String> = sqlx::query_scalar!(
+            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
+            obj_ref
+        )
+        .fetch_optional(&mut **tx)
+        .await?
+        .flatten();
+        let Some(payload_json) = payload_json.filter(|str| !str.is_empty()) else {
+            for part_id in parts {
+                let part_ref = self.core.ensure_part_ref(tx, part_id).await?;
+                sqlx::query!("INSERT OR IGNORE INTO big_sync_pending_members(scope_id,obj_ref,part_ref) VALUES (?1,?2,?3)", self.scope().id(), obj_ref, part_ref).execute(&mut **tx).await?;
+            }
+            return Ok(Vec::new());
+        };
+        let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
+        let mut events = Vec::new();
+        for part_id in parts {
+            let part_ref = self.core.ensure_part_ref(tx, part_id.clone()).await?;
+            let old = self
+                .load_member_state(tx, part_id.clone(), obj_id.clone())
+                .await?;
+            if matches!(old, MemberState::Live(_)) {
+                continue;
+            }
+            let cursor = Self::next_cursor(tx).await?;
+            // `added_at` is stamped by the row that becomes present: the insert arm is a
+            // first add, and the conflict arm restamps only a row that was absent
+            // (`EVENT_REMOVED`), so a present-to-present touch keeps its add cursor.
+            sqlx::query!(
+                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
+                     event_type = excluded.event_type
+                   , txid = excluded.txid
+                   , added_at = CASE
+                         WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
+                         ELSE big_sync_members.added_at
+                     END",
+                self.scope().id(),
+                obj_ref,
+                part_ref,
+                EVENT_CHANGED,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                EVENT_REMOVED
+            )
+            .execute(&mut **tx)
+            .await?;
+            self.apply_bucket_transition(
+                tx,
+                part_id.clone(),
+                obj_id.clone(),
+                cursor,
+                &old,
+                &MemberState::Live(payload.clone()),
+            )
+            .await?;
+            sqlx::query!(
+                "UPDATE big_sync_parts
+                 SET latest_cursor = MAX(latest_cursor, ?1)
+                 WHERE scope_id = ?2 AND part_ref = ?3",
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                self.scope().id(),
+                part_ref
+            )
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query!("DELETE FROM big_sync_pending_members WHERE scope_id=?1 AND obj_ref=?2 AND part_ref=?3", self.scope().id(), obj_ref, part_ref).execute(&mut **tx).await?;
+            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                cursor,
+                part_ids: vec![part_id],
+                obj_id: obj_id.clone(),
+                payload: payload.clone(),
+            }));
+        }
+        Ok(events)
+    }
+
+    /// Drop an object's membership of `/seds`, in the caller's transaction. The store owns that
+    /// partition because it is the side that knows whether a sedimentree exists, so the removal
+    /// happens where the tree is deleted. Reports the event to publish after committing, or
+    /// `None` when there was no live membership.
+    pub(crate) async fn remove_seds_membership_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: sedimentree_core::id::SedimentreeId,
+    ) -> Res<Option<PartEvent>> {
+        let obj_id = crate::DocumentId::new(*id.as_bytes());
+        let part_id = crate::seds_part_id();
+        let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
+        let part_ref = self.core.ensure_part_ref(tx, part_id.clone()).await?;
+        self.remove_obj_from_part_in_tx(tx, &obj_id, obj_ref, &part_id, part_ref)
+            .await
+    }
     /// Take the object out of one part, in the caller's transaction: clear the pending want
     /// for that part, mark the member row absent, and advance the part and bucket cursors.
     /// Reports the `Removed` event, or `None` when the part held no live membership to

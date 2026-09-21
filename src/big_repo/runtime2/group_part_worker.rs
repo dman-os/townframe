@@ -71,7 +71,6 @@ pub fn spawn_group_part_worker(
                 let group_agents = Arc::new(GroupAgentsMemo::default());
                 let docs = keyhive.document_ids().await;
                 let futs = docs.into_iter().map(|doc| {
-                    let local_peer_id = local_peer_id.clone();
                     let store = store.clone();
                     let keyhive = keyhive.clone();
                     let initial_group_parts = Arc::clone(&initial_group_parts);
@@ -91,7 +90,6 @@ pub fn spawn_group_part_worker(
                             doc,
                             &initial_group_parts,
                             &scope,
-                            local_peer_id,
                             &group_agents,
                         )
                         .await?;
@@ -310,7 +308,6 @@ impl<'a> Worker<'a> {
         let future = task_future(
             self.store.clone(),
             self.keyhive.clone(),
-            self.local_peer_id.clone(),
             self.scope.clone(),
             task.clone(),
         );
@@ -356,7 +353,6 @@ impl<'a> Worker<'a> {
             let future = task_future(
                 self.store.clone(),
                 self.keyhive.clone(),
-                self.local_peer_id.clone(),
                 self.scope.clone(),
                 task,
             );
@@ -651,18 +647,16 @@ impl<'a> Worker<'a> {
 fn task_future(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerKey,
     scope: WorkerGroupScope,
     task: Task,
 ) -> impl Future<Output = Res<TaskOutput>> + Send + 'static {
-    run_task(task, store, keyhive, local_peer_id, scope)
+    run_task(task, store, keyhive, scope)
 }
 
 async fn run_task(
     task: Task,
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    local_peer_id: PeerKey,
     scope: WorkerGroupScope,
 ) -> Res<TaskOutput> {
     match task {
@@ -683,7 +677,6 @@ async fn run_task(
                 doc,
                 &affected_group_parts,
                 &scope,
-                local_peer_id,
                 &GroupAgentsMemo::default(),
             )
             .await?;
@@ -716,10 +709,9 @@ async fn reconcile_doc(
     doc: ObjKey,
     affected_group_parts: &HashSet<PartKey>,
     scope: &WorkerGroupScope,
-    local_principal: PeerKey,
     group_agents: &GroupAgentsMemo,
 ) -> Res<GroupPartReconciliation> {
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.try_to_bytes32()?)
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32()?)
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
         .document_has_content(crate::DocumentId::new(doc.as_bytes()))
@@ -756,19 +748,11 @@ async fn reconcile_doc(
     } else {
         (HashMap::new(), HashMap::new(), HashSet::new())
     };
-    let mut desired_group_parts = candidate_group_parts;
-    // ADR 012 decision 9: `/seds` is a real part, so its membership is ordinary
-    // membership. A doc the local principal can read belongs in it, and naming it in the
-    // managed set in every case is what lets the store's stale/desired logic take it out
-    // again once the doc stops being readable — no flag, no special branch.
-    if agents
-        .get(&local_principal)
-        .is_some_and(|access| access.is_reader())
-    {
-        desired_group_parts.insert(crate::global_part_id());
-    }
+    let desired_group_parts = candidate_group_parts;
+    // This worker owns keyhive-derived membership only: one agent set per containing group, and
+    // one part per group. `/seds` is not one of them — the store populates it when it saves a
+    // sedimentree, which is the moment the tree starts existing locally.
     let mut reconciled_group_parts = affected_group_parts.clone();
-    reconciled_group_parts.insert(crate::global_part_id());
     reconciled_group_parts.extend(desired_group_parts.iter().cloned());
     Ok(GroupPartReconciliation {
         doc,
@@ -868,7 +852,7 @@ async fn affected_event(
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjKey::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.as_bytes())),
             );
             // A part and a containing-group query both name a *group*, and the group
             // this operation was dispatched to is the proof chain's root, not the
@@ -900,7 +884,7 @@ async fn affected_event(
                     .payload()
                     .after_content
                     .keys()
-                    .map(|id| ObjKey::new(id.to_bytes())),
+                    .map(|id| ObjKey::new(id.as_bytes())),
             );
             // Same as the delegation arm: the group is the proof chain's root, not
             // the immediate signer.

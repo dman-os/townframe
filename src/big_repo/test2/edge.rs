@@ -26,6 +26,7 @@ use crate::SyncDocError;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -49,13 +50,13 @@ async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
 /// Agent identifier for a node, for direct keyhive queries.
 fn agent_id(node: &Node) -> keyhive_core::principal::identifier::Identifier {
     let peer = node.peer_id();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("peer id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
 
 fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identifier::Identifier {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("doc id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }

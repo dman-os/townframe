@@ -101,6 +101,7 @@ impl StressFixture for LwwStressFixture {
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
+        // FIXME: what ??
         tokio::try_join!(node.handle.snapshot(), node.snapshot())
     }
 

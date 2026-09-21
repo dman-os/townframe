@@ -39,7 +39,7 @@ where
 {
     // The doc id can reach a worker straight from the sync edge (a peer-supplied object id
     // resolved by a sync round), so the fixed-width sedimentree id derivation is fallible.
-    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.try_to_bytes32()?);
+    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?);
     let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
 
     let worker = DocWorker2 {
@@ -2634,7 +2634,8 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5a; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let content_ref = CommitId::new([0x11; 32]);
         let checkpoint = CausalCheckpoint::new([0x77; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2754,7 +2755,8 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5b; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let content_ref = CommitId::new([0x21; 32]);
         let checkpoint = CausalCheckpoint::new([0x87; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);

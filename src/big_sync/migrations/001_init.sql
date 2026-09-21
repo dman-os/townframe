@@ -60,18 +60,12 @@ CREATE TABLE IF NOT EXISTS big_sync_buckets (
 CREATE INDEX IF NOT EXISTS big_sync_buckets_level_changed_idx
     ON big_sync_buckets(scope_id, part_ref, level, changed_at, buck_id);
 
--- event_type: 1 = a membership touch (present), 2 = absent. There is no
--- "added" kind: whether an object is new is a fact only the reader's own
--- replica knows, so the substrate reports only touched-or-deleted.
--- `added_at` is the add cursor anyway, and it is what lets a page exclude a
--- tombstone for a reader that never saw the add (`added_at <= cursor < txid`).
--- It is never carried on the wire. The column carries `DEFAULT 0`, but 0 cannot
--- occur: this file only ever creates fresh databases (see the header), so no row
--- predates the column, every add is stamped from the global cursor (bumped before
--- use, so >= 1) and every writer that omits the column only ever reaches its
--- upsert's conflict arm. `added_at <= cursor` would read 0 as "always selected",
--- i.e. deliver the tombstone to every reader; that case is not reachable, so the
--- predicate is a real predicate on every row.
+-- event_type: 1 = a membership touch (present), 2 = absent. There is no "added"
+-- kind: whether an object is new is a fact only the reader's own replica knows.
+-- `added_at` is the add cursor: a page excludes a tombstone for a reader that
+-- never saw the add (`added_at <= cursor < txid`). It is never on the wire.
+-- `DEFAULT 0` cannot occur (fresh databases only, see the header): every add is
+-- stamped from the global cursor, which is bumped before use, so it is >= 1.
 CREATE TABLE IF NOT EXISTS big_sync_members (
       scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id)
     , obj_ref INTEGER NOT NULL REFERENCES big_sync_objs(obj_ref)
@@ -116,5 +110,6 @@ CREATE TABLE IF NOT EXISTS big_sync_syncable (
     , PRIMARY KEY(scope_id, part_ref, principal_id)
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS big_sync_syncable_principal_changed_idx
-    ON big_sync_syncable(principal_id, changed_at);
+-- No index on (principal_id, changed_at): every reader pairs the principal with a pinned
+-- `part_ref`, so the primary key above already serves them and the extra b-tree only
+-- copies the row's keys on each access write.

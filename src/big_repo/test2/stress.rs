@@ -26,6 +26,7 @@ use std::{
 };
 use tempfile::tempdir;
 use tokio::sync::Mutex;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0002;
 
@@ -346,6 +347,118 @@ impl BigRepoStressFixture {
     }
 }
 
+/// Short hex prefix of a sedimentree head: enough to tell two heads apart in a log line.
+fn short_head(head: &[u8; 32]) -> String {
+    head.iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Short rendering of a part key for a log line.
+fn short_part(part: &PartKey) -> String {
+    format!("{part:?}").chars().take(14).collect()
+}
+
+/// First-sight description of what moved between two settle rounds: per node, the documents
+/// whose sedimentree heads, part lists, or published payload heads differ, and in which
+/// direction. The settle fence proves the cluster stopped moving; when it cannot reach that
+/// proof this is the line that names the node and document still moving, so the stall does not
+/// have to be reconstructed from a raw debug log afterwards.
+fn settle_diff(left: &[BigRepoStressObservation], right: &[BigRepoStressObservation]) -> String {
+    let mut out = String::new();
+    for (index, (before, after)) in left.iter().zip(right).enumerate() {
+        if before == after {
+            continue;
+        }
+        let mut moved: Vec<String> = Vec::new();
+        let docs: BTreeSet<&DocumentId> = before
+            .sedimentree_heads
+            .keys()
+            .chain(before.parts.keys())
+            .chain(before.payload_heads.keys())
+            .chain(after.sedimentree_heads.keys())
+            .chain(after.parts.keys())
+            .chain(after.payload_heads.keys())
+            .collect();
+        for doc in docs {
+            let mut fields: Vec<String> = Vec::new();
+            match (
+                before.sedimentree_heads.get(doc),
+                after.sedimentree_heads.get(doc),
+            ) {
+                (None, Some(heads)) => fields.push(format!("sedimentree +{}", heads.len())),
+                (Some(heads), None) => fields.push(format!("sedimentree -{}", heads.len())),
+                (Some(before_heads), Some(after_heads)) if before_heads != after_heads => {
+                    let added: Vec<String> = after_heads
+                        .difference(before_heads)
+                        .map(short_head)
+                        .collect();
+                    let removed: Vec<String> = before_heads
+                        .difference(after_heads)
+                        .map(short_head)
+                        .collect();
+                    fields.push(format!(
+                        "sedimentree +{} -{}",
+                        added.join(","),
+                        removed.join(",")
+                    ));
+                }
+                _ => {}
+            }
+            match (before.payload_heads.get(doc), after.payload_heads.get(doc)) {
+                (None, Some(heads)) => fields.push(format!("payload +{}", heads.len())),
+                (Some(heads), None) => fields.push(format!("payload -{}", heads.len())),
+                (Some(before_heads), Some(after_heads)) if before_heads != after_heads => {
+                    let added: Vec<String> = after_heads
+                        .difference(before_heads)
+                        .map(short_head)
+                        .collect();
+                    let removed: Vec<String> = before_heads
+                        .difference(after_heads)
+                        .map(short_head)
+                        .collect();
+                    fields.push(format!(
+                        "payload +{} -{}",
+                        added.join(","),
+                        removed.join(",")
+                    ));
+                }
+                _ => {}
+            }
+            match (before.parts.get(doc), after.parts.get(doc)) {
+                (None, Some(parts)) => fields.push(format!("parts +{}", parts.len())),
+                (Some(parts), None) => fields.push(format!("parts -{}", parts.len())),
+                (Some(before_parts), Some(after_parts)) if before_parts != after_parts => {
+                    let added: Vec<String> = after_parts
+                        .iter()
+                        .filter(|part| !before_parts.contains(part))
+                        .map(short_part)
+                        .collect();
+                    let removed: Vec<String> = before_parts
+                        .iter()
+                        .filter(|part| !after_parts.contains(part))
+                        .map(short_part)
+                        .collect();
+                    fields.push(format!("parts +{} -{}", added.join(","), removed.join(",")));
+                }
+                _ => {}
+            }
+            if !fields.is_empty() {
+                moved.push(format!("{doc}: {}", fields.join(" ")));
+            }
+        }
+        if moved.is_empty() {
+            moved.push("outside the compared fields".to_string());
+        }
+        out.push_str(&format!("node={index} {} | ", moved.join("; ")));
+    }
+    if out.is_empty() {
+        "node count differs".to_string()
+    } else {
+        out
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BigRepoStressObservation {
     pub sedimentree_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
@@ -390,7 +503,7 @@ impl StressFixture for BigRepoStressFixture {
             // is the sync primitive under test, and hiding GLOBAL exercises
             // the production relay design (large sets never pay global-sub
             // cost) end to end.
-            HashSet::from([crate::global_part_id()]),
+            HashSet::from([crate::seds_part_id()]),
         )
         .await?;
         self.node_paths.lock().await.insert(node.peer_id(), path);
@@ -529,6 +642,14 @@ impl StressFixture for BigRepoStressFixture {
         })
     }
 
+    fn observation_diff(
+        &self,
+        left: &[BigRepoStressObservation],
+        right: &[BigRepoStressObservation],
+    ) -> String {
+        settle_diff(left, right)
+    }
+
     fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id()
     }
@@ -639,7 +760,7 @@ impl StressFixture for BigRepoStressFixture {
         }
         let agent = node.repo.keyhive().keyhive_peer_id().to_identifier()?;
         let document = keyhive_core::principal::identifier::Identifier::from(
-            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
                 .expect("stress document id must be a verifying key"),
         );
         Ok(node
@@ -905,7 +1026,9 @@ impl StressFixture for BigRepoStressFixture {
         let _reference_heads = &observations[0].1.sedimentree_heads;
         let mut sedimentree_mismatches = Vec::new();
         for doc_id in &tracked_docs {
-            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()) else {
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(
+                &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+            ) else {
                 continue;
             };
             let doc_identifier = keyhive_core::principal::identifier::Identifier::from(vk);
@@ -1026,12 +1149,16 @@ impl StressFixture for BigRepoStressFixture {
                         .map(Vec::len)
                         .collect::<Vec<_>>();
                     let agent_id = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(&peer_id.to_bytes32())
-                            .expect("stress peer id must be a verifying key"),
+                        ed25519_dalek::VerifyingKey::from_bytes(
+                            &peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                        )
+                        .expect("stress peer id must be a verifying key"),
                     );
                     let doc_identifier = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-                            .expect("stress document id must be a verifying key"),
+                        ed25519_dalek::VerifyingKey::from_bytes(
+                            &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                        )
+                        .expect("stress document id must be a verifying key"),
                     );
                     let access = node
                         .repo

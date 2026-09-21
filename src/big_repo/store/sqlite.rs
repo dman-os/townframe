@@ -264,8 +264,9 @@ impl SqliteBigRepoStore {
 #[derive(Debug, Clone)]
 pub(crate) struct GroupPartReconciliation {
     pub(crate) doc: ObjKey,
-    /// The doc-level union of [`Self::part_agents`]: used by the grant re-emit. Never
-    /// written to a part row.
+    /// The doc-level union of [`Self::part_agents`]: it decides whether the grant re-emit runs
+    /// — a principal that appeared in it since the last reconciliation may have missed the
+    /// membership touches that delivery-time filtering denied. Never written to a part row.
     pub(crate) agents: HashMap<PeerKey, keyhive_core::access::Access>,
     /// The agent set of each part the doc resides in — these are the access rows that
     /// get written, so a principal of one group never receives another group's part.
@@ -558,6 +559,7 @@ impl SqliteBigRepoStore {
                )
                AND m.maybe_part_ref > 0
                AND m.event_type != 2
+               AND s.scope_id = ?1
                AND s.principal_id = ?3
              ORDER BY p.part_id",
             self.scope_id,

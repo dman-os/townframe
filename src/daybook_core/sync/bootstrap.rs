@@ -353,16 +353,19 @@ async fn pull_required_partitions_via_big_sync_worker(
     let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(blob_part_store),
         blob_sync_backends,
-        "daybook-blobs",
+        crate::repo::BLOB_SCOPE_KEY,
         max_task_backoff,
         // Bucket-diff, explicitly: see the note on the docs worker above.
         Some(big_sync::SyncMode::Bucket),
-        Arc::from("daybook-blobs"),
+        Arc::from(crate::repo::BLOB_SCOPE_KEY),
     )?;
     let (big_sync_rpc, big_sync_rpc_stop) =
         big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
             (Arc::from("daybook-core"), Arc::clone(partition_store) as _),
-            (Arc::from("daybook-blobs"), Arc::clone(blob_part_store) as _),
+            (
+                Arc::from(crate::repo::BLOB_SCOPE_KEY),
+                Arc::clone(blob_part_store) as _,
+            ),
         ]))
         .await?;
     let (repo_rpc, repo_rpc_stop_token) =
@@ -402,8 +405,10 @@ async fn pull_required_partitions_via_big_sync_worker(
     tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id.clone()))
         .await
         .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
-    let big_sync_rpc_client =
-        big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
+    let big_sync_rpc_client = big_sync::rpc::BigSyncRpcClient::over_iroh(
+        endpoint.clone(),
+        bootstrap.endpoint_addr.clone(),
+    );
     let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
         Arc::new(big_sync_rpc_client);
 

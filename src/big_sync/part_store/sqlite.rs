@@ -46,16 +46,56 @@ pub struct SqlitePartStore {
     hidden_parts: Arc<HashSet<PartKey>>,
 }
 
-/// Open a durable revision reader over a set of targets against an existing
-/// BigSync SQLite schema. Callers that own a different store facade can supply
-/// its read pool, scope, and commit wakeup; this is the same reader the
-/// responder pages from, so the remote page and the local pull consumer read
-/// one path rather than two.
+/// Open a durable revision reader over a set of targets against an existing BigSync SQLite
+/// schema, handing the caller what the log holds — tombstones included. Callers that own a
+/// different store facade can supply its read pool, scope, and commit wakeup. This is the
+/// pull consumer's read; a page takes [`open_sqlite_page_reader`], which applies the
+/// request-scoped tombstone predicate.
 pub async fn open_sqlite_revision_reader(
     read_pool: sqlx::SqlitePool,
     scope_id: i64,
     changed: Arc<Notify>,
     reqs: SubPartsRequest,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    open_sqlite_reader(
+        read_pool,
+        scope_id,
+        changed,
+        reqs,
+        SqlitePartSelector::default(),
+    )
+    .await
+}
+
+/// The page's read: the same reader with ADR 012 decision 9's tombstone predicate applied to
+/// the requested cursors in `reqs`.
+///
+/// A page's cursor is a claim about what the requester already has, so a removal whose add is
+/// newer than that cursor is not the requester's business and is not fetched at all. A pull
+/// consumer's bound is where it starts streaming and then advances, so
+/// [`open_sqlite_revision_reader`] hands that reader the log whole.
+pub async fn open_sqlite_page_reader(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    reqs: SubPartsRequest,
+) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
+    open_sqlite_reader(
+        read_pool,
+        scope_id,
+        changed,
+        reqs,
+        SqlitePartSelector::request_scoped(),
+    )
+    .await
+}
+
+async fn open_sqlite_reader(
+    read_pool: sqlx::SqlitePool,
+    scope_id: i64,
+    changed: Arc<Notify>,
+    reqs: SubPartsRequest,
+    mut selector: SqlitePartSelector,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
     use big_sync_core::rpc::SubscriptionTarget;
 
@@ -75,10 +115,6 @@ pub async fn open_sqlite_revision_reader(
             SubscriptionTarget::Object { .. } => None,
         })
         .collect::<HashSet<_>>();
-    // The reader is the faithful seam: it hands back what the log holds, tombstones
-    // included. Peer-facing policy lives in the responder, which knows the requested
-    // cursor and the peer, and the rev-store adapters keep their tombstones.
-    let mut selector = SqlitePartSelector::default();
     for target in reqs.targets {
         match target {
             SubscriptionTarget::Part { part_id, cursor } => {
@@ -291,6 +327,63 @@ impl SqlitePartStore {
                 })
             })
             .collect()
+    }
+}
+
+impl SqlitePartStore {
+    /// One reader, two policies: a pull reader is handed what the log holds, tombstones
+    /// included, while a page reader applies ADR 012 decision 9's tombstone predicate to the
+    /// requested cursors in `reqs` — see [`HostPartStore::open_page_reader`].
+    async fn revision_reader(
+        &self,
+        reqs: SubPartsRequest,
+        mut selector: SqlitePartSelector,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        use big_sync_core::rpc::SubscriptionTarget;
+
+        let objects = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
+                SubscriptionTarget::Part { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let parts = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, .. } => Some(part_id.clone()),
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        for target in reqs.targets {
+            match target {
+                SubscriptionTarget::Part { part_id, cursor } => {
+                    selector
+                        .parts
+                        .entry(part_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
+                        .or_insert(reqs.lower_bound.max(cursor));
+                }
+                SubscriptionTarget::Object { obj_id, .. } => {
+                    selector
+                        .objects
+                        .entry(obj_id)
+                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
+                        .or_insert(reqs.lower_bound);
+                }
+            }
+        }
+        let reader = open_sqlite_reader_with_byte_budget(
+            self.frontier.clone(),
+            selector,
+            Some(REPLAY_READ_AHEAD_BYTES),
+        )
+        .await?;
+        Ok(Ok(Box::new(super::PartRevisionReader::new(
+            reader, objects, parts,
+        ))))
     }
 }
 
@@ -692,33 +785,6 @@ impl HostPartStore for SqlitePartStore {
         }
         frontier_tx.commit().await?;
         Ok(())
-    }
-
-    async fn obj_part_added_at(
-        &self,
-        obj_id: ObjKey,
-        part_id: PartKey,
-    ) -> Res<Option<CursorIndex>> {
-        // The member row is the record of the add. A row that is gone, or one that
-        // predates the column, reports `None` — which delivers the tombstone rather than
-        // dropping a removal on the strength of a record we do not have.
-        let added_at: Option<i64> = sqlx::query_scalar(
-            "SELECT m.added_at
-               FROM big_sync_members m
-              WHERE m.scope_id = ?1
-                AND m.obj_ref = (
-                    SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-                )
-                AND m.maybe_part_ref = (
-                    SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3
-                )",
-        )
-        .bind(self.core.scope_id)
-        .bind(Self::obj_blob(obj_id))
-        .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.core.sql.read_pool)
-        .await?;
-        Ok(added_at.map(|value| u64::try_from(value).expect(ERROR_IMPOSSIBLE)))
     }
 
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
@@ -1409,55 +1475,16 @@ impl HostPartStore for SqlitePartStore {
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
-        use big_sync_core::rpc::SubscriptionTarget;
+        self.revision_reader(reqs, SqlitePartSelector::default())
+            .await
+    }
 
-        let objects = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Object { obj_id, .. } => Some(obj_id.clone()),
-                SubscriptionTarget::Part { .. } => None,
-            })
-            .collect::<HashSet<_>>();
-        let parts = reqs
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                SubscriptionTarget::Part { part_id, .. } => Some(part_id.clone()),
-                SubscriptionTarget::Object { .. } => None,
-            })
-            .collect::<HashSet<_>>();
-        // The reader is the faithful seam: it hands back what the log holds, tombstones
-        // included. Peer-facing policy lives in the responder, which knows the requested
-        // cursor and the peer.
-        let mut selector = SqlitePartSelector::default();
-        for target in reqs.targets {
-            match target {
-                SubscriptionTarget::Part { part_id, cursor } => {
-                    selector
-                        .parts
-                        .entry(part_id)
-                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound.max(cursor)))
-                        .or_insert(reqs.lower_bound.max(cursor));
-                }
-                SubscriptionTarget::Object { obj_id, .. } => {
-                    selector
-                        .objects
-                        .entry(obj_id)
-                        .and_modify(|bound| *bound = (*bound).max(reqs.lower_bound))
-                        .or_insert(reqs.lower_bound);
-                }
-            }
-        }
-        let reader = open_sqlite_reader_with_byte_budget(
-            self.frontier.clone(),
-            selector,
-            Some(REPLAY_READ_AHEAD_BYTES),
-        )
-        .await?;
-        Ok(Ok(Box::new(super::PartRevisionReader::new(
-            reader, objects, parts,
-        ))))
+    async fn open_page_reader(
+        &self,
+        reqs: SubPartsRequest,
+    ) -> Res<Result<Box<dyn super::LocalPartRevisionReader>, ListPartsError>> {
+        self.revision_reader(reqs, SqlitePartSelector::request_scoped())
+            .await
     }
 
     async fn open_revision_reader_all(
@@ -1617,6 +1644,7 @@ async fn permitted_parts(
                    )
                    AND m.maybe_part_ref > 0
                    AND m.event_type != 2
+                   AND s.scope_id = ?1
                    AND s.principal_id = ?3
                  ORDER BY p.part_id",
                 core.scope_id,
@@ -2796,16 +2824,16 @@ mod tests {
             }
         };
 
-        // A faithful reader is handed the tombstone even when its cursor predates the add:
-        // it replays the log, not a peer's replica. Peer policy is the responder's, asserted
-        // below with the request's own cursor.
+        // A request that started before the add is not handed the tombstone: the read applies
+        // the rule with the request's own cursor, asserted at this level first and then through
+        // the responder below.
         let before = sub(0).await??;
         let before_events = collect_to_boundary(&before).await?;
         assert!(
-            before_events
+            !before_events
                 .iter()
                 .any(|event| matches!(event, PartEvent::Removed(_))),
-            "a faithful reader is handed the tombstone; got {before_events:?}"
+            "a request that started before the add is not handed the tombstone; got {before_events:?}"
         );
 
         // A peer whose request started before the add is not told about the removal...

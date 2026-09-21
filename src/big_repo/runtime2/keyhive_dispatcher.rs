@@ -239,9 +239,13 @@ async fn classify_rows(
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         subs.keys()
-            .map(|peer| KeyhivePeerId::from_bytes(peer.to_bytes32()))
-            .collect()
-    });
+            // The subscriber keys are registered from our own connection path with the
+            // authenticated peer identity, so a key of the wrong width means our plumbing broke,
+            // not that a peer sent something odd. Report it rather than skip: skipping would
+            // silently drop that peer's admission rows.
+            .map(|peer| eyre::Ok(KeyhivePeerId::from_bytes(peer.to_bytes32()?)))
+            .collect::<Res<BTreeSet<KeyhivePeerId>>>()
+    })?;
     if connected.is_empty() {
         if dispatch_diag() {
             tracing::debug!(

@@ -21,13 +21,14 @@ use crate::encrypted_blob::decode_encrypted_blob;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
 /// Convert a BigRepo `DocumentId` into a keyhive `DocumentId` for direct
 /// keyhive API calls (decryption, etc.).
 fn kh_doc_id(doc_id: crate::DocumentId) -> keyhive_core::principal::document::id::DocumentId {
-    let bytes: [u8; 32] = doc_id.to_bytes32();
+    let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .expect("doc id must be a valid Ed25519 point");
     keyhive_core::principal::document::id::DocumentId::from(

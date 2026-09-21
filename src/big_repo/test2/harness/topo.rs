@@ -188,7 +188,7 @@ impl Node {
         // document scope has to be a document, which the frontier worker asserts
         // in test builds.
         store.ensure_part(stress_support::test_part()).await?;
-        store.ensure_part(crate::global_part_id()).await?;
+        store.ensure_part(crate::seds_part_id()).await?;
         Self::boot_with_store(
             seed,
             label,
@@ -366,7 +366,7 @@ impl Node {
         self.worker
             .set_peer(
                 remote.peer_id(),
-                Arc::new(big_sync::rpc::IrohBigSyncRpcClient::new(
+                Arc::new(big_sync::rpc::BigSyncRpcClient::over_iroh(
                     self.endpoint.clone(),
                     remote.endpoint.addr(),
                 )),
@@ -437,7 +437,7 @@ impl Node {
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_parts(remote, vec![crate::global_part_id()])
+        self.connect_with_parts(remote, vec![crate::seds_part_id()])
             .await
     }
     pub(crate) async fn connect_with_parts(
@@ -682,10 +682,10 @@ impl Pair {
         // explicit and a page denied at registration backs off for the whole
         // unauthorized window, so the grant has to precede the routes.
         pair.left()
-            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .allow_part_pull(pair.right(), &[crate::seds_part_id()])
             .await?;
         pair.right()
-            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .allow_part_pull(pair.left(), &[crate::seds_part_id()])
             .await?;
         pair.connect().await?;
         // The contact-card exchange rides the first keyhive protocol round;
@@ -702,7 +702,7 @@ impl Pair {
         assert!(self.right_conn.is_none());
         let left_conn = self
             .left()
-            .connect_with_parts_ungranted(self.right(), vec![crate::global_part_id()])
+            .connect_with_parts_ungranted(self.right(), vec![crate::seds_part_id()])
             .await?;
         let right_conn = self.right().accepted_connection().await;
         self.left_conn = Some(left_conn);
@@ -882,10 +882,10 @@ impl Pair {
         // The frontier peers read `/seds` (store-wide enumeration): grant it before
         // the routes are registered, or the reader's first page is denied and backs off.
         pair.left()
-            .allow_part_pull(pair.right(), &[crate::global_part_id()])
+            .allow_part_pull(pair.right(), &[crate::seds_part_id()])
             .await?;
         pair.right()
-            .allow_part_pull(pair.left(), &[crate::global_part_id()])
+            .allow_part_pull(pair.left(), &[crate::seds_part_id()])
             .await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;

@@ -26,6 +26,7 @@ use super::harness::{Pair, fixtures, heads};
 use crate::StorageConfig;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -334,10 +335,13 @@ async fn tier5_reopen_no_sync_membership_first() -> crate::Res<()> {
     // Even without a keyhive sync, the local store persisted the keyhive
     // state. Verify the right node's keyhive still knows the document.
     let right_reader_peer = pair.right().peer_id();
-    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(&right_reader_peer.to_bytes32())
-        .expect("peer id must be a verifying key");
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-        .expect("document id must be a verifying key");
+    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(
+        &right_reader_peer.to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .expect("peer id must be a verifying key");
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
 
@@ -417,10 +421,13 @@ async fn tier5_reopen_no_sync_payload_first() -> crate::Res<()> {
 
     // --- Membership assertions.
     let right_reader_peer = pair.right().peer_id();
-    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(&right_reader_peer.to_bytes32())
-        .expect("peer id must be a verifying key");
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
-        .expect("document id must be a verifying key");
+    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(
+        &right_reader_peer.to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .expect("peer id must be a verifying key");
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
 
@@ -709,11 +716,11 @@ async fn wait_for_reader_access(
 ) -> crate::Res<()> {
     let peer = repo.local_peer_id();
     let agent = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("peer id must be a verifying key"),
     );
     let document = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("document id must be a verifying key"),
     );
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -750,17 +757,17 @@ async fn tier5_remote_restart_notification_propagates_existing_doc_update() -> c
     // explicit, and a page denied when its route is registered backs off for the whole
     // unauthorized window, so grant before `connect` re-registers the routes.
     pair.left()
-        .allow_part_pull(pair.right(), &[crate::global_part_id()])
+        .allow_part_pull(pair.right(), &[crate::seds_part_id()])
         .await?;
     pair.right()
-        .allow_part_pull(pair.left(), &[crate::global_part_id()])
+        .allow_part_pull(pair.left(), &[crate::seds_part_id()])
         .await?;
     pair.connect().await?;
     pair.left()
-        .set_peer_parts(pair.right(), vec![crate::global_part_id()])
+        .set_peer_parts(pair.right(), vec![crate::seds_part_id()])
         .await?;
     pair.right()
-        .set_peer_parts(pair.left(), vec![crate::global_part_id()])
+        .set_peer_parts(pair.left(), vec![crate::seds_part_id()])
         .await?;
     owner_doc
         .with_document(|doc| {
@@ -787,7 +794,7 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.right(),
             vec![
-                crate::global_part_id(),
+                crate::seds_part_id(),
                 crate::PartKey::new(doc_id.as_bytes()),
             ],
         )
@@ -796,7 +803,7 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.left(),
             vec![
-                crate::global_part_id(),
+                crate::seds_part_id(),
                 crate::PartKey::new(doc_id.as_bytes()),
             ],
         )

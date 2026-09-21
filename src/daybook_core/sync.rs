@@ -272,18 +272,18 @@ impl IrohSyncRepo {
             big_sync::spawn_big_sync_worker_with_options(
                 Arc::clone(&rcx.blob_part_store),
                 blob_sync_backends,
-                "daybook-blobs",
+                crate::repo::BLOB_SCOPE_KEY,
                 max_task_backoff,
                 // Bucket-diff, explicitly: see the note on the docs worker above.
                 Some(big_sync::SyncMode::Bucket),
-                Arc::from("daybook-blobs"),
+                Arc::from(crate::repo::BLOB_SCOPE_KEY),
             )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
                 (Arc::from("daybook-core"), Arc::clone(&rcx.part_store) as _),
                 (
-                    Arc::from("daybook-blobs"),
+                    Arc::from(crate::repo::BLOB_SCOPE_KEY),
                     Arc::clone(&rcx.blob_part_store) as _,
                 ),
             ]))
@@ -653,14 +653,14 @@ impl IrohSyncRepo {
         }
         let peer_id = conn.peer_id.clone();
         let res = async {
-            let peer_key = daybook_types::doc::format_peer_key(&conn.peer_id.to_bytes32());
+            let peer_key = daybook_types::doc::format_peer_key(&conn.peer_id.to_bytes32()?);
             let events = [IrohSyncEvent::IncomingConnection {
                 peer_key: Arc::clone(&peer_key),
             }];
             let endpoint = self.router.endpoint().clone();
             let remote_info = endpoint
                 .remote_info(
-                    EndpointId::from_bytes(&conn.peer_id.to_bytes32()).expect(ERROR_IMPOSSIBLE),
+                    EndpointId::from_bytes(&conn.peer_id.to_bytes32()?).expect(ERROR_IMPOSSIBLE),
                 )
                 .await
                 .ok_or_eyre("unable to get remote info for incoming conn")?;
@@ -675,8 +675,9 @@ impl IrohSyncRepo {
             self.big_repo_rpc
                 .register_peer(remote_endpoint_id, peer_id.clone());
             let doc_rpc_client =
-                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
-            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
+                big_sync::rpc::BigSyncRpcClient::over_iroh(endpoint.clone(), addr.clone());
+            let blob_rpc_client =
+                big_sync::rpc::BigSyncRpcClient::over_iroh(endpoint, addr.clone());
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
@@ -865,7 +866,7 @@ impl IrohSyncRepo {
                     "BigSync object synced"
                 );
                 self.registry.notify([IrohSyncEvent::DocSyncedWithPeer {
-                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()),
+                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()?),
                     doc_id: obj_id,
                 }]);
             }
@@ -877,7 +878,7 @@ impl IrohSyncRepo {
                     "BigSync peer partition fully synced"
                 );
                 self.registry.notify([IrohSyncEvent::PartitionFullySynced {
-                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()),
+                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()?),
                     partition: part_id.to_string(),
                 }]);
             }
@@ -899,7 +900,7 @@ impl IrohSyncRepo {
             big_sync_core::SyncStatEvent::PeerFullySynced { .. } => {}
             big_sync_core::SyncStatEvent::PeerStale { peer_id } => {
                 self.registry.notify([IrohSyncEvent::StalePeer {
-                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()),
+                    peer_key: daybook_types::doc::format_peer_key(&peer_id.to_bytes32()?),
                 }]);
             }
             big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { .. } => {}
@@ -940,9 +941,9 @@ impl IrohSyncRepo {
                 )
                 .await?;
             let doc_rpc_client =
-                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), endpoint_addr.clone());
+                big_sync::rpc::BigSyncRpcClient::over_iroh(endpoint.clone(), endpoint_addr.clone());
             let blob_rpc_client =
-                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, endpoint_addr.clone());
+                big_sync::rpc::BigSyncRpcClient::over_iroh(endpoint, endpoint_addr.clone());
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 

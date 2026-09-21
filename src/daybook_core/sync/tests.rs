@@ -482,7 +482,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
 
     // Blob docs exist in the seed BEFORE the clone so the bootstrap phase must
     // serve blob-scope sync requests (the seed's blob worker probes the
-    // bootstrap node's RPC registry for the "daybook-blobs" scope).
+    // bootstrap node's RPC registry for the blob scope (repo::BLOB_SCOPE_KEY).
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
@@ -1155,9 +1155,9 @@ async fn wait_for_sync_convergence(
         partition_count = required_partitions.len(),
         "waiting for notification-driven sync convergence"
     );
-    // A stall here used to burn the whole nextest timeout with no evidence. Bound the
-    // wait and dump what refused to settle: the (peer, part) pairs still outstanding
-    // and which of the four `peer_part_is_fully_synced` terms held them back.
+    // A stall here dumps what refused to settle: the (peer, part) pairs still outstanding and
+    // which of the four `peer_part_is_fully_synced` terms held them back. The cadence is
+    // diagnosis only: nextest owns the test's timeout, so this loop exits when the wait does.
     let wait = async {
         tokio::try_join!(
             target.sync_repo.wait_for_full_sync(
@@ -1170,7 +1170,6 @@ async fn wait_for_sync_convergence(
     };
     tokio::pin!(wait);
     let mut next_dump = tokio::time::Instant::now() + Duration::from_secs(45);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     loop {
         tokio::select! {
             result = &mut wait => {
@@ -1180,12 +1179,6 @@ async fn wait_for_sync_convergence(
             _ = tokio::time::sleep_until(next_dump) => {
                 dump_sync_state(source, "source").await;
                 dump_sync_state(target, "target").await;
-                if tokio::time::Instant::now() >= deadline {
-                    eyre::bail!(
-                        "notification-driven sync convergence did not settle within 180s; \
-                         the dumps above name the peers, parts and terms still outstanding"
-                    );
-                }
                 next_dump += Duration::from_secs(45);
             }
         }

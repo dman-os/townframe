@@ -218,12 +218,12 @@ pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
     LeafBuckets(ScopedRequest<LeafBucketsRequest>),
 }
-impl IrohBigSyncRpcClient {
-    pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
-        Self::new_with_alpn(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN)
+impl BigSyncRpcClient {
+    pub fn over_iroh(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
+        Self::over_iroh_with_alpn(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN)
     }
 
-    pub fn new_with_alpn(
+    pub fn over_iroh_with_alpn(
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         alpn: &'static [u8],
@@ -246,6 +246,29 @@ impl BigSyncRpcHandle {
 
     pub fn protocol_handler(&self) -> BigSyncRpcProtocolHandler {
         self.protocol_handler.clone()
+    }
+
+    /// A client that reaches this worker in the same process, with no socket.
+    ///
+    /// The caller's identity is supplied here rather than read off a connection, because a peer in
+    /// this process has no connection to authenticate it. The messages travel the same queue the iroh
+    /// protocol handler feeds, so the worker cannot tell the two apart and applies every rule it
+    /// applies to a remote caller.
+    pub fn in_memory_client(&self, caller: PeerKey) -> BigSyncRpcClient {
+        const QUEUE: usize = 1024;
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        let authenticated = self.protocol_handler.tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if authenticated.send((caller.clone(), msg)).await.is_err() {
+                    // The worker is gone. The caller learns that from its own request, not here.
+                    break;
+                }
+            }
+        });
+        BigSyncRpcClient {
+            client: irpc::Client::<BigSyncIrpc>::local(tx),
+        }
     }
 }
 
@@ -375,12 +398,12 @@ fn spawn_rpc_handler(
 }
 
 #[derive(Clone)]
-pub struct IrohBigSyncRpcClient {
+pub struct BigSyncRpcClient {
     client: irpc::Client<BigSyncIrpc>,
 }
 
 #[async_trait]
-impl WireBigSyncRpcClient for IrohBigSyncRpcClient {
+impl WireBigSyncRpcClient for BigSyncRpcClient {
     async fn peer_summary(
         &self,
         req: ScopedRequest<PeerSummaryRequest>,
@@ -455,6 +478,38 @@ const MAX_REPLAY_SUBSCRIPTION_TARGETS: usize = 16_384;
 const MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES: usize = 2 * 1024 * 1024;
 const REPLAY_SUBSCRIPTION_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// The `ReadTarget` a subscription target's authorization is asked through.
+fn replay_target_read_target(target: &big_sync_core::rpc::ReplaySubscriptionTarget) -> ReadTarget {
+    match target {
+        big_sync_core::rpc::ReplaySubscriptionTarget::Part { part_id } => {
+            ReadTarget::Part(part_id.clone())
+        }
+        big_sync_core::rpc::ReplaySubscriptionTarget::Object { obj_id } => {
+            ReadTarget::Object(obj_id.clone())
+        }
+    }
+}
+
+/// Whether the scope has the target at all: the existence half of admitting an addition.
+///
+/// A part is asked through `summarize_parts`, which is what the page read itself asks to
+/// decide a target's `UnknownPart` verdict, so an absent part and a hidden one are one
+/// answer here too. An object target has no unknown-object verdict to be answered with, and
+/// the store answers a read of an object it does not hold as an empty drained page rather
+/// than as an unknown target, so authorization is the whole admission question for it.
+async fn replay_target_exists(
+    store: &dyn HostPartStore,
+    target: &big_sync_core::rpc::ReplaySubscriptionTarget,
+) -> Res<bool> {
+    match target {
+        big_sync_core::rpc::ReplaySubscriptionTarget::Part { part_id } => Ok(store
+            .summarize_parts(HashSet::from([part_id.clone()]))
+            .await?
+            .is_ok()),
+        big_sync_core::rpc::ReplaySubscriptionTarget::Object { .. } => Ok(true),
+    }
+}
+
 fn replay_event_matches_target(
     event: &big_sync_core::rpc::PartEvent,
     target: &big_sync_core::rpc::ReplaySubscriptionTarget,
@@ -482,11 +537,34 @@ fn replay_event_matches_target(
     }
 }
 
+/// One `Update` as it arrived: the subscription it names and the changes it carries.
+struct ReplaySubscriptionUpdate {
+    session_id: ReplaySessionId,
+    subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+    generation: u64,
+    additions: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
+    removals: Vec<big_sync_core::rpc::ReplayTargetId>,
+}
+
+/// One applied reconfiguration: the request's generation, with the additions the store's own
+/// admission accepted separated from the ones it refused.
+struct AppliedReplayUpdate {
+    subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+    generation: u64,
+    additions: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
+    removals: Vec<big_sync_core::rpc::ReplayTargetId>,
+    rejected: Vec<(big_sync_core::rpc::ReplayTargetId, TargetVerdict)>,
+}
+
 #[derive(Clone)]
 struct ReplaySubscriptionState {
     generation: u64,
     targets:
         HashMap<big_sync_core::rpc::ReplayTargetId, big_sync_core::rpc::ReplaySubscriptionTarget>,
+    /// The entries the generation above refused. A repeat of that generation is answered with
+    /// the same verdicts: the caller's retry of an update whose answer was lost must not be
+    /// told that its refused entries landed.
+    rejected: Vec<(big_sync_core::rpc::ReplayTargetId, TargetVerdict)>,
     changed: Arc<tokio::sync::Notify>,
     last_touched: std::time::Instant,
 }
@@ -535,76 +613,33 @@ impl BigSyncRpcWorker {
         });
     }
 
-    fn open_replay_subscription(
+    /// Apply one reconfiguration to a subscription, opening it when the id is unknown.
+    ///
+    /// Opening is folded into the update (ADR 012 decision 9): the same call carries the
+    /// additions, so opening gets the same per-entry outcomes as any later change. Removals
+    /// are applied before additions, so one request may remove a target and re-add the same
+    /// part under a fresh id, and a removal of an id the subscription does not hold is a
+    /// no-op: a client that lost the answer to its own update has to be able to remove an
+    /// entry it cannot know the responder took.
+    ///
+    /// An addition is inserted only when the scope has the target and the asker may read it;
+    /// anything else comes back in `rejected`, which is what lets the client retry exactly
+    /// those entries. Both refusal kinds are one outcome for the client, because absent access
+    /// rows cannot distinguish a revocation from a grant that has not landed yet.
+    async fn update_replay_subscription(
         &self,
-        peer: &PeerKey,
+        store: &dyn HostPartStore,
+        subscriber: &PeerKey,
         scope_key: &Arc<str>,
-        session_id: ReplaySessionId,
-        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
-        generation: u64,
-        targets: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
+        update: ReplaySubscriptionUpdate,
     ) -> Result<ReplaySubscriptionResponse, RpcError> {
-        self.sweep_replay_subscriptions();
-        if targets.len() > MAX_REPLAY_SUBSCRIPTION_TARGETS {
-            return Err(RpcError::SubscriptionLimit);
-        }
-        let encoded = targets
-            .iter()
-            .map(|entry| replay_target_wire_bytes(&entry.target))
-            .sum::<usize>();
-        if encoded > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES {
-            return Err(RpcError::SubscriptionLimit);
-        }
-        let mut ids = std::collections::HashSet::new();
-        for entry in &targets {
-            if !ids.insert(entry.id) {
-                return Err(RpcError::InvalidRequest(
-                    "duplicate replay target id".into(),
-                ));
-            }
-        }
-        let key = (peer.clone(), Arc::clone(scope_key), session_id);
-        let mut registry = self
-            .replay_subscriptions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let peer_subscription_count = registry
-            .iter()
-            .filter(|((registered_peer, _, _), _)| registered_peer == peer)
-            .map(|(_, subscriptions)| subscriptions.len())
-            .sum::<usize>();
-        let subscriptions = registry.entry(key).or_default();
-        if !subscriptions.contains_key(&subscription_id)
-            && peer_subscription_count >= MAX_REPLAY_SUBSCRIPTIONS_PER_PEER
-        {
-            return Err(RpcError::SubscriptionLimit);
-        }
-        let previous = subscriptions.insert(
+        let ReplaySubscriptionUpdate {
+            session_id,
             subscription_id,
-            ReplaySubscriptionState {
-                generation,
-                targets: targets
-                    .into_iter()
-                    .map(|entry| (entry.id, entry.target))
-                    .collect(),
-                changed: Arc::new(tokio::sync::Notify::new()),
-                last_touched: std::time::Instant::now(),
-            },
-        );
-        if let Some(previous) = previous {
-            previous.changed.notify_waiters();
-        }
-        Ok(ReplaySubscriptionResponse::Opened { generation })
-    }
-
-    fn update_replay_subscription(
-        &self,
-        key: ReplaySessionKey,
-        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
-        generation: u64,
-        additions: Vec<big_sync_core::rpc::ReplaySubscriptionTargetEntry>,
-        removals: Vec<big_sync_core::rpc::ReplayTargetId>,
-    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+            generation,
+            additions,
+            removals,
+        } = update;
         self.sweep_replay_subscriptions();
         if additions.len() + removals.len() > MAX_REPLAY_SUBSCRIPTION_TARGETS {
             return Err(RpcError::SubscriptionLimit);
@@ -616,43 +651,172 @@ impl BigSyncRpcWorker {
         if encoded > MAX_REPLAY_SUBSCRIPTION_TARGET_BYTES {
             return Err(RpcError::SubscriptionLimit);
         }
-        let mut registry = self
-            .replay_subscriptions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let subscriptions = registry
-            .get_mut(&key)
-            .ok_or(RpcError::UnknownSubscription)?;
-        let state = subscriptions
-            .get_mut(&subscription_id)
-            .ok_or(RpcError::UnknownSubscription)?;
-        if generation == state.generation {
-            state.last_touched = std::time::Instant::now();
-            return Ok(ReplaySubscriptionResponse::Updated { generation });
-        }
-        if generation != state.generation.saturating_add(1) {
-            return Err(RpcError::StaleSubscriptionGeneration);
-        }
-        let removal_set: std::collections::HashSet<_> = removals.iter().copied().collect();
-        if removal_set.len() != removals.len() {
-            return Err(RpcError::InvalidRequest(
-                "duplicate replay target removal".into(),
-            ));
-        }
-        if removals.iter().any(|id| !state.targets.contains_key(id)) {
-            return Err(RpcError::InvalidRequest(
-                "unknown replay target removal".into(),
-            ));
+        // The ids are the caller's own, so two of them in one request is a caller bug rather
+        // than a target this responder has to adjudicate.
+        let mut removal_ids = std::collections::HashSet::new();
+        for id in &removals {
+            if !removal_ids.insert(*id) {
+                return Err(RpcError::InvalidRequest(
+                    "duplicate replay target removal".into(),
+                ));
+            }
         }
         let mut addition_ids = std::collections::HashSet::new();
         for entry in &additions {
-            if !addition_ids.insert(entry.id)
-                || (state.targets.contains_key(&entry.id) && !removal_set.contains(&entry.id))
-            {
+            if !addition_ids.insert(entry.id) {
                 return Err(RpcError::InvalidRequest(
                     "duplicate replay target addition".into(),
                 ));
             }
+        }
+        let key = (subscriber.clone(), Arc::clone(scope_key), session_id);
+        // The standing is read before the store reads below, and the apply re-checks it: an
+        // update a newer one overtook in the meantime is answered as not applied rather than
+        // clobbering the newer generation's target set.
+        match self.replay_subscription_standing(&key, subscription_id) {
+            // Only a fresh client state opens a subscription. An update ahead of an unknown id
+            // belongs to a handle this responder has forgotten (its TTL, or a restart), and
+            // answering as unknown is what makes the client re-state its whole target set
+            // instead of opening with a delta that silently misses the entries it thinks the
+            // responder holds.
+            None if generation != 0 => return Err(RpcError::UnknownSubscription),
+            None => {}
+            Some((current, rejected)) if generation <= current => {
+                return Ok(ReplaySubscriptionResponse::Updated {
+                    generation: current,
+                    rejected,
+                });
+            }
+            Some(_) => {}
+        }
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+        for entry in additions {
+            let exists = replay_target_exists(store, &entry.target)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        error = ?error,
+                        "replay subscription addition existence check failed"
+                    );
+                    RpcError::Internal
+                })?;
+            let verdict = if !exists {
+                Some(TargetVerdict::UnknownPart)
+            } else if store
+                .read_denied(replay_target_read_target(&entry.target), subscriber.clone())
+                .await
+                .unwrap()
+            {
+                Some(TargetVerdict::Unauthorized)
+            } else {
+                None
+            };
+            match verdict {
+                Some(verdict) => {
+                    // A refusal is how a peer learns it may not have what it asked for, so the
+                    // reason belongs in the log where an operator can see the rate.
+                    tracing::debug!(
+                        ?verdict,
+                        %subscriber,
+                        target = ?entry.target,
+                        "replay subscription addition refused"
+                    );
+                    rejected.push((entry.id, verdict));
+                }
+                None => accepted.push(entry),
+            }
+        }
+        self.apply_replay_update(
+            &key,
+            AppliedReplayUpdate {
+                subscription_id,
+                generation,
+                additions: accepted,
+                removals,
+                rejected,
+            },
+        )
+    }
+
+    /// The generation a subscription holds and the entries that generation refused, or `None`
+    /// when this responder does not hold the id.
+    fn replay_subscription_standing(
+        &self,
+        key: &ReplaySessionKey,
+        subscription_id: big_sync_core::rpc::ReplaySubscriptionId,
+    ) -> Option<(
+        u64,
+        Vec<(big_sync_core::rpc::ReplayTargetId, TargetVerdict)>,
+    )> {
+        let registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.get(key).and_then(|subscriptions| {
+            subscriptions
+                .get(&subscription_id)
+                .map(|state| (state.generation, state.rejected.clone()))
+        })
+    }
+
+    /// Write one applied update, opening the subscription when the id is unknown.
+    fn apply_replay_update(
+        &self,
+        key: &ReplaySessionKey,
+        applied: AppliedReplayUpdate,
+    ) -> Result<ReplaySubscriptionResponse, RpcError> {
+        let AppliedReplayUpdate {
+            subscription_id,
+            generation,
+            additions,
+            removals,
+            rejected,
+        } = applied;
+        let mut registry = self
+            .replay_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (peer, _, _) = key;
+        let peer_subscription_count = registry
+            .iter()
+            .filter(|((registered_peer, _, _), _)| registered_peer == peer)
+            .map(|(_, subscriptions)| subscriptions.len())
+            .sum::<usize>();
+        let subscriptions = registry.entry(key.clone()).or_default();
+        if !subscriptions.contains_key(&subscription_id)
+            && peer_subscription_count >= MAX_REPLAY_SUBSCRIPTIONS_PER_PEER
+        {
+            return Err(RpcError::SubscriptionLimit);
+        }
+        let Some(state) = subscriptions.get_mut(&subscription_id) else {
+            // This update opens the subscription, so its additions are the whole target set
+            // and there is nothing to reconcile them with.
+            let targets: HashMap<_, _> = additions
+                .into_iter()
+                .map(|entry| (entry.id, entry.target))
+                .collect();
+            subscriptions.insert(
+                subscription_id,
+                ReplaySubscriptionState {
+                    generation,
+                    targets,
+                    rejected: rejected.clone(),
+                    changed: Arc::new(tokio::sync::Notify::new()),
+                    last_touched: std::time::Instant::now(),
+                },
+            );
+            return Ok(ReplaySubscriptionResponse::Updated {
+                generation,
+                rejected,
+            });
+        };
+        if generation <= state.generation {
+            // A newer update overtook this one while the store was being read.
+            return Ok(ReplaySubscriptionResponse::Updated {
+                generation: state.generation,
+                rejected: state.rejected.clone(),
+            });
         }
         let current_target_bytes = state
             .targets
@@ -661,7 +825,8 @@ impl BigSyncRpcWorker {
             .sum::<usize>();
         let removed_target_bytes = removals
             .iter()
-            .map(|id| replay_target_wire_bytes(state.targets.get(id).expect(ERROR_IMPOSSIBLE)))
+            .filter_map(|id| state.targets.get(id))
+            .map(replay_target_wire_bytes)
             .sum::<usize>();
         let added_target_bytes = additions
             .iter()
@@ -677,11 +842,23 @@ impl BigSyncRpcWorker {
         let new_target_count = state
             .targets
             .len()
-            .saturating_sub(removals.len())
-            .saturating_add(additions.len());
+            .saturating_sub(
+                removals
+                    .iter()
+                    .filter(|id| state.targets.contains_key(*id))
+                    .count(),
+            )
+            .saturating_add(
+                additions
+                    .iter()
+                    .filter(|entry| !state.targets.contains_key(&entry.id))
+                    .count(),
+            );
         if new_target_count > MAX_REPLAY_SUBSCRIPTION_TARGETS {
             return Err(RpcError::SubscriptionLimit);
         }
+        // Removals before additions: one request may remove a target and re-add the same
+        // part under a fresh id, and an id the subscription does not hold is a no-op here.
         for id in removals {
             state.targets.remove(&id);
         }
@@ -689,9 +866,13 @@ impl BigSyncRpcWorker {
             state.targets.insert(entry.id, entry.target);
         }
         state.generation = generation;
+        state.rejected = rejected.clone();
         state.last_touched = std::time::Instant::now();
         state.changed.notify_waiters();
-        Ok(ReplaySubscriptionResponse::Updated { generation })
+        Ok(ReplaySubscriptionResponse::Updated {
+            generation,
+            rejected,
+        })
     }
 
     fn close_replay_subscription(
@@ -749,32 +930,30 @@ impl BigSyncRpcWorker {
         request: ReplaySubscriptionRequest,
     ) -> Result<ReplaySubscriptionResponse, RpcError> {
         match request {
-            ReplaySubscriptionRequest::Open {
-                session_id,
-                subscription_id,
-                generation,
-                targets,
-            } => self.open_replay_subscription(
-                &subscriber,
-                &scope_key,
-                session_id,
-                subscription_id,
-                generation,
-                targets,
-            ),
             ReplaySubscriptionRequest::Update {
                 session_id,
                 subscription_id,
                 generation,
                 additions,
                 removals,
-            } => self.update_replay_subscription(
-                (subscriber, scope_key, session_id),
-                subscription_id,
-                generation,
-                additions,
-                removals,
-            ),
+            } => {
+                let Some(store) = self.stores.get(&scope_key) else {
+                    return Err(RpcError::InvalidRequest("unknown storage scope".into()));
+                };
+                self.update_replay_subscription(
+                    store.as_ref(),
+                    &subscriber,
+                    &scope_key,
+                    ReplaySubscriptionUpdate {
+                        session_id,
+                        subscription_id,
+                        generation,
+                        additions,
+                        removals,
+                    },
+                )
+                .await
+            }
             ReplaySubscriptionRequest::Close {
                 session_id,
                 subscription_id,
@@ -1208,6 +1387,12 @@ impl BigSyncRpcWorker {
                     request_id,
                     &cancel,
                 );
+                // The response channel closes when the caller drops the request — the
+                // ordinary outcome for a page the caller superseded or gave up on, which is
+                // what `ERROR_CALLER` names. That is a signal about the caller's lifecycle,
+                // not this task's, so a failed send is reported and dropped rather than
+                // panicking here: a peer that drops a request must not be able to take the
+                // process down. Every response send in this dispatcher is written this way.
                 tx.send(out)
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1428,78 +1613,387 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_subscription_updates_remove_targets() {
+    /// The one `Update` call opens a subscription the responder does not know, applies
+    /// removals before additions — so one request may remove a target and re-add the same part
+    /// under a fresh id (ADR 012 decision 9) — and a removal of an id it does not hold is a
+    /// no-op rather than a refusal, because a retried update cannot know what the responder took.
+    #[tokio::test]
+    async fn replay_subscription_update_opens_and_replaces_targets() -> Res<()> {
         let worker = BigSyncRpcWorker {
             stores: HashMap::new(),
             replay_cancels: Default::default(),
             replay_subscriptions: Default::default(),
         };
+        let part_id = test_part();
+        let store = Arc::new(MemoryPartStore::new());
+        seed_test_store(&store, part_id.clone()).await?;
         let peer = PeerKey::new([9u8; 32]);
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
+            .await?;
+        let store: Arc<dyn HostPartStore> = store;
         let scope: Arc<str> = Arc::from("scope");
         let subscription_id = ReplaySubscriptionId(11);
-        let target_id = ReplayTargetId(3);
+        let first_id = ReplayTargetId(3);
         let target = ReplaySubscriptionTarget::Part {
-            part_id: PartKey::new(b"part"),
+            part_id: part_id.clone(),
         };
+
+        // The first update against an unknown id opens the subscription.
         assert_eq!(
-            worker.open_replay_subscription(
-                &peer,
-                &scope,
-                ReplaySessionId(0),
-                subscription_id,
-                0,
-                vec![ReplaySubscriptionTargetEntry {
-                    id: target_id,
-                    target: target.clone(),
-                }],
-            ),
-            Ok(ReplaySubscriptionResponse::Opened { generation: 0 }),
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(0),
+                        subscription_id,
+                        generation: 0,
+                        additions: vec![ReplaySubscriptionTargetEntry {
+                            id: first_id,
+                            target: target.clone(),
+                        }],
+                        removals: Vec::new(),
+                    },
+                )
+                .await,
+            Ok(ReplaySubscriptionResponse::Updated {
+                generation: 0,
+                rejected: Vec::new(),
+            }),
+            "the first update opens the subscription"
         );
-        let second_target = ReplaySubscriptionTarget::Part {
-            part_id: PartKey::new(b"other-part"),
-        };
+
+        // Removing the same part and re-adding it under a fresh id is one request.
+        let fresh_id = ReplayTargetId(4);
         assert_eq!(
-            worker.open_replay_subscription(
-                &peer,
-                &scope,
-                ReplaySessionId(1),
-                subscription_id,
-                0,
-                vec![ReplaySubscriptionTargetEntry {
-                    id: target_id,
-                    target: second_target,
-                }],
-            ),
-            Ok(ReplaySubscriptionResponse::Opened { generation: 0 }),
-        );
-        let other_session = worker
-            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(1), subscription_id)
-            .expect("second session is independent");
-        assert_eq!(other_session.targets.len(), 1);
-        let snapshot = worker
-            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
-            .expect("opened subscription");
-        assert!(snapshot.targets.contains_key(&target_id));
-        assert_eq!(snapshot.generation, 0);
-        assert_eq!(
-            worker.update_replay_subscription(
-                (peer.clone(), Arc::clone(&scope), ReplaySessionId(0)),
-                subscription_id,
-                1,
-                Vec::new(),
-                vec![target_id],
-            ),
-            Ok(ReplaySubscriptionResponse::Updated { generation: 1 }),
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(0),
+                        subscription_id,
+                        generation: 1,
+                        additions: vec![ReplaySubscriptionTargetEntry {
+                            id: fresh_id,
+                            target: target.clone(),
+                        }],
+                        removals: vec![first_id],
+                    },
+                )
+                .await,
+            Ok(ReplaySubscriptionResponse::Updated {
+                generation: 1,
+                rejected: Vec::new(),
+            }),
         );
         let snapshot = worker
             .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
             .expect("subscription remains after target removal");
-        assert!(snapshot.targets.is_empty());
+        assert_eq!(snapshot.generation, 1);
+        assert!(!snapshot.targets.contains_key(&first_id));
+        assert!(snapshot.targets.contains_key(&fresh_id));
+
+        // An id the subscription does not hold is a no-op to remove: the client re-sends its
+        // batch until an answer acknowledges it, and cannot know which ids the responder took.
+        assert_eq!(
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(0),
+                        subscription_id,
+                        generation: 2,
+                        additions: Vec::new(),
+                        removals: vec![first_id, ReplayTargetId(99)],
+                    },
+                )
+                .await,
+            Ok(ReplaySubscriptionResponse::Updated {
+                generation: 2,
+                rejected: Vec::new(),
+            }),
+            "an unknown removal id is not a refusal"
+        );
+
+        // Another session's subscription under the same id is its own.
+        assert_eq!(
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(1),
+                        subscription_id,
+                        generation: 0,
+                        additions: vec![ReplaySubscriptionTargetEntry {
+                            id: first_id,
+                            target: target.clone(),
+                        }],
+                        removals: Vec::new(),
+                    },
+                )
+                .await,
+            Ok(ReplaySubscriptionResponse::Updated {
+                generation: 0,
+                rejected: Vec::new(),
+            }),
+        );
         let other_session = worker
             .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(1), subscription_id)
+            .expect("second session is independent");
+        assert!(other_session.targets.contains_key(&first_id));
+        let snapshot = worker
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
             .expect("changing one session does not remove the other");
-        assert_eq!(other_session.targets.len(), 1);
+        assert!(snapshot.targets.contains_key(&fresh_id));
+        Ok(())
+    }
+
+    /// An update reports partial success: a target the scope does not have, or one the asker
+    /// may not read, comes back as a refused entry and is not inserted, while the entries that
+    /// are acceptable land in the same request (ADR 012 decision 9).
+    #[tokio::test]
+    async fn replay_subscription_update_refuses_unservable_additions() -> Res<()> {
+        let worker = BigSyncRpcWorker {
+            stores: HashMap::new(),
+            replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
+        };
+        let part_id = test_part();
+        let hidden_part = PartKey::new(b"a-part-this-asker-may-not-read");
+        let absent_part = PartKey::new(b"a-part-this-scope-does-not-have");
+        let store = Arc::new(MemoryPartStore::new());
+        seed_test_store(&store, part_id.clone()).await?;
+        store.ensure_part(hidden_part.clone()).await?;
+        let peer = PeerKey::new([9u8; 32]);
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
+            .await?;
+        let store: Arc<dyn HostPartStore> = store;
+        let scope: Arc<str> = Arc::from("scope");
+        let subscription_id = ReplaySubscriptionId(11);
+        let readable = ReplayTargetId(1);
+        let unreadable = ReplayTargetId(2);
+        let unknown = ReplayTargetId(3);
+
+        let response = worker
+            .update_replay_subscription(
+                store.as_ref(),
+                &peer,
+                &scope,
+                ReplaySubscriptionUpdate {
+                    session_id: ReplaySessionId(0),
+                    subscription_id,
+                    generation: 0,
+                    additions: vec![
+                        ReplaySubscriptionTargetEntry {
+                            id: readable,
+                            target: ReplaySubscriptionTarget::Part {
+                                part_id: part_id.clone(),
+                            },
+                        },
+                        ReplaySubscriptionTargetEntry {
+                            id: unreadable,
+                            target: ReplaySubscriptionTarget::Part {
+                                part_id: hidden_part,
+                            },
+                        },
+                        ReplaySubscriptionTargetEntry {
+                            id: unknown,
+                            target: ReplaySubscriptionTarget::Part {
+                                part_id: absent_part,
+                            },
+                        },
+                    ],
+                    removals: Vec::new(),
+                },
+            )
+            .await
+            .expect("a refused entry is a partial success, not a request error");
+        let ReplaySubscriptionResponse::Updated {
+            generation,
+            rejected,
+        } = response
+        else {
+            panic!("an update is answered with an update answer");
+        };
+        assert_eq!(generation, 0);
+        assert_eq!(
+            rejected,
+            vec![
+                (unreadable, TargetVerdict::Unauthorized),
+                (unknown, TargetVerdict::UnknownPart),
+            ],
+            "the refused entries come back with their reason"
+        );
+        let snapshot = worker
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
+            .expect("opened subscription");
+        assert!(snapshot.targets.contains_key(&readable));
+        assert!(
+            !snapshot.targets.contains_key(&unreadable) && !snapshot.targets.contains_key(&unknown),
+            "a refused entry is not inserted"
+        );
+
+        // A repeat of the applied generation is not applied again: the answer names that
+        // generation and the verdicts it was given. A resend whose first answer was lost therefore
+        // keeps its refusals, and is never told that a refused entry landed.
+        let repeat = worker
+            .update_replay_subscription(
+                store.as_ref(),
+                &peer,
+                &scope,
+                ReplaySubscriptionUpdate {
+                    session_id: ReplaySessionId(0),
+                    subscription_id,
+                    generation: 0,
+                    additions: vec![ReplaySubscriptionTargetEntry {
+                        id: unreadable,
+                        target: ReplaySubscriptionTarget::Part {
+                            part_id: PartKey::new(b"a-part-this-asker-may-not-read"),
+                        },
+                    }],
+                    removals: Vec::new(),
+                },
+            )
+            .await
+            .expect("a repeated generation is answered rather than refused");
+        let ReplaySubscriptionResponse::Updated { rejected, .. } = repeat else {
+            panic!("an update is answered with an update answer");
+        };
+        assert_eq!(
+            rejected,
+            vec![
+                (unreadable, TargetVerdict::Unauthorized),
+                (unknown, TargetVerdict::UnknownPart),
+            ],
+            "the answer to a repeat is the applied generation's own verdicts"
+        );
+        Ok(())
+    }
+
+    /// An update that is no newer than the generation the responder holds is not applied, and
+    /// the answer names the generation that was held: the client sends past it rather than
+    /// clobbering a newer target set with an older one.
+    #[tokio::test]
+    async fn replay_subscription_update_does_not_apply_an_older_generation() -> Res<()> {
+        let worker = BigSyncRpcWorker {
+            stores: HashMap::new(),
+            replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
+        };
+        let part_id = test_part();
+        let store = Arc::new(MemoryPartStore::new());
+        seed_test_store(&store, part_id.clone()).await?;
+        let peer = PeerKey::new([9u8; 32]);
+        store
+            .set_part_members(
+                part_id.clone(),
+                HashMap::from([(peer.clone(), Access::Read)]),
+            )
+            .await?;
+        let store: Arc<dyn HostPartStore> = store;
+        let scope: Arc<str> = Arc::from("scope");
+        let subscription_id = ReplaySubscriptionId(7);
+        let entry = |id| ReplaySubscriptionTargetEntry {
+            id,
+            target: ReplaySubscriptionTarget::Part {
+                part_id: part_id.clone(),
+            },
+        };
+        for generation in [0, 5] {
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(0),
+                        subscription_id,
+                        generation,
+                        additions: vec![entry(ReplayTargetId(generation as u32))],
+                        removals: Vec::new(),
+                    },
+                )
+                .await?;
+        }
+        let response = worker
+            .update_replay_subscription(
+                store.as_ref(),
+                &peer,
+                &scope,
+                ReplaySubscriptionUpdate {
+                    session_id: ReplaySessionId(0),
+                    subscription_id,
+                    generation: 3,
+                    additions: vec![entry(ReplayTargetId(3))],
+                    removals: Vec::new(),
+                },
+            )
+            .await?;
+        assert_eq!(
+            response,
+            ReplaySubscriptionResponse::Updated {
+                generation: 5,
+                rejected: Vec::new(),
+            },
+            "an older generation is not applied, and the answer says which one was held"
+        );
+        let snapshot = worker
+            .replay_subscription_snapshot(&peer, &scope, ReplaySessionId(0), subscription_id)
+            .expect("opened subscription");
+        assert!(
+            !snapshot.targets.contains_key(&ReplayTargetId(3)),
+            "the overtaken update's entries are not in the target set"
+        );
+        Ok(())
+    }
+
+    /// A responder that has forgotten the handle answers `UnknownSubscription` to an update
+    /// that is not a fresh open, which is how a swept or restarted responder makes the client
+    /// re-state its whole target set instead of opening with a delta (ADR 012 decision 9).
+    #[tokio::test]
+    async fn replay_subscription_update_of_an_unknown_handle_is_refused() -> Res<()> {
+        let worker = BigSyncRpcWorker {
+            stores: HashMap::new(),
+            replay_cancels: Default::default(),
+            replay_subscriptions: Default::default(),
+        };
+        let store = Arc::new(MemoryPartStore::new());
+        let store: Arc<dyn HostPartStore> = store;
+        let peer = PeerKey::new([9u8; 32]);
+        let scope: Arc<str> = Arc::from("scope");
+        assert_eq!(
+            worker
+                .update_replay_subscription(
+                    store.as_ref(),
+                    &peer,
+                    &scope,
+                    ReplaySubscriptionUpdate {
+                        session_id: ReplaySessionId(0),
+                        subscription_id: ReplaySubscriptionId(4),
+                        generation: 9,
+                        additions: Vec::new(),
+                        removals: Vec::new(),
+                    },
+                )
+                .await,
+            Err(RpcError::UnknownSubscription),
+        );
+        Ok(())
     }
 
     #[test]
@@ -1607,7 +2101,7 @@ mod tests {
     /// is `spawn_big_sync_rpc`'s local channel, which stamps no peer key at all.
     #[derive(Clone, Copy)]
     enum Caller<'a> {
-        Peer(&'a IrohBigSyncRpcClient),
+        Peer(&'a BigSyncRpcClient),
         Unauthenticated(&'a irpc::Client<BigSyncIrpc>),
     }
 
@@ -1824,10 +2318,10 @@ mod tests {
         // connection, so the granted key is read off that peer's own endpoint.
         let granted_endpoint = test_endpoint().await?;
         let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
-        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr.clone());
+        let granted = BigSyncRpcClient::over_iroh(granted_endpoint, server_addr.clone());
         let refused_endpoint = test_endpoint().await?;
         let refused_peer = PeerKey::new(*refused_endpoint.id().as_bytes());
-        let refused = IrohBigSyncRpcClient::new(refused_endpoint, server_addr.clone());
+        let refused = BigSyncRpcClient::over_iroh(refused_endpoint, server_addr.clone());
         assert_ne!(granted_peer, refused_peer, "two endpoints, two identities");
         store
             .set_part_members(
@@ -2028,7 +2522,7 @@ mod tests {
 
         let granted_endpoint = test_endpoint().await?;
         let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
-        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr);
+        let granted = BigSyncRpcClient::over_iroh(granted_endpoint, server_addr);
         store
             .set_part_members(
                 part_id.clone(),
@@ -2053,11 +2547,18 @@ mod tests {
         };
 
         // Parked, not answered: nothing is waiting on the part, so the responder holds
-        // the request until its hold elapses. The future is kept pinned so that the
-        // release below is observable rather than being taken on trust.
-        let mut held = Box::pin(granted.replay_page(page_request(0, None, 5_000)));
+        // the request until its hold elapses. The request runs as its own task rather than
+        // as a future this test polls by hand: `irpc-iroh` holds the client's shared
+        // connection lock for the whole of `open_bi`, so a request future left unpolled
+        // while it is inside that call keeps the lock, and the next request then waits on
+        // the lock instead of on the responder — the test would be measuring the client's
+        // dial rather than the dispatch loop. The join handle keeps the release below
+        // observable rather than taken on trust.
+        let parked_request = page_request(0, None, 5_000);
+        let parked_client = granted.clone();
+        let mut held = tokio::spawn(async move { parked_client.replay_page(parked_request).await });
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), held.as_mut())
+            tokio::time::timeout(Duration::from_millis(50), &mut held)
                 .await
                 .is_err(),
             "a page with nothing to send is held rather than answered early"
@@ -2085,11 +2586,33 @@ mod tests {
             "the fresh page carries an events verdict"
         );
 
-        // The supersede reached the parked request's own task: it answers instead of
-        // waiting out the rest of its hold.
-        let released = tokio::time::timeout(Duration::from_secs(3), held)
-            .await
-            .expect("a superseded request stops waiting instead of holding to its deadline")??;
+        // The supersede has to reach the parked request's own task, which answers instead
+        // of waiting out the rest of its hold. A responder registers a request's
+        // cancellation at the top of its handler, so a successor that arrives before that
+        // point names an id the responder does not hold yet and is a documented no-op.
+        // Retry with a fresh id while the parked request is still inside its hold: only a
+        // supersede that actually reached it releases it before its own deadline, so a
+        // supersede that stopped working still fails here rather than passing on a retry.
+        let mut successor = 2u64;
+        let released = loop {
+            match tokio::time::timeout(Duration::from_millis(200), &mut held).await {
+                Ok(joined) => break joined.expect("the parked request task does not panic")??,
+                Err(_) => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(4),
+                        "a superseded request stops waiting instead of holding to its deadline"
+                    );
+                    let carrier = granted
+                        .replay_page(page_request(successor, Some(0), 50))
+                        .await??;
+                    assert!(
+                        carrier.events.is_empty(),
+                        "the part still has nothing to send"
+                    );
+                    successor += 1;
+                }
+            }
+        };
         assert!(
             released.events.is_empty(),
             "the released page carries nothing to send"
@@ -2174,7 +2697,7 @@ mod tests {
 
         let granted_endpoint = test_endpoint().await?;
         let granted_peer = PeerKey::new(*granted_endpoint.id().as_bytes());
-        let granted = IrohBigSyncRpcClient::new(granted_endpoint, server_addr);
+        let granted = BigSyncRpcClient::over_iroh(granted_endpoint, server_addr);
         store
             .set_part_members(
                 part_id.clone(),

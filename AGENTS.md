@@ -59,6 +59,7 @@
 
 - Do not adress TODOs or FIXMEs unless told to do so, usually the reason they're there is a broader issue that might not be apparent in the local scope that you encountered them.
 - Prefer to preserve comments unless they are progress comments written by an agent. 
+- Explain the mechanism at the site. A pointer to an ADR is not a substitute for the sentence a reader needs: state the fact where the code is, and even when the ADR carries the reasoning, state the operative part here anyway.
 
 ## big_sync ↔ keyhive racing (read before diagnosing sync flakes)
 

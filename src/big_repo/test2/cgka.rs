@@ -27,6 +27,7 @@ use super::harness::{Node, Pair, Topo, fixtures, keyhive as kh_snap};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
     handle
@@ -412,8 +413,9 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         }
     };
     pair.connect().await?;
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.to_bytes32())
-        .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(verifying_key),
     );
@@ -1219,7 +1221,7 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
         use keyhive_core::principal::document::id::DocumentId as KhDocId;
         use keyhive_core::principal::identifier::Identifier;
 
-        let bytes: [u8; 32] = doc_id.to_bytes32();
+        let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
             .map_err(|_| crate::ferr!("doc_id invalid"))?;
         let kh_doc_id = KhDocId::from(Identifier::from(vk));
@@ -1558,7 +1560,7 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
 fn kh_document_id(
     doc_id: crate::DocumentId,
 ) -> crate::Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .map_err(|err| crate::ferr!("doc_id is not a valid Ed25519 point: {err:?}"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

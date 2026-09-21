@@ -19,6 +19,7 @@
 use super::harness::{Node, Pair, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ fn right_agent_id(pair: &Pair) -> keyhive_core::principal::identifier::Identifie
 
 /// Document identifier for direct keyhive queries.
 fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identifier::Identifier {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("doc id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
@@ -354,7 +355,7 @@ async fn tier6_document_as_member() -> crate::Res<()> {
     // The right-side node is not directly a party to this grant, but the
     // owner side's keyhive must reflect the delegation.
     let doc_b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
     let doc_a_ident = doc_identifier(doc_a_id);
@@ -522,8 +523,14 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
 
     // Escalator must not magically gain access.
     let esc_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(0).peer_id().to_bytes32())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(0)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let esc_has = pair
         .left()
@@ -631,8 +638,14 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     // Both readers still have access.
     let a_ident = right_agent_id(&pair);
     let b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(0).peer_id().to_bytes32())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(0)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let doc_kh_id = doc_identifier(doc_id);
     assert!(
@@ -856,8 +869,10 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&pair.right().peer_id().to_bytes32())
-                    .expect("peer id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("peer id must be a verifying key"),
             ),
             doc_identifier(doc_id.clone()),
         )
@@ -1363,8 +1378,14 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
     // All three nodes must now agree: Alice has no access.
     let doc_id_kh = doc_identifier(doc_id);
     let alice_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(1).peer_id().to_bytes32())
-            .expect("Alice peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(1)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("Alice peer id must be a verifying key"),
     );
     for label in ["owner", "alice", "observer"] {
         let repo = match label {
@@ -1703,8 +1724,14 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Verify Reader has Read (not Edit, not Admin).
     let reader_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(1).peer_id().to_bytes32())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(1)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let doc_id_kh = doc_identifier(doc_id.clone());
     let access = guard
@@ -1774,8 +1801,14 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Observer must not have gained access through the Reader's attempt.
     let obs_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(2).peer_id().to_bytes32())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(2)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let obs_access = guard
         .node(0)
@@ -1929,8 +1962,14 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
     // Charlie's own keyhive must show Read access after receiving both paths.
     let doc_id_kh = doc_identifier(doc_id.clone());
     let charlie_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&guard.node(3).peer_id().to_bytes32())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(3)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let charlie_access = guard
         .node(3)
@@ -2041,11 +2080,11 @@ async fn tier6_doc_as_member_two_hop_chain() -> crate::Res<()> {
 
     // Identifiers for access checks.
     let doc_b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
     let doc_c_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_c_id.to_bytes32())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_c_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
 

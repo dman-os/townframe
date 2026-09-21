@@ -242,21 +242,14 @@ structstruck::strike! {
     }
 }
 
-/// How long a route is left alone after the peer denied it.
+/// The first retry delay for a replay round the peer answered without progress: either it
+/// does not know the part yet, or access rows deny it.
 ///
-/// A pacing knob, not a measured threshold: denial is reversible, because a
-/// grant may simply not have reached the peer's store yet.
-const UNAUTHORIZED_BACKOFF: Duration = Duration::from_secs(30);
-
-/// The pacing backoff applied to a denied replay route.
-///
-/// Exposed for tests, so one can advance the machine's clock past the pacing
-/// instead of sleeping it out. A test whose own deadline equals this constant is
-/// racing it rather than measuring it.
-#[cfg(any(test, feature = "test-support"))]
-pub fn unauthorized_backoff() -> Duration {
-    UNAUTHORIZED_BACKOFF
-}
+/// Only the seed lives here. `Tasks` doubles a retry's backoff per attempt and caps it at the
+/// frame's `max_backoff` (a minute by default), so the growth and the cap ride the task rather
+/// than being chosen at this call site. Pacing rather than a verdict is right for both arms: a
+/// denial is reversible, because a grant may simply not have reached the peer's store yet.
+const REPLAY_RETRY_SEED: Duration = Duration::from_secs(2);
 
 /// A replay route's stable identity.
 ///
@@ -319,15 +312,40 @@ structstruck::strike! {
             caught_up: bool,
             waiting_for_credit: bool,
         }>,
-        /// One logical target registry per replay lane. Cursors remain in the page task and
-        /// cursor machine; this state only avoids repeating stable target metadata on the wire.
-        replay_subscriptions: Map<ReplayLane, struct ReplaySubscriptionState {
+        /// The peer's one logical replay subscription: the target set the responder holds for
+        /// this client session, and the changes it has not acknowledged yet. Cursors remain in
+        /// the page task and the cursor machine; this state only avoids repeating stable target
+        /// metadata on the wire (ADR 012 decision 9).
+        replay_subscription: struct ReplaySubscriptionState {
             subscription_id: crate::rpc::ReplaySubscriptionId,
+            /// The generation the next `Update` carries. Sending takes the current value and
+            /// leaves the next one behind, so a session's first update carries 0 — which is
+            /// what opens a subscription the responder does not know.
             generation: u64,
             next_target_id: u32,
-            opened: bool,
+            /// Entries the responder acknowledged, and therefore the only routes a page may
+            /// name.
             targets: Map<ReplayRoute, crate::rpc::ReplayTargetId>,
-        }>,
+            /// Entries sent, or about to be sent, that no answer has acknowledged. A route
+            /// stays out of `targets`, and so out of a page, until its entry lands.
+            pending_additions: Map<ReplayRoute, struct PendingReplayAddition {
+                id: crate::rpc::ReplayTargetId,
+                target: crate::rpc::ReplaySubscriptionTarget,
+            }>,
+            /// Ids the next `Update` removes. An id the responder does not hold is a no-op to
+            /// remove, so a re-send or a lost entry is safe to name here.
+            pending_removals: Set<crate::rpc::ReplayTargetId>,
+            /// The removals the update now in flight carries. They are held apart from
+            /// `pending_removals` so a route dropped while the update was in flight is not
+            /// lost with them.
+            in_flight_removals: Set<crate::rpc::ReplayTargetId>,
+            /// Routes the responder refused. A refused route stays wanted, keeps blocking
+            /// full sync, and is re-added under a fresh id until an update for it succeeds.
+            blocked: Set<ReplayRoute>,
+            /// The scheduled task carrying the pending batch while it waits on the retry a
+            /// refusal bought it.
+            update_task: Option<TaskId>,
+        },
         objects: Set<ObjKey>,
 
         cursor_machine: CursorSyncMachine,
@@ -1037,7 +1055,21 @@ impl BigSyncMachine {
             pending_removals: default(),
             sync_workers: default(),
             replay_pages: default(),
-            replay_subscriptions: default(),
+            replay_subscription: ReplaySubscriptionState {
+                // One subscription per client session and storage scope, named in every
+                // request; the id only has to be unique within the session.
+                subscription_id: crate::rpc::ReplaySubscriptionId(1),
+                generation: 0,
+                // Ids keep counting up across a re-open, so a fresh entry can never collide
+                // with an entry of a handle the responder has forgotten.
+                next_target_id: 1,
+                targets: default(),
+                pending_additions: default(),
+                pending_removals: default(),
+                in_flight_removals: default(),
+                blocked: default(),
+                update_task: None,
+            },
             objects: default(),
             cursor_machine: default(),
             cursors_cmd_buf: default(),
@@ -1182,6 +1214,18 @@ impl BigSyncMachine {
             peer_state.cursor_machine.abandon_obj_sync(&obj_id);
         }
         peer_state.objects = objects;
+        // A target the embedder has dropped stops being blocked with it: a part or object that
+        // comes back is a fresh entry, and only the client ever changes the target set.
+        let wanted: Set<ReplayRoute> = parts
+            .iter()
+            .cloned()
+            .map(ReplayRoute::Part)
+            .chain(peer_state.objects.iter().cloned().map(ReplayRoute::Object))
+            .collect();
+        peer_state
+            .replay_subscription
+            .blocked
+            .retain(|route| wanted.contains(route));
         self.stat_machine
             .set_peer(peer_id.clone(), parts.iter().cloned());
         for part_id in &decision_parts {
@@ -1607,8 +1651,8 @@ impl BigSyncMachine {
                 ReplayLane::Bulk => bulk.push(target),
             }
         }
-        self.spawn_replay_pages_inner(peer_id.clone(), live, caught_up, None);
-        self.spawn_replay_pages_inner(peer_id, bulk, caught_up, None);
+        self.spawn_replay_pages_inner(peer_id.clone(), ReplayLane::Live, live, caught_up, None);
+        self.spawn_replay_pages_inner(peer_id, ReplayLane::Bulk, bulk, caught_up, None);
     }
 
     /// Re-issue a page for `targets` after a delay, keeping each route's last verdict.
@@ -1628,13 +1672,327 @@ impl BigSyncMachine {
                 ReplayLane::Bulk => bulk.push(target),
             }
         }
-        self.spawn_replay_pages_inner(peer_id.clone(), live, caught_up, Some((retry, delay)));
-        self.spawn_replay_pages_inner(peer_id, bulk, caught_up, Some((retry, delay)));
+        self.spawn_replay_pages_inner(
+            peer_id.clone(),
+            ReplayLane::Live,
+            live,
+            caught_up,
+            Some((retry, delay)),
+        );
+        self.spawn_replay_pages_inner(
+            peer_id,
+            ReplayLane::Bulk,
+            bulk,
+            caught_up,
+            Some((retry, delay)),
+        );
+    }
+
+    /// Apply the wanted-set changes to the peer's subscription and send the batch they make.
+    ///
+    /// A route the embedder now wants takes a fresh entry id; a registered route it no longer
+    /// wants is removed from the responder's set and unblocked. A newly wanted target is what
+    /// makes an update due now — a fresh entry joins the pending batch and the retry a refusal
+    /// bought it waits on is reset with it (ADR 012 decision 9).
+    fn sync_replay_subscription(&mut self, peer_id: &PeerKey) {
+        let wanted = self.replay_page_targets(peer_id.clone());
+        let mut queued = false;
+        if let Some(peer_state) = self.peers.get_mut(peer_id) {
+            let state = &mut peer_state.replay_subscription;
+            for (route, target) in &wanted {
+                if !state.targets.contains_key(route)
+                    && !state.pending_additions.contains_key(route)
+                {
+                    let id = Self::next_replay_target_id(state);
+                    state.pending_additions.insert(
+                        route.clone(),
+                        PendingReplayAddition {
+                            id,
+                            target: crate::rpc::ReplaySubscriptionTarget::from(target),
+                        },
+                    );
+                    queued = true;
+                }
+            }
+            let dropped: Vec<(ReplayRoute, crate::rpc::ReplayTargetId)> = state
+                .targets
+                .iter()
+                .filter(|(route, _)| !wanted.contains_key(*route))
+                .map(|(route, id)| (route.clone(), *id))
+                .collect();
+            for (route, id) in dropped {
+                state.targets.remove(&route);
+                state.pending_removals.insert(id);
+                // The embedder dropping the target is one of the two ways a block clears.
+                state.blocked.remove(&route);
+                queued = true;
+            }
+            let abandoned: Vec<(ReplayRoute, crate::rpc::ReplayTargetId)> = state
+                .pending_additions
+                .iter()
+                .filter(|(route, _)| !wanted.contains_key(*route))
+                .map(|(route, pending)| (route.clone(), pending.id))
+                .collect();
+            for (route, id) in abandoned {
+                state.pending_additions.remove(&route);
+                // The entry may have landed even though its answer never came back, so the id
+                // is removed responder-side rather than left to be served for a dropped route.
+                state.pending_removals.insert(id);
+                state.blocked.remove(&route);
+                queued = true;
+            }
+        }
+        if queued {
+            self.schedule_replay_update(peer_id.clone(), None);
+        }
+    }
+
+    /// Send the peer's pending target-set changes as one `Update` (ADR 012 decision 9).
+    ///
+    /// The batch stays pending until an answer acknowledges it, so a lost answer is retried
+    /// rather than lost with it. `delayed` is the retry a refusal or a failed round bought:
+    /// the caller hands this task's own backoff on, and a target queued while it waits sends
+    /// the batch at once instead.
+    fn schedule_replay_update(&mut self, peer_id: PeerKey, delayed: Option<(Retry, Duration)>) {
+        let session_id = self.replay_session_id();
+        self.replay_request_seq = self.replay_request_seq.wrapping_add(1);
+        let request_id = crate::rpc::ReplayRequestId(self.replay_request_seq);
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
+        let state = &mut peer_state.replay_subscription;
+        if state.pending_additions.is_empty() && state.pending_removals.is_empty() {
+            return;
+        }
+        if let Some(previous) = state.update_task.take()
+            && self.tasks.cancel(previous).is_none()
+        {
+            tracing::debug!(task_id = previous, "replay update was already retired");
+        }
+        // Whatever the last update was carrying goes back into the batch: nothing may be
+        // dropped just because an answer never came back. A removal the responder already
+        // applied is a no-op to repeat, because an id it does not hold is a no-op to remove.
+        let carried: Vec<_> = state.in_flight_removals.drain().collect();
+        state.pending_removals.extend(carried);
+        let generation = state.generation;
+        state.generation = generation.checked_add(1).expect(ERROR_IMPOSSIBLE);
+        let additions: Vec<_> = state
+            .pending_additions
+            .values()
+            .map(|pending| crate::rpc::ReplaySubscriptionTargetEntry {
+                id: pending.id,
+                target: pending.target.clone(),
+            })
+            .collect();
+        let removals: Vec<_> = state.pending_removals.iter().copied().collect();
+        state.in_flight_removals = state.pending_removals.clone();
+        state.pending_removals.clear();
+        let subscription = ReplaySubscriptionTaskState {
+            subscription_id: state.subscription_id,
+            generation,
+            request: Some(crate::rpc::ReplaySubscriptionRequest::Update {
+                session_id,
+                subscription_id: state.subscription_id,
+                generation,
+                additions,
+                removals,
+            }),
+        };
+        let deets = TaskSeed::Machine(MachineTaskDeets::ReplayPage(ReplayPageTask {
+            peer_id: peer_id.clone(),
+            session_id,
+            request_id,
+            targets: Vec::new(),
+            supersede: None,
+            limit: ReplayPageTask::LIMIT,
+            hold_ms: 0,
+            subscription: Some(subscription),
+        }));
+        let task_id = match delayed {
+            Some((retry, delay)) => {
+                self.tasks
+                    .spawn_delayed(deets, retry, delay, std::time::Instant::now())
+            }
+            None => self.tasks.spawn(std::time::Instant::now(), deets),
+        };
+        tracing::debug!(
+            peer_id = %peer_id,
+            ?request_id,
+            generation,
+            delayed = delayed.is_some(),
+            "spawning replay subscription update"
+        );
+        state.update_task = Some(task_id);
+    }
+
+    fn next_replay_target_id(state: &mut ReplaySubscriptionState) -> crate::rpc::ReplayTargetId {
+        let id = crate::rpc::ReplayTargetId(state.next_target_id);
+        state.next_target_id = state.next_target_id.checked_add(1).expect(ERROR_IMPOSSIBLE);
+        id
+    }
+
+    /// Block one route: the responder refused its entry, so the route keeps its place in the
+    /// wanted set, keeps full sync blocked, and is re-added under a fresh id (ADR 012
+    /// decision 9). Only the client ever removes it.
+    fn block_replay_route(
+        &mut self,
+        peer_id: &PeerKey,
+        route: ReplayRoute,
+        target: crate::rpc::ReplaySubscriptionTarget,
+    ) {
+        let Some(peer_state) = self.peers.get_mut(peer_id) else {
+            return;
+        };
+        // A blocked route has no round of its own: a page names it again only once an update
+        // acknowledges the entry the block re-queues below, so its round state goes with it.
+        if let Some(page) = peer_state.replay_pages.remove(&route)
+            && self.tasks.cancel(page.task_id).is_none()
+        {
+            tracing::debug!(
+                task_id = page.task_id,
+                "replay round was already retired when its route was blocked"
+            );
+        }
+        let state = &mut peer_state.replay_subscription;
+        // The entry that was refused leaves the acknowledged set, and its id is removed
+        // responder-side so the fresh id below cannot collide with an entry the responder
+        // still holds.
+        if let Some(id) = state.targets.remove(&route) {
+            state.pending_removals.insert(id);
+        }
+        if let Some(pending) = state.pending_additions.remove(&route) {
+            state.pending_removals.insert(pending.id);
+        }
+        let id = Self::next_replay_target_id(state);
+        state
+            .pending_additions
+            .insert(route.clone(), PendingReplayAddition { id, target });
+        state.blocked.insert(route);
+    }
+
+    /// Apply the answer to one `Update`: entries it did not refuse landed, and the refused
+    /// ones are returned for the caller to block (ADR 012 decision 9).
+    ///
+    /// An answer to an update a newer one has since replaced is ignored: the newer update
+    /// carries the same entries, and its answer is the one that counts.
+    fn acknowledge_replay_update(
+        &mut self,
+        peer_id: &PeerKey,
+        task_id: TaskId,
+        generation: u64,
+        rejected: &[(crate::rpc::ReplayTargetId, TargetVerdict)],
+    ) -> Vec<(ReplayRoute, crate::rpc::ReplaySubscriptionTarget)> {
+        let mut refused = Vec::new();
+        let Some(peer_state) = self.peers.get_mut(peer_id) else {
+            return refused;
+        };
+        let state = &mut peer_state.replay_subscription;
+        if state.generation != generation.saturating_add(1) {
+            return refused;
+        }
+        if state.update_task == Some(task_id) {
+            state.update_task = None;
+        }
+        let refused_routes: Vec<ReplayRoute> = state
+            .pending_additions
+            .iter()
+            .filter(|(_, pending)| rejected.iter().any(|(id, _)| *id == pending.id))
+            .map(|(route, _)| route.clone())
+            .collect();
+        for route in refused_routes {
+            if let Some(pending) = state.pending_additions.remove(&route) {
+                refused.push((route, pending.target));
+            }
+        }
+        let landed: Vec<ReplayRoute> = state.pending_additions.keys().cloned().collect();
+        for route in landed {
+            if let Some(pending) = state.pending_additions.remove(&route) {
+                state.targets.insert(route.clone(), pending.id);
+                state.blocked.remove(&route);
+            }
+        }
+        // The update applied, so the removals it carried are the responder's business no more.
+        state.in_flight_removals.clear();
+        refused
+    }
+
+    /// A responder that is ahead did not apply the generation this round carried, so the
+    /// round is re-sent past the generation the responder holds.
+    fn retry_superseded_replay_update(
+        &mut self,
+        peer_id: &PeerKey,
+        task_id: TaskId,
+        generation: u64,
+        current: u64,
+    ) {
+        {
+            let Some(peer_state) = self.peers.get_mut(peer_id) else {
+                return;
+            };
+            let state = &mut peer_state.replay_subscription;
+            if state.generation != generation.saturating_add(1) {
+                // A newer update is already in flight, and it carries these entries too.
+                return;
+            }
+            if state.update_task == Some(task_id) {
+                state.update_task = None;
+            }
+            // Sending past the responder's generation is what makes the re-send apply: an
+            // update no newer than the one it holds is not applied at all.
+            state.generation = state.generation.max(current.saturating_add(1));
+        }
+        self.schedule_replay_update(peer_id.clone(), None);
+    }
+
+    /// Forget everything the machine believes about the peer's subscription, then re-state it.
+    ///
+    /// The responder answering that it does not hold the id means its handle is gone (its TTL
+    /// swept it, or it restarted), so the next update re-states the whole target set under
+    /// generation 0 — which is the one generation that opens a subscription it does not know.
+    /// Target ids keep counting up so a re-open cannot collide with an entry of the handle
+    /// that was lost; the subscription id is reused because the responder holds nothing under
+    /// it, and a fresh one would spend the peer's subscription budget on the abandoned one.
+    ///
+    /// Forgetting is only half of a reset. A reset that left nothing queued would leave every
+    /// wanted route unpageable for good: a page may only name an entry the responder has
+    /// acknowledged, and only an `Update` can acknowledge one. So the reset ends by handing the
+    /// wanted set to the same reconciler every other change uses, which queues it and sends the
+    /// opening update itself.
+    fn reset_replay_subscription(&mut self, peer_id: &PeerKey) {
+        if let Some(peer_state) = self.peers.get_mut(peer_id) {
+            let state = &mut peer_state.replay_subscription;
+            state.generation = 0;
+            state.targets.clear();
+            state.pending_additions.clear();
+            state.pending_removals.clear();
+            state.in_flight_removals.clear();
+            state.blocked.clear();
+            state.update_task = None;
+        }
+        // The routes of the lost subscription have no page of their own any more: dropping
+        // their round state is what lets the re-open's acknowledgement page them again.
+        if let Some(peer_state) = self.peers.get_mut(peer_id) {
+            let stale: Vec<ReplayRoute> = peer_state.replay_pages.keys().cloned().collect();
+            for route in stale {
+                if let Some(state) = peer_state.replay_pages.remove(&route)
+                    && self.tasks.cancel(state.task_id).is_none()
+                {
+                    tracing::debug!(
+                        task_id = state.task_id,
+                        "replay task was already retired during a subscription reset",
+                    );
+                }
+            }
+        }
+        // Re-state the wanted set under generation 0 and send it: this is the update that
+        // opens the responder's new subscription.
+        self.sync_replay_subscription(peer_id);
     }
 
     fn spawn_replay_pages_inner(
         &mut self,
         peer_id: PeerKey,
+        lane: ReplayLane,
         targets: Vec<SubscriptionTarget>,
         caught_up: bool,
         delayed: Option<(Retry, Duration)>,
@@ -1642,10 +2000,36 @@ impl BigSyncMachine {
         if targets.is_empty() {
             return;
         }
+        // A page names entries the responder acknowledged. An entry still in flight, or one
+        // the responder refused, is not in its target set: naming it would fail the whole
+        // page instead of answering the routes it can serve (ADR 012 decision 9).
+        // A page names entries the responder acknowledged. An entry still in flight, one the
+        // responder refused, or one whose peer has gone is not in its target set: naming it
+        // would fail the whole page instead of answering the routes it can serve (ADR 012
+        // decision 9). The entry id is what the wire names, so it is paired with the route here
+        // and the round carries both.
+        let targets: Vec<(crate::rpc::ReplayTargetId, SubscriptionTarget)> = targets
+            .into_iter()
+            .filter_map(|target| {
+                let id = self
+                    .peers
+                    .get(&peer_id)?
+                    .replay_subscription
+                    .targets
+                    .get(&ReplayRoute::of(&target))?;
+                Some((*id, target))
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
         let session_id = self.replay_session_id();
         self.replay_request_seq = self.replay_request_seq.wrapping_add(1);
         let request_id = crate::rpc::ReplayRequestId(self.replay_request_seq);
-        let routes: Vec<ReplayRoute> = targets.iter().map(ReplayRoute::of).collect();
+        let routes: Vec<ReplayRoute> = targets
+            .iter()
+            .map(|(_, target)| ReplayRoute::of(target))
+            .collect();
         // A lane request supersedes only the previous request carrying that lane's routes. The
         // live and bulk requests are intentionally independent so a bulk backlog cannot release
         // or delay a live long-poll.
@@ -1657,7 +2041,6 @@ impl BigSyncMachine {
                 .map(|(_, page)| page.request_id)
                 .max()
         });
-        let lane = self.replay_lane(&peer_id, &targets[0]);
         // A lane that has not yet established a caught-up verdict is drain-only. This
         // includes a forced refresh: it must check current backlog without making the
         // full-sync waiter pay for a live hold. Once every route is caught up, the
@@ -1677,83 +2060,12 @@ impl BigSyncMachine {
         } else {
             0
         };
-        let subscription = self.peers.get_mut(&peer_id).map(|peer_state| {
-            let state = peer_state
-                .replay_subscriptions
-                .entry(lane)
-                .or_insert_with(|| {
-                    let subscription_id = crate::rpc::ReplaySubscriptionId(match lane {
-                        ReplayLane::Live => 1,
-                        ReplayLane::Bulk => 2,
-                    });
-                    ReplaySubscriptionState {
-                        subscription_id,
-                        generation: 0,
-                        next_target_id: 1,
-                        opened: false,
-                        targets: Map::new(),
-                    }
-                });
-            let current_routes: Set<_> = routes.iter().cloned().collect();
-            let mut additions = Vec::new();
-            for target in &targets {
-                let route = ReplayRoute::of(target);
-                if !state.targets.contains_key(&route) {
-                    let target_id = crate::rpc::ReplayTargetId(state.next_target_id);
-                    state.next_target_id =
-                        state.next_target_id.checked_add(1).expect(ERROR_IMPOSSIBLE);
-                    state.targets.insert(route, target_id);
-                    additions.push(crate::rpc::ReplaySubscriptionTargetEntry {
-                        id: target_id,
-                        target: crate::rpc::ReplaySubscriptionTarget::from(target),
-                    });
-                }
-            }
-            let removals: Vec<_> = state
-                .targets
-                .iter()
-                .filter(|(route, _)| !current_routes.contains(*route))
-                .map(|(route, target_id)| (route.clone(), *target_id))
-                .collect();
-            for (route, _) in &removals {
-                state.targets.remove(route);
-            }
-            let entries: Vec<_> = targets
-                .iter()
-                .map(|target| {
-                    let route = ReplayRoute::of(target);
-                    crate::rpc::ReplaySubscriptionTargetEntry {
-                        id: state.targets[&route],
-                        target: crate::rpc::ReplaySubscriptionTarget::from(target),
-                    }
-                })
-                .collect();
-            let request = if !state.opened {
-                state.opened = true;
-                Some(crate::rpc::ReplaySubscriptionRequest::Open {
-                    session_id,
-                    subscription_id: state.subscription_id,
-                    generation: state.generation,
-                    targets: entries.clone(),
-                })
-            } else if !additions.is_empty() || !removals.is_empty() {
-                state.generation = state.generation.checked_add(1).expect(ERROR_IMPOSSIBLE);
-                Some(crate::rpc::ReplaySubscriptionRequest::Update {
-                    session_id,
-                    subscription_id: state.subscription_id,
-                    generation: state.generation,
-                    additions,
-                    removals: removals.iter().map(|(_, target_id)| *target_id).collect(),
-                })
-            } else {
-                None
-            };
+        let subscription = self.peers.get(&peer_id).map(|peer_state| {
+            let state = &peer_state.replay_subscription;
             ReplaySubscriptionTaskState {
-                session_id,
                 subscription_id: state.subscription_id,
                 generation: state.generation,
-                targets: entries,
-                request,
+                request: None,
             }
         });
         tracing::debug!(
@@ -1861,18 +2173,29 @@ impl BigSyncMachine {
 
     /// The peer-level replay verdict: caught up when every wanted route has an
     /// answer saying so. No routes means there is nothing left to replay.
+    ///
+    /// A blocked route has no answer that could make it caught up, so it keeps full sync
+    /// blocked until an update for it succeeds or the embedder drops it (ADR 012 decision 9).
     fn update_peer_replay_done(&mut self, peer_id: PeerKey) {
         let routes = self.replay_page_targets(peer_id.clone());
-        let done = routes.keys().all(|route| {
-            self.peers
-                .get(&peer_id)
-                .and_then(|peer_state| peer_state.replay_pages.get(route))
-                .is_some_and(|state| state.caught_up)
-        });
+        let done = {
+            let peer_state = self.peers.get(&peer_id);
+            let blocked = peer_state.map(|state| &state.replay_subscription.blocked);
+            routes.keys().all(|route| {
+                !blocked.is_some_and(|blocked| blocked.contains(route))
+                    && peer_state
+                        .and_then(|state| state.replay_pages.get(route))
+                        .is_some_and(|state| state.caught_up)
+            })
+        };
         self.stat_machine.mark_peer_replay_done(peer_id, done);
     }
 
     fn refresh_peer_replay_worker(&mut self, peer_id: PeerKey, force: bool) {
+        // The wanted set is reconciled into the subscription before any page is asked for: an
+        // entry the responder has not acknowledged is not pageable, and a newly wanted target
+        // is what sends the batch that makes it so (ADR 012 decision 9).
+        self.sync_replay_subscription(&peer_id);
         let targets = self.replay_page_targets(peer_id.clone());
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return;
@@ -1941,15 +2264,15 @@ impl BigSyncMachine {
     ) {
         let peer_id = result.peer_id;
         let page = result.page;
+        let update = result.update;
         // The events are page-level: they are applied even when a newer round has replaced
         // this one, because re-delivering them costs a watermark comparison while dropping
         // them costs a round. The verdicts are per route, and a verdict for a route this round
         // no longer owns is dropped: the round that replaced it has already been asked, and
         // its answer is the one that counts.
-        let mut immediate: Vec<SubscriptionTarget> = Vec::new();
-        let mut backed_off: Vec<SubscriptionTarget> = Vec::new();
-        let mut backoff: Option<Duration> = None;
-        let mut unanswered: Vec<PartKey> = Vec::new();
+        let mut reask: Vec<SubscriptionTarget> = Vec::new();
+        let mut refused: Vec<(ReplayRoute, crate::rpc::ReplaySubscriptionTarget)> = Vec::new();
+        let mut refused_parts: Vec<PartKey> = Vec::new();
         {
             let Some(peer_state) = self.peers.get_mut(&peer_id) else {
                 assert!(self.all_seen_peer.contains(&peer_id), "fishy");
@@ -2005,62 +2328,77 @@ impl BigSyncMachine {
                                 ReplayLane::Bulk
                             };
                         }
-                        immediate.push(target);
+                        reask.push(target);
                     }
-                    TargetVerdict::UnknownPart => {
-                        // The peer does not know this part (yet). That is not the part being
-                        // synced: record it as unanswered so full sync stays blocked, keep the
-                        // route and retry slowly — a restarting peer re-creates its part rows,
-                        // and dropping the route here would tear it permanently.
+                    TargetVerdict::UnknownPart | TargetVerdict::Unauthorized => {
+                        // Both kinds are one machine outcome: absent access rows cannot
+                        // distinguish a revocation from a grant that has not landed yet, so a
+                        // route the peer cannot serve is blocked rather than torn down. It
+                        // keeps its place in the wanted set and in the full-sync gate, the
+                        // responder never removes it, and the update that re-adds it under a
+                        // fresh id is what resolves it (ADR 012 decision 9).
                         if let SubscriptionTarget::Part { part_id, .. } = &target {
-                            unanswered.push(part_id.clone());
+                            refused_parts.push(part_id.clone());
                         }
-                        if let Some(state) = peer_state.replay_pages.get_mut(&route) {
-                            state.caught_up = false;
-                        }
-                        backed_off.push(target);
-                        backoff = Some(Duration::from_secs(2));
-                    }
-                    TargetVerdict::Unauthorized => {
-                        // Absent access rows cannot distinguish a revocation from a grant that
-                        // has not landed yet, so back off rather than tear the route down:
-                        // dropping it here would strand a part whose grant is still in flight.
-                        // This caller is done with the route either way, and it is deliberately
-                        // not recorded as unanswered — blocking full sync on a part this caller
-                        // may never read hangs every topology whose access matrix leaves a part
-                        // unreadable to one side.
-                        if let Some(state) = peer_state.replay_pages.get_mut(&route) {
-                            state.caught_up = true;
-                        }
-                        backed_off.push(target);
-                        backoff = Some(UNAUTHORIZED_BACKOFF);
+                        refused.push((route, crate::rpc::ReplaySubscriptionTarget::from(&target)));
                     }
                 }
             }
         }
-        for part_id in unanswered {
+        self.drain_cursor_machine_cmds(peer_id.clone());
+        // The round's own update answer is the other source of refusals, and the answer's
+        // landed entries are the ones a page may name from here on.
+        let mut acked = false;
+        if let Some(update) = update {
+            match update {
+                ReplayUpdateOutcome::Applied {
+                    generation,
+                    rejected,
+                } => {
+                    refused.extend(
+                        self.acknowledge_replay_update(&peer_id, task_id, generation, &rejected),
+                    );
+                    acked = true;
+                }
+                ReplayUpdateOutcome::Superseded {
+                    generation,
+                    current,
+                } => {
+                    self.retry_superseded_replay_update(&peer_id, task_id, generation, current);
+                }
+            }
+        }
+        // Every refusal of this round is one machine outcome and one retry: the update re-adds
+        // the refused entries under fresh ids, on the backoff this round's task handed on.
+        if !refused.is_empty() {
+            for (route, target) in refused {
+                if let ReplayRoute::Part(part_id) = &route {
+                    refused_parts.push(part_id.clone());
+                }
+                self.block_replay_route(&peer_id, route, target);
+            }
+            self.schedule_replay_update(peer_id.clone(), Some((retry, REPLAY_RETRY_SEED)));
+        }
+        for part_id in refused_parts {
             self.stat_machine
                 .mark_peer_part_unanswered(peer_id.clone(), part_id);
         }
-        self.drain_cursor_machine_cmds(peer_id.clone());
+        // A round whose update landed makes its entries pageable, so the fresh ones are paged
+        // by the same path an event-driven refresh uses.
+        if acked {
+            self.refresh_peer_replay_worker(peer_id.clone(), false);
+        }
         // The next round asks for the same routes at their current positions, which is the
         // cursor machine's own bookkeeping: an applied event moved a position, and a route
         // that answered with nothing has nothing to move. A route retired while this round was
         // in flight is dropped here rather than asked for again.
-        let immediate = self.refresh_replay_targets(peer_id.clone(), immediate);
-        let backed_off = self.refresh_replay_targets(peer_id.clone(), backed_off);
+        let reask = self.refresh_replay_targets(peer_id.clone(), reask);
         if self.replay_work_below_watermark(&peer_id) {
-            if !immediate.is_empty() {
-                self.spawn_replay_pages(peer_id.clone(), immediate, false);
-            }
-            if !backed_off.is_empty() {
-                // A round that saw both an unknown and an unauthorized target backs off for the
-                // larger of the two: a delay is pacing, and both routes are retried either way.
-                let delay = backoff.unwrap_or_else(|| Duration::from_secs(2));
-                self.schedule_replay_pages(peer_id.clone(), backed_off, false, retry, delay);
+            if !reask.is_empty() {
+                self.spawn_replay_pages(peer_id.clone(), reask, false);
             }
         } else {
-            self.pause_replay_targets_for_credit(&peer_id, immediate.into_iter().chain(backed_off));
+            self.pause_replay_targets_for_credit(&peer_id, reask);
         }
         self.update_peer_replay_done(peer_id);
     }
@@ -2072,6 +2410,7 @@ impl BigSyncMachine {
         ReplayPageTaskError {
             peer_id,
             targets,
+            updated_subscription_id,
             deets,
         }: ReplayPageTaskError,
     ) {
@@ -2098,7 +2437,23 @@ impl BigSyncMachine {
                 live.push(target);
             }
         }
+        if matches!(
+            &deets,
+            ReplayPageTaskErrorDeets::Rpc(rpc::RpcError::UnknownSubscription)
+        ) {
+            // The responder does not hold the handle any more (its TTL swept it, or it
+            // restarted). The reset forgets the lost handle *and* re-states the whole target
+            // set under generation 0, which is the update that opens the new subscription — so
+            // the opening update is already scheduled by the time this returns, and a second
+            // send here would only cancel and repeat it.
+            self.reset_replay_subscription(&peer_id);
+        } else if updated_subscription_id.is_some() {
+            // The round carried an update and never asked for its page, so what this backoff
+            // retries is the update, and the batch it carries stays pending meanwhile.
+            self.schedule_replay_update(peer_id.clone(), Some((retry, Duration::from_secs(2))));
+        }
         if live.is_empty() {
+            self.update_peer_replay_done(peer_id);
             return;
         }
         tracing::debug!(
@@ -3370,6 +3725,537 @@ mod tests {
         );
     }
 
+    /// A machine with one peer that wants `parts`, each with an already-decided strategy, so
+    /// every part is a replay route and nothing else gates it.
+    fn replay_machine_with_parts(
+        parts: impl IntoIterator<Item = PartKey>,
+    ) -> (BigSyncMachine, PeerKey) {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let parts: Vec<PartKey> = parts.into_iter().collect();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: Set::new(),
+        }));
+        let peer_state = machine.peers.get_mut(&peer).expect("peer was inserted");
+        for part in parts {
+            peer_state.parts.insert(
+                part,
+                PeerPartState {
+                    strat: PeerPartStrategy::Cursor(CursorState { replay_cursor: 0 }),
+                },
+            );
+        }
+        (machine, peer)
+    }
+
+    fn replay_machine_with_one_part() -> (BigSyncMachine, PeerKey, PartKey) {
+        let part = PartKey::random();
+        let (machine, peer) = replay_machine_with_parts([part.clone()]);
+        (machine, peer, part)
+    }
+
+    fn test_retry() -> crate::scheduler::Retry {
+        crate::scheduler::Retry {
+            attempt_no: 0,
+            backoff: Duration::ZERO,
+            queued_at: std::time::Instant::now(),
+        }
+    }
+
+    /// The route a page round carries at `index`, without its responder entry id: the tests here
+    /// are about routes, and the round names each one by the id the wire uses.
+    fn paged_route(page: &ReplayPageTask, index: usize) -> SubscriptionTarget {
+        page.targets[index].1.clone()
+    }
+
+    fn take_replay_task(machine: &mut BigSyncMachine, what: &str) -> (TaskId, ReplayPageTask) {
+        let spawned = machine
+            .drain_machine_spawn_queue()
+            .next()
+            .unwrap_or_else(|| panic!("{what}"));
+        let MachineTask {
+            id,
+            deets: MachineTaskDeets::ReplayPage(task),
+        } = spawned
+        else {
+            panic!("{what}: spawned a non-replay task");
+        };
+        (id, task)
+    }
+
+    fn empty_page_result(
+        peer_id: &PeerKey,
+        update: Option<ReplayUpdateOutcome>,
+    ) -> ReplayPageResult {
+        ReplayPageResult {
+            peer_id: peer_id.clone(),
+            page: crate::rpc::ReplayPage {
+                events: Vec::new(),
+                targets: Vec::new(),
+            },
+            update,
+        }
+    }
+
+    /// Open `peer`'s subscription for its wanted routes and acknowledge it, leaving the routes
+    /// pageable, and hand back the page round the machine then spawns.
+    fn open_and_acknowledge_replay(
+        machine: &mut BigSyncMachine,
+        peer: &PeerKey,
+    ) -> (TaskId, ReplayPageTask) {
+        machine.refresh_peer_replay_worker(peer.clone(), true);
+        let (opening_id, opening) =
+            take_replay_task(machine, "a refresh spawns the opening update");
+        assert!(
+            opening.targets.is_empty(),
+            "an update round carries no page targets"
+        );
+        let generation = opening
+            .subscription
+            .as_ref()
+            .expect("an update round belongs to a subscription")
+            .generation;
+        machine.handle_replay_page_result(
+            opening_id,
+            test_retry(),
+            empty_page_result(
+                peer,
+                Some(ReplayUpdateOutcome::Applied {
+                    generation,
+                    rejected: Vec::new(),
+                }),
+            ),
+        );
+        take_replay_task(machine, "an acknowledged route is paged")
+    }
+
+    /// A peer that answers `UnknownSubscription` has forgotten the handle the client is naming:
+    /// its TTL swept it, or it restarted. Forgetting it back is not enough — the machine must
+    /// re-state the whole wanted set under generation 0, which is the update that opens the new
+    /// subscription, and then resume paging from the same cursors. Objects stay live; parts
+    /// return through their own lanes.
+    #[test]
+    fn a_forgotten_subscription_is_reopened_with_the_whole_wanted_set() {
+        let part = PartKey::random();
+        let object = ObjKey::random();
+        let (mut machine, peer) = replay_machine_with_parts([part.clone()]);
+        machine
+            .stat_machine
+            .set_peer(peer.clone(), [part.clone()].into_iter());
+        machine
+            .peers
+            .get_mut(&peer)
+            .expect("peer was inserted")
+            .objects
+            .insert(object.clone());
+        let part_route = ReplayRoute::Part(part.clone());
+        let object_route = ReplayRoute::Object(object.clone());
+        let wanted: Set<ReplayRoute> = machine
+            .replay_page_targets(peer.clone())
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            wanted,
+            Set::from([part_route.clone(), object_route.clone()]),
+            "both routes are wanted before anything goes wrong"
+        );
+
+        // Healthy first: both routes acknowledged and drained.
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let verdicts: Vec<_> = page
+            .targets
+            .into_iter()
+            .map(|(_, target)| {
+                let resume = target.cursor();
+                (
+                    target,
+                    TargetVerdict::Events {
+                        resume,
+                        drained: true,
+                    },
+                )
+            })
+            .collect();
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: verdicts,
+                },
+                update: None,
+            },
+        );
+        assert!(
+            machine
+                .stat_machine
+                .peer_part_is_fully_synced(peer.clone(), part.clone()),
+            "the routed part starts out drained and synced"
+        );
+
+        // The peer forgets the handle: the live round it answers cannot name the subscription.
+        let (forgotten_id, forgotten) =
+            take_replay_task(&mut machine, "a caught-up peer re-asks its live round");
+        machine.handle_replay_page_err(
+            forgotten_id,
+            test_retry(),
+            ReplayPageTaskError {
+                peer_id: peer.clone(),
+                targets: forgotten
+                    .targets
+                    .iter()
+                    .map(|(_, target)| target.clone())
+                    .collect(),
+                updated_subscription_id: None,
+                deets: ReplayPageTaskErrorDeets::Rpc(crate::rpc::RpcError::UnknownSubscription),
+            },
+        );
+
+        // The reset must re-open: an update carrying every wanted route under generation 0.
+        let (_reopen_id, reopen) = take_replay_task(
+            &mut machine,
+            "a forgotten subscription re-opens with an update",
+        );
+        assert!(
+            reopen.targets.is_empty(),
+            "the re-open is an update round, not a page"
+        );
+        let subscription = reopen
+            .subscription
+            .as_ref()
+            .expect("an update round belongs to a subscription");
+        assert_eq!(
+            subscription.generation, 0,
+            "the re-open must open a handle the responder does not have"
+        );
+        let Some(crate::rpc::ReplaySubscriptionRequest::Update {
+            generation,
+            additions,
+            removals,
+            ..
+        }) = subscription.request.clone()
+        else {
+            panic!("the re-open must carry an update");
+        };
+        assert_eq!(generation, 0, "an opening update carries generation 0");
+        assert!(removals.is_empty(), "a re-open removes nothing");
+        let reopened: Set<ReplayRoute> = additions
+            .iter()
+            .map(|entry| match &entry.target {
+                crate::rpc::ReplaySubscriptionTarget::Part { part_id } => {
+                    ReplayRoute::Part(part_id.clone())
+                }
+                crate::rpc::ReplaySubscriptionTarget::Object { obj_id } => {
+                    ReplayRoute::Object(obj_id.clone())
+                }
+            })
+            .collect();
+        assert_eq!(
+            reopened, wanted,
+            "the re-open restates every wanted route, not a delta"
+        );
+    }
+
+    /// A target the responder refuses is blocked: it stays in the wanted set, it keeps full
+    /// sync blocked, and the update that re-adds it — under a fresh id — is retried on the
+    /// task's own backoff (ADR 012 decision 9).
+    #[test]
+    fn a_refused_target_is_blocked_and_readded_under_a_fresh_id() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let route = ReplayRoute::Part(part.clone());
+        let first_id = machine.peers[&peer].replay_subscription.targets[&route];
+        let target = paged_route(&page, 0);
+        machine.drain_stat_evts().for_each(drop);
+
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: vec![(target, TargetVerdict::UnknownPart)],
+                },
+                update: None,
+            },
+        );
+
+        let state = &machine.peers[&peer].replay_subscription;
+        assert!(
+            state.blocked.contains(&route),
+            "a refused target is blocked"
+        );
+        let pending = state
+            .pending_additions
+            .get(&route)
+            .expect("a refused entry is re-queued");
+        assert_ne!(
+            pending.id, first_id,
+            "the re-add travels under a fresh id so it cannot collide with the refused entry"
+        );
+        assert!(
+            state.in_flight_removals.contains(&first_id),
+            "the refused entry's own id is what the retry's update removes"
+        );
+        assert!(
+            !state.targets.contains_key(&route),
+            "a blocked route is not pageable"
+        );
+        assert!(
+            !machine
+                .stat_machine
+                .peer_part_is_fully_synced(peer.clone(), part.clone()),
+            "a blocked target keeps full sync blocked"
+        );
+        assert!(
+            machine
+                .drain_stat_evts()
+                .any(|evt| matches!(evt, SyncStatEvent::PeerPartUnanswered { .. })),
+            "the embedder is told the part cannot be answered"
+        );
+        // The page is not paced per target by the refusal: it is the update that waits.
+        let counts = machine.task_counts();
+        assert_eq!(counts.delayed, 1, "the re-add waits on its own retry");
+        assert_eq!(counts.spawn_queue, 0, "the retry is not run now");
+        assert!(
+            machine.drain_machine_spawn_queue().next().is_none(),
+            "a refusal spawns no page"
+        );
+    }
+
+    /// A part the responder reports as unauthorized is one machine outcome with one it does not
+    /// know: absent access rows cannot tell a revocation from a grant that has not landed yet,
+    /// so both block the target and keep full sync blocked (ADR 012 decision 9).
+    #[test]
+    fn an_unauthorized_verdict_blocks_its_target_like_an_unknown_part() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let route = ReplayRoute::Part(part.clone());
+        let target = paged_route(&page, 0);
+        machine.drain_stat_evts().for_each(drop);
+
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: vec![(target, TargetVerdict::Unauthorized)],
+                },
+                update: None,
+            },
+        );
+
+        let state = &machine.peers[&peer].replay_subscription;
+        assert!(state.blocked.contains(&route));
+        assert!(state.pending_additions.contains_key(&route));
+        assert!(
+            !machine
+                .stat_machine
+                .peer_part_is_fully_synced(peer.clone(), part.clone()),
+            "a denied target keeps full sync blocked too"
+        );
+    }
+
+    /// The re-add lands: the block clears, the fresh entry is acknowledged, and the route is
+    /// paged again — which is what lets full sync settle.
+    #[test]
+    fn a_refused_target_unblocks_when_its_readd_lands() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let route = ReplayRoute::Part(part.clone());
+        let first_id = machine.peers[&peer].replay_subscription.targets[&route];
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: vec![(paged_route(&page, 0), TargetVerdict::UnknownPart)],
+                },
+                update: None,
+            },
+        );
+        let fresh_id = machine.peers[&peer].replay_subscription.pending_additions[&route].id;
+
+        // The retry runs and its update re-adds the part under the fresh id.
+        machine
+            .tasks
+            .tick(std::time::Instant::now() + Duration::from_secs(3));
+        let (retry_id, retry) = take_replay_task(&mut machine, "the retry runs its update");
+        let subscription = retry
+            .subscription
+            .as_ref()
+            .expect("the retry carries an update");
+        let Some(crate::rpc::ReplaySubscriptionRequest::Update {
+            additions,
+            removals,
+            ..
+        }) = subscription.request.clone()
+        else {
+            panic!("the retry carries an update");
+        };
+        assert_eq!(
+            additions
+                .iter()
+                .find(|entry| entry.id == fresh_id)
+                .map(|entry| &entry.target),
+            Some(&crate::rpc::ReplaySubscriptionTarget::Part {
+                part_id: part.clone(),
+            }),
+            "the retry re-adds the same part under the fresh id"
+        );
+        assert!(
+            removals.contains(&first_id),
+            "the retry removes the entry the refusal came from"
+        );
+        machine.handle_replay_page_result(
+            retry_id,
+            test_retry(),
+            empty_page_result(
+                &peer,
+                Some(ReplayUpdateOutcome::Applied {
+                    generation: subscription.generation,
+                    rejected: Vec::new(),
+                }),
+            ),
+        );
+
+        let state = &machine.peers[&peer].replay_subscription;
+        assert!(
+            state.blocked.is_empty(),
+            "an update for the entry clears the block"
+        );
+        assert_eq!(state.targets[&route], fresh_id);
+        let (_, page) = take_replay_task(&mut machine, "the unblocked route is paged again");
+        assert_eq!(
+            page.targets,
+            vec![(
+                fresh_id,
+                SubscriptionTarget::Part {
+                    part_id: part.clone(),
+                    cursor: 0,
+                },
+            )],
+            "the page names the acknowledged route under the id the update registered"
+        );
+    }
+
+    /// A refusal paces the update, not the page: the routes of the same round that answered
+    /// with events are asked for again immediately (ADR 012 decision 9).
+    #[test]
+    fn a_refused_route_does_not_pace_the_page_of_its_neighbours() {
+        let refused_part = PartKey::random();
+        let served_part = PartKey::random();
+        let (mut machine, peer) =
+            replay_machine_with_parts([refused_part.clone(), served_part.clone()]);
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let refused_route = ReplayRoute::Part(refused_part.clone());
+        let verdicts = page
+            .targets
+            .into_iter()
+            .map(|(_, route)| match &route {
+                SubscriptionTarget::Part { part_id, .. } if *part_id == refused_part => {
+                    (route, TargetVerdict::UnknownPart)
+                }
+                _ => (
+                    route,
+                    TargetVerdict::Events {
+                        resume: 3,
+                        drained: true,
+                    },
+                ),
+            })
+            .collect();
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: verdicts,
+                },
+                update: None,
+            },
+        );
+
+        assert!(
+            machine.peers[&peer]
+                .replay_subscription
+                .blocked
+                .contains(&refused_route),
+            "the refused route is the blocked one"
+        );
+        let counts = machine.task_counts();
+        assert_eq!(
+            counts.delayed, 1,
+            "only the refused route's re-add is delayed"
+        );
+        let spawned: Vec<_> = machine.drain_machine_spawn_queue().collect();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "the route that answered with events is asked again now"
+        );
+    }
+
+    /// Dropping a blocked target clears its block with it: only the client ever changes the
+    /// wanted set, and the same part or object coming back is a fresh entry (ADR 012
+    /// decision 9).
+    #[test]
+    fn dropping_a_blocked_target_clears_its_block() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let (page_id, page) = open_and_acknowledge_replay(&mut machine, &peer);
+        let route = ReplayRoute::Part(part.clone());
+        machine.handle_replay_page_result(
+            page_id,
+            test_retry(),
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: vec![(paged_route(&page, 0), TargetVerdict::UnknownPart)],
+                },
+                update: None,
+            },
+        );
+        assert!(
+            machine.peers[&peer]
+                .replay_subscription
+                .blocked
+                .contains(&route)
+        );
+
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: Set::new(),
+            objects: Set::new(),
+        }));
+
+        let state = &machine.peers[&peer].replay_subscription;
+        assert!(
+            state.blocked.is_empty(),
+            "the embedder dropping the target clears its block"
+        );
+        assert!(
+            !state.pending_additions.contains_key(&route),
+            "a dropped target is not re-added"
+        );
+        assert!(
+            machine.drain_machine_spawn_queue().next().is_some(),
+            "dropping the target tells the responder to remove its entry"
+        );
+    }
+
     #[test]
     fn replay_catch_up_pages_do_not_long_poll_until_caught_up() {
         let mut machine = BigSyncMachine::default();
@@ -3392,16 +4278,57 @@ mod tests {
                 },
             );
         machine.refresh_peer_replay_worker(peer.clone(), true);
+        // A route the responder has not acknowledged is not pageable, so the forced refresh
+        // opens the subscription first: one `Update` carrying the route's fresh entry.
+        let opening = machine
+            .drain_machine_spawn_queue()
+            .next()
+            .expect("forced refresh spawned the opening update");
+        let MachineTask {
+            id: opening_id,
+            deets: MachineTaskDeets::ReplayPage(opening),
+        } = opening
+        else {
+            panic!("forced refresh spawned a non-replay task");
+        };
+        assert!(opening.targets.is_empty(), "an update round pages nothing");
+        assert_eq!(opening.hold_ms, 0, "an update round never long-polls");
+        let opening_generation = opening
+            .subscription
+            .as_ref()
+            .expect("the opening round belongs to a subscription")
+            .generation;
+        machine.handle_replay_page_result(
+            opening_id,
+            crate::scheduler::Retry {
+                attempt_no: 0,
+                backoff: Duration::ZERO,
+                queued_at: std::time::Instant::now(),
+            },
+            ReplayPageResult {
+                peer_id: peer.clone(),
+                page: crate::rpc::ReplayPage {
+                    events: Vec::new(),
+                    targets: Vec::new(),
+                },
+                update: Some(ReplayUpdateOutcome::Applied {
+                    generation: opening_generation,
+                    rejected: Vec::new(),
+                }),
+            },
+        );
+        // The acknowledged route is pageable now, and a route with no caught-up verdict is
+        // drain-only: the full-sync waiter must not pay for a live hold.
         let first = machine
             .drain_machine_spawn_queue()
             .next()
-            .expect("forced refresh spawned a replay page");
+            .expect("an acknowledged route spawns a replay page");
         let MachineTask {
             deets: MachineTaskDeets::ReplayPage(first),
             ..
         } = first
         else {
-            panic!("forced refresh spawned a non-replay task");
+            panic!("the acknowledged route spawned a non-replay task");
         };
         assert_eq!(first.hold_ms, 0);
         machine
